@@ -341,6 +341,47 @@ async def test_permission_error_surfaces_code_and_doctor_hint(
     assert "request_permission(kind='accessibility')" in text  # the one-step grant hint
 
 
+async def test_missing_gi_on_linux_is_a_package_hint_not_a_macos_grant(tmp_path, monkeypatch) -> None:
+    """A Linux venv without PyGObject must not tell the model to open System Settings.
+
+    ``gi`` is hidden the way a venv that did not use ``--system-site-packages``
+    fails the import. Snapshot and find, and doctor, share one install hint.
+    """
+    from a11y_computer_use import doctor
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.setitem(sys.modules, "gi", None)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    with server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    ) as runtime:
+        mcp = server.build_server(runtime=runtime)
+        for name, args in (
+            ("desktop_snapshot", {"app": "LibreOffice"}),
+            ("find", {"app": "LibreOffice", "text": "WRITER-TWO"}),
+        ):
+            result = await call_tool(mcp, name, args)
+            assert result.isError
+            text = result.content[0].text
+            assert "unsupported: AT-SPI2 Python bindings are missing" in text
+            assert "permission_denied_accessibility" not in text
+            assert '"reason": "missing_dependency"' in text
+            assert "System Settings" not in text
+            assert "request_permission" not in text
+            assert doctor.ATSPI_BINDINGS_FIX in text
+    bindings = doctor._check_atspi_bindings()
+    bus = doctor._check_a11y_bus()
+    assert bindings["ok"] is False and bindings["fix"] == doctor.ATSPI_BINDINGS_FIX
+    assert bus["ok"] is False and bus["fix"] == doctor.ATSPI_BINDINGS_FIX
+    hint = doctor.ATSPI_BINDINGS_FIX
+    assert "python3-gi" in hint
+    assert "PyGObject" in hint
+    assert "--system-site-packages" in hint
+    assert "[linux]" in hint
+    assert "libgirepository" in hint
+    assert "cairo" in hint
+
+
 async def test_ref_before_any_snapshot_is_stale(mcp_server, mocked_driver) -> None:
     result = await call_tool(mcp_server, "click", {"ref": "e2"})
     assert result.isError
@@ -470,6 +511,84 @@ def test_linux_onscreen_button_click_uses_the_pointer() -> None:
     rt.click("e3")
     assert calls["click"] == ["e2"]
     assert calls["press"] == ["e9", "e3"]
+
+
+def test_linux_canvas_fallback_button_is_not_a_pointer_click(monkeypatch) -> None:
+    """A button inside a canvas is activated, not clicked at its box.
+
+    The box sits on the painted canvas. A pointer click reports success and
+    runs the canvas handler. Right-click and double-click are refused the
+    same way: a pointer event would land on the canvas. An activation that
+    does not change the tree is an error, not ``clicked``.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.schema import Bounds, Element
+
+    button = Element(
+        ref="e28", role="AXButton", title="FallbackBtn", value=None,
+        bounds=Bounds(0, 59, 140, 395, 11), snapshot_id="s", clickable=True,
+    )
+    snap = type("S", (), {"app": "chrome", "pid": 0, "elements": (button,), "snapshot_id": ""})()
+    calls = {"press": [], "click": []}
+
+    class _D:
+        name = "linux"
+        resolves_apps = False
+
+        def press_element(self, element):
+            calls["press"].append(element.ref)
+            return True
+
+        def click(self, target, **_kwargs):
+            calls["click"].append(getattr(target, "ref", None))
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(_atspi, "canvas_fallback_content", lambda _acc: True)
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._operation_lock = __import__("threading").Lock()
+    rt._closed = False
+    rt._screen_text = None
+    rt.driver = _D()
+    rt._current = snap
+    rt._resolve = lambda ref, kind: (snap, button)
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._dismiss_open_menu = lambda app: ""
+    rt._recheck_target = lambda *args, **kwargs: None
+    rt._guard_user = lambda *args, **kwargs: None
+    rt._effect_after = lambda pre: ""
+
+    assert "clicked" in rt.click("e28")
+    assert calls["press"] == ["e28"]
+    assert calls["click"] == []
+
+    for kwargs in ({"button": "right"}, {"count": 2}, {"modifiers": ["ctrl"]}):
+        with pytest.raises(ComputerUseError) as caught:
+            rt.click("e28", **kwargs)
+        assert caught.value.code is ErrorCode.UNSUPPORTED
+        assert caught.value.detail["reason"] == "canvas_fallback"
+        assert "no pointer click was sent" in caught.value.message
+    assert calls["press"] == ["e28"]
+    assert calls["click"] == []
+
+    same = Snapshot(
+        snapshot_id="", scope=Scope.WINDOW, app="chrome", pid=0,
+        created_at=0.0, displays=(), elements=(button,),
+    )
+
+    class _Still(_D):
+        def snapshot(self, scope, app):
+            return same
+
+    rt.driver = _Still()
+    rt._current = same
+    rt._resolve = lambda ref, kind: (same, button)
+    with pytest.raises(ComputerUseError) as unconfirmed:
+        rt.click("e28")
+    assert unconfirmed.value.code is ErrorCode.UNSUPPORTED
+    assert unconfirmed.value.detail["reason"] == "canvas_fallback"
+    assert "not confirmed" in unconfirmed.value.message
+    assert calls["click"] == []
 
 
 def test_linux_recheck_treats_prgname_and_comm_as_one_process(monkeypatch) -> None:
@@ -695,6 +814,45 @@ async def test_app_list_on_a_fresh_desktop_keys_on_a_trusted_running_app(mcp_ser
     assert server.Runtime(store=store, audit=safety.AuditLog(tmp_path_for(store)))._list_gate_key() == APP
 
 
+async def test_app_list_on_an_unimplemented_backend_is_a_refusal(tmp_path, monkeypatch) -> None:
+    """A grant must not turn a missing app-list backend into an internal error.
+
+    Windows ``running_apps`` raises ``NotImplementedError``. With no grant the
+    gate refuses before that call. With a grant the list used to crash. The
+    wire result is still refusal text.
+    """
+
+    class _Driver:
+        name = "stub"
+        calls = 0
+
+        def running_apps(self):
+            self.calls += 1
+            raise NotImplementedError("Windows backend not implemented yet")
+
+    driver = _Driver()
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    audit = tmp_path / "audit"
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "notepad.exe")
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(audit), driver=driver)
+    mcp = server.build_server(runtime=runtime)
+    result = await call_tool(mcp, "app", {"action": "list"})
+    assert result.isError
+    text = result.content[0].text
+    assert text.startswith("needs_permission"), text
+    assert "internal_error" not in text
+    assert driver.calls == 0  # ungranted: the gate never asks the backend
+
+    store.set_tier("notepad.exe", safety.Tier.READ)
+    result = await call_tool(mcp, "app", {"action": "list"})
+    assert result.isError
+    text = result.content[0].text
+    assert text.startswith("needs_permission"), text
+    assert "internal_error" not in text
+    assert "not implemented" in text
+    assert driver.calls == 1
+
+
 async def test_window_list_bounds_are_display_qualified_physical_pixels(
     mcp_server, store, monkeypatch
 ) -> None:
@@ -819,8 +977,8 @@ async def test_confirmation_elicitation_names_role_window_and_control(
     message = seen[0]
     assert "role=AXButton" in message
     assert "Delete" in message
-    assert "Untitled" in message
-    assert "<untrusted nonce=" in message
+    assert 'window=untrusted:"Untitled"' in message
+    assert "<untrusted" not in message
     assert "in com.apple.TextEdit" in message
     assert mocked_driver["click"] == []
     text = result.content[0].text
@@ -1456,9 +1614,9 @@ def test_scroll_to_find_comes_back_after_a_still_page_past_the_target(monkeypatc
 
     A downward step jumps forty rows and lands on ITEM-193 through ITEM-200
     without showing ITEM-180. The next wheel does not move and raises
-    page_unchanged. The search then steps back one line at a time until the
-    window contains ITEM-180. The default budget of 6 is extended for that
-    return pass.
+    page_unchanged. That still page is repeated once, then the search steps
+    back by the same five lines until the window contains ITEM-180. The
+    default budget of 6 is extended for that return pass.
     """
     from a11y_computer_use import server
 
@@ -1494,18 +1652,1149 @@ def test_scroll_to_find_comes_back_after_a_still_page_past_the_target(monkeypatc
 
     out = rt.scroll_to_find("app", text="ITEM-180")
     assert "ITEM-180" in out
-    assert "found after 10 scroll(s)" in out
+    assert "found after 11 scroll(s)" in out
     assert "found after 0" not in out
-    assert scrolls == [5, 5, 5, 5, 5, 5, -1, -1, -1, -1]
+    assert scrolls == [5, 5, 5, 5, 5, 5, 5, -5, -5, -5, -5]
+    assert -1 not in scrolls
+
+
+def test_scroll_to_find_reaches_an_early_row_by_stepping_back_up(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome list.
+
+    The window is already at the bottom, ITEM-172 through ITEM-179.
+    ITEM-020 is above it. Both downward wheels report page_unchanged, so
+    the still page is retried once and then the search turns. Each return
+    step moves five rows. Thirty-one of those steps put ITEM-020 in the
+    window. A one-line return would still be below that row when a budget
+    of 40 ran out.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        screen = 172
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(_D.screen)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy > 0:
+                raise _still_page(dy)
+            _D.screen = max(1, _D.screen + dy)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", max_scrolls=40)
+    assert "ITEM-020" in out
+    assert "found after 33 scroll(s)" in out
+    assert "found after 0" not in out
+    assert scrolls == [5, 5, *([-5] * 31)]
+    assert -1 not in scrolls
+
+
+def test_scroll_to_find_stops_at_the_document_end_without_turning_around(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    The target is not on the page. Each document wheel reports that the
+    page did not move. The search retries once and then returns not found.
+    It does not turn around, and it does not raise page_unchanged.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(1)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the document did not move after the wheel scroll",
+                detail={
+                    "reason": "page_unchanged",
+                    "surface": "document",
+                    "unit": "lines",
+                    "dx": 0,
+                    "dy": dy,
+                },
+            )
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="AXCell", max_scrolls=30)
+    assert out.startswith("not found after 2 scroll(s)")
+    assert "4711" in out
+    assert scrolls == [5, 5]
     assert -5 not in scrolls
+
+
+def test_scroll_to_find_returns_partial_evidence_at_the_time_budget(monkeypatch) -> None:
+    """Synthetic snapshots, not a live page.
+
+    A zero-second budget stops before any wheel. The note names the
+    container, the scroll position, and the rows that were on screen.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(1)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def scroll_offset(self, element):
+            return 12
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=0)
+    assert out.startswith("not found after 0 scroll(s) (time budget 0s)")
+    assert "container: AXScrollArea ref=box" in out
+    assert "scroll_position: 12" in out
+    assert "ITEM-001" in out
+    assert "last_rows:" in out
+    assert scrolls == []
+
+
+def _ticket_window(found: bool) -> Snapshot:
+    """A short table plus a Next link. Synthetic snapshot, not a Chrome page."""
+    els = [
+        Element(ref="win", role="AXWindow", title="tickets", value=None,
+                bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+        Element(ref="table", role="AXTable", title="Tickets", value=None,
+                bounds=Bounds(0, 20, 80, 400, 500), snapshot_id="s"),
+        Element(ref="a", role="AXCell", title="4001", value=None,
+                bounds=Bounds(0, 24, 120, 80, 22), snapshot_id="s"),
+        Element(ref="next", role="AXLink", title="Next", value=None,
+                bounds=Bounds(0, 24, 700, 40, 18), snapshot_id="s"),
+    ]
+    if found:
+        els.append(Element(
+            ref="hit", role="AXCell", title="4711", value=None,
+            bounds=Bounds(0, 24, 200, 80, 22), snapshot_id="s",
+        ))
+    return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                    displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els))
+
+
+def test_scroll_to_find_pages_a_table_before_the_wheel(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    A table with a Next link is paginated. The search uses Page Down, not
+    the wheel, and returns the row only once a later snapshot shows it.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    class _D:
+        phase = 0
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _ticket_window(_D.phase >= 2)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+            if chord == "pagedown":
+                _D.phase += 1
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+        def scroll_offset(self, _element):
+            return float(_D.phase)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=6, budget_s=15)
+    assert "4711" in out
+    assert "found after" in out
+    assert "pagedown" in chords
+    assert scrolls == []
+
+
+def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    A body-scroll document tries Ctrl+F before the wheel. The row is
+    returned only after the find bar is closed and a later snapshot
+    still shows it inside the window. No wheel is sent.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    def shot(found: bool) -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="rows", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="page", role="AXGroup", title="Rows", value=None,
+                    bounds=Bounds(0, 0, 40, 900, 640), snapshot_id="s"),
+            Element(ref="a", role="AXListItem", title="ITEM-001 scroll-row", value=None,
+                    bounds=Bounds(0, 20, 80, 400, 28), snapshot_id="s"),
+        ]
+        if found:
+            els.append(Element(
+                ref="hit", role="AXListItem", title="ITEM-180 scroll-row", value=None,
+                bounds=Bounds(0, 20, 200, 400, 28), snapshot_id="s",
+            ))
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1000, 700, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        found = False
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return shot(_D.found)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+            if chord == "Return":
+                _D.found = True
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=15, budget_s=15)
+    assert "ITEM-180" in out
+    assert "found after 1 scroll" in out
+    assert "found after 0" not in out
+    assert chords[:3] == ["ctrl+f", "type:ITEM-180", "Return"]
+    assert "Escape" in chords
+    assert scrolls == []
+
+
+def _short_overflow_list(head: int, *, found: str | None = None) -> Snapshot:
+    """A 520px list inside an 800px window. Synthetic snapshot, not Chrome."""
+    els = [
+        Element(ref="win", role="AXWindow", title="up371", value=None,
+                bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+        Element(ref="list", role="AXList", title="Rows", value=None,
+                bounds=Bounds(0, 20, 80, 400, 520), snapshot_id="s"),
+        Element(ref="tab", role="AXStaticText", title="Tab title", value=None,
+                bounds=Bounds(0, 20, 8, 120, 18), snapshot_id="s", parent="win"),
+    ]
+    for offset, number in enumerate(range(head, head + 8)):
+        els.append(Element(
+            ref=f"r{number}", role="AXListItem", title=f"ITEM-{number:03d} scroll-row",
+            value=None, bounds=Bounds(0, 24, 100 + offset * 18, 360, 18),
+            snapshot_id="s", parent="list",
+        ))
+    if found is not None:
+        els.append(Element(
+            ref="hit", role="AXStaticText", title=found, value=None,
+            bounds=Bounds(0, 24, 200, 360, 18), snapshot_id="s", parent="list",
+        ))
+    return Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+        displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+    )
+
+
+def test_scroll_to_find_uses_in_page_find_on_a_short_overflow_list(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    An overflow list shorter than the window tries Ctrl+F before the
+    wheel. The early row is returned only after the find bar is closed
+    and a later snapshot still shows it. No wheel is sent.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    class _D:
+        found = False
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(169, found="ITEM-020 scroll-row" if _D.found else None)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+            if chord == "Return":
+                _D.found = True
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
+    assert "ITEM-020" in out
+    assert "found after 1 scroll" in out
+    assert "found after 0" not in out
+    assert chords[:3] == ["ctrl+f", "type:ITEM-020", "Return"]
+    assert "Escape" in chords
+    assert scrolls == []
+
+
+def test_scroll_to_find_names_static_text_rows_when_the_budget_stops(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Chrome paints an overflow row as static text under the list, not as
+    a list item. A zero-second budget still names those rows. A static
+    text outside the list is not one of them.
+    """
+    from a11y_computer_use import server
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            els = [
+                Element(ref="win", role="AXWindow", title="up371", value=None,
+                        bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+                Element(ref="list", role="AXList", title="Rows", value=None,
+                        bounds=Bounds(0, 20, 80, 400, 520), snapshot_id="s"),
+                Element(ref="group", role="AXGroup", title="", value=None,
+                        bounds=Bounds(0, 24, 100, 360, 18), snapshot_id="s", parent="list"),
+                Element(ref="row", role="AXStaticText", title="ITEM-169 scroll-row", value=None,
+                        bounds=Bounds(0, 24, 100, 360, 18), snapshot_id="s", parent="group"),
+                Element(ref="tab", role="AXStaticText", title="Tab title", value=None,
+                        bounds=Bounds(0, 20, 8, 120, 18), snapshot_id="s", parent="win"),
+            ]
+            return Snapshot(
+                snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+            )
+
+        def scroll(self, target, **kw):
+            raise AssertionError("a zero budget must not scroll")
+
+        def scroll_offset(self, _element):
+            return None
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=0)
+    assert out.startswith("not found after 0 scroll(s) (time budget 0s)")
+    assert "container: AXList 'Rows' ref=list" in out
+    assert "last_rows: ITEM-169 scroll-row" in out
+    assert "Tab title" not in out
+    assert "scroll_position: unknown" in out
+
+
+def test_scroll_to_find_keeps_going_while_a_list_makes_progress(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Each upward step takes ten seconds and reveals a new head. The 15s
+    figure is only the no-progress cap, so the search continues past it
+    and returns the row. A clock that does not move the rows stops on
+    that cap instead of using max_scrolls.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    scrolls: list[int] = []
+
+    class _D:
+        head = 80
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(_D.head)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            clock["t"] += 10.0
+            _D.head -= 15
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
+    assert "ITEM-020" in out
+    assert "found after" in out
+    assert "time budget" not in out
+    assert scrolls == [-5, -5, -5, -5]
+    assert clock["t"] > 1015.0
+
+
+def test_scroll_to_find_stops_a_list_that_makes_no_progress(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    The rows and the offset stay put. Fifteen seconds of that ends the
+    search even though max_scrolls is larger. The note still names the
+    rows that were on screen.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(169)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            clock["t"] += 20.0
+
+        def scroll_offset(self, _element):
+            return 40
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
+    assert out.startswith("not found after 1 scroll(s) (time budget 15s)")
+    assert "ITEM-169 scroll-row" in out
+    assert scrolls == [-5]
+
+
+def test_scroll_to_find_stops_at_the_hard_ceiling_while_still_moving(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Every step reveals a new head, so the 15s no-progress cap keeps
+    resetting. The search still stops at the 120s ceiling instead of
+    running out max_scrolls.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    scrolls: list[int] = []
+
+    class _D:
+        head = 400
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(_D.head)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            clock["t"] += 10.0
+            _D.head -= 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
+    assert out.startswith("not found after 12 scroll(s) (time budget 120s)")
+    assert "ITEM-388 scroll-row" in out
+    assert len(scrolls) == 12
+    assert clock["t"] == 1120.0
+
+
+def _empty_cached_frame() -> Snapshot:
+    """An untitled group and no rows. The post-find Chrome cache, not a page."""
+    els = [
+        Element(ref="win", role="AXWindow", title="rows", value=None,
+                bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+        Element(ref="e2", role="AXGroup", title="", value=None,
+                bounds=Bounds(0, 0, 80, 900, 700), snapshot_id="s"),
+    ]
+    return Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+        displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+    )
+
+
+def test_scroll_to_find_re_reads_until_the_page_frame_returns(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Ctrl+F leaves two empty cached frames. The search latches Chrome and
+    reads again until the list is back. That untitled group is never wheeled,
+    and the row found by Ctrl+F is returned.
+    """
+    from a11y_computer_use import server
+
+    state = {"poison": False, "stale": 0, "latched": 0}
+    scrolled: list[str] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if state["stale"] > 0:
+                state["stale"] -= 1
+                return _empty_cached_frame()
+            if state["poison"]:
+                return _empty_cached_frame()
+            found = "ITEM-020 scroll-row" if state["latched"] else None
+            return _short_overflow_list(169, found=found)
+
+        def scroll(self, target, **kw):
+            scrolled.append(target.role)
+            raise AssertionError(f"wheeled {target.role} {target.ref}")
+
+        def key_chord(self, chord, **_kw):
+            if chord == "ctrl+f":
+                state["poison"] = True
+
+        def type_text(self, text, **_kw):
+            pass
+
+        def latch_chromium_find(self, app):
+            state["latched"] += 1
+            state["poison"] = False
+            state["stale"] = 2
+            assert app == "com.a"
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
+    assert "ITEM-020" in out
+    assert "found after 1 scroll" in out
+    assert state["latched"] == 1
+    assert scrolled == []
+
+
+def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    After Ctrl+F the snapshot stays an untitled group with no rows. The
+    search latches Chrome, re-reads a few times, and stops. It does not
+    wheel that frame, and it does not spend the no-progress budget on it.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    latched: list[str] = []
+    scrolled: list[str] = []
+    poisoned = {"on": False}
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if poisoned["on"]:
+                return _empty_cached_frame()
+            return _short_overflow_list(169)
+
+        def scroll(self, target, **kw):
+            scrolled.append(f"{target.role}:{target.ref}")
+
+        def key_chord(self, chord, **_kw):
+            if chord == "ctrl+f":
+                poisoned["on"] = True
+
+        def type_text(self, text, **_kw):
+            pass
+
+        def latch_chromium_find(self, app):
+            latched.append(app)
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(server.time, "sleep", sleep)
+
+    out = rt.scroll_to_find(
+        "app", text="ROW-0300", direction="down", max_scrolls=60, budget_s=15,
+    )
+    assert out.startswith("not found after 0 scroll(s)")
+    assert "time budget" not in out
+    assert "container: AXGroup ref=e2" in out
+    assert "last_rows: none" in out
+    assert "scroll_position: unknown" in out
+    assert latched == ["com.a"]
+    assert scrolled == []
+    assert clock["t"] < 1015.0
+
+
+def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    A Next link under a table that still runs past the window is the
+    next page, not a reason to Page Down in place. The wheel moves the
+    document. The missing row is not found, and page_unchanged is not
+    reported.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    def shot() -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="tickets", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+            Element(ref="table", role="AXTable", title="Tickets", value=None,
+                    bounds=Bounds(0, 20, 80, 400, 900), snapshot_id="s"),
+            Element(ref="a", role="AXCell", title="4001", value=None,
+                    bounds=Bounds(0, 24, 120, 80, 22), snapshot_id="s"),
+            Element(ref="next", role="AXLink", title="Next", value=None,
+                    bounds=Bounds(0, 24, 1000, 40, 18), snapshot_id="s"),
+        ]
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return shot()
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+        def scroll_offset(self, _element):
+            return 0
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=15)
+    assert out.startswith("not found after")
+    assert "page_unchanged" not in out
+    assert "pagedown" not in chords
+    assert "ctrl+f" in chords
+    assert scrolls == [5, 5]
+
+
+def test_scroll_to_find_stops_once_a_short_document_table_is_on_screen(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    The table starts below the window. One wheel brings its box inside.
+    The missing id is not on the page. Page Down is not a second search:
+    those snapshots are what pushed the live short page past 12s.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+    phase = {"n": 0}
+
+    def shot() -> Snapshot:
+        tall = phase["n"] == 0
+        table_height = 900 if tall else 500
+        table_y = 80 if tall else 40
+        els = [
+            Element(ref="win", role="AXWindow", title="tickets", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+            Element(ref="table", role="AXTable", title="Tickets", value=None,
+                    bounds=Bounds(0, 20, table_y, 400, table_height), snapshot_id="s"),
+            Element(ref="a", role="AXCell", title="4001", value=None,
+                    bounds=Bounds(0, 24, table_y + 40, 80, 22), snapshot_id="s"),
+            Element(ref="last", role="AXCell", title="4025", value=None,
+                    bounds=Bounds(0, 24, table_y + table_height - 30, 80, 22), snapshot_id="s"),
+            Element(ref="next", role="AXLink", title="Next", value=None,
+                    bounds=Bounds(0, 24, table_y + table_height - 8, 40, 18), snapshot_id="s"),
+        ]
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return shot()
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            phase["n"] += 1
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+        def scroll_offset(self, _element):
+            return float(phase["n"])
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=15)
+    assert out.startswith("not found after 1 scroll")
+    assert "page_unchanged" not in out
+    assert "pagedown" not in chords
+    assert scrolls == [5]
+
+
+def test_scroll_to_find_does_not_return_a_row_the_page_has_scrolled_past(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome table.
+
+    The page head is already row 312. One snapshot still names ROW-0300 at
+    y=403, which is the pre-scroll tree. The next snapshot does not contain
+    that row. The search scrolls back and returns ROW-0300 from a window
+    that actually shows it, not the stale y=403 line.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    def row_at(number: int, y: int) -> Snapshot:
+        els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+        els.append(Element(
+            ref=f"r{number}", role="AXCell", title=f"ROW-{number:04d}", value=None,
+            bounds=Bounds(0, 24, y, 76, 23), snapshot_id="s",
+        ))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
+
+    class _D:
+        head = 280
+        stale = False
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if _D.stale:
+                _D.stale = False
+                return row_at(300, 403)
+            return _item_window_named(_D.head)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy > 0:
+                _D.head = 312
+                _D.stale = True
+                return
+            _D.head = 300
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ROW-0300", max_scrolls=6)
+    assert "ROW-0300" in out
+    assert "found after 2 scroll(s)" in out
+    assert "403" not in out
+    assert scrolls == [5, -5]
+
+
+def test_scroll_to_find_document_bursts_until_the_row_is_named(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    While the row is absent the step stays five lines, the burst that
+    moves about a viewport. Once the document names the row above the
+    window, the next step is one line, so the search does not jump
+    another viewport past it. The returned bounds are the on-screen ones.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    def page(y: int | None) -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="page", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="doc", role="AXGroup", title="document", value=None,
+                    bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+        ]
+        if y is not None:
+            els.append(Element(
+                ref="row", role="AXCell", title="ITEM-180", value=None,
+                bounds=Bounds(0, 40, y, 80, 20), snapshot_id="s", parent="doc",
+            ))
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        y = -30
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if len(scrolls) < 2:
+                return page(None)
+            return page(_D.y)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy < 0:
+                _D.y = 100
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=6)
+    assert "ITEM-180" in out
+    assert "found after 3 scroll(s)" in out
+    assert "not found" not in out
+    assert "@0:40,100" in out
+    assert ",-30" not in out
+    assert scrolls == [5, 5, -1]
+
+
+def test_scroll_to_find_document_inches_when_the_row_is_already_named(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    The row is already in the tree, above the window, and the requested
+    direction is down. A viewport burst would move away from it. The
+    document steps one line toward the row. A scroll area keeps the
+    requested five-line step; this anchor is the document group.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+    y = {"v": -40}
+
+    def page() -> Snapshot:
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),),
+            elements=(
+                Element(ref="win", role="AXWindow", title="page", value=None,
+                        bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+                Element(ref="doc", role="AXGroup", title="document", value=None,
+                        bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+                Element(ref="row", role="AXCell", title="ITEM-180", value=None,
+                        bounds=Bounds(0, 40, y["v"], 80, 20), snapshot_id="s", parent="doc"),
+            ),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return page()
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            y["v"] += -dy * 60
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ITEM-180", direction="down", max_scrolls=6)
+    assert "found after 1 scroll(s)" in out
+    assert "ITEM-180" in out
+    assert scrolls == [-1]
+    assert 5 not in scrolls
+
+
+def test_scroll_to_find_document_bursts_toward_a_far_row(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    The row is already named, but its center is many windows below.
+    One notch cannot arrive within the scroll cap. The document keeps
+    the five-line burst until a later snapshot shows the row up close.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+    y = {"v": 5000}
+
+    def page() -> Snapshot:
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),),
+            elements=(
+                Element(ref="win", role="AXWindow", title="page", value=None,
+                        bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+                Element(ref="doc", role="AXGroup", title="document", value=None,
+                        bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+                Element(ref="row", role="AXCell", title="ROW-0300", value=None,
+                        bounds=Bounds(0, 40, y["v"], 80, 20), snapshot_id="s", parent="doc"),
+            ),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return page()
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if len(scrolls) >= 2:
+                y["v"] = 200
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ROW-0300", direction="down", max_scrolls=60)
+    assert "ROW-0300" in out
+    assert "found after" in out
+    assert "not found" not in out
+    assert scrolls
+    assert 1 not in scrolls
+    assert all(abs(dy) == 5 for dy in scrolls)
+
+
+def test_scroll_to_find_document_keeps_inching_after_the_row_vanishes(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    The search bursts down until the row is named above the window, then
+    steps up one line. The next read still names it and the confirming
+    read does not. That miss keeps the upward notch. It does not flip
+    back to a downward viewport.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+    script = ["miss", "miss", "above", "above", "stale", "gone", "on", "on"]
+    index = {"i": 0}
+
+    def page(kind: str) -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="page", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="doc", role="AXGroup", title="document", value=None,
+                    bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+        ]
+        y = {"above": -30, "stale": 120, "on": 120}.get(kind)
+        if y is not None:
+            els.append(Element(
+                ref="row", role="AXCell", title="ITEM-180", value=None,
+                bounds=Bounds(0, 40, y, 80, 20), snapshot_id="s", parent="doc",
+            ))
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            kind = script[min(index["i"], len(script) - 1)]
+            index["i"] += 1
+            return page(kind)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=8)
+    assert "found after 4 scroll(s)" in out
+    assert "@0:40,120" in out
+    assert scrolls == [5, 5, -1, -1]
+
+
+def test_scroll_to_find_keeps_scrolling_toward_a_row_above_the_window(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome table.
+
+    The row is already in the tree, parked above the window. The search is
+    going up. It keeps scrolling up until the row's center is inside the
+    window. It does not turn around just because the name is already present.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        y = -80
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                           bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+            els.append(Element(
+                ref="r1", role="AXCell", title="ROW-0001", value=None,
+                bounds=Bounds(0, 24, _D.y, 76, 23), snapshot_id="s",
+            ))
+            return Snapshot(
+                snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els),
+            )
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            _D.y += -dy * 8
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ROW-0001", direction="up", max_scrolls=6)
+    assert "ROW-0001" in out
+    assert "not found" not in out
+    assert scrolls == [-5, -5]
+    assert 5 not in scrolls
+
+
+def _item_window_named(head: int) -> Snapshot:
+    """Eight ROW-NNNN cells starting at ``head``. Synthetic, not a Chrome table."""
+    els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                   bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+    for offset, number in enumerate(range(head, head + 8)):
+        els.append(Element(
+            ref=f"r{number}", role="AXCell", title=f"ROW-{number:04d}", value=None,
+            bounds=Bounds(0, 24, 80 + offset * 24, 76, 23), snapshot_id="s",
+        ))
+    return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                    displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
 
 
 def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome list.
 
-    The target is not on screen. The first wheel and the one-line return
-    both report page_unchanged. That second still page is the error the
-    caller sees. The search does not keep scrolling.
+    The target is not on screen. Each direction reports page_unchanged
+    twice: the first still page is retried, and the second ends that
+    direction. The error is the second still page of the return. The
+    search does not keep scrolling.
     """
     from a11y_computer_use import server
 
@@ -1534,8 +2823,8 @@ def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> No
         rt.scroll_to_find("app", text="ITEM-180")
     assert error.value.code is ErrorCode.UNSUPPORTED
     assert error.value.detail["reason"] == "page_unchanged"
-    assert error.value.detail["dy"] == -1
-    assert scrolls == [5, -1]
+    assert error.value.detail["dy"] == -5
+    assert scrolls == [5, 5, -5, -5]
 
 
 def test_scroll_to_find_resnapshots_after_rows_stale(monkeypatch) -> None:
@@ -1874,6 +3163,8 @@ def test_drag_path_reaches_the_driver_as_waypoints_on_the_start_display(tmp_path
     rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
     out = rt.drag(start_x=10, start_y=10, end_x=90, end_y=90, path=[[30, 60], [60, 30]])
     assert "via 2 waypoints" in out
+    assert "drop not confirmed" in out
+    assert out.outcome == "unverifiable"
     start, end, path = calls[0]
     assert path == (Point(7, 30, 60), Point(7, 60, 30))
     assert start.display_id == 7 and end.display_id == 7
@@ -1895,6 +3186,112 @@ def test_drag_path_rejects_bad_waypoints(tmp_path) -> None:
         rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1]])
     with pytest.raises(ValueError, match="256"):
         rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1, 1]] * 257)
+
+
+def _drag_rows(snapshot_id: str, rows: list[tuple[str, int, int]], *, selected: str | None = None) -> Snapshot:
+    """A window and one cell per ``(title, x, y)``. Rows are 28px tall."""
+    cells = []
+    for index, (title, x, y) in enumerate(rows, start=2):
+        cells.append(Element(
+            f"e{index}", "AXCell", title, None, Bounds(0, x, y, 180, 28), snapshot_id,
+            parent="e1", path=("AXWindow", "AXCell"), selected=title == selected,
+        ))
+    window = Element(
+        "e1", "AXWindow", "files", None, Bounds(0, 0, 0, 400, 300), snapshot_id,
+        path=("AXWindow",),
+    )
+    return Snapshot(
+        snapshot_id, Scope.WINDOW, "com.test", 1, 0.0,
+        (Display(0, 1280, 800, 1.0, True),), (window, *cells),
+    )
+
+
+def _drag_runtime(tmp_path, before: Snapshot, after: Snapshot, *, on_drag=None):
+    class _D:
+        resolves_apps = True
+        name = "fake"
+        i = 0
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("com.test", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def snapshot(self, scope, app):
+            del scope, app
+            return after if _D.i else before
+
+        def resolve_ref(self, snap, ref, *, live=None):
+            del live
+            return snap.element(ref)
+
+        def drag(self, start, end, *, button=None, path=(), pre_check=None, dry_run=False):
+            del start, end, button, path, pre_check, dry_run
+            _D.i += 1
+            if on_drag is not None:
+                on_drag()
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    rt._current = before
+    return rt
+
+
+def test_drag_confirms_when_the_row_order_changes(tmp_path) -> None:
+    before = _drag_rows("s0", [("notes", 20, 40), ("readme.txt", 20, 68)])
+    after = _drag_rows("s1", [("readme.txt", 20, 40), ("notes", 20, 68)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e3", end_ref="e2")
+    assert out == "dragged e3 (AXCell 'readme.txt') -> e2 (AXCell 'notes')"
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the item moved"
+
+
+def test_drag_confirms_a_sideways_move_that_keeps_the_row_order(tmp_path) -> None:
+    before = _drag_rows("s0", [("notes", 20, 40), ("readme.txt", 20, 68)])
+    after = _drag_rows("s1", [("notes", 20, 40), ("readme.txt", 200, 68)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e3", end_ref="e2")
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the item moved"
+    assert "drop not confirmed" not in out
+
+
+def test_drag_does_not_confirm_a_selection_or_a_scroll(tmp_path) -> None:
+    before = _drag_rows("s0", [("notes", 20, 40), ("readme.txt", 20, 68)])
+    selected = _drag_rows("s1", [("notes", 20, 40), ("readme.txt", 20, 68)], selected="readme.txt")
+    out = _drag_runtime(tmp_path, before, selected).drag(start_ref="e3", end_ref="e2")
+    assert "drop not confirmed" in out
+    assert out.outcome == "suspected_noop"
+    assert out.evidence == "the drop was not confirmed"
+
+    scrolled = _drag_rows("s2", [("notes", 20, 80), ("readme.txt", 20, 108)])
+    out = _drag_runtime(tmp_path, before, scrolled).drag(start_x=110, start_y=82, end_x=110, end_y=54)
+    assert out.outcome == "suspected_noop"
+    assert "drop not confirmed" in out
+
+
+def test_drag_confirms_when_the_file_appears_in_the_target_folder(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server.Runtime, "_DRAG_DROP_SETTLE_S", 0)
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    before = _drag_rows("s0", [("readme.txt", 20, 68), (str(folder), 20, 40)])
+    after = _drag_rows("s1", [("readme.txt", 20, 68), (str(folder), 20, 40)])
+
+    def land() -> None:
+        (folder / "readme.txt").write_text("moved")
+
+    out = _drag_runtime(tmp_path, before, after, on_drag=land).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the file is now in the target folder"
+    assert (folder / "readme.txt").is_file()
+
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "suspected_noop"
+    assert "drop not confirmed" in out
 
 
 # --- verified activation ------------------------------------------------------
@@ -2053,6 +3450,9 @@ def test_window_list_for_a_named_app_is_gated_against_it_and_filtered(tmp_path, 
 
 
 def test_auto_ocr_escalation_runs_when_cropped_even_if_not_frontmost(tmp_path, monkeypatch) -> None:
+    # AUTO_OCR defaults off. This case is the opt-in path: a crop of the named
+    # app's window still reads that app even when another app is frontmost.
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     rt = _granted_runtime(tmp_path, monkeypatch)
     note = rt._auto_ocr_note("org.krita", None)
     assert "Brush" in note and "cropped" in note
@@ -2170,6 +3570,47 @@ async def test_request_permission_is_a_no_op_off_macos(mcp_server, monkeypatch) 
     assert json.loads(result.content[0].text)["needed"] is False
 
 
+@pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
+async def test_unknown_tool_argument_is_rejected_before_input(
+    mcp_server, mocked_driver, audit_dir, name: str,
+) -> None:
+    """An undeclared key is invalid_arguments and the tool function does not run."""
+    async with client_session(mcp_server) as client:
+        listed = (await client.list_tools()).tools
+        schema = next(tool.inputSchema for tool in listed if tool.name == name)
+        assert schema.get("additionalProperties") is False
+        result = await client.call_tool(name, {"not_a_real_argument": "x"})
+    assert result.isError
+    text = result.content[0].text
+    assert f"invalid_arguments: {name}:" in text
+    assert "unknown field 'not_a_real_argument'" in text
+    assert mocked_driver == {"click": [], "type": [], "key": [], "scroll": [], "drag": []}
+    assert audit_entries(audit_dir) == []
+
+
+async def test_runtime_rejects_unknown_type_argument_before_input(tmp_path, monkeypatch) -> None:
+    """call_tool and dispatch name an undeclared key and do not type.
+
+    ``ref`` is a declared type argument, so the unknown key is ``zoom``.
+    """
+    typed: list[str] = []
+    monkeypatch.setattr(act, "type_text", lambda text, **_kw: typed.append(text) or [])
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    with server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit")) as runtime:
+        runtime.driver.type_text = lambda text, **_kw: typed.append(text) or 0  # type: ignore[method-assign]
+        assert "ref" in server.accepted_keywords(runtime.type_text)
+        for entry in (runtime.call_tool, runtime.dispatch):
+            with pytest.raises(ValueError) as exc:
+                entry("type", {"text": "TYPED", "zoom": 1})
+            message = str(exc.value)
+            assert "unknown field 'zoom'" in message
+            assert "text" in message and "app" in message and "ref" in message
+            assert "invalid_arguments" not in message
+        with pytest.raises(ValueError, match="unknown field 'zoom'"):
+            runtime.call_tool("type", {"text": "TYPED", "ref": "e1", "zoom": 2})
+    assert typed == []
+
+
 async def test_unknown_key_chord_is_invalid_arguments_not_an_internal_error(mcp_server, audit_dir) -> None:
     """key('ctrl+notakey') names the unknown key. It is not an internal crash."""
     result = await call_tool(mcp_server, "key", {"chord": "ctrl+notakey"})
@@ -2260,6 +3701,68 @@ def test_hover_off_linux_is_unsupported_and_does_not_move(tmp_path, monkeypatch)
     steps = json.loads(rt.act_batch([{"do": "hover", "x": 1, "y": 2}]))
     assert steps[0]["ok"] is False and "unsupported" in steps[0]["error"]
     assert driver.hovered == []
+
+
+def test_click_point_is_not_rewritten_to_the_element_under_it(tmp_path, monkeypatch) -> None:
+    """A raw x/y click stays that point. Save's box contains it and is not the target.
+
+    call_tool and an act step keep the coordinates. Single, double, and
+    right clicks are the same point.
+    """
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    clicked: list[tuple] = []
+
+    def record(target, **kwargs):
+        clicked.append((target, kwargs))
+
+    driver.click = record
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+    # Save is e2 at display 1, (240, 140) 120x56. (250, 150) is inside it.
+    point = {"x": 250, "y": 150, "display_id": 1}
+    assert "clicked (250, 150)" in rt.call_tool("click", dict(point))
+    steps = json.loads(rt.act_batch([
+        {"do": "click", **point, "count": 2},
+        {"do": "click", **point, "button": "right"},
+    ]))
+    assert steps[0]["ok"] is True and steps[1]["ok"] is True
+    assert [target for target, _kwargs in clicked] == [
+        Point(display_id=1, x=250, y=150),
+        Point(display_id=1, x=250, y=150),
+        Point(display_id=1, x=250, y=150),
+    ]
+    assert [kwargs["count"] for _target, kwargs in clicked] == [1, 2, 1]
+    assert [kwargs["button"] for _target, kwargs in clicked] == [
+        server.MouseButton.LEFT, server.MouseButton.LEFT, server.MouseButton.RIGHT,
+    ]
+    assert all(not isinstance(target, Element) for target, _kwargs in clicked)
+
+
+async def test_mcp_click_point_is_not_rewritten_to_save(store, audit_dir, monkeypatch) -> None:
+    """The MCP click tool sends the caller's point, not the Save ref under it."""
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    store.set_tier("editor", safety.Tier.CLICK)
+    driver = _HoverDriver()
+    clicked: list = []
+    driver.click = lambda target, **kwargs: clicked.append((target, kwargs))
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir), driver=driver) as runtime:
+        runtime._current = build_synthetic_snapshot(app="editor")
+        mcp = server.build_server(runtime=runtime)
+        result = await call_tool(mcp, "click", {
+            "x": 250, "y": 150, "display_id": 1, "button": "right", "count": 2,
+        })
+    assert not result.isError, result.content[0].text
+    assert "250" in result.content[0].text and "150" in result.content[0].text
+    target, kwargs = clicked[0]
+    assert target == Point(display_id=1, x=250, y=150)
+    assert kwargs["button"] is server.MouseButton.RIGHT
+    assert kwargs["count"] == 2
+    assert not isinstance(target, Element)
 
 
 async def test_mcp_hover_on_linux_moves_and_off_linux_is_unsupported(
@@ -2433,6 +3936,60 @@ async def test_launch_activate_flag_reaches_the_driver(bg, monkeypatch) -> None:
     await call_tool(srv, "app", {"action": "launch", "name": APP, "activate": False})
     await call_tool(srv, "app", {"action": "launch", "name": APP})
     assert [a for _, a in driver.launched] == [False, True]
+
+
+class _FrontDriver:
+    """A desktop driver that cannot start an app behind the current one."""
+
+    resolves_apps = False
+    name = "linux"
+    background_input = False
+
+    def __init__(self) -> None:
+        self.launched: list = []
+
+    def ensure_trusted(self):
+        return None
+
+    def frontmost_app(self):
+        return ("gedit", 1)
+
+    def main_display_id(self):
+        return 0
+
+    def launch_app(self, ident, **kwargs):
+        self.launched.append((ident, kwargs))
+        return None
+
+
+async def test_app_launch_activate_false_is_unsupported_off_background_drivers(tmp_path) -> None:
+    """Linux-style drivers reject activate=false before any launch."""
+    driver = _FrontDriver()
+    store = safety.PermissionStore(tmp_path / "p.json")
+    with server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    ) as rt:
+        with pytest.raises(ComputerUseError) as caught:
+            rt.app("launch", "demo", activate=False)
+        assert caught.value.code is ErrorCode.UNSUPPORTED
+        assert caught.value.detail["reason"] == "activate_unsupported"
+        assert "linux" in caught.value.message
+        assert "not launched" in caught.value.message
+        assert driver.launched == []
+        with pytest.raises(ComputerUseError) as omitted:
+            rt.app("launch", "demo")
+        assert omitted.value.code is ErrorCode.APP_NOT_FOUND
+        assert driver.launched == []
+        mcp = server.build_server(runtime=rt)
+        result = await call_tool(mcp, "app", {
+            "action": "launch", "name": "demo", "activate": False,
+        })
+    assert result.isError
+    text = result.content[0].text
+    assert "unsupported" in text
+    assert "activate_unsupported" in text
+    assert "not launched" in text
+    assert driver.launched == []
 
 
 async def test_type_with_app_is_unsupported_off_background_drivers(bg) -> None:

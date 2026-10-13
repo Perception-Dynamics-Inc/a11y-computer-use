@@ -16,6 +16,11 @@ or in find. A click on a link in the hidden tab is an error, not "clicked".
 #151: type into a Firefox contenteditable reports success when the text landed.
 The key fallback's read-back treats NBSP as a space and U+FFFC as the child
 text, and set_value replaces Editor A instead of leaving it empty.
+
+#243: a static paragraph and a select are not edit. find(editable=true) does not
+return them. set_value on the paragraph is not_editable and does not select
+the page. A real input and a contenteditable stay editable and accept
+set_value. The select still changes through the combo path.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ _FORM = textwrap.dedent(
     <div><label>Count <input id="n" type="number"></label></div>
     <div><label>Notes <textarea id="ta"></textarea></label></div>
     <div><label>Color <select id="s"><option>Red</option><option>Green</option><option>Blue</option></select></label></div>
+    <button type="button">Div button</button>
     <div id="ed" contenteditable="true" role="textbox" aria-label="Editor A">Hello world</div>
     <div id="edb" contenteditable="true" aria-label="Editor B"><p>First para</p><p>Second <b>bold</b> para</p></div>
     <p id="log"></p>
@@ -552,6 +558,48 @@ def test_firefox_background_ref_is_not_showing_not_stale(firefox_form, tmp_path)
             time.sleep(0.25)
 
 
+def test_firefox_type_and_key_with_app_carry_an_outcome(firefox_form, tmp_path) -> None:
+    """Live Firefox. ``type`` and ``key`` with ``app=`` carry outcome and evidence.
+
+    The sentence stays. The outcome is the same confirmed read-back the call
+    without ``app=`` already returns.
+    """
+    driver = firefox_form
+    runtime = _runtime(tmp_path, driver)
+    runtime.desktop_snapshot("firefox")
+    snap = runtime._current
+    assert snap is not None
+    name = _field(snap, "Name")
+    assert name is not None, _dump(driver)
+    runtime.click(name.ref)
+    typed = runtime.type_text("xy", app="firefox")
+    assert str(typed).startswith("typed ")
+    assert typed.outcome == "confirmed", (typed.outcome, getattr(typed, "evidence", None))
+    assert typed.evidence
+    pressed = runtime.key("BackSpace", app="firefox")
+    assert str(pressed).startswith("pressed BackSpace")
+    assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+    assert pressed.evidence
+
+
+def test_firefox_second_inert_click_without_a_snapshot_is_suspected_noop(firefox_form, tmp_path) -> None:
+    """Live Firefox. A second click on Div button, with no snapshot between, is a no-op."""
+    driver = firefox_form
+    runtime = _runtime(tmp_path, driver)
+    runtime.desktop_snapshot("firefox")
+    snap = runtime._current
+    assert snap is not None
+    button = next((el for el in snap.elements if el.title == "Div button" and el.clickable), None)
+    assert button is not None, _dump(driver)
+    first = runtime.click(button.ref)
+    second = runtime.click(button.ref)
+    assert str(second).startswith("clicked ")
+    assert second.outcome == "suspected_noop", (
+        first.outcome, second.outcome, getattr(second, "evidence", None),
+    )
+    assert "did not change" in second.evidence
+
+
 def _wait_values(driver, expected: dict[str, str], timeout_s: float = 4.0):
     deadline = time.monotonic() + timeout_s
     last = None
@@ -583,6 +631,19 @@ def _editor_text(snap, title: str) -> str:
     if el is None:
         return ""
     return str(el.value or "").replace("\u00a0", " ").replace("\ufffc", "")
+
+
+def _subtree_refs(snap, root: str) -> set[str]:
+    """``root`` and every element parented under it, directly or further down."""
+    refs = {root}
+    changed = True
+    while changed:
+        changed = False
+        for el in snap.elements:
+            if el.parent in refs and el.ref not in refs:
+                refs.add(el.ref)
+                changed = True
+    return refs
 
 
 def test_firefox_contenteditable_type_and_set_value(firefox_form, tmp_path) -> None:
@@ -629,17 +690,27 @@ def test_firefox_contenteditable_type_and_set_value(firefox_form, tmp_path) -> N
     typed = runtime.type_text("ZZ")
     assert typed.startswith("typed "), typed
     deadline = time.monotonic() + 4
-    blob = ""
+    editor_b_text = ""
+    editor_a_text = ""
+    outside = ""
     while time.monotonic() < deadline:
         last = current()
-        blob = " ".join(
+        editor_b = next(el for el in last.elements if el.title == "Editor B")
+        # The text role's value is the paragraphs. Those paragraphs are also
+        # child elements, so the same "ZZ" is not a second insertion.
+        inside = _subtree_refs(last, editor_b.ref)
+        editor_b_text = str(editor_b.value or "").replace("\ufffc", "")
+        editor_a_text = _editor_text(last, "Editor A")
+        outside = " ".join(
             f"{el.title or ''} {el.value or ''}" for el in last.elements
-            if el.title in {"Editor B", "Editor A"} or "ZZ" in f"{el.title or ''} {el.value or ''}"
+            if el.ref not in inside and "ZZ" in f"{el.title or ''} {el.value or ''}"
         ).replace("\ufffc", "")
-        if blob.count("ZZ") == 1:
+        if editor_b_text.count("ZZ") == 1 and "ZZ" not in editor_a_text and "ZZ" not in outside:
             break
         time.sleep(0.25)
-    assert blob.count("ZZ") == 1, observe.render_text(last)
+    assert editor_b_text.count("ZZ") == 1, observe.render_text(last)
+    assert "ZZ" not in editor_a_text, observe.render_text(last)
+    assert "ZZ" not in outside, observe.render_text(last)
 
     editor = next(el for el in last.elements if el.title == "Editor A")
     runtime._current = last
@@ -672,6 +743,182 @@ def test_firefox_contenteditable_type_and_set_value(firefox_form, tmp_path) -> N
     assert shown == "Set 0", observe.render_text(last)
 
 
+_CONTENTEDITABLE_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>ffce433</title></head>
+    <body>
+    <label>Name <input id="name" aria-label="Name" value="kept"></label>
+    <div id="ce" contenteditable="true">editable block</div>
+    </body>
+    </html>
+    """
+)
+
+
+def _norm_value(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\u00a0", " ").replace("\ufffc", "")
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.strip()
+
+
+def _contenteditable_facts(driver) -> dict | None:
+    """AT-SPI facts for the roleless Firefox contenteditable. None when absent.
+
+    Live tree. The section, EDITABLE, MULTI_LINE, and a text interface are
+    what the snapshot mapping reads.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    def collect() -> dict | None:
+        root = _atspi.find_root("firefox", Scope.WINDOW)
+        found: dict | None = None
+
+        def walk(node, depth: int) -> None:
+            nonlocal found
+            if node is None or depth > 22 or found is not None:
+                return
+            role = _atspi._role_name(node)
+            attrs = _atspi._get_attributes(node)
+            tag = str(attrs.get("tag") or "").lower()
+            if role == "section" and tag == "div" and _atspi._state_has(node, "EDITABLE"):
+                count = _atspi._safe(lambda: _atspi._atspi().Text.get_character_count(node))
+                found = {
+                    "role": role,
+                    "editable": True,
+                    "multi": _atspi._state_has(node, "MULTI_LINE"),
+                    "text": isinstance(count, int) and not isinstance(count, bool),
+                    "iface": _atspi._editable_iface(node) is not None,
+                }
+                return
+            count_children = _atspi._child_count(node)
+            if not isinstance(count_children, int) or isinstance(count_children, bool):
+                return
+            for index in range(min(count_children, 48)):
+                walk(_atspi._child_at(node, index), depth + 1)
+
+        walk(root, 0)
+        return found
+
+    return driver._run(collect)
+
+
+def _value_element(snap, text: str):
+    want = _norm_value(text)
+    hits = [el for el in snap.elements if _norm_value(el.value) == want]
+    return hits
+
+
+def test_linux_firefox_contenteditable_role_and_set_value(tmp_path) -> None:
+    """Live Firefox ESR. A roleless contenteditable is a text role, and set_value sticks.
+
+    The node is an AT-SPI section with STATE_EDITABLE and a text interface.
+    MULTI_LINE maps to textarea; otherwise it is a text field. It is not a
+    group. set_value is repeated and each read-back matches. type(ref) then
+    inserts into that same control. The Name input is unchanged. A missing
+    Firefox binary fails. This test does not skip for a missing browser.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "ffce433.html"
+    page.write_text(_CONTENTEDITABLE_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            try:
+                runtime.find("firefox", text="Name")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                snap = runtime._current
+                last = observe.render_text(snap)
+                if any(el.title == "Name" for el in snap.elements) and _value_element(snap, "editable block"):
+                    break
+            time.sleep(0.4)
+        else:
+            log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+            raise AssertionError(f"Firefox did not expose the contenteditable\n{last}\n{log}")
+
+        rendered = observe.render_text(snap)
+        name = next(el for el in snap.elements if el.title == "Name")
+        assert name.role == "AXTextField", rendered
+        editors = _value_element(snap, "editable block")
+        assert len(editors) == 1, rendered
+        editor = editors[0]
+        assert editor.role != "AXGroup", rendered
+        assert editor.editable is True, rendered
+        facts = _contenteditable_facts(driver)
+        assert facts is not None, rendered
+        assert facts["role"] == "section", facts
+        assert facts["text"] or facts["iface"], facts
+        if facts["multi"]:
+            assert editor.role == "AXTextArea", (facts, rendered)
+            assert "textarea" in next(
+                line for line in rendered.splitlines() if "editable block" in line
+            )
+        else:
+            assert editor.role == "AXTextField", (facts, rendered)
+
+        previous = "editable block"
+        for value in ("CE_VAL_1", "CE_VAL_2", "CE_VAL_3"):
+            shot = driver.snapshot(Scope.WINDOW, "firefox")
+            runtime._current = shot
+            found = _value_element(shot, previous)
+            assert len(found) == 1, observe.render_text(shot)
+            assert runtime.set_value(found[0].ref, value).startswith("set ")
+            deadline = time.monotonic() + 6
+            shown = ""
+            last_shot = shot
+            while time.monotonic() < deadline:
+                last_shot = driver.snapshot(Scope.WINDOW, "firefox")
+                shown_hits = _value_element(last_shot, value)
+                name_now = next((el for el in last_shot.elements if el.title == "Name"), None)
+                if len(shown_hits) == 1 and _norm_value(name_now.value if name_now else None) == "kept":
+                    shown = value
+                    break
+                time.sleep(0.25)
+            assert shown == value, observe.render_text(last_shot)
+            assert _value_element(last_shot, value)[0].role == editor.role
+            previous = value
+
+        shot = driver.snapshot(Scope.WINDOW, "firefox")
+        runtime._current = shot
+        target = _value_element(shot, "CE_VAL_3")[0]
+        typed = runtime.type_text("Q", ref=target.ref)
+        assert str(typed).startswith("typed "), typed
+        deadline = time.monotonic() + 6
+        blob = ""
+        last_shot = shot
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "firefox")
+            blob = " ".join(_norm_value(el.value) for el in last_shot.elements)
+            name_now = next((el for el in last_shot.elements if el.title == "Name"), None)
+            if "Q" in blob and _norm_value(name_now.value if name_now else None) == "kept":
+                break
+            time.sleep(0.25)
+        assert "Q" in blob, observe.render_text(last_shot)
+        name_now = next(el for el in last_shot.elements if el.title == "Name")
+        assert _norm_value(name_now.value) == "kept", observe.render_text(last_shot)
+    finally:
+        _stop(proc)
+        proc._log.close()
+
+
 def _hidden_link(driver):
     """The Products link in the background document, which the snapshot must not list."""
     from a11y_computer_use.drivers import _atspi
@@ -695,3 +942,428 @@ def _hidden_link(driver):
 
     driver._run(lambda: walk(root, 0))
     return found[0] if found else None
+
+
+_CROP_SCROLL_PAGE = (
+    "<!doctype html><meta charset=utf-8><title>cuacropscroll</title>"
+    "<style>body{margin:0;font:16px/24px sans-serif}"
+    "#swatch{display:block;width:200px;height:60px;margin:8px;background:#c00;"
+    "color:#fff;border:0}.pad{height:240px}</style>"
+    "<p>Lead paragraph</p><button id=swatch type=button>Red swatch</button>"
+    + "".join("<div class=pad>pad</div>" for _ in range(40))
+    + "<p id=tail>Tail marker</p>"
+)
+
+
+def test_linux_firefox_crop_of_a_scrolled_off_button_is_off_screen(tmp_path) -> None:
+    """crop of a button End scrolled off the page is not_visible, not stale_ref.
+
+    Live Firefox on a local page. The ref stays the one from before the scroll.
+    The error reason is off_screen and the hint is scroll(ref, into_view=true).
+    A missing Firefox binary fails. Padding does not turn the miss into a crop.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ScrollUnit
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    if _firefox_binary() is None:
+        pytest.fail("Firefox is not installed; the Linux live job installs it when it is missing")
+    page = tmp_path / "cuacropscroll.html"
+    page.write_text(_CROP_SCROLL_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "firefox")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(el.title == "Red swatch" and el.bounds.height >= 40 for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Firefox did not expose Red swatch"
+        runtime = _runtime(tmp_path, driver)
+        runtime._current = snap
+        lead = next((el for el in snap.elements if el.title == "Lead paragraph"), None)
+        if lead is not None:
+            runtime.click(lead.ref)
+            snap = runtime._current or snap
+        swatch = next(el for el in snap.elements if el.title == "Red swatch" and el.bounds.height >= 40)
+        runtime._current = snap
+        ref = swatch.ref
+        fresh = snap
+        for _ in range(12):
+            fresh = driver.snapshot(Scope.WINDOW, "firefox")
+            if not any(el.title == "Red swatch" for el in fresh.elements):
+                break
+            runtime.key("end", app="firefox")
+            runtime.key("ctrl+end", app="firefox")
+            runtime.key("pagedown", app="firefox")
+            try:
+                driver.scroll(swatch, dy=1200, unit=ScrollUnit.PIXELS)
+            except ComputerUseError:
+                pass
+            time.sleep(0.25)
+        else:
+            titles = sorted({el.title for el in fresh.elements if el.title})
+            raise AssertionError(f"Red swatch stayed in the Firefox tree: {titles[:40]}")
+        assert runtime._current.element(ref).title == "Red swatch"
+        try:
+            runtime.crop(ref, padding=512)
+        except ComputerUseError as exc:
+            assert exc.code is ErrorCode.NOT_VISIBLE, exc
+            assert exc.detail["reason"] == "off_screen"
+            assert "still valid" in exc.message
+            assert exc.detail["hint"] == f"scroll(ref={ref!r}, into_view=true)"
+            assert "Reload" not in exc.message
+            assert "stale" not in exc.message
+        else:
+            raise AssertionError("crop of a scrolled-off button must be not_visible")
+    finally:
+        _stop(proc)
+
+
+_EDIT_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>ffedit243</title></head>
+    <body>
+    <label>Name <input id="name" aria-label="Name"></label>
+    <button type="button" id="go">Submit</button>
+    <p id="out">idle</p>
+    <select id="color" aria-label="Color"><option>Red</option><option>Green</option></select>
+    <div id="notes" contenteditable="true" aria-label="Notes box">old note</div>
+    <div id="rich" contenteditable="true" role="textbox" aria-label="Rich box">rich old</div>
+    </body>
+    </html>
+    """
+)
+
+
+def _text_selections(driver) -> list[str]:
+    """Non-empty AT-SPI text selections in the Firefox window.
+
+    A refused set_value must not leave one. The paragraph's EditableText
+    select, and ctrl+a, select the document.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    def collect() -> list[str]:
+        Atspi = _atspi._atspi()
+        root = _atspi.find_root("firefox", Scope.WINDOW)
+        found: list[str] = []
+
+        def walk(node, depth: int) -> None:
+            if node is None or depth > 22 or len(found) > 16:
+                return
+            role = _atspi._role_name(node)
+            if role in {"paragraph", "document web", "section", "panel", "entry", "text"}:
+                count = _atspi._safe(lambda: Atspi.Text.get_n_selections(node))
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    bounds = _atspi._selection_bounds(
+                        _atspi._safe(lambda: Atspi.Text.get_selection(node, 0))
+                    )
+                    if bounds is not None and int(bounds[1]) > int(bounds[0]):
+                        found.append(f"{role}:{int(bounds[0])}-{int(bounds[1])}")
+            count_children = _atspi._child_count(node)
+            if not isinstance(count_children, int) or isinstance(count_children, bool):
+                return
+            for index in range(min(count_children, 48)):
+                walk(_atspi._child_at(node, index), depth + 1)
+
+        walk(root, 0)
+        return found
+
+    return driver._run(collect)
+
+
+def _shown(element) -> str:
+    if element is None or element.value is None:
+        return ""
+    return str(element.value).replace("\u00a0", " ").replace("\n", " ").strip()
+
+
+def test_linux_firefox_paragraph_and_select_are_not_editable(tmp_path) -> None:
+    """Live Firefox. A paragraph and a select are not edit. An input and a contenteditable are.
+
+    set_value on the paragraph is not_editable and leaves no text selection.
+    set_value still writes the input, the select, and both contenteditables.
+    A missing Firefox binary fails. This test does not skip.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "ffedit243.html"
+    page.write_text(_EDIT_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            try:
+                runtime.find("firefox", text="Name")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                snap = runtime._current
+                last = observe.render_text(snap)
+                titles = {el.title for el in snap.elements}
+                if {"Name", "Color", "Notes box", "Rich box", "Submit"} <= titles and any(
+                    _shown(el) == "idle" and el.role == "AXStaticText" for el in snap.elements
+                ):
+                    break
+            time.sleep(0.4)
+        else:
+            log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+            raise AssertionError(f"Firefox did not expose the edit page\n{last}\n{log}")
+
+        rendered = observe.render_text(snap)
+        paragraph = next(
+            el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
+        )
+        select = next(el for el in snap.elements if el.title == "Color" and el.role == "AXComboBox")
+        name = next(el for el in snap.elements if el.title == "Name" and el.role == "AXTextField")
+        notes = next(el for el in snap.elements if el.title == "Notes box")
+        rich = next(el for el in snap.elements if el.title == "Rich box")
+        para_line = next(line for line in rendered.splitlines() if '="idle"' in line)
+        color_line = next(line for line in rendered.splitlines() if "Color" in line and "combobox" in line)
+        assert paragraph.editable is False, para_line
+        assert "edit" not in para_line, para_line
+        assert select.editable is False, color_line
+        assert "edit" not in color_line, color_line
+        assert name.editable is True, rendered
+        assert notes.editable is True, rendered
+        assert rich.editable is True, rendered
+
+        found = runtime.find("firefox", editable=True)
+        assert "idle" not in found, found
+        assert "Color" not in found, found
+        assert "Name" in found, found
+        assert "Notes box" in found, found
+        assert "Rich box" in found, found
+
+        snap = runtime._current
+        paragraph = next(
+            el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
+        )
+        runtime._current = snap
+        before = _text_selections(driver)
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(paragraph.ref, "nope")
+        assert exc.value.detail.get("reason") == "not_editable", exc.value
+        assert _text_selections(driver) == before
+        snap = driver.snapshot(Scope.WINDOW, "firefox")
+        paragraph = next(
+            el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
+        )
+        assert _shown(paragraph) == "idle", observe.render_text(snap)
+
+        name = next(el for el in snap.elements if el.title == "Name" and el.editable)
+        runtime._current = snap
+        assert runtime.set_value(name.ref, "Ada").startswith("set ")
+        select = next(el for el in driver.snapshot(Scope.WINDOW, "firefox").elements
+                      if el.title == "Color" and el.role == "AXComboBox")
+        runtime._current = driver.snapshot(Scope.WINDOW, "firefox")
+        select = next(el for el in runtime._current.elements if el.title == "Color" and el.role == "AXComboBox")
+        assert runtime.set_value(select.ref, "Green").startswith("set ")
+        deadline = time.monotonic() + 6
+        shown = ""
+        last_shot = runtime._current
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "firefox")
+            select = next(
+                (el for el in last_shot.elements if el.title == "Color" and el.role == "AXComboBox"),
+                None,
+            )
+            shown = "" if select is None else _shown(select)
+            name_now = next((el for el in last_shot.elements if el.title == "Name"), None)
+            if shown == "Green" and _shown(name_now) == "Ada":
+                break
+            time.sleep(0.25)
+        assert shown == "Green", observe.render_text(last_shot)
+        assert _shown(next(el for el in last_shot.elements if el.title == "Name")) == "Ada"
+
+        notes = next(el for el in last_shot.elements if el.title == "Notes box" and el.editable)
+        runtime._current = last_shot
+        assert runtime.set_value(notes.ref, "new note").startswith("set ")
+        rich = next(el for el in driver.snapshot(Scope.WINDOW, "firefox").elements if el.title == "Rich box" and el.editable)
+        runtime._current = driver.snapshot(Scope.WINDOW, "firefox")
+        rich = next(el for el in runtime._current.elements if el.title == "Rich box" and el.editable)
+        assert runtime.set_value(rich.ref, "rich new").startswith("set ")
+        deadline = time.monotonic() + 6
+        notes_shown = rich_shown = ""
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "firefox")
+            notes_now = next((el for el in last_shot.elements if el.title == "Notes box"), None)
+            rich_now = next((el for el in last_shot.elements if el.title == "Rich box"), None)
+            notes_shown = _shown(notes_now)
+            rich_shown = _shown(rich_now)
+            if notes_shown == "new note" and rich_shown == "rich new":
+                break
+            time.sleep(0.25)
+        assert notes_shown == "new note", observe.render_text(last_shot)
+        assert rich_shown == "rich new", observe.render_text(last_shot)
+        assert not any(
+            el.editable and el.role == "AXStaticText" and _shown(el) == "idle"
+            for el in last_shot.elements
+        )
+        color = next(el for el in last_shot.elements if el.title == "Color" and el.role == "AXComboBox")
+        assert color.editable is False
+    finally:
+        _stop(proc)
+        proc._log.close()
+
+
+_TEXTAREA_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>fftextarea432</title></head>
+    <body>
+    <label>Name <input id="name" aria-label="Name" value="initial-name"></label>
+    <label>Notes <textarea id="notes" aria-label="Notes" rows="4">line1
+line2</textarea></label>
+    </body>
+    </html>
+    """
+)
+
+
+def _gecko_entry_facts(driver, name: str) -> dict | None:
+    """AT-SPI facts for the Firefox entry named ``name``. None when it is absent.
+
+    Live tree. The role, MULTI_LINE, and tag are what the snapshot mapping reads.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    def collect() -> dict | None:
+        root = _atspi.find_root("firefox", Scope.WINDOW)
+        found: dict | None = None
+
+        def walk(node, depth: int) -> None:
+            nonlocal found
+            if node is None or depth > 22 or found is not None:
+                return
+            role = _atspi._role_name(node)
+            if role == "entry" and _atspi._node_name(node) == name:
+                attrs = _atspi._get_attributes(node)
+                found = {
+                    "role": role,
+                    "multi": _atspi._state_has(node, "MULTI_LINE"),
+                    "single": _atspi._state_has(node, "SINGLE_LINE"),
+                    "tag": str(attrs.get("tag") or "").lower(),
+                }
+                return
+            count = _atspi._child_count(node)
+            if not isinstance(count, int) or isinstance(count, bool):
+                return
+            for index in range(min(count, 48)):
+                walk(_atspi._child_at(node, index), depth + 1)
+
+        walk(root, 0)
+        return found
+
+    return driver._run(collect)
+
+
+def _focus_window_titled(driver, needle: str) -> None:
+    """Raise the X window whose title contains ``needle``. A miss does nothing.
+
+    The suite can already have a Firefox window in front. ``find`` follows
+    the active frame, so this page has to be that frame before the snapshot.
+    """
+    try:
+        rows = driver.windows()
+    except ComputerUseError:
+        return
+    for row in rows:
+        if needle not in str(row.get("title") or ""):
+            continue
+        window_id = row.get("window_id")
+        if isinstance(window_id, bool) or not isinstance(window_id, int):
+            return
+        try:
+            driver.focus_window(window_id)
+        except ComputerUseError:
+            return
+        return
+
+
+def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
+    """Live Firefox ESR. A ``<textarea>`` snapshots as textarea.
+
+    Gecko exposes it as AT-SPI ``entry`` with MULTI_LINE. A single-line
+    ``<input>`` on the same page stays a text field. A missing Firefox
+    binary fails. This test does not skip for a missing browser. Another
+    Firefox window that also has Name and Notes is not this page: the
+    snapshot has to be the ``fftextarea432`` window.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "fftextarea432.html"
+    page.write_text(_TEXTAREA_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            _focus_window_titled(driver, "fftextarea432")
+            try:
+                runtime.find("firefox", text="Name")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                snap = runtime._current
+                last = observe.render_text(snap)
+                titles = {el.title for el in snap.elements}
+                if "fftextarea432" in last and {"Name", "Notes"} <= titles:
+                    break
+            time.sleep(0.4)
+        else:
+            log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+            raise AssertionError(f"Firefox did not expose the textarea page\n{last}\n{log}")
+
+        rendered = observe.render_text(snap)
+        name = next(el for el in snap.elements if el.title == "Name")
+        notes = next(el for el in snap.elements if el.title == "Notes")
+        assert name.role == "AXTextField", rendered
+        assert notes.role == "AXTextArea", rendered
+        name_line = next(line for line in rendered.splitlines() if '"Name"' in line)
+        notes_line = next(line for line in rendered.splitlines() if '"Notes"' in line)
+        assert "textfield" in name_line, name_line
+        assert "textarea" in notes_line, notes_line
+        assert "textfield" not in notes_line, notes_line
+        facts = _gecko_entry_facts(driver, "Notes")
+        assert facts is not None, rendered
+        assert facts["role"] == "entry", facts
+        assert facts["multi"] is True, facts
+    finally:
+        _stop(proc)
+        proc._log.close()

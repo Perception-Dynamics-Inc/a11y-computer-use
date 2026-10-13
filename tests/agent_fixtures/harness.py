@@ -30,11 +30,14 @@ APP_NAME = "cuagentfix"
 NOTE = "M1 live note\nsecond line\n"
 FORM_RESULT = "RESULT name=Ada color=blue subscribe=yes"
 
-# Rendered snapshot lines from observe.render_text:
+# Rendered snapshot lines from observe.render_text, and the same line after a
+# model diff prefix (+ added, ~ changed, focus). A leading "- ref" is a removal.
 #   e7 textarea "Notes" ="M1 live note second line " (edit,focus)
+#   ~ e7 textarea "Notes" ="M1 live note second line " (edit) [value: ""->…]
 _LINE = re.compile(
-    r"""(?m)^[ \t]*(e\d+)\s+(\S+)\s+"([^"]*)"(?:\s+="([^"]*)")?(?:\s+\(([^)]*)\))?"""
+    r"""^[ \t]*(?:(?:\+|~|focus)\s+)?(e\d+)\s+(\S+)\s+"([^"]*)"(?:\s+="([^"]*)")?(?:\s+\(([^)]*)\))?"""
 )
+_REMOVED = re.compile(r"^[ \t]*-\s+(e\d+)\b")
 
 
 @dataclass(frozen=True)
@@ -76,9 +79,20 @@ def _content_text(content: object) -> str:
 
 
 def parse_snapshot(text: str) -> list[Seen]:
-    """Element lines in ``text``. Later duplicates replace earlier ones."""
+    """Element lines in ``text``. Later duplicates replace earlier ones.
+
+    A diff line updates the same ref. ``- eN … (gone)`` drops that ref so a
+    removed element does not stay visible from an older full snapshot.
+    """
     found: dict[str, Seen] = {}
-    for match in _LINE.finditer(text or ""):
+    for line in (text or "").splitlines():
+        removed = _REMOVED.match(line)
+        if removed:
+            found.pop(removed.group(1), None)
+            continue
+        match = _LINE.match(line)
+        if match is None:
+            continue
         ref, role, name, value, flags = match.groups()
         found[ref] = Seen(ref, role, name, value, flags or "")
     return list(found.values())

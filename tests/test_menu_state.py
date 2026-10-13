@@ -246,6 +246,72 @@ def test_menu_state_and_close_are_dispatchable_by_name(tmp_path) -> None:
     assert rt.call_tool("menu", {"app": APP, "action": "close"}).startswith("closed menu Edit")
 
 
+def test_click_still_closes_a_menu_when_escape_reaches_it(tmp_path) -> None:
+    """A menu that is really open is still closed before the click."""
+    rt, driver = make_runtime(tmp_path)
+    driver.open = ["File"]
+    driver.menu_escape_safe = lambda _app: True
+    driver.target_vanished = lambda _element: False
+    rt.desktop_snapshot(APP)
+    out = rt.click(ref="e2")
+    assert str(out).startswith("clicked e2")
+    assert "(closed open menu File first)" in str(out)
+    assert ("press", "e2") in driver.calls
+
+
+def test_click_does_not_send_escape_into_a_dialog(tmp_path) -> None:
+    """Escape is not sent at a dialog that does not contain the menu.
+
+    The click is refused. It is not reported as a click on the button.
+    """
+    rt, driver = make_runtime(tmp_path)
+    driver.open = ["Edit"]
+    driver.menu_escape_safe = lambda _app: False
+    rt.desktop_snapshot(APP)
+    with pytest.raises(ComputerUseError) as exc:
+        rt.click(ref="e2")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "menu_dismiss_blocked"
+    assert "clicked" not in exc.value.message
+    assert ("menu_close", APP) not in driver.calls
+    assert not any(call[0] in {"press", "click"} for call in driver.calls)
+
+
+def test_click_refuses_when_closing_the_menu_fails(tmp_path) -> None:
+    """A dismiss that fails does not continue into the click."""
+    rt, driver = make_runtime(tmp_path)
+    driver.open = ["Edit"]
+
+    def menu_close(_app):
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "the menu is still open after Escape; close was not successful",
+            detail={"reason": "menu_still_open", "path": ["Edit"]},
+        )
+
+    driver.menu_close = menu_close
+    rt.desktop_snapshot(APP)
+    with pytest.raises(ComputerUseError) as exc:
+        rt.click(ref="e2")
+    assert exc.value.detail["reason"] == "menu_still_open"
+    assert exc.value.detail["outcome"] == "refused"
+    assert not any(call[0] in {"press", "click"} for call in driver.calls)
+
+
+def test_click_does_not_report_success_when_the_target_vanished(tmp_path) -> None:
+    """The button is gone after the menu dismiss. No click is sent."""
+    rt, driver = make_runtime(tmp_path)
+    driver.target_vanished = lambda _element: True
+    rt.desktop_snapshot(APP)
+    with pytest.raises(ComputerUseError) as exc:
+        rt.click(ref="e2")
+    assert exc.value.detail["reason"] == "target_vanished"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "clicked" not in exc.value.message
+    assert "nothing was sent" in exc.value.message
+    assert not any(call[0] in {"press", "click"} for call in driver.calls)
+
+
 def test_a_driver_without_menu_support_is_left_alone(tmp_path) -> None:
     class Bare(FakeDriver):
         menu_state = None  # type: ignore[assignment]

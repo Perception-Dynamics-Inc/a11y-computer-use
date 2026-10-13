@@ -28,6 +28,7 @@ from a11y_computer_use.schema import (
     Point,
     Scope,
     ScrollUnit,
+    Snapshot,
 )
 
 
@@ -98,6 +99,122 @@ def _atspi_actions(*names: str) -> tuple[str, ...]:
     return _atspi._action_names(_Acc())
 
 
+def test_canvas_drawing_area_and_canvas_tag_read_as_a_canvas(monkeypatch) -> None:
+    """AT-SPI canvas, GTK drawing area, and a ``<canvas>`` section are AXCanvas.
+
+    WebGL is the graphics-document role on that same element. An image stays
+    an image; the pruner, not this reader, decides ``opaque_region``.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 9.0), (120.0, 80.0)))
+    monkeypatch.setattr(
+        _atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_call_first", lambda acc, names, *args, default=None: "")
+
+    def read(role: str, attrs: dict | None = None):
+        node = type("Node", (), {"role": role, "attrs": attrs or {}})()
+        monkeypatch.setattr(_atspi, "_role_name", lambda acc: acc.role)
+        monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: dict(acc.attrs))
+        return _atspi.ATSPIAccessor().read(node)
+
+    assert read("canvas").role == "AXCanvas"
+    assert read("drawing area").role == "AXCanvas"
+    assert read("section", {"tag": "canvas"}).role == "AXCanvas"
+    assert read("panel", {"xml-roles": "graphics-document"}).role == "AXCanvas"
+    assert read("image").role == "AXImage"
+    assert read("push button", {"tag": "button"}).role == "AXButton"
+    assert read("panel").browser_chrome is False
+
+
+def test_browser_frame_view_is_chrome_ui_and_not_the_page() -> None:
+    """Synthetic Chrome tree. No live browser.
+
+    A childless panel beside the document is browser UI. A canvas inside
+    the document web is page content, even when the frame above it was
+    already marked as browser UI. The omnibox popup document is browser UI.
+    """
+
+    class _Node:
+        def __init__(self, role, parent=None, url=None):
+            self.role = role
+            self.parent = parent
+            self.url = url
+
+        def get_role_name(self):
+            return self.role
+
+        def get_parent(self):
+            return self.parent
+
+        def get_name(self):
+            return ""
+
+        def get_description(self):
+            return ""
+
+        def get_hyperlink(self):
+            return self if self.url else None
+
+        def get_uri(self, _index):
+            return self.url
+
+    app = _Node("application")
+    frame = _Node("frame", app)
+    toolbar = _Node("panel", frame)
+    doc = _Node("document web", frame, url="http://example.test/f117")
+    section = _Node("section", doc)
+    canvas = _Node("canvas", section)
+    cache: dict[int, bool] = {}
+    assert _atspi.browser_frame_view(canvas, cache, role_str="canvas") is False
+    assert _atspi.browser_frame_view(section, cache) is False
+    assert _atspi.browser_frame_view(doc, cache) is False
+    assert _atspi.browser_frame_view(toolbar, cache, role_str="panel") is True
+    assert _atspi.browser_frame_view(frame, cache) is True
+    popup = _Node("document web", frame, url="chrome://omnibox-popup.top-chrome/omnibox")
+    assert _atspi.browser_frame_view(popup, {}, role_str="document web") is True
+
+
+def test_browser_frame_view_reuses_the_object_path(monkeypatch) -> None:
+    """A second proxy with the same path does not walk parents again.
+
+    Synthetic nodes. ``get_parent`` on a live accessible returns a new
+    wrapper, so the cache is the object path, not ``id()``.
+    """
+
+    class _Node:
+        def __init__(self, role, parent=None, path=None):
+            self.role = role
+            self.parent = parent
+            self.path = path
+            self.parent_reads = 0
+
+        def get_role_name(self):
+            return self.role
+
+        def get_parent(self):
+            self.parent_reads += 1
+            return self.parent
+
+        def get_name(self):
+            return ""
+
+    def path_of(acc):
+        return getattr(acc, "path", None)
+
+    monkeypatch.setattr(_atspi, "_atspi_object_path", path_of)
+    app = _Node("application", path="/org/a11y/atspi/app")
+    frame = _Node("frame", app, path="/org/a11y/atspi/frame")
+    first = _Node("panel", frame, path="/org/a11y/atspi/panel")
+    second = _Node("panel", frame, path="/org/a11y/atspi/panel")
+    cache: dict[object, bool] = {}
+    assert _atspi.browser_frame_view(first, cache, role_str="panel") is True
+    assert frame.parent_reads == 1
+    assert _atspi.browser_frame_view(second, cache, role_str="panel") is True
+    assert second.parent_reads == 0
+    assert frame.parent_reads == 1
+
+
 def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     """A Linux-shaped tree (window > button + entry) prunes/indexes through the
     identical engine macOS uses: AXWindow root, a clickable button, an editable
@@ -120,6 +237,35 @@ def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     assert snap.app == "gedit" and snap.pid == 42
 
 
+def _lo_node(role, name, screen, window, parent=None, children=()):
+    kids = list(children)
+
+    class _Node:
+        def get_role_name(self):
+            return role
+
+        def get_name(self):
+            return name
+
+        def get_parent(self):
+            return parent
+
+        def get_child_count(self):
+            return len(kids)
+
+        def get_child_at_index(self, index):
+            return kids[int(index)]
+
+        def get_component_iface(self):
+            return self
+
+        def get_extents(self, coord):
+            raw = screen if coord == 0 else window
+            return _NS(x=raw[0], y=raw[1], width=raw[2], height=raw[3])
+
+    return _Node()
+
+
 def test_extents_pass_gtks_negative_sentinel_through_and_drop_zero_size(monkeypatch) -> None:
     class _Rect:
         def __init__(self, x, y, w, h): self.x, self.y, self.width, self.height = x, y, w, h
@@ -134,6 +280,646 @@ def test_extents_pass_gtks_negative_sentinel_through_and_drop_zero_size(monkeypa
     assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30))) == (None, None)
     assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30)), keep_zero=True) == ((5.0, 5.0), (0.0, 30.0))
     assert _atspi._extents(_Comp(_Rect(5, 6, 70, 30))) == ((5.0, 6.0), (70.0, 30.0))
+
+
+def test_offscreen_extents_distinguish_a_scrolled_box_from_zero_and_on_screen(monkeypatch) -> None:
+    """A box that misses the screen is off-screen. An overlapping box is not.
+
+    DEFUNCT is gone. A positive box that still overlaps the screen is on
+    screen, including a partial clip. A box fully above the screen is the
+    scrolled-off case. Zero size is off-screen only when the node is not
+    SHOWING, so a failed extents read of a showing control stays absent.
+    """
+
+    class _Rect:
+        def __init__(self, x, y, w, h):
+            self.x, self.y, self.width, self.height = x, y, w, h
+
+    class _Node:
+        def __init__(self, role, states, rect):
+            self.role = role
+            self.states = set(states)
+            self.rect = rect
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return ""
+
+        def get_toolkit_name(self):
+            return ""
+
+        def get_application(self):
+            return None
+
+        def get_state_set(self):
+            return _NS(names=set(self.states), contains=lambda member: str(member) in self.states)
+
+        def get_component_iface(self):
+            return self
+
+        def get_extents(self, _coord):
+            return self.rect
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (100, 80))
+    assert _atspi.offscreen_extents(_Node("push button", {"DEFUNCT"}, _Rect(-40, 10, 20, 10))) is None
+    assert _atspi.offscreen_extents(_Node("push button", {"SHOWING"}, _Rect(10, 12, 20, 16))) is None
+    assert _atspi.offscreen_extents(_Node("push button", set(), _Rect(-10, 5, 30, 10))) is None
+    assert _atspi.offscreen_extents(_Node("push button", set(), _Rect(8, -80, 200, 60))) == (
+        (8.0, -80.0),
+        (200.0, 60.0),
+    )
+    assert _atspi.offscreen_extents(_Node("push button", {"SHOWING"}, _Rect(5, 5, 0, 30))) is None
+    assert _atspi.offscreen_extents(_Node("push button", set(), _Rect(5, 5, 0, 30))) == (
+        (0.0, 0.0),
+        (0.0, 0.0),
+    )
+
+    element = Element(
+        "e3", "AXButton", "Red swatch", None, Bounds(0, 8, 40, 200, 60), "snap-off",
+    )
+    issued = Snapshot(
+        "snap-off", Scope.WINDOW, "chrome", 1, 0.0, (), (element,),
+    )
+    handle = object()
+    observe._register_epoch(issued.snapshot_id, {}, {"e3": handle})
+    monkeypatch.setattr(
+        _atspi, "offscreen_extents",
+        lambda acc: ((8.0, -80.0), (200.0, 60.0)) if acc is handle else None,
+    )
+    driver = LinuxDriver()
+    assert driver.alive_offscreen(issued, "e3") == Bounds(0, 8, -80, 200, 60)
+    monkeypatch.setattr(_atspi, "offscreen_extents", lambda acc: None)
+    assert driver.alive_offscreen(issued, "e3") is None
+    assert driver.alive_offscreen(issued, "e9") is None
+
+
+def test_libreoffice_paragraph_bounds_follow_the_frame_insets(monkeypatch) -> None:
+    """LibreOffice content uses the coord frame that matches the client area.
+
+    When the root pane's SCREEN top is still the outer frame, the paragraph's
+    SCREEN and WINDOW points omit the title bar and the published point is
+    the X client origin plus that box. When the root pane sits on the X
+    client origin, the paragraph's SCREEN point is already on the pixels and
+    the client origin is not added again. A node whose SCREEN point is
+    already the client origin plus its WINDOW point stays there. The frame's
+    own screen rectangle stays the outer window. A frame with no matching X
+    window is not shifted.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+
+    def origin(x, y, width, height, title=""):
+        del width, height, title
+        if (x, y) == (0, 0):
+            return (0, 28)
+        if (x, y) == (100, 80):
+            return (100, 104)
+        if (x, y) == (150, 90):
+            return (155, 114)
+        return None
+
+    monkeypatch.setattr(_linux_system, "client_origin_for_outer_frame", origin)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+
+    # Client-relative: the root pane's SCREEN top is the outer frame, not the client.
+    pane = _lo_node("root pane", "client", (0, 0, 1280, 745), (0, 0, 1280, 745))
+    frame = _lo_node(
+        "frame", "notes.odt — LibreOffice Writer", (0, 0, 1280, 773), (0, -28, 1280, 801),
+        children=[pane],
+    )
+    paragraph = _lo_node(
+        "paragraph", "Beta", (194, 286, 816, 37), (194, 286, 816, 37), parent=frame,
+    )
+    raw = accessor.read(paragraph)
+    assert raw.position == (194.0, 314.0)
+    assert raw.size == (816.0, 37.0)
+    frame_box = accessor.read(frame)
+    assert frame_box.position == (0.0, 0.0)
+
+    # Already on the screen: the root pane sits on the X client origin, so 268 stays 268.
+    on_screen = _lo_node("root pane", "client", (0, 28, 1280, 752), (0, 28, 1280, 752))
+    absolute = _lo_node(
+        "frame", "notes.odt — LibreOffice Writer", (0, 0, 1280, 800), (0, -28, 1280, 800),
+        children=[on_screen],
+    )
+    low = _lo_node(
+        "paragraph", "Beta", (207, 268, 793, 18), (207, 268, 793, 18), parent=absolute,
+    )
+    assert accessor.read(low).position == (207.0, 268.0)
+
+    # This node already stored the client origin in SCREEN. Do not add it twice.
+    mixed = _lo_node(
+        "paragraph", "Beta", (194, 314, 816, 37), (194, 286, 816, 37), parent=frame,
+    )
+    assert accessor.read(mixed).position == (194.0, 314.0)
+
+    # Moved window, still client-relative. Outer (100, 80), client (100, 104).
+    moved_pane = _lo_node("root pane", "client", (100, 80, 800, 560), (0, 0, 800, 560))
+    moved = _lo_node(
+        "frame", "moved", (100, 80, 800, 600), (0, -24, 800, 624), children=[moved_pane],
+    )
+    inside = _lo_node(
+        "paragraph", "Beta", (30, 40, 200, 18), (30, 40, 200, 18), parent=moved,
+    )
+    assert accessor.read(inside).position == (130.0, 144.0)
+
+    # Moved window whose client area is already on the screen.
+    # Client is (155, 114): adding it would publish (385, 394).
+    screen_pane = _lo_node("root pane", "client", (155, 114, 690, 470), (155, 114, 690, 470))
+    screen_frame = _lo_node(
+        "frame", "moved", (150, 90, 700, 500), (150, 90, 700, 500), children=[screen_pane],
+    )
+    screen_para = _lo_node(
+        "paragraph", "Beta", (230, 280, 200, 18), (230, 280, 200, 18), parent=screen_frame,
+    )
+    assert accessor.read(screen_para).position == (230.0, 280.0)
+
+    agreed = _lo_node("frame", "plain", (10, 20, 400, 300), (10, 20, 400, 300))
+    child = _lo_node("paragraph", "Beta", (30, 40, 80, 18), (30, 40, 80, 18), parent=agreed)
+    same = accessor.read(child)
+    assert same.position == (30.0, 40.0)
+
+    accessor.libreoffice = False
+    untouched = accessor.read(paragraph)
+    assert untouched.position == (194.0, 286.0)
+
+
+def test_libreoffice_pre_motion_is_screen_a_title_bar_above_window() -> None:
+    """The 25.2 gap is SCREEN above WINDOW. Equal, and SCREEN below, are not."""
+    assert _atspi.libreoffice_pre_motion(260, 287) is True
+    assert _atspi.libreoffice_pre_motion(208, 208) is False
+    assert _atspi.libreoffice_pre_motion(235, 208) is False
+    assert _atspi.libreoffice_status_point(0, 21, 1280, 779) == (640, 792)
+    assert _atspi.libreoffice_status_point(0, 0, 20, 779) is None
+
+
+def test_settle_libreoffice_geometry_moves_only_when_screen_is_high(monkeypatch) -> None:
+    """A pre-motion window gets two status-bar motions. A matched window does not.
+
+    Synthetic nodes, not a live LibreOffice. The placement cache is not
+    involved: this only reads raw extents and moves the pointer.
+    """
+    _atspi._lo_settle_attempts.clear()
+    moved: list[tuple[int, int]] = []
+    gap = {"on": True}
+
+    class _Node:
+        def __init__(self, role, name, children=()):
+            self.role = role
+            self.name = name
+            self.children = list(children)
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_process_id(self):
+            return 4242
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[int(index)]
+
+        def get_component_iface(self):
+            return self
+
+        def get_extents(self, coord):
+            if self.role == "frame":
+                raw = (0, 0, 1280, 800)
+            elif gap["on"]:
+                raw = (0, 0, 1280, 752) if coord == 0 else (0, 27, 1280, 752)
+            else:
+                raw = (0, 27, 1280, 752)
+            return _NS(x=raw[0], y=raw[1], width=raw[2], height=raw[3])
+
+    pane = _Node("root pane", "client")
+    frame = _Node("frame", "Untitled 1 — LibreOffice Calc", [pane])
+
+    def hover(x, y):
+        moved.append((int(x), int(y)))
+        gap["on"] = False
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    monkeypatch.setattr(_atspi, "_client_box_for_frame", lambda node: (0, 21, 1280, 779))
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.hover", hover)
+    try:
+        _atspi.settle_libreoffice_geometry(frame)
+        assert moved == [(640, 792), (643, 792)]
+        _atspi.settle_libreoffice_geometry(frame)
+        assert moved == [(640, 792), (643, 792)]
+    finally:
+        _atspi._lo_settle_attempts.clear()
+
+
+def test_sheet_click_verdict_requires_the_selected_address(monkeypatch) -> None:
+    """A Calc click is confirmed only when the selected cell is the target."""
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    chosen = {"address": "B2"}
+    focused = {"address": "B4"}
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: app == "soffice")
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: chosen["address"])
+    monkeypatch.setattr(_atspi, "_focused_sheet_address", lambda app: focused["address"])
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "partial", "the selected cell is B2, not B4",
+    )
+    chosen["address"] = "B4"
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "confirmed", "the selected cell is B4",
+    )
+    # LibreOffice 24 leaves Selection empty. The focused visible cell is
+    # the Name Box, and it can confirm. It cannot override a different
+    # published address: that case already returned partial above.
+    chosen["address"] = None
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "confirmed", "the selected cell is B4",
+    )
+    focused["address"] = "B2"
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "partial", "the selected cell is B2, not B4",
+    )
+    assert _atspi.sheet_click_verdict("gedit", "B4") is None
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: False)
+    assert _atspi.sheet_click_verdict("soffice", "B4") is None
+
+
+def test_coordinate_click_on_a_calc_cell_uses_the_selected_cell(monkeypatch) -> None:
+    """A point click reports partial when the selected cell is not the target.
+
+    Synthetic snapshot, not a live Calc. The driver click is the pointer.
+    The outcome comes from the selected address, not from a tree change.
+    """
+    from a11y_computer_use import server
+
+    cell = Element(
+        "e1", "AXCell", "B4", None, Bounds(0, 100, 200, 82, 17), "s",
+    )
+    snap = Snapshot("s", Scope.WINDOW, "soffice", 0, 0.0, (), (cell,))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt._view = "compact"
+    clicked_at: list[tuple] = []
+
+    class _Driver:
+        name = "linux"
+
+        def main_display_id(self):
+            return 0
+
+        def click(self, target, **kwargs):
+            clicked_at.append((target, kwargs.get("count")))
+
+        def _run(self, fn):
+            return fn()
+
+    rt.driver = _Driver()
+    rt._reject_coordinate = lambda *args, **kwargs: None
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._capture = lambda app=None: {
+        "snap": snap, "pid": 0, "pid_alive": False, "scope": Scope.WINDOW,
+        "app": "soffice", "bounds": "x",
+    }
+    rt._frontmost = lambda: "soffice"
+    rt._refuse_disabled = lambda *args, **kwargs: None
+    rt._refuse_secure = lambda *args, **kwargs: None
+    rt._dismiss_open_menu = lambda *args, **kwargs: ""
+    rt._recheck_target = lambda *args, **kwargs: None
+    rt._guard_user = lambda *args, **kwargs: None
+    rt._resolves_apps = lambda: False
+    monkeypatch.setattr(
+        _atspi, "sheet_click_verdict",
+        lambda app, address: ("partial", f"the selected cell is B2, not {address}"),
+    )
+    result = rt.click(x=141, y=208)
+    assert clicked_at, "the pointer click was not sent"
+    assert result.outcome == "partial"
+    assert result.evidence == "the selected cell is B2, not B4"
+
+
+def test_libreoffice_pointer_shift_is_the_title_bar_only_on_24() -> None:
+    """The published box stays on the pixels. The pointer moves on 24.2 only.
+
+    LibreOffice 24.2 hit-tests one title bar above a SCREEN point that
+    already includes that bar. The event is shifted by the inset. LibreOffice
+    25 hit-tests the point, and a client-relative frame already published the
+    inset in the box, so the event is not shifted again.
+    """
+    delta = _atspi._libreoffice_pointer_delta
+    assert delta(True, 24, (0, 21), (0, 0, 1280, 800)) == (0.0, 21.0)
+    assert delta(True, 25, (0, 24), (0, 0, 1280, 800)) == (0.0, 0.0)
+    assert delta(True, None, (0, 21), (0, 0, 1280, 800)) == (0.0, 0.0)
+    assert delta(False, 24, (0, 28), (0, 0, 1280, 773)) == (0.0, 0.0)
+    assert delta(True, 24, (100, 104), (100, 80, 800, 600)) == (0.0, 24.0)
+
+
+def test_libreoffice_pointer_shift_applies_once_per_process(monkeypatch) -> None:
+    """The title-bar inset is for the first pointer event in that soffice.
+
+    LibreOffice 24.2 moves its published extents into the hit-test after
+    that event. A second click in the same process uses the new box. A
+    later process on the same screen rectangle still gets the first inset.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    _atspi._lo_pointer_aligned.clear()
+    frame = object()
+
+    def at(x, y, current=frame):
+        del x, y
+        return current
+
+    keys = {"pid": 4242}
+
+    def align_key(node):
+        del node
+        return (keys["pid"], 0, 0, 1280, 800)
+
+    monkeypatch.setattr(_atspi, "_libreoffice_frame_at", at)
+    monkeypatch.setattr(_atspi, "_libreoffice_frame_key", lambda node: (0, 0, 1280, 800))
+    monkeypatch.setattr(_atspi, "_libreoffice_align_key", align_key)
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: (0, 0, 1280, 800))
+    monkeypatch.setattr(_atspi, "libreoffice_major", lambda: 24)
+    monkeypatch.setattr(_atspi, "_client_area_is_on_screen", lambda *args: True)
+    monkeypatch.setattr(
+        _linux_system, "client_origin_for_outer_frame", lambda *args, **kwargs: (0, 21),
+    )
+    try:
+        assert _atspi.libreoffice_pointer_shift(168, 216) == (0.0, 21.0)
+        _atspi.note_libreoffice_pointer(168, 216)
+        assert _atspi.libreoffice_pointer_shift(180, 200) == (0.0, 0.0)
+        keys["pid"] = 9999
+        assert _atspi.libreoffice_pointer_shift(168, 216) == (0.0, 21.0)
+    finally:
+        _atspi._lo_pointer_aligned.clear()
+
+
+def test_linux_drag_keeps_one_libreoffice_delta(monkeypatch) -> None:
+    """A drag shifts every point by the start inset, then notes once."""
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Point
+
+    driver = LinuxDriver()
+    calls: list[tuple[int, int]] = []
+    noted: list[tuple[int, int]] = []
+    captured: dict[str, object] = {}
+
+    def pointer(self, x, y):
+        del self
+        calls.append((x, y))
+        return x, y + 21
+
+    def note(self, x, y):
+        del self
+        noted.append((x, y))
+
+    def drag(x1, y1, x2, y2, *, button="left", path=()):
+        captured["drag"] = (x1, y1, x2, y2, button, list(path))
+
+    monkeypatch.setattr(LinuxDriver, "_pointer", pointer)
+    monkeypatch.setattr(LinuxDriver, "_note_pointer", note)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_linux_input, "drag", drag)
+    driver.drag(Point(1, 10, 20), Point(1, 30, 40), path=(Point(1, 15, 25),))
+    assert calls == [(10, 20)]
+    assert captured["drag"] == (10, 41, 30, 61, "left", [(15, 46)])
+    assert noted == [(10, 20)]
+
+
+def test_place_paragraph_caret_uses_the_end_when_the_point_misses(monkeypatch) -> None:
+    class _Acc:
+        def __init__(self, role="paragraph", parent=None, name="soffice"):
+            self.role = role
+            self.parent = parent
+            self.name = name
+            self.caret = -1
+            self.n = 31
+            self.states: set[str] = set()
+            self.children: list = []
+
+        def get_role_name(self):
+            return self.role
+
+        def get_application(self):
+            return self
+
+        def get_name(self):
+            return self.name
+
+        def get_parent(self):
+            return self.parent
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    document = _Acc("document text")
+    acc = _Acc(parent=document)
+
+    class _Text:
+        @staticmethod
+        def get_character_count(node):
+            return node.n
+
+        @staticmethod
+        def get_offset_at_point(node, x, y, coord):
+            del node, x, y, coord
+            return -1
+
+        @staticmethod
+        def set_caret_offset(node, offset):
+            node.caret = offset
+            return True
+
+        @staticmethod
+        def get_caret_offset(node):
+            return node.caret
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0), Text=_Text))
+    monkeypatch.setattr(_atspi, "grab_focus", lambda node: True)
+    assert _atspi.place_paragraph_caret(acc, 10, 10) is True
+    assert acc.caret == 31
+    assert _atspi.paragraph_click_verdict(acc) == (
+        "confirmed", "the caret is in the target paragraph",
+    )
+    acc.caret = -1
+    assert _atspi.paragraph_click_verdict(acc) == (
+        "partial", "the caret is not in the target paragraph",
+    )
+    acc.role = "push button"
+    assert _atspi.place_paragraph_caret(acc, 10, 10) is False
+    assert _atspi.paragraph_click_verdict(acc) is None
+    slide = _Acc("document presentation")
+    shape = _Acc("shape", parent=slide)
+    title = _Acc(parent=shape)
+    title.children = []
+    shape.children = [title]
+    assert _atspi.is_libreoffice_text_paragraph(title) is False
+    assert _atspi.is_libreoffice_shape_text(title) is True
+    assert _atspi.place_paragraph_caret(title, 10, 10) is False
+    assert _atspi.paragraph_click_verdict(title) == (
+        "partial", "the text frame is not in text edit",
+    )
+    title.states = {"FOCUSED", "EDITABLE"}
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, name: name in getattr(node, "states", ()))
+    assert _atspi.paragraph_click_verdict(title) == (
+        "confirmed", "a focused editable paragraph is inside the text frame",
+    )
+    title.states = {"FOCUSED"}
+    title.caret = 4
+    assert _atspi.paragraph_click_verdict(title) == (
+        "confirmed", "the caret is inside the text frame",
+    )
+    title.states = set()
+    title.caret = 4
+    assert _atspi.paragraph_click_verdict(title) == (
+        "partial", "the text frame is not in text edit",
+    )
+    drawing = _Acc("document drawing")
+    frame = _Acc("text frame", parent=drawing)
+    assert _atspi.is_libreoffice_shape_text(frame) is True
+    named = _Acc("panel", parent=slide, name="Text Frame ")
+    named.get_application = lambda: slide
+    assert _atspi.is_libreoffice_shape_text(named) is True
+    page = _Acc("panel", parent=slide, name="PageShape: Slide 1")
+    page.get_application = lambda: slide
+    assert _atspi.is_libreoffice_shape_text(page) is False
+    writer = _Acc(parent=document)
+    assert _atspi.is_libreoffice_text_paragraph(writer) is True
+
+
+def test_impress_title_click_uses_the_pointer_and_not_the_writer_caret(monkeypatch) -> None:
+    """An Impress paragraph click is a center pointer click, then a double-click.
+
+    The Writer caret shortcut must not run. A single click that does not
+    enter text edit is followed by a double-click at the same center. When
+    the first click already enters edit, the double-click is not sent.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    handle = object()
+    clicks: list[tuple] = []
+    noted: list[tuple[int, int]] = []
+    editing = {"ready": False}
+
+    def pointer_click(x, y, *, button="left", count=1):
+        clicks.append((x, y, button, count))
+        if count >= 2:
+            editing["ready"] = True
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_linux_input, "click", pointer_click)
+    monkeypatch.setattr(_atspi, "is_libreoffice_shape_text", lambda acc: acc is handle)
+    monkeypatch.setattr(
+        _atspi, "place_paragraph_caret",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("writer caret")),
+    )
+    monkeypatch.setattr(_atspi, "shape_text_editing", lambda acc: editing["ready"] and acc is handle)
+    monkeypatch.setattr(_atspi, "is_libreoffice_text_paragraph", lambda acc: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(LinuxDriver, "_pointer", lambda self, x, y: (int(x), int(y)))
+    monkeypatch.setattr(LinuxDriver, "_note_pointer", lambda self, x, y: noted.append((int(x), int(y))))
+    element = Element(
+        "e4", "AXStaticText", "Paragraph: 0 Alpha Slide Title", "Alpha Slide Title",
+        Bounds(0, 100, 200, 80, 40), "snap-imp", clickable=True,
+    )
+    observe._register_epoch(element.snapshot_id, {}, {"e4": handle})
+    assert driver.press_element(element) is False
+    driver.click(element)
+    assert clicks == [(140, 220, "left", 1), (140, 220, "left", 2)]
+    assert noted == [(140, 220)]
+    assert driver._focused_editable is handle
+
+    clicks.clear()
+    noted.clear()
+    editing["ready"] = True
+    driver._focused_editable = None
+    driver.click(element)
+    assert clicks == [(140, 220, "left", 1)]
+    assert driver._focused_editable is handle
+
+
+def test_type_text_impress_reads_the_title_when_the_document_text_is_empty(
+    fake_atspi, monkeypatch,
+) -> None:
+    """The presentation stays focused and its text stays empty.
+
+    The title paragraph is where the keys land. A read of the document
+    would be ``""`` and report text_mismatch after the title already holds
+    the characters. The type confirms from that paragraph. A paragraph
+    that never changes is a mismatch showing the title, not the empty
+    document.
+    """
+    app = _Acc("application", name="soffice.bin")
+    slide = _Acc(
+        "document presentation",
+        name="deck - LibreOffice Presentation",
+        states=("FOCUSED", "EDITABLE"),
+    )
+    slide.text = ""
+    slide.get_application = lambda: app
+    page = _Acc("panel", name="PageShape: Slide 1")
+    frame = _Acc("panel", name="Text Frame ")
+    title = _Acc(
+        "paragraph", name="Paragraph: 0",
+        states=("FOCUSED", "EDITABLE", "SHOWING"),
+    )
+    title.text = "Alpha Slide Title"
+    title.caret = 17
+    _adopt(frame, title)
+    _adopt(slide, page, frame)
+    reads = {"n": 0}
+    real_get_text = fake_atspi.Text.get_text
+
+    def get_text(acc, start, end):
+        if acc is title:
+            reads["n"] += 1
+            acc.text = "Alpha Slide Title" if reads["n"] < 3 else "Alpha Slide Title K1"
+        return real_get_text(acc, start, end)
+
+    monkeypatch.setattr(fake_atspi.Text, "get_text", staticmethod(get_text))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 4)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: False)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app, **_kwargs: (slide, False))
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    assert driver.type_text(" K1") == 3
+    assert reads["n"] >= 3
+    assert title.text == "Alpha Slide Title K1"
+
+    reads["n"] = 0
+
+    def stuck(acc, start, end):
+        if acc is title:
+            acc.text = "Alpha Slide Title"
+        return real_get_text(acc, start, end)
+
+    monkeypatch.setattr(fake_atspi.Text, "get_text", staticmethod(stuck))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text(" K1")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "Alpha Slide Title"
 
 
 def test_hollow_page_tab_keeps_the_document_below_it() -> None:
@@ -174,6 +960,162 @@ def test_hollow_page_tab_keeps_the_document_below_it() -> None:
     assert not [el for el in snap.elements if el.title in ("hidden", "Inside")]
 
 
+class _PageNode:
+    """A notebook accessible with an explicit box. No gi."""
+
+    def __init__(self, role, name="", box=None, children=()):
+        self.role = role
+        self.name = name
+        self.box = box
+        self.children = list(children)
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+
+def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch) -> None:
+    """A notebook page with no allocation is a named hidden tab, not the page.
+
+    GTK reports (-1, -1, -1, -1) and an empty name for the lone page tab.
+    The frame name is the page label. The page is hoisted to the tab list.
+    The tab has no box and is not clickable. A page tab that already has a
+    box and a name keeps that box.
+    """
+    def extents(acc, *, keep_zero=False):
+        box = getattr(acc, "box", None)
+        if box is not None:
+            return box
+        return (0.0, 0.0), (10.0, 10.0)
+
+    monkeypatch.setattr(_atspi, "_extents", extents)
+    monkeypatch.setattr(
+        _atspi, "_state_flags",
+        lambda _acc: (True, False, None, True, None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_value_text", lambda *_args, **_kwargs: None)
+
+    frame = _PageNode("frame", "Probe Title", box=((100.0, 100.0), (800.0, 500.0)))
+    hidden = _PageNode("page tab", "", box=((-1.0, -1.0), (-1.0, -1.0)))
+    page = _PageNode("panel", "", box=((110.0, 160.0), (780.0, 420.0)))
+    terminal = _PageNode("terminal", "Terminal", box=((110.0, 160.0), (760.0, 420.0)))
+    page.children = [terminal]
+    terminal.parent = page
+    tabs = _PageNode("page tab list", "", box=((110.0, 160.0), (780.0, 420.0)), children=[hidden])
+    hidden.children = [page]
+    page.parent = hidden
+    frame.children = [tabs]
+    tabs.parent = frame
+
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(hidden)
+    assert raw.role == "AXButton"
+    assert raw.title == "Probe Title"
+    assert raw.selected is True
+    assert raw.unallocated is True
+    assert raw.position is None and raw.size is None
+    assert raw.actions == ()
+    assert accessor.children(hidden) == []
+    assert accessor.children(tabs) == [hidden, page]
+
+    labelled = _PageNode("page tab", "Kept Label", box=((-1.0, -1.0), (-1.0, -1.0)))
+    labelled.parent = tabs
+    labelled_raw = accessor.read(labelled)
+    assert labelled_raw.title == "Kept Label"
+    assert labelled_raw.unallocated is True
+    assert labelled_raw.position is None and labelled_raw.size is None
+
+    visible = _PageNode("page tab", "Alpha Title", box=((565.0, 402.0), (74.0, 19.0)))
+    visible_page = _PageNode("panel", "", box=((551.0, 429.0), (818.0, 420.0)))
+    visible.children = [visible_page]
+    visible_page.parent = visible
+    visible_tabs = _PageNode("page tab list", "", children=[visible])
+    visible.parent = visible_tabs
+    assert accessor.read(visible).title == "Alpha Title"
+    assert accessor.read(visible).size == (74.0, 19.0)
+    assert accessor.children(visible) == [visible_page]
+    assert accessor.children(visible_tabs) == [visible]
+
+    snap = build_snapshot(
+        frame, accessor, scope=Scope.WINDOW, app="xfce4-terminal", pid=1, geometry=_geometry(),
+    )
+    buttons = [el for el in snap.elements if el.role == "AXButton" and el.title == "Probe Title"]
+    assert len(buttons) == 1
+    tab = buttons[0]
+    assert tab.bounds is None
+    assert tab.clickable is False
+    assert tab.actionable is False
+    rendered = observe.render_text(snap, include_bounds=True)
+    line = next(
+        item for item in rendered.splitlines()
+        if "button" in item and "Probe Title" in item
+    )
+    assert "hidden" in line
+    assert "@" not in line
+    text = [el for el in snap.elements if el.role == "AXTextArea" and el.title == "Terminal"]
+    assert len(text) == 1
+    area = text[0]
+    assert area.bounds is not None
+    by_ref = {el.ref: el for el in snap.elements}
+    parent = area.parent
+    while parent is not None:
+        assert by_ref[parent].ref != tab.ref
+        parent = by_ref[parent].parent
+
+
+def test_hidden_page_tab_ref_click_is_not_a_pointer_click() -> None:
+    """A ref click on a hidden tab is a typed no-op. The pointer is not called."""
+    from a11y_computer_use import server
+
+    tab = Element(
+        "e2", "AXButton", "Probe Title", None, None, "s",
+        clickable=False, selected=True,
+    )
+    clicks: list[object] = []
+
+    class _Driver:
+        name = "linux"
+
+        def click(self, target, **kwargs):
+            clicks.append(target)
+
+        def press_element(self, element):
+            clicks.append(("press", element.ref))
+            return False
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _Driver()
+    rt._current = Snapshot("s", Scope.WINDOW, "xfce4-terminal", 1, 0.0, (), (tab,))
+    rt._reject_coordinate = lambda *args, **kwargs: None
+    rt._target = lambda *args, **kwargs: (tab, "xfce4-terminal")
+    rt._capture = lambda app=None: {}
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._refuse_disabled = lambda *args, **kwargs: None
+    rt._refuse_secure = lambda *args, **kwargs: None
+    result = rt.click(ref="e2")
+    assert clicks == []
+    assert result.outcome == "suspected_noop"
+    assert result.evidence == "not_actionable"
+    assert "no click was sent" in result
+
+
 def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> None:
     """The snapshot read keeps a zero box and marks an internal frame.
     Hit-testing still asks for the default extents, which drop that box."""
@@ -183,7 +1125,7 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
         seen["keep_zero"] = keep_zero
         return (8.0, 9.0), (0.0, 40.0)
 
-    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
     monkeypatch.setattr(_atspi, "_extents", extents)
 
     class Acc:
@@ -206,7 +1148,7 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
 
 def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> None:
     """Gtk.Entry and Gtk.TextView share the AT-SPI role ``text``. The entry is single-line."""
-    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0.0, 0.0), (80.0, 24.0)))
     monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: "")
     monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
@@ -235,6 +1177,597 @@ def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> Non
     assert entry.role == "AXTextField"
     assert area.role == "AXTextArea"
     assert plain.role == "AXTextArea"
+
+
+def test_chromium_textarea_entry_is_multi_line_text(monkeypatch) -> None:
+    """Chromium exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
+
+    A single-line ``<input>`` stays a text field. The ``multiline`` attribute
+    is the same fact when the state is absent. A contenteditable
+    ``role=textbox`` with ``aria-multiline`` stays a text field. The snapshot
+    word for the textarea is ``textarea``. Not a live Chrome or Electron.
+    """
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 40.0), (240.0, 80.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: "line1 line2")
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+
+    class Acc:
+        def __init__(self, states, attrs):
+            self.states = set(states)
+            self.attrs = dict(attrs)
+
+        def get_role_name(self):
+            return "entry"
+
+        def get_name(self):
+            return "Note body" if "MULTI_LINE" in self.states or self.attrs.get("tag") == "textarea" else "Note title"
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States(self.states)
+
+        def get_attributes(self):
+            return dict(self.attrs)
+
+    def read(states, attrs):
+        return _atspi.ATSPIAccessor().read(Acc(states, attrs))
+
+    area = read({"MULTI_LINE", "EDITABLE", "SINGLE_LINE"}, {"tag": "textarea"})
+    single = read({"SINGLE_LINE", "EDITABLE"}, {"tag": "input"})
+    by_attr = read({"EDITABLE"}, {"multiline": "true"})
+    by_bool = read({"EDITABLE"}, {"multiline": True})
+    rich = read(
+        {"MULTI_LINE", "EDITABLE"},
+        {"tag": "div", "xml-roles": "textbox", "aria-multiline": "true"},
+    )
+    aria_only = read({"EDITABLE"}, {"aria-multiline": "true"})
+    off = read({"EDITABLE"}, {"multiline": "false", "aria-multiline": "false"})
+    assert area.role == "AXTextArea"
+    assert single.role == "AXTextField"
+    assert by_attr.role == "AXTextArea"
+    assert by_bool.role == "AXTextArea"
+    assert rich.role == "AXTextField"
+    assert aria_only.role == "AXTextField"
+    assert off.role == "AXTextField"
+
+    snap = build_snapshot(
+        (area, []), _FakeAccessor(), scope=Scope.WINDOW, app="electron", pid=1, geometry=_geometry(),
+    )
+    text = observe.render_text(snap)
+    assert 'textarea "Note body"' in text
+    single_snap = build_snapshot(
+        (single, []), _FakeAccessor(), scope=Scope.WINDOW, app="electron", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Note title"' in observe.render_text(single_snap)
+
+
+class _Section:
+    """A Chrome ``<div contenteditable>`` with no textbox role: AT-SPI section."""
+
+    def __init__(self, name: str, text: str, states: set[str]):
+        self.name = name
+        self.text = text
+        self.states = set(states)
+        self.attrs = {"tag": "div"}
+
+    def get_role_name(self):
+        return "section"
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        return _States(self.states)
+
+    def get_attributes(self):
+        return dict(self.attrs)
+
+
+def _toolkit_app(toolkit: str, name: str):
+    class _App:
+        def get_toolkit_name(self):
+            return toolkit
+
+        def get_name(self):
+            return name
+
+    return _App()
+
+
+def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch) -> None:
+    """A Chromium contenteditable section is a group the snapshot marks editable.
+
+    The role stays a group. The edit flag comes from STATE_EDITABLE on a
+    div section, not from a textbox role and not from EditableText alone.
+    A section with neither the state nor a browser toolkit stays non-editable.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((10.0, 20.0), (240.0, 48.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    notes = _Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    notes.get_application = lambda: _toolkit_app("Chromium", "Google Chrome")
+    raw = _atspi.ATSPIAccessor().read(notes)
+    assert raw.role == "AXGroup"
+    assert raw.editable is True
+    assert raw.value == "old note"
+    snap = build_snapshot(
+        (raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    rendered = observe.render_text(snap)
+    assert 'group "Notes box" ="old note" (click,edit)' in rendered
+    assert snap.elements[0].editable is True
+
+    quiet = _atspi.ATSPIAccessor().read(_Section("Quiet", "static words", {"ENABLED"}))
+    assert quiet.role == "AXGroup"
+    assert quiet.editable is False
+
+    via = _Section("Iface", "typed", {"ENABLED"})
+    via.get_editable_text_iface = lambda: object()
+    assert _atspi.ATSPIAccessor().read(via).editable is False
+
+    gecko = _Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    gecko.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+    gecko.get_editable_text_iface = lambda: object()
+    assert _atspi.ATSPIAccessor().read(gecko).editable is True
+
+
+def test_gecko_contenteditable_section_is_a_text_role(fake_atspi, monkeypatch) -> None:
+    """A Firefox contenteditable section with a text interface is a text role.
+
+    MULTI_LINE, or a multiline attribute, is a textarea. A single-line editor
+    is a text field. A section without EDITABLE, or without a text interface,
+    stays a group. Chromium's section stays a group. Not a live Firefox.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((10.0, 20.0), (240.0, 48.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+
+    def read(node: _Section):
+        return _atspi.ATSPIAccessor().read(node)
+
+    def gecko(name: str, text: str, states: set[str], *, iface: bool = True, tag: str = "div"):
+        node = _Section(name, text, states)
+        node.attrs["tag"] = tag
+        node.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+        if iface:
+            node.get_editable_text_iface = lambda: object()
+        return node
+
+    multi = gecko("Notes box", "editable block", {"EDITABLE", "MULTI_LINE", "ENABLED", "FOCUSABLE"})
+    raw = read(multi)
+    assert raw.role == "AXTextArea"
+    assert raw.editable is True
+    assert raw.value == "editable block"
+    snap = build_snapshot(
+        (raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textarea "Notes box" ="editable block"' in observe.render_text(snap)
+
+    single = gecko("Plain", "one line", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    assert read(single).role == "AXTextField"
+    single_snap = build_snapshot(
+        (read(single), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Plain"' in observe.render_text(single_snap)
+
+    by_attr = gecko("Rich", "rich old", {"EDITABLE", "ENABLED"})
+    by_attr.attrs["aria-multiline"] = "true"
+    assert read(by_attr).role == "AXTextArea"
+    by_bool = gecko("Rich", "rich old", {"EDITABLE", "ENABLED"})
+    by_bool.attrs["multiline"] = True
+    assert read(by_bool).role == "AXTextArea"
+    off = gecko("Plain", "one line", {"EDITABLE", "ENABLED"})
+    off.attrs["multiline"] = "false"
+    off.attrs["aria-multiline"] = False
+    assert read(off).role == "AXTextField"
+
+    quiet = gecko("Quiet", "static words", {"ENABLED"})
+    assert read(quiet).role == "AXGroup"
+    assert read(quiet).editable is False
+
+    no_iface = _Section("Bare", "words", {"EDITABLE", "MULTI_LINE", "ENABLED"})
+    no_iface.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+    del no_iface.text
+    assert read(no_iface).role == "AXGroup"
+
+    chrome = _Section("Notes box", "old note", {"EDITABLE", "MULTI_LINE", "ENABLED", "FOCUSABLE"})
+    chrome.get_application = lambda: _toolkit_app("Chromium", "Google Chrome")
+    chrome.get_editable_text_iface = lambda: object()
+    assert read(chrome).role == "AXGroup"
+    assert read(chrome).editable is True
+
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: 0.0)
+    numbered = read(multi)
+    assert numbered.role == "AXTextArea"
+    assert numbered.value == "editable block"
+
+
+def test_roleless_contenteditable_set_text_clears_then_types(fake_atspi, monkeypatch) -> None:
+    """Fake Chrome section. No EditableText. The #165 clear runs, then the keys.
+
+    Not a browser. BackSpace leaves a newline, which is empty, and Delete is
+    still sent. The read-back is the new string. An empty value uses that
+    same clear and does not restore the old words.
+    """
+    field = _KeyClearedWebField("old note")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "section"
+    field.get_editable_text_iface = None
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "new note") is True
+    assert field.text == "new note"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+    field.text = "new note"
+    sent.clear()
+    assert _atspi.set_text(field, "") is True
+    assert field.text == "\n"
+    assert "new note" not in field.text
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+
+def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic group. The editable flag is what lets set_value through.
+
+    Not a browser. A plain group raises not_editable and sends no chords.
+    """
+    field = _KeyClearedWebField("old note")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "section"
+    field.get_editable_text_iface = None
+
+    def state_set():
+        # grab_focus records field.focused and does not touch a static set.
+        # Without FOCUSED the gate treats focus as reported and absent.
+        names = {"EDITABLE", "ENABLED", "FOCUSABLE"}
+        if getattr(field, "focused", False):
+            names.add("FOCUSED")
+        return _States(names)
+
+    field.get_state_set = state_set
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        # One character is one batch once focus is reported. A blank read,
+        # including the newline BackSpace leaves, is replaced; later
+        # characters append.
+        if field.text in ("", "\n"):
+            field.text = text
+        else:
+            field.text += text
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    box = Bounds(0, 8, 8, 200, 40)
+    editable = Element(
+        "e4", "AXGroup", "Notes box", "old note", box, "snap-1", editable=True, clickable=True,
+    )
+    assert LinuxDriver().set_value(editable, "new note") is True
+    assert field.text == "new note"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+    sent.clear()
+    plain = Element("e5", "AXGroup", "Quiet", "static words", box, "snap-1", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(plain, "nope")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_editable"
+    assert sent == []
+    assert field.text == "new note"
+
+
+def test_set_value_accepts_focus_on_a_child_text_node(fake_atspi, monkeypatch) -> None:
+    """Roleless contenteditable. FOCUSED is on a child text node, not the section.
+
+    Fake transport. The section's state set never includes FOCUSED, and
+    grab_focus does not add it. An indexed text child carries FOCUSED, then
+    a hypertext embed with no indexed children does. Both writes land. A
+    section with no focused descendant sends no chords.
+    """
+    field = _KeyClearedWebField("old note")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "section"
+    field.get_editable_text_iface = None
+    field.grab_focus = lambda: True
+    field.get_state_set = lambda: _States({"EDITABLE", "ENABLED", "FOCUSABLE"})
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        if field.text in ("", "\n"):
+            field.text = text
+        else:
+            field.text += text
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    box = Bounds(0, 8, 8, 200, 40)
+    editable = Element(
+        "e4", "AXGroup", "Notes box", "old note", box, "snap-1", editable=True, clickable=True,
+    )
+
+    class _Text:
+        def __init__(self):
+            self.states = {"ENABLED", "FOCUSED"}
+
+        def get_role_name(self):
+            return "text"
+
+        def get_state_set(self):
+            return _States(self.states)
+
+        def get_child_count(self):
+            return 0
+
+    text = _Text()
+    field.children = [text]
+    field.get_child_count = lambda: len(field.children)
+    field.get_child_at_index = lambda index: field.children[index]
+    field.links = ()
+    assert LinuxDriver().set_value(editable, "new note") is True
+    assert field.text == "new note"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+    field.text = "old note"
+    field.selected_all = False
+    sent.clear()
+    field.children = []
+    field.links = (text,)
+    assert LinuxDriver().set_value(editable, "from embed") is True
+    assert field.text == "from embed"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+    field.text = "old note"
+    field.selected_all = False
+    sent.clear()
+    field.links = ()
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(editable, "nope")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert sent == []
+    assert field.text == "old note"
+
+
+class _Tagged:
+    """One AT-SPI node with a role, a tag, and optional EditableText."""
+
+    def __init__(self, role: str, name: str, text: str, states: set[str], tag: str,
+                 toolkit: str = "", app_name: str = ""):
+        self.role = role
+        self.name = name
+        self.text = text
+        self.states = set(states)
+        self.attrs = {"tag": tag}
+        self.toolkit = toolkit
+        self.app_name = app_name
+        self.iface = None
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        return _States(self.states)
+
+    def get_attributes(self):
+        return dict(self.attrs)
+
+    def get_application(self):
+        if not self.toolkit and not self.app_name:
+            return None
+        return _toolkit_app(self.toolkit, self.app_name)
+
+    def get_editable_text_iface(self):
+        return self.iface
+
+
+def test_firefox_paragraph_and_select_are_not_editable_entries(fake_atspi, monkeypatch) -> None:
+    """A paragraph or select is not an edit target. An entry and a contenteditable are.
+
+    EditableText or STATE_EDITABLE on a paragraph, panel, or document does not
+    set the flag. set_value on a paragraph raises not_editable and sends no
+    select-all, even when the snapshot flag was wrong. A read-only entry is
+    not an entry. A combo is not edit; its role no longer implies the flag.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (180.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+
+    def read(node: _Tagged):
+        return _atspi.ATSPIAccessor().read(node)
+
+    paragraph = _Tagged(
+        "paragraph", "", "idle", {"ENABLED", "SENSITIVE", "SHOWING"}, "p", "Gecko", "Firefox",
+    )
+    paragraph.iface = object()
+    assert read(paragraph).editable is False
+    paragraph.states.add("EDITABLE")
+    raw_p = read(paragraph)
+    assert raw_p.editable is False
+    assert raw_p.role == "AXStaticText"
+    snap = build_snapshot(
+        (raw_p, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert snap.elements[0].editable is False
+    assert "edit" not in observe.render_text(snap)
+
+    panel = _Tagged("panel", "", "bar", {"EDITABLE", "ENABLED"}, "div", "Gecko", "Firefox")
+    panel.iface = object()
+    assert read(panel).editable is False
+    document = _Tagged("document web", "ffedit", "", {"EDITABLE", "ENABLED"}, "", "Gecko", "Firefox")
+    document.iface = object()
+    assert read(document).editable is False
+
+    select = _Tagged("combo box", "Color", "Red", {"ENABLED", "SHOWING"}, "select", "Gecko", "Firefox")
+    raw_s = read(select)
+    assert raw_s.editable is False
+    assert raw_s.role == "AXComboBox"
+    combo_snap = build_snapshot(
+        (raw_s, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert combo_snap.elements[0].editable is False
+    assert "edit" not in observe.render_text(combo_snap)
+
+    entry = _Tagged(
+        "entry", "Name", "", {"EDITABLE", "ENABLED", "SINGLE_LINE"}, "input", "Gecko", "Firefox",
+    )
+    entry.iface = object()
+    raw_e = read(entry)
+    assert raw_e.editable is True
+    assert raw_e.role == "AXTextField"
+    entry_snap = build_snapshot(
+        (raw_e, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert entry_snap.elements[0].editable is True
+
+    frozen = _Tagged(
+        "entry", "Locked", "no", {"EDITABLE", "READ_ONLY", "ENABLED"}, "input", "Gecko", "Firefox",
+    )
+    frozen.iface = object()
+    assert read(frozen).editable is False
+
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    box = Bounds(0, 8, 40, 200, 20)
+    wrongly = Element(
+        "e9", "AXStaticText", "", "idle", box, "snap-1", editable=True,
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(wrongly, "nope")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert sent == []
+    assert paragraph.text == "idle"
+    assert _atspi.set_text(paragraph, "nope") is False
+    assert sent == []
+    assert paragraph.text == "idle"
+
+
+def test_gecko_textarea_entry_is_multi_line_text(monkeypatch) -> None:
+    """Gecko exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
+
+    A single-line ``<input>`` stays a text field. ``multiline`` and
+    ``aria-multiline`` are the same fact when the state is absent. A false
+    attribute is not a textarea. Chromium is not this mapping. The snapshot
+    word is ``textarea``. Not a live Firefox.
+    """
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 40.0), (240.0, 80.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+
+    def read(node: _Tagged):
+        return _atspi.ATSPIAccessor().read(node)
+
+    area = _Tagged(
+        "entry", "Notes", "line1 line2",
+        {"MULTI_LINE", "EDITABLE", "SINGLE_LINE"}, "textarea", "Gecko", "Firefox",
+    )
+    single = _Tagged(
+        "entry", "Name", "initial-name",
+        {"SINGLE_LINE", "EDITABLE"}, "input", "Gecko", "Firefox",
+    )
+    by_attr = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_attr.attrs["multiline"] = "true"
+    by_aria = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_aria.attrs["aria-multiline"] = "true"
+    by_bool = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_bool.attrs["multiline"] = True
+    off = _Tagged(
+        "entry", "Name", "initial-name", {"EDITABLE"}, "input", "Gecko", "Firefox",
+    )
+    off.attrs["multiline"] = "false"
+    off.attrs["aria-multiline"] = False
+    one_true = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    one_true.attrs["multiline"] = False
+    one_true.attrs["aria-multiline"] = "yes"
+    chrome = _Tagged(
+        "entry", "Notes", "line1 line2",
+        {"MULTI_LINE", "EDITABLE"}, "textarea", "Chromium", "Google Chrome",
+    )
+    assert _atspi._gecko_multiline_entry(chrome, chrome.get_attributes()) is False
+
+    assert read(area).role == "AXTextArea"
+    assert read(single).role == "AXTextField"
+    assert read(by_attr).role == "AXTextArea"
+    assert read(by_aria).role == "AXTextArea"
+    assert read(by_bool).role == "AXTextArea"
+    assert read(off).role == "AXTextField"
+    assert read(one_true).role == "AXTextArea"
+
+    snap = build_snapshot(
+        (read(area), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textarea "Notes"' in observe.render_text(snap)
+    single_snap = build_snapshot(
+        (read(single), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Name"' in observe.render_text(single_snap)
 
 
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:
@@ -379,6 +1912,263 @@ def test_zero_section_or_div_with_click_and_show_context_menu_keeps_the_form(rol
     _assert_login_form(snap)
 
 
+def test_find_bar_snapshot_is_remembered_and_the_address_bar_is_not() -> None:
+    """The find field latches the Chrome pid. The address bar does not."""
+    find = _NS(title="Find", role="AXTextField", value="")
+    close = _NS(title="Close find bar", role="AXButton", value=None)
+    address = _NS(title="Address and search bar", role="AXTextField", value="https://example.com/")
+    button = _NS(title="Find", role="AXButton", value=None)
+    assert _atspi.snapshot_shows_browser_bar([find])
+    assert _atspi.snapshot_shows_browser_bar([close])
+    assert not _atspi.snapshot_shows_browser_bar([address, button])
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+
+
+def test_find_field_focus_latches_and_the_address_bar_does_not(monkeypatch) -> None:
+    """scroll_to_find types into Find without snapshotting the open bar."""
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+
+    class Find:
+        def get_name(self):
+            return "Find"
+
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app, **_k: (Find(), False))
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda _acc: {})
+    monkeypatch.setattr(_atspi, "pid_of", lambda _acc: 4242)
+    _atspi.note_focused_find_bar("chrome")
+    assert 4242 in _atspi._BROWSER_BAR_PIDS
+
+    class Address(Find):
+        def get_name(self):
+            return "Address and search bar"
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app, **_k: (Address(), False))
+    _atspi.note_focused_find_bar("chrome")
+    assert _atspi._BROWSER_BAR_PIDS == set()
+
+
+def test_latch_chromium_find_records_the_pid_before_the_bar_is_seen(monkeypatch) -> None:
+    """scroll_to_find closes Find before a snapshot can latch on focus."""
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    _atspi._BROWSER_BAR_CLEARED.add(4242)
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "pid_of", lambda _acc: 4242)
+    assert _atspi.latch_chromium_find("chrome") is True
+    assert 4242 in _atspi._BROWSER_BAR_PIDS
+    assert 4242 not in _atspi._BROWSER_BAR_CLEARED
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: False)
+    assert _atspi.latch_chromium_find("gedit") is False
+    assert _atspi._BROWSER_BAR_PIDS == set()
+
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: None)
+    assert _atspi.latch_chromium_find("chrome") is False
+    assert _atspi._BROWSER_BAR_PIDS == set()
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    assert driver.latch_chromium_find("chrome") is True
+    assert 4242 in _atspi._BROWSER_BAR_PIDS
+    assert 4242 in _atspi._BROWSER_BAR_OPEN
+    _atspi._BROWSER_BAR_CLEARED.add(4242)
+    lingering = _NS(title="Close find bar", role="AXButton", value=None)
+    _atspi.note_browser_bar(object(), [lingering])
+    assert 4242 in _atspi._BROWSER_BAR_CLEARED
+    _atspi.note_browser_bar(object(), [])
+    assert 4242 not in _atspi._BROWSER_BAR_OPEN
+    _atspi.note_browser_bar(object(), [lingering])
+    assert 4242 not in _atspi._BROWSER_BAR_CLEARED
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+
+
+def test_stale_find_frame_beside_the_page_clears_the_cache(monkeypatch) -> None:
+    """A cached find-in-page sibling is dropped even before the pid is latched."""
+    cleared: list[object] = []
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _root: True)
+    monkeypatch.setattr(_atspi, "_browser_bar_latched", lambda _root: False)
+    monkeypatch.setattr(
+        _atspi, "_call_first", lambda _obj, _names, *_a, **_k: "app",
+    )
+    monkeypatch.setattr(_atspi, "_application_bar_frame", lambda _app: "bar")
+    monkeypatch.setattr(_atspi, "_is_browser_bar_frame", lambda node: node == "bar")
+    monkeypatch.setattr(_atspi, "_clear_browser_bar_cache", lambda node: cleared.append(node))
+    assert _atspi.chromium_snapshot_root("page") == "page"
+    assert cleared == ["app"]
+    cleared.clear()
+    assert _atspi.chromium_snapshot_root("bar") == "bar"
+    assert cleared == []
+
+
+def test_empty_untitled_chrome_frame_yields_the_named_page() -> None:
+    """An empty untitled Chrome frame is not the snapshot when a titled window exists.
+
+    Chrome keeps those frames beside the document. When one is active, the
+    walk is an untitled group with no rows, and scroll_to_find stops before
+    the wheel. The titled window is the root. A frame that already holds a
+    document stays, and the open find bar stays until it is latched.
+    """
+
+    class _States:
+        def __init__(self, names):
+            self.names = frozenset(names)
+
+    class _Node:
+        def __init__(self, name, *, role="frame", children=(), states=(), pid=5151):
+            self._name = name
+            self._role = role
+            self._children = list(children)
+            self._states = frozenset(states)
+            self._pid = pid
+            self._app = None
+
+        def get_name(self):
+            return self._name
+
+        def get_role_name(self):
+            return self._role
+
+        def get_child_count(self):
+            return len(self._children)
+
+        def get_child_at_index(self, index):
+            return self._children[index]
+
+        def get_state_set(self):
+            return _States(self._states)
+
+        def get_process_id(self):
+            return self._pid
+
+        def get_application(self):
+            return self._app
+
+        def get_toolkit_name(self):
+            return "Chrome"
+
+    def application(*frames):
+        app = _Node("Google Chrome", role="application", children=list(frames))
+        for frame in frames:
+            frame._app = app
+        return app
+
+    def empty_frame(**states):
+        filler = _Node("", role="panel")
+        panel = _Node("", role="panel", children=[filler])
+        return _Node("", children=[panel], states=states.get("states", ("ACTIVE", "SHOWING")))
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    try:
+        empty = empty_frame()
+        page = _Node(
+            "cualong - Google Chrome",
+            states=("SHOWING",),
+            children=[_Node("cualong", role="document web")],
+        )
+        application(empty, page)
+        assert _atspi.chromium_snapshot_root(empty) is page
+        assert _atspi.chromium_snapshot_root(page) is page
+
+        document = _Node("", children=[_Node("body", role="document web")])
+        other = _Node("Other - Google Chrome", states=("SHOWING",))
+        application(document, other)
+        assert _atspi.chromium_snapshot_root(document) is document
+
+        only = empty_frame()
+        application(only)
+        assert _atspi.chromium_snapshot_root(only) is only
+
+        bar = _Node("Find in page", states=("ACTIVE", "SHOWING"))
+        page = _Node("cualong - Google Chrome", states=("SHOWING",))
+        empty = empty_frame(states=("SHOWING",))
+        application(empty, bar, page)
+        assert _atspi.chromium_snapshot_root(bar) is bar
+
+        _atspi._BROWSER_BAR_PIDS.add(5151)
+        assert _atspi.chromium_snapshot_root(bar) is page
+        assert _atspi.chromium_snapshot_root(empty) is page
+    finally:
+        _atspi._BROWSER_BAR_PIDS.clear()
+        _atspi._BROWSER_BAR_CLEARED.clear()
+        _atspi._BROWSER_BAR_OPEN.clear()
+
+
+def test_scrolled_off_chromium_root_keeps_the_onscreen_page() -> None:
+    """Find-in-page parks the content root above the viewport.
+
+    The section is viewport-sized at a negative Y, so its own box misses
+    the screen. The heading now on screen stays. A control that scrolled
+    away, and one below the fold, stay out. Without the web mark the
+    whole subtree drops.
+    """
+    heading = _node(
+        "AXStaticText", "ElevationMarkerUnique",
+        pos=(80.0, 220.0), size=(240.0, 24.0),
+    )
+    above = _node(
+        "AXStaticText", "TopMarkerAlmaty",
+        pos=(80.0, -1800.0), size=(200.0, 20.0),
+    )
+    below = _node(
+        "AXStaticText", "BelowFold",
+        pos=(80.0, 2400.0), size=(120.0, 20.0),
+    )
+    article = _node(
+        "AXGroup", "Almaty", pos=(54.0, -1400.0), size=(1000.0, 4200.0),
+        children=[above, heading, below],
+    )
+    root = _node(
+        "AXGroup", "", pos=(54.0, -2143.0), size=(1077.0, 709.0),
+        children=[article],
+    )
+    doc = _node(
+        "AXGroup", "Find Scroll", pos=(54.0, 91.0), size=(1092.0, 709.0),
+        children=[root], atspi_web="page",
+    )
+    window = _node(
+        "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+        children=[doc],
+    )
+    snap = build_snapshot(
+        window, _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
+        geometry=_geometry(),
+    )
+    titles = {el.title for el in snap.elements}
+    assert "ElevationMarkerUnique" in titles
+    assert "TopMarkerAlmaty" not in titles
+    assert "BelowFold" not in titles
+    assert "Find Scroll" in titles
+
+    unmarked = _node(
+        "AXGroup", "Find Scroll", pos=(54.0, 91.0), size=(1092.0, 709.0),
+        children=[root],
+    )
+    bare = build_snapshot(
+        _node(
+            "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+            children=[unmarked],
+        ),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    assert "ElevationMarkerUnique" not in {el.title for el in bare.elements}
+
+
 def test_focusable_or_named_zero_wrapper_still_drops_its_subtree() -> None:
     """A zero-size node that can take focus, or that has a name, stays dropped.
 
@@ -521,19 +2311,49 @@ def test_enable_a11y_status_opt_out(monkeypatch) -> None:
 
 
 def test_atspi_events_gate(monkeypatch) -> None:
+    import warnings
+
     from a11y_computer_use.drivers import _atspi_events
+
+    _atspi_events._warned_values.clear()
     monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
-    assert _atspi_events.enabled() is False
-    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "1")
+    monkeypatch.setattr(_atspi_events.sys, "platform", "linux")
+    monkeypatch.setattr(_atspi_events, "typelib_imports", lambda: True)
     assert _atspi_events.enabled() is True
+    monkeypatch.setattr(_atspi_events, "typelib_imports", lambda: False)
+    assert _atspi_events.enabled() is False
+    monkeypatch.setattr(_atspi_events.sys, "platform", "darwin")
+    assert _atspi_events.enabled() is False
+    for off in ("0", "false", "no", "off", "FALSE", " Off "):
+        monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", off)
+        assert _atspi_events.enabled() is False
+    for on in ("1", "true", "yes", "on", "YES", " On "):
+        monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", on)
+        assert _atspi_events.enabled() is True
+
+    monkeypatch.setattr(_atspi_events.sys, "platform", "linux")
+    monkeypatch.setattr(_atspi_events, "typelib_imports", lambda: True)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "maybe")
+    with pytest.warns(RuntimeWarning, match="maybe"):
+        assert _atspi_events.enabled() is True
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _atspi_events.enabled() is True
+    assert caught == []
+
+    monkeypatch.setattr(_atspi_events, "typelib_imports", lambda: False)
+    _atspi_events._warned_values.clear()
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "2")
+    with pytest.warns(RuntimeWarning, match="using the default \\(off\\)"):
+        assert _atspi_events.enabled() is False
 
 
 def test_linux_driver_run_inline_when_events_disabled(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi_events  # noqa: F401
     from a11y_computer_use.drivers.linux import LinuxDriver
-    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     d = LinuxDriver()
-    assert d._run(lambda: 42) == 42  # default path runs inline, no thread/gi needed
+    assert d._run(lambda: 42) == 42  # opt-out runs inline, no event thread
 
 
 # --- XTEST pointer positioning (the coordinate/vision fallback) ---------------
@@ -636,6 +2456,8 @@ def test_click_button_and_count(xtest_recorder) -> None:
 
 def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder, monkeypatch) -> None:
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_HOVER_S", 0)
     events, display = xtest_recorder
     _linux_input.drag(10, 20, 300, 400)
     assert events[:2] == [(_X_MOTION, 0, 10, 20), (_X_BPRESS, 1, 0, 0)]
@@ -651,6 +2473,8 @@ def test_drag_walks_through_every_waypoint_in_order(xtest_recorder, monkeypatch)
     """A freehand-brush stroke: the waypoints must all be visited, in order,
     with the button held, so a canvas draws the curve rather than a chord."""
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_HOVER_S", 0)
     events, _display = xtest_recorder
     path = [(60, 20), (60, 80), (10, 80)]
     _linux_input.drag(10, 20, 10, 20, path=path)
@@ -665,6 +2489,51 @@ def test_hops_end_exactly_on_the_target() -> None:
     assert _linux_input._hops(0, 0, 0, 0) == [(0, 0)]
     hops = _linux_input._hops(0, 0, 100, 0)
     assert hops[-1] == (100, 0) and len(hops) == 13
+
+
+def test_drag_pauses_past_the_gtk_threshold_then_hovers(xtest_recorder, monkeypatch) -> None:
+    """A short stroke still walks in small hops. GTK needs a pause once the
+    pointer is past the threshold, and a rest on the target before release."""
+    import time
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+    events, _display = xtest_recorder
+    _linux_input.drag(0, 0, 0, 28)
+    assert events[0] == (_X_MOTION, 0, 0, 0)
+    assert events[1] == (_X_BPRESS, 1, 0, 0)
+    assert events[-2:] == [(_X_MOTION, 0, 0, 28), (_X_BRELEASE, 1, 0, 0)]
+    motions = [(x, y) for kind, _d, x, y in events[2:-1]]
+    hops = [abs(by - ay) for (_ax, ay), (_bx, by) in zip([(0, 0), *motions], motions)]
+    assert hops and max(hops) <= _linux_input.DRAG_STEP_PX + 1
+    # 28px is four hops: 7 (still under the threshold), 14 (past it), 21, 28.
+    assert sleeps == [
+        _linux_input.DRAG_PACE_S,
+        _linux_input.DRAG_THRESHOLD_PAUSE_S,
+        _linux_input.DRAG_PACE_S,
+        _linux_input.DRAG_HOVER_S,
+    ]
+    sleeps.clear()
+    _linux_input.drag(0, 0, 0, 9)
+    assert sleeps == [
+        _linux_input.DRAG_PACE_S,
+        _linux_input.DRAG_THRESHOLD_PAUSE_S,
+        _linux_input.DRAG_HOVER_S,
+    ]
+
+
+def test_drag_below_the_gtk_threshold_does_not_pause(xtest_recorder, monkeypatch) -> None:
+    """A slider nudge that never clears the threshold keeps the old short pace."""
+    import time
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+    events, _display = xtest_recorder
+    _linux_input.drag(0, 0, 0, 8)
+    assert events[-2:] == [(_X_MOTION, 0, 0, 8), (_X_BRELEASE, 1, 0, 0)]
+    assert sleeps == [_linux_input.DRAG_PACE_S]
+    assert _linux_input.DRAG_THRESHOLD_PAUSE_S not in sleeps
+    assert _linux_input.DRAG_HOVER_S not in sleeps
 
 
 def test_scroll_positions_before_wheel_notches(xtest_recorder) -> None:
@@ -934,16 +2803,16 @@ class _States:
 
 
 class _Rect:
-    def __init__(self, width, height):
-        self.x = 0.0
-        self.y = 0.0
+    def __init__(self, width, height, x=0.0, y=0.0):
+        self.x = float(x)
+        self.y = float(y)
         self.width = width
         self.height = height
 
 
 class _Geom:
-    def __init__(self, width, height):
-        self._rect = _Rect(width, height)
+    def __init__(self, width, height, x=0.0, y=0.0):
+        self._rect = _Rect(width, height, x, y)
 
     def get_extents(self, _coord):
         return self._rect
@@ -1106,6 +2975,11 @@ class _FakeAtspi:
             return True
 
         @staticmethod
+        def set_caret_offset(acc, offset):
+            acc.caret = int(offset)
+            return True
+
+        @staticmethod
         def add_selection(acc, start_offset, end_offset):
             acc.selection = (int(start_offset), int(end_offset))
             return True
@@ -1125,6 +2999,268 @@ def fake_atspi(monkeypatch):
     yield _FakeAtspi
     _FakeAtspi.desktop = None
     _atspi.reset_shown_rows()
+
+
+@pytest.fixture
+def gtk_font_combo(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    def make(labels):
+        app = _Acc("application", name="AbiWord")
+        app.get_toolkit_name = lambda: "gtk"
+        combo = _Acc("combo box")
+        combo.get_application = lambda: app
+        menu = _adopt(_Acc("menu"), *[
+            _Acc("menu item", name=label) for label in labels
+        ])
+        _adopt(combo, menu)
+        selected = []
+        combo.get_selection_iface = lambda: combo
+        combo.get_selected_child = lambda index: menu.children[selected[-1] if selected else 0]
+
+        def select_child(index):
+            selected.append(index)
+            return True
+
+        combo.select_child = select_child
+        driver = LinuxDriver()
+        monkeypatch.setattr(driver, "_run", lambda fn: fn())
+        monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+        monkeypatch.setattr(observe, "ax_handle_for", lambda *args: combo)
+        monkeypatch.setattr(_cdp_forms, "write_element", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_atspi, "peer_field_texts", lambda handle: {})
+        monkeypatch.setattr(_atspi, "is_sheet_cell", lambda handle: False)
+        element = Element("e1", "AXComboBox", "Font", labels[0],
+                          Bounds(0, 0, 0, 100, 20), "font-combo")
+        return driver, element, menu, selected
+
+    return make
+
+
+@pytest.mark.parametrize("option_number", [65, 300, 600])
+def test_gtk_font_combo_set_value_searches_all_options(gtk_font_combo, option_number):
+    labels = [f"Font {index:03}" for index in range(1, 601)]
+    driver, element, menu, selected = gtk_font_combo(labels)
+    assert driver.set_value(element, labels[option_number - 1]) is True
+    assert selected == [option_number - 1]
+    assert menu.children[selected[-1]].name == labels[option_number - 1]
+
+
+def test_gtk_font_combo_missing_option_has_bounded_honest_message(gtk_font_combo):
+    labels = [f"Font {index:03}" for index in range(1, 601)]
+    driver, element, menu, selected = gtk_font_combo(labels)
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Missing Font")
+    message = str(exc.value)
+    assert "showing first 64 of 600 options (list truncated)" in message
+    assert "is not one of" not in message
+    assert len(message) < 2200
+    assert selected == []
+
+
+def test_gtk_small_combo_selection_and_missing_message_unchanged(gtk_font_combo):
+    driver, element, menu, selected = gtk_font_combo(["Red", "Green", "Blue"])
+    assert driver.set_value(element, "Blue") is True
+    assert selected == [2]
+    with pytest.raises(ValueError, match="^value 'Missing' is not one of: Red, Green, Blue$"):
+        driver.set_value(element, "Missing")
+    assert selected == [2]
+
+
+def test_gtk_combo_missing_message_bounds_long_labels(gtk_font_combo):
+    driver, element, menu, selected = gtk_font_combo(["F" * 3000, "Blue"])
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Missing")
+    assert "showing first 0 of 2 options (list truncated)" in str(exc.value)
+    assert len(str(exc.value)) < 2200
+    assert selected == []
+
+
+def _toggle_click_target(monkeypatch, *, toolkit="Qt", role="check box",
+                         actions=("Toggle", "SetFocus"), bounds=Bounds(0, 40, 60, 100, 20)):
+    """Synthetic Qt Toggle changes state; only mouse input runs the handler."""
+    app = _Acc("application", name="toggleprobe")
+    app.get_toolkit_name = lambda: toolkit
+    control = _Acc(role, name="Option", states=("SHOWING", "VISIBLE", "ENABLED"))
+    control.get_application = lambda: app
+    control.get_action_iface = lambda: control
+    control.get_n_actions = lambda: len(actions)
+    control.get_action_name = lambda index: actions[index]
+    action_log = []
+    events = []
+
+    def do_action(index):
+        action_log.append(actions[index])
+        control.states.symmetric_difference_update({"CHECKED"})
+        return True
+
+    control.do_action = do_action
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: control)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: events.append(("raise", handle)))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._screen_span", lambda: (1280, 800))
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda x, y: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        control.handler_ran = True
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    element = Element(
+        "e493", _atspi._ROLE[role], "Option", None, bounds, "snap-toggle", clickable=True,
+    )
+    return driver, control, element, action_log, events
+
+
+@pytest.mark.parametrize("role", ["check box", "toggle button", "radio button", "list item"])
+@pytest.mark.parametrize("actions", [("Toggle",), ("SetFocus", "Toggle")])
+def test_qt_toggle_only_ref_click_runs_the_pointer_handler(fake_atspi, monkeypatch, role, actions):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role=role, actions=actions,
+    )
+    # Item-view selection can also silently bypass itemClicked. Neither
+    # Toggle nor Selection.select_child may run before the mouse handler.
+    if role == "list item":
+        parent = _adopt(_Acc("list"), control)
+        parent.get_selection_iface = lambda: parent
+        parent.select_child = lambda _index: pytest.fail("selection bypassed the click handler")
+
+    assert driver.press_element(element) is True
+    assert action_log == []
+    assert control.handler_ran is True
+    assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("toolkit", ["gtk", "Chromium", "Gecko", "VCL", "JAVA", ""])
+def test_other_toolkit_toggle_checkbox_keeps_atspi(fake_atspi, monkeypatch, toolkit):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch, toolkit=toolkit)
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert "CHECKED" in control.states
+    assert not getattr(control, "handler_ran", False)
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("bounds", [
+    None, Bounds(0, 40, 60, 0, 20), Bounds(0, 40, 60, 100, 0),
+    Bounds(0, 40, 60, -1, -1), Bounds(0, -200, 60, 100, 20),
+    Bounds(0, 1280, 60, 100, 20), Bounds(0, 40, 800, 100, 20),
+])
+@pytest.mark.parametrize("role", ["check box", "list item"])
+def test_qt_toggle_without_usable_screen_bounds_falls_back(fake_atspi, monkeypatch, bounds, role):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, bounds=bounds, role=role,
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_click_uses_the_visible_part_of_the_bounds(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, bounds=Bounds(0, -90, 60, 100, 20),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == []
+    assert events == [("raise", control), ("click", 5, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("action", ["Press", "Click", "activate", "select"])
+@pytest.mark.parametrize("toggle_first", [False, True])
+def test_qt_control_with_another_activating_action_keeps_atspi(
+    fake_atspi, monkeypatch, action, toggle_first,
+):
+    actions = ("Toggle", "SetFocus", action) if toggle_first else (action, "Toggle", "SetFocus")
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=actions,
+    )
+    assert driver.press_element(element) is True
+    assert action_log == [actions[0]]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_on_wayland_keeps_atspi(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: True)
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_pointer_failure_does_not_run_toggle(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch)
+
+    def failed_click(*_args, **_kwargs):
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "pointer input failed")
+
+    monkeypatch.setattr(_linux_input, "click", failed_click)
+    with pytest.raises(ComputerUseError, match="pointer input failed"):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("checked", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("changes", [False, True])
+def test_gtk_toggle_cell_click_verifies_checked_not_selection(
+    fake_atspi, monkeypatch, checked, selected, changes,
+):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell",
+        actions=("toggle", "expand or contract", "edit", "activate"),
+    )
+    if checked:
+        cell.states.add("CHECKED")
+    if selected:
+        cell.states.add("SELECTED")
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        cell.states.add("SELECTED")
+        if changes:
+            cell.states.symmetric_difference_update({"CHECKED"})
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if changes:
+        assert driver.press_element(element) is True
+        assert ("CHECKED" in cell.states) != checked
+    else:
+        with pytest.raises(ComputerUseError, match="checked state") as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "checked_unchanged"
+    assert action_log == []
+    assert [event for event in events if event[0] == "click"] == [
+        ("click", 90, 70, "left", 1),
+    ]
+
+
+@pytest.mark.parametrize("bounds", [
+    None, Bounds(0, 40, 60, 0, 20), Bounds(0, -200, 60, 100, 20),
+])
+def test_gtk_toggle_cell_without_bounds_refuses_without_toggle(fake_atspi, monkeypatch, bounds):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell", actions=("toggle",), bounds=bounds,
+    )
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert not any(event[0] == "click" for event in events)
+
+
+def test_gtk_toggle_cell_wayland_refuses_without_toggle(fake_atspi, monkeypatch):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell", actions=("toggle",),
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: True)
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert not any(event[0] == "click" for event in events)
 
 
 def _scrolled_text():
@@ -1330,6 +3466,163 @@ def test_chromium_document_scroll_waits_until_shown_names_change(
     LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
     assert seen["n"] >= 2
     assert any(event[0] == _X_BPRESS and event[1] == 5 for event in events)
+
+
+def test_chromium_document_scroll_tops_up_a_short_head_move(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A five-line burst that only moves the head by one name sends more notches.
+
+    Synthetic names, not a live Chrome. The requested notches go out
+    together. When that burst settles on a one-row move, more notches
+    follow until the head has moved by about the request. A burst that
+    clears the sample is the viewport step and is not topped up.
+    """
+    events, _display = xtest_recorder
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+
+    class _Handle:
+        __gpointer__ = 1
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Handle())
+    monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    script = [tuple(f"ROW-{i:04d}" for i in range(1, 9))]
+    # The burst settles on a one-row move. The wait holds that reading
+    # across the polls that cover the burst's landing time, then tops up.
+    script.extend((tuple(f"ROW-{i:04d}" for i in range(2, 10)),) * 8)
+    for head in range(3, 7):
+        script.append(tuple(f"ROW-{i:04d}" for i in range(head, head + 8)))
+    index = {"i": 0}
+
+    def names(_handle, limit=6):
+        item = script[min(index["i"], len(script) - 1)]
+        index["i"] += 1
+        return item
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    # Four in the burst (the fifth notch is the gap past the viewport),
+    # then one notch per missing row until the head has moved by that many.
+    assert len(presses) == 7, len(presses)
+
+
+def test_chromium_document_scroll_keeps_a_viewport_burst(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A viewport burst that clears the on-screen names is pulled back, not extended.
+
+    Synthetic names, not a live Chrome. The burst is four notches down.
+    The fifth forward notch is not sent. When that burst leaves the old
+    sample, reverse notches follow until one old row is back, or the
+    burst count is spent. This mock stays parted, so all four reverse
+    notches are sent. Stopping at the first forward notch, and waiting
+    for the tree after it, is the four-row two-second regression.
+    """
+    events, _display = xtest_recorder
+    sleeps = {"n": 0}
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+
+    def sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+
+    class _Handle:
+        __gpointer__ = 1
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Handle())
+    monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    reads = {"n": 0}
+
+    def names(_handle, limit=6):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return tuple(f"ITEM-{i:03d}" for i in range(1, 7))
+        return tuple(f"ITEM-{i:03d}" for i in range(21, 27))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    down = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    up = [event for event in events if event[0] == _X_BPRESS and event[1] == 4]
+    assert len(down) == 4, len(down)
+    assert len(up) == 4, len(up)
+    # One read of the old sample, one of the parted sample, then one per reverse notch.
+    assert reads["n"] == 6
+    assert sleeps["n"] == 0
+
+
+def test_document_scroll_marker_is_the_rows_not_the_window_buttons(fake_atspi) -> None:
+    """A titled list under the document is not the scroll marker.
+
+    The list's name and the frame's Minimize/Maximize/Close names do not
+    move when the page scrolls. Waiting on them runs out the 0.9s clock
+    on every step. The marker is the on-screen row text. A row parked
+    above the viewport is not part of it. The climb stops at the frame.
+    """
+    from a11y_computer_use.drivers.linux import _name_source, _showing_names
+
+    frame = _Acc("frame", name="scroll340", width=1000, height=700)
+    buttons = [
+        _Acc("push button", name=label, width=20, height=20)
+        for label in ("Minimize", "Maximize", "Close")
+    ]
+    parked = _Acc("list item", name="ITEM-000 scroll-row", width=400, height=20)
+    parked.component._rect.y = -40
+    rows = [
+        _Acc("list item", name=f"ITEM-{i:03d} scroll-row", width=400, height=28)
+        for i in range(1, 9)
+    ]
+    listing = _Acc("list", name="Rows", width=400, height=800)
+    _adopt(listing, parked, *rows)
+    infobar = _Acc("push button", name="Close this view", width=80, height=20)
+    document = _Acc("document web", name="scroll340", width=900, height=600)
+    _adopt(document, infobar, listing)
+    _adopt(frame, *buttons, document)
+    cell = rows[0]
+
+    assert _showing_names(document) == tuple(f"ITEM-{i:03d} scroll-row" for i in range(1, 7))
+    source, names = _name_source(lambda fn: fn(), cell)
+    assert source is listing
+    assert names[0] == "ITEM-001 scroll-row"
+    assert "Minimize" not in names
+    assert "Rows" not in names
+    assert "Close this view" not in _showing_names(document)
+    frame_source, frame_names = _name_source(lambda fn: fn(), document)
+    assert frame_source is document
+    assert "Minimize" not in frame_names
+
+
+def test_document_scroll_marker_is_one_name_per_table_row(fake_atspi) -> None:
+    """A table row contributes its first cell, not every cell.
+
+    Six names were two rows (the id, the value, and the button). A two-row
+    twitch then parted the whole sample, the burst returned, and the next
+    burst jumped over the row ``scroll_to_find`` was hunting.
+    """
+    from a11y_computer_use.drivers.linux import _showing_names
+
+    table = _Acc("table", name="", width=400, height=800)
+    built = []
+    for i in range(1, 9):
+        row = _Acc("table row", name="", width=400, height=22)
+        cells = [
+            _Acc("table cell", name=label, width=80, height=22)
+            for label in (f"ROW-{i:04d}", f"val {i}", f"edit {i}")
+        ]
+        _adopt(row, *cells)
+        built.append(row)
+    _adopt(table, *built)
+    assert _showing_names(table) == tuple(f"ROW-{i:04d}" for i in range(1, 7))
 
 
 def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:
@@ -1833,6 +4126,22 @@ def _firefox_documents():
     }
 
 
+def test_calc_document_url_does_not_search_the_sheet(monkeypatch) -> None:
+    """LibreOffice has no page URL. Collection on the sheet wedges the bus."""
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    sheet = _GeckoNode("application", "soffice")
+
+    def boom(_root):
+        raise AssertionError("collection searched a Calc tree")
+
+    monkeypatch.setattr(_atspi, "_collected_content_document", boom)
+    assert _atspi.document_url_of(sheet) is None
+    assert LinuxDriver().document_url("soffice.bin") is None
+    assert LinuxDriver().document_url("LibreOffice Calc") is None
+
+
 def test_document_url_follows_the_showing_tab_and_skips_browser_chrome(monkeypatch) -> None:
     """Synthetic trees. The first document is not the page, and an omnibox URL is not either."""
     from a11y_computer_use.drivers import _atspi
@@ -2060,6 +4369,213 @@ def test_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monkeypatch)
     assert exc.value.detail["outcome"] == "refused"
 
 
+def _chrome_documents():
+    """Active form and a background tab. The background document is not SHOWING."""
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    name = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "FOCUSABLE", "EDITABLE"))
+    form = _GeckoNode("document web", "Form Probe", ("SHOWING", "VISIBLE"), [name])
+    hidden = _GeckoNode("entry", "Hidden", ("VISIBLE", "FOCUSABLE", "EDITABLE"))
+    background = _GeckoNode("document web", "Other Probe", ("VISIBLE",), [hidden])
+    frame = _GeckoNode(
+        "frame", "Form Probe - Google Chrome", ("SHOWING", "VISIBLE"), [form, background],
+    )
+    for node in (name, form, hidden, background, frame):
+        node.application = app
+    return {"name": name, "hidden": hidden, "form": form, "background": background, "frame": frame}
+
+
+def test_chrome_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monkeypatch) -> None:
+    """Synthetic tree. A live node in a background Chrome tab is not_showing.
+
+    A DEFUNCT node stays stale_ref. Not a live Chrome.
+    """
+    from a11y_computer_use.schema import Bounds, Element, Scope, Snapshot
+
+    tree = _chrome_documents()
+    assert _atspi.hidden_web_target(tree["hidden"]) is True
+    assert _atspi.hidden_web_target(tree["name"]) is False
+    hidden = Element(
+        "e3", "AXTextField", "Hidden", None, Bounds(0, 8, 40, 120, 24), "snap-old",
+        editable=True,
+    )
+    showing = Element(
+        "e1", "AXTextField", "Name", None, Bounds(0, 8, 10, 120, 24), "snap-old",
+        editable=True,
+    )
+    old = Snapshot("snap-old", Scope.WINDOW, "chrome", 1, 0.0, (), (showing, hidden))
+    live = Snapshot("snap-live", Scope.WINDOW, "chrome", 1, 0.0, (), ())
+    observe._register_epoch("snap-old", {}, {"e3": tree["hidden"], "e1": tree["name"]})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "snapshot", lambda *_args, **_kwargs: live)
+
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e3")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_showing"
+    assert exc.value.detail["outcome"] == "refused"
+    assert exc.value.detail["next"][0] == "foreground"
+    assert "re-observe" not in exc.value.message
+
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e1")
+    assert exc.value.code is ErrorCode.STALE_REF
+
+    tree["hidden"].states.add("DEFUNCT")
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: tree["frame"])
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e3")
+    assert exc.value.code is ErrorCode.STALE_REF
+
+    # Live Chrome leaves SHOWING set and detaches the background document
+    # from the frame. A document that is still SHOWING but is not the
+    # selected tab is the same refusal.
+    app = tree["frame"].application
+    orphan = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "EDITABLE"))
+    orphan_doc = _GeckoNode("document web", "Outcome Probe", ("SHOWING", "VISIBLE"), [orphan])
+    orphan.application = app
+    orphan_doc.application = app
+    assert _atspi.hidden_web_target(orphan) is True
+    tab = _GeckoNode("page tab", "Other Probe", ("SHOWING", "SELECTED"))
+    attached = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "EDITABLE"))
+    attached_doc = _GeckoNode(
+        "document web", "Outcome Probe", ("SHOWING", "VISIBLE"), [attached],
+    )
+    other = _GeckoNode(
+        "frame", "Other Probe - Google Chrome", ("SHOWING", "ACTIVE"), [attached_doc, tab],
+    )
+    for node in (attached, attached_doc, tab, other):
+        node.application = app
+    assert _atspi.hidden_web_target(attached) is True
+
+
+def test_reused_parent_ids_do_not_hide_a_showing_electron_document(monkeypatch) -> None:
+    """Electron page content sits several panels under a showing frame.
+
+    ``get_parent`` returns a new wrapper. After the walk drops one, CPython
+    allocates a later panel at that same ``id()``. A seen-set of those ids
+    stops before the frame and reports the document hidden. The walk keys on
+    the AT-SPI bus name and object path, and keeps each wrapper alive when
+    that key is missing. A second chain reuses two wrapper objects for
+    different ancestors, so ``id()`` collides while both objects are alive.
+    Not a live Electron.
+    """
+    asked: list[tuple[str, str]] = []
+
+    def key(node):
+        token = getattr(node, "atspi_key", None)
+        if token is not None:
+            asked.append(token)
+        return token
+
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", key)
+
+    class App:
+        def get_toolkit_name(self):
+            return "Chromium"
+
+        def get_name(self):
+            return "electron"
+
+        def get_application(self):
+            return self
+
+    app = App()
+    frame_at = 9
+
+    def states_of(names: set[str]):
+        copied = set(names)
+        return _NS(names=copied, contains=lambda member: str(member) in copied)
+
+    class Fresh:
+        __slots__ = ("role", "name", "states", "app", "depth", "atspi_key")
+
+        def __init__(self, role: str, depth: int):
+            self.role = role
+            self.name = "Notes" if role == "document web" else "Save note" if role == "push button" else ""
+            self.states = {"SHOWING", "VISIBLE"}
+            self.app = app
+            self.depth = depth
+            if role == "push button":
+                path = "/button"
+            elif role == "document web":
+                path = "/doc"
+            elif role == "frame":
+                path = "/frame"
+            else:
+                path = f"/panel/{depth}"
+            self.atspi_key = (":1.44", path)
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_application(self):
+            return self.app
+
+        def get_state_set(self):
+            return states_of(self.states)
+
+        def get_parent(self):
+            if self.depth >= frame_at:
+                return None
+            nxt = self.depth + 1
+            if nxt == 1:
+                role = "document web"
+            elif nxt == frame_at:
+                role = "frame"
+            else:
+                role = "panel"
+            # Same-sized garbage. A freed wrapper's id is what the next
+            # ancestor is allocated at when the walk does not keep it.
+            dead = [Fresh("panel", -1) for _ in range(8)]
+            del dead
+            return Fresh(role, nxt)
+
+    for _ in range(30):
+        asked.clear()
+        assert _atspi.hidden_web_target(Fresh("push button", 0)) is False
+        assert (":1.44", "/frame") in asked
+
+    specs = [("document web", "/doc")]
+    specs.extend(("panel", f"/panel/{depth}") for depth in range(2, frame_at))
+    specs.append(("frame", "/frame"))
+
+    class Recycled(Fresh):
+        def get_parent(self):
+            if self.depth >= frame_at:
+                return None
+            return materialize(self.depth + 1)
+
+    shells = [Recycled("panel", 0), Recycled("panel", 0)]
+
+    def materialize(index: int) -> Recycled:
+        shell = shells[(index - 1) % 2]
+        role, path = specs[index - 1]
+        shell.role = role
+        shell.name = "Notes" if role == "document web" else ""
+        shell.states = {"SHOWING", "VISIBLE"}
+        shell.depth = index
+        shell.atspi_key = (":1.44", path)
+        return shell
+
+    class Button(Recycled):
+        def __init__(self):
+            super().__init__("push button", 0)
+            self.atspi_key = (":1.44", "/button")
+
+        def get_parent(self):
+            return materialize(1)
+
+    asked.clear()
+    assert _atspi.hidden_web_target(Button()) is False
+    assert (":1.44", "/doc") in asked
+    assert (":1.44", "/frame") in asked
+
+
 def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_atspi, monkeypatch) -> None:
     field = _KeyClearedWebField("bench-value-0")
     sent: list[str] = []
@@ -2102,6 +4618,154 @@ def test_typed_visible_ignores_nbsp_and_one_trailing_newline() -> None:
     assert _atspi._typed_visible("hello world", "hello world", "4711") is False
 
 
+def test_typed_visible_replaces_a_selection_instead_of_appending() -> None:
+    """A selected word is replaced. The check is the final text, not an append.
+
+    Without the selection, ``WORD`` sitting in the middle of a shorter field
+    is not success: the old model required the typed text at the end or the
+    field to grow. With the selection, the result has to be that range
+    replaced and nothing else.
+    """
+    before = "Hello world startSecond line"
+    after = "Hello WORD startSecond line"
+    assert _atspi._typed_visible(before, after, "WORD") is False
+    assert _atspi._typed_visible(before, after, "WORD", selection=(6, 11)) is True
+    assert _atspi._typed_visible(
+        before, after, "WORD", selection=(6, 11), chrome=True,
+    ) is True
+    assert _atspi._typed_visible(before, after, "WORD", selection=(0, 5)) is False
+    assert _atspi._typed_visible(before, before + "WORD", "WORD") is True
+
+
+def test_selection_span_covers_an_embedded_word(fake_atspi) -> None:
+    """A contenteditable parent stores the bold word as one U+FFFC.
+
+    The selection of that object is the word in the expanded read-back.
+    """
+    word = _Acc("text")
+    word.text = "world"
+    parent = _Acc("section")
+    parent.text = "Hello \ufffc start"
+    parent.links = [word]
+    expanded, starts = _atspi._expansion_starts(parent, parent.text)
+    assert expanded == "Hello world start"
+    assert starts[6] == 6 and starts[7] == 11
+    parent.selection = (6, 7)
+    assert _atspi._selection_span(parent, expanded) == (6, 11)
+    assert _atspi._typed_visible(
+        expanded, "Hello WORD start", "WORD", selection=(6, 11), chrome=True,
+    ) is True
+
+
+def test_selection_span_uses_the_word_inside_the_paragraph(fake_atspi) -> None:
+    """Chrome selects the paragraph object and the word inside it.
+
+    The contenteditable's own text is one U+FFFC per paragraph, so its
+    selection is the whole first paragraph. The paragraph's selection is the
+    word. Typing replaces the word, so the span is the word.
+    """
+    word = _Acc("static", name="world")
+    word.text = "world"
+    word.selection = (0, 5)
+    para = _Acc("paragraph")
+    para.text = "Hello world start"
+    para.selection = (6, 11)
+    _adopt(para, word)
+    second = _Acc("paragraph")
+    second.text = "Second line"
+    parent = _Acc("entry", name="Story editor")
+    parent.text = "\ufffc\ufffc"
+    parent.links = [para, second]
+    parent.selection = (0, 1)
+    readable = _atspi._readable_text(parent)
+    assert readable == "Hello world start\nSecond line"
+    assert _atspi._selection_span(parent, readable) == (6, 11)
+    para.selection = None
+    assert _atspi._selection_span(parent, readable) == (6, 11)
+    para.selection = (0, len(para.text))
+    word.selection = (0, 5)
+    assert _atspi._selection_span(parent, readable) == (0, len(para.text))
+
+
+def test_typed_breaks_match_equates_boundaries_and_keeps_other_text() -> None:
+    """Newline, CRLF, U+2028, U+2029, and a block boundary are one break.
+
+    A missing break, an extra break, and any other extra or missing
+    character are not a match. The same helper is what Chrome type, Writer
+    paragraph lines, and a Calc cell use.
+    """
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    assert typed_breaks_match("a\nb", "a\nb") is True
+    assert typed_breaks_match("a\r\nb", "a\nb") is True
+    assert typed_breaks_match("a\u2028b", "a\nb") is True
+    assert typed_breaks_match("a\u2029b", "a\nb") is True
+    assert typed_breaks_match("a\u00a0\nb", "a \nb") is True
+    assert typed_breaks_match("ab", "a\nb") is False
+    assert typed_breaks_match("a b", "a\nb") is False
+    assert typed_breaks_match("a\n\nb", "a\nb") is False
+    assert typed_breaks_match("a\nbX", "a\nb") is False
+    assert typed_breaks_match("a\n", "a\nb") is False
+    assert typed_breaks_match(None, "a\nb") is False
+    assert _atspi._typed_visible(
+        "Alpha beta", "Alpha beta gamma\u2028line2", " gamma\nline2", chrome=True,
+    ) is True
+    assert _atspi._typed_visible(
+        "Alpha beta", "Alpha beta gammaline2", " gamma\nline2", chrome=True,
+    ) is False
+    assert _atspi._typed_visible(
+        "Alpha beta", "Alpha beta gamma\nline3", " gamma\nline2", chrome=True,
+    ) is False
+
+
+def test_chrome_contenteditable_type_confirms_a_newline_between_paragraphs(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Fake Chrome contenteditable. A newline becomes the next paragraph.
+
+    Not a browser. The parent text stays one object character per paragraph.
+    The read-back keeps the boundary, so the typed newline confirms. The
+    same call is a mismatch when the paragraphs are different text, and when
+    the boundary was dropped.
+    """
+    field = _chrome_contenteditable(_KeyClearedWebField("Alpha beta"))
+    field.get_editable_text_iface = None
+
+    def type_string(text: str) -> None:
+        assert text == " gamma\nline2"
+        first = _Acc("paragraph")
+        first.text = "Alpha beta gamma"
+        second = _Acc("paragraph")
+        second.text = "line2"
+        field.text = "\ufffc\ufffc"
+        field.links = [first, second]
+
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.chromium_contenteditable_type(field, " gamma\nline2") is True
+    assert _atspi._readable_text(field) == "Alpha beta gamma\nline2"
+
+    flat = _chrome_contenteditable(_KeyClearedWebField("Alpha beta gammaline2"))
+    flat.get_editable_text_iface = None
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    assert _atspi.chromium_contenteditable_type(flat, " gamma\nline2") is False
+
+    wrong = _chrome_contenteditable(_KeyClearedWebField("Alpha beta"))
+    wrong.get_editable_text_iface = None
+
+    def type_wrong(text: str) -> None:
+        first = _Acc("paragraph")
+        first.text = "Alpha beta gamma"
+        second = _Acc("paragraph")
+        second.text = "LINE2"
+        wrong.text = "\ufffc\ufffc"
+        wrong.links = [first, second]
+
+    monkeypatch.setattr(_linux_input, "type_string", type_wrong)
+    assert _atspi.chromium_contenteditable_type(wrong, " gamma\nline2") is False
+
+
 def test_omnibox_poll_accepts_the_url_after_a_truncated_read() -> None:
     """The address bar can publish a prefix first. The later full URL matches."""
     url = "https://2captcha.com/demo/recaptcha-v2"
@@ -2141,6 +4805,34 @@ def test_chrome_contenteditable_type_waits_for_the_settled_text(fake_atspi, monk
     assert _atspi.chromium_contenteditable_type(field, " ZZ ") is True
     assert typed == [" ZZ "]
     assert reads["n"] >= 3
+
+
+def test_chrome_contenteditable_type_replaces_the_selected_word(
+    fake_atspi, monkeypatch
+) -> None:
+    """Fake Chrome contenteditable. Typing replaces the selected word.
+
+    Not a browser. The read-back is the field with that range replaced.
+    Appending ``WORD`` onto ``world`` is not success.
+    """
+    field = _chrome_contenteditable(_KeyClearedWebField("Hello world start"))
+    field.get_editable_text_iface = None
+    field.selection = (6, 11)
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        start, end = field.selection
+        field.text = field.text[:start] + text + field.text[end:]
+        field.selection = None
+
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.chromium_contenteditable_type(field, "WORD") is True
+    assert typed == ["WORD"]
+    assert field.text == "Hello WORD start"
+    assert _atspi.chromium_contenteditable_type.last_expected == "Hello WORD start"
 
 
 def test_chrome_contenteditable_type_that_settles_wrong_is_not_success(
@@ -2440,6 +5132,185 @@ def test_gecko_contenteditable_set_value_accepts_a_nbsp_read_back(fake_atspi, mo
     assert field.text.replace("\u00a0", " ") == "Set 0"
 
 
+class _GeckoEditableSection:
+    """A Firefox ``<div contenteditable>``: AT-SPI section, not an entry.
+
+    EditableText returns true and does not change the DOM unless a test
+    says it does. Not a live browser.
+    """
+
+    def __init__(self, text: str = "editable block"):
+        self.text = text
+        self.states = {"EDITABLE", "ENABLED", "FOCUSABLE", "MULTI_LINE"}
+        self.attrs = {"tag": "div"}
+        self.focused = False
+        self.writes: list[str] = []
+        self.deletes = 0
+        self.selected_all = False
+        self._land = False
+
+    def get_role_name(self):
+        return "section"
+
+    def get_name(self):
+        return ""
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        names = set(self.states)
+        if self.focused:
+            names.add("FOCUSED")
+        return _States(names)
+
+    def get_attributes(self):
+        return dict(self.attrs)
+
+    def get_application(self):
+        return _toolkit_app("Gecko", "Firefox")
+
+    def get_editable_text_iface(self):
+        return self
+
+    def set_text_contents(self, text):
+        self.writes.append(text)
+        if self._land:
+            self.text = text
+        return True
+
+    def delete_text(self, _start, _end):
+        self.deletes += 1
+        return True
+
+    def get_component_iface(self):
+        return self
+
+    def grab_focus(self):
+        self.focused = True
+        return True
+
+    def get_child_count(self):
+        return 0
+
+
+def test_gecko_contenteditable_set_value_types_only_after_focus(fake_atspi, monkeypatch) -> None:
+    """Fake Firefox contenteditable. Keys run only after focus is confirmed.
+
+    EditableText does not change the DOM. The read-back accepts one trailing
+    newline. Text selection is not used. Not a live browser.
+    """
+    field = _GeckoEditableSection("editable block")
+    sent: list[str] = []
+    selected: list = []
+
+    def press_chord(chord: str) -> None:
+        assert field.focused
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and field.selected_all:
+            field.text = "\n"
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        assert field.focused
+        # One character is one batch once focus can be read. A trailing
+        # newline is the empty paragraph, added once the request is complete.
+        if field.text in ("", "\n"):
+            field.text = text
+        else:
+            field.text = field.text.rstrip("\n") + text
+        if field.text == "CE_VAL_1":
+            field.text += "\n"
+
+    monkeypatch.setattr(
+        fake_atspi.Text, "set_selection", lambda *args: selected.append(args) or True,
+    )
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "CE_VAL_1") is True
+    assert field.text.replace("\n", "") == "CE_VAL_1"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+    assert field.writes == ["CE_VAL_1"]
+    assert selected == []
+    assert field.deletes == 0
+
+    field._land = True
+    field.text = "editable block"
+    field.focused = False
+    sent.clear()
+    assert _atspi.set_text(field, "CE_VAL_2") is True
+    assert field.text == "CE_VAL_2"
+    assert sent == []
+
+
+def test_gecko_contenteditable_set_value_types_nothing_without_focus(fake_atspi, monkeypatch) -> None:
+    """Fake Firefox contenteditable. Unconfirmed focus sends no keys.
+
+    Not a live browser. The DOM stays on the original text.
+    """
+    field = _GeckoEditableSection("editable block")
+    field.grab_focus = lambda: True
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: sent.append(text))
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(field, "CE_VAL")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert sent == []
+    assert field.text == "editable block"
+
+    box = Bounds(0, 8, 8, 200, 40)
+    element = Element(
+        "e40", "AXTextArea", "", "editable block", box, "snap-1", editable=True,
+    )
+    with pytest.raises(ComputerUseError) as driver_exc:
+        LinuxDriver().set_value(element, "CE_VAL")
+    assert driver_exc.value.code is ErrorCode.FOCUS_LOST
+    assert sent == []
+    assert field.text == "editable block"
+
+
+def test_gecko_contenteditable_set_value_restores_when_focused_keys_miss(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Fake Firefox contenteditable. A missed read-back types the original back.
+
+    Focus is confirmed, so the keys are the fallback. Not a live browser.
+    """
+    field = _GeckoEditableSection("editable block")
+    sent: list[str] = []
+    field.chunks: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and field.selected_all:
+            field.text = "\n"
+            field.chunks.clear()
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        # One character is one batch. The replacement reads back wrong.
+        # The original is typed back one character at a time after the clear.
+        field.chunks.append(text)
+        joined = "".join(field.chunks)
+        field.text = "WRONG" if joined.startswith("C") else joined
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "CE_VAL") is False
+    assert field.text == "editable block"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+
 def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi, monkeypatch) -> None:
     web = _AppendingField("earlier")
     pad = _ReplacingField("earlier")
@@ -2687,6 +5558,113 @@ def _record_wheel_dy(monkeypatch, hit):
 
 def _row_titles(snap) -> list[str]:
     return [el.title for el in snap.elements if el.role == "AXRow"]
+
+
+def _own(app, *nodes: _Acc) -> None:
+    for node in nodes:
+        node.get_application = lambda: app
+
+
+def _expanded_chrome_tree(*, sibling: bool = False):
+    """Chromium ARIA tree whose expanded row is as tall as the tree.
+
+    Synthetic boxes, not a live Chrome window. The expanded treeitem's box
+    is the tree's box, which is what made the visible-row walk record the
+    inner static text instead of the row.
+    """
+    app = _ChromeApp()
+    bullet = _Acc("static", name="•", width=8, height=16)
+    label = _Acc("static", name="Docs folder", width=100, height=16)
+    child = _Acc("tree item", name="Report child", width=360, height=18)
+    group = _Acc("panel", name="", width=400, height=20)
+    parent = _Acc(
+        "tree item", name="Docs folder",
+        states=("EXPANDABLE", "EXPANDED", "SHOWING"),
+        width=400, height=40,
+    )
+    _adopt(group, child)
+    _adopt(parent, bullet, label, group)
+    tree = _Acc("tree", name="Files", width=400, height=40 if not sibling else 100)
+    nodes = [tree, parent, bullet, label, group, child]
+    if sibling:
+        other = _Acc("tree item", name="Other folder", states=("EXPANDABLE", "SHOWING"), width=400, height=18)
+        _adopt(tree, parent, other)
+        nodes.append(other)
+        _place_row(parent, 40, 120, 400, 92)
+        _place_row(tree, 40, 120, 400, 100)
+        _place_row(other, 40, 200, 400, 18)
+        _place_row(group, 40, 140, 400, 40)
+        _place_row(child, 60, 140, 360, 18)
+    else:
+        other = None
+        _adopt(tree, parent)
+        _place_row(tree, 40, 120, 400, 40)
+        _place_row(parent, 40, 120, 400, 40)
+        _place_row(group, 40, 136, 400, 20)
+        _place_row(child, 60, 136, 360, 18)
+    _place_row(bullet, 40, 120, 8, 16)
+    _place_row(label, 50, 120, 100, 16)
+    document = _Acc("document web", name="cuatree331", width=1200, height=680)
+    document.component._rect.x = 0.0
+    document.component._rect.y = 90.0
+    _adopt(document, tree)
+    window = _Acc("frame", name="cuatree331", width=1280, height=800)
+    _adopt(window, document)
+    _own(app, window, document, *nodes)
+    _add_tab_strip(window)
+    return window, tree, parent, child, other
+
+
+def test_expanded_treeitem_stays_in_the_snapshot_with_its_child(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium tree, not a live Chrome window.
+
+    The expanded treeitem is as tall as the tree. The snapshot keeps that
+    row, with expanded set, and the child row under it. The inner static
+    text is not the row.
+    """
+    window, _tree, _parent, _child, _other = _expanded_chrome_tree()
+    hit = _ListHit([], [])
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    by_ref = {el.ref: el for el in snap.elements}
+    folder = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Docs folder")
+    assert folder.expanded is True
+    child = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Report child")
+    ancestor = child
+    while ancestor.parent is not None and ancestor.ref != folder.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == folder.ref
+    label = next(el for el in snap.elements if el.role == "AXStaticText" and el.title == "Docs folder")
+    assert label.parent == folder.ref
+    rendered = observe.render_text(snap, mode="interactive")
+    assert 'row "Docs folder"' in rendered
+    assert "expanded" in rendered.split('row "Docs folder"')[1].splitlines()[0]
+
+
+def test_expanded_treeitem_is_not_replaced_when_a_sibling_is_visible(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium tree with two root rows, not a live Chrome window.
+
+    The expanded row is taller than nine tenths of the tree, so the old
+    walk opened it and listed its label and its child as the tree's rows.
+    Both root rows stay, and the child stays under the expanded row.
+    """
+    window, tree, parent, child, other = _expanded_chrome_tree(sibling=True)
+    live = _atspi._in_view_named_rows(tree)
+    assert [node.get_role_name() for node, _pos, _size in live] == ["tree item", "tree item"]
+    assert [node.get_name() for node, _pos, _size in live] == ["Docs folder", "Other folder"]
+    hit = _ListHit([], [])
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    by_ref = {el.ref: el for el in snap.elements}
+    folder = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Docs folder")
+    assert folder.expanded is True
+    assert any(el.role == "AXRow" and el.title == "Other folder" for el in snap.elements)
+    nested = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Report child")
+    ancestor = nested
+    while ancestor.parent is not None and ancestor.ref != folder.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == folder.ref
+    assert parent.name == "Docs folder" and child.name == "Report child" and other.name == "Other folder"
 
 
 def test_snapshot_lists_layout_rows_not_the_cached_children(fake_atspi, monkeypatch) -> None:
@@ -3413,6 +6391,71 @@ def test_overflow_bar_at_rest_does_not_scroll_up(
     assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == "ITEM-001"
 
 
+def test_page_unchanged_requires_an_unmoved_scroll_offset() -> None:
+    """The offset comparison. Not a live scroll."""
+    from a11y_computer_use.drivers.linux import _offset_did_not_move
+
+    assert _offset_did_not_move(4.0, 4.2) is True
+    assert _offset_did_not_move(4.0, 30.0) is False
+    assert _offset_did_not_move(None, 4.0) is None
+    assert _offset_did_not_move(4.0, None) is None
+
+
+def test_short_table_past_the_document_wheels_the_page(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic body-scroll table that fits on the screen, not a live window.
+
+    The list is shorter than the screen and still extends past the document,
+    which is the short ticket table. The scroll uses the document wheel. It
+    does not write a viewport bar.
+    """
+    import a11y_computer_use.drivers.linux as linux_mod
+
+    window, listing, hit, rows = _document_scroll_page()
+    # Document is y=90, height 680, bottom 770. The list stays inside the
+    # 800px screen and runs past that document.
+    hit.x, hit.y, hit.width, hit.height = 40, 120, 400, 670
+    _show_page_rows(listing, rows, 1)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    called = {"wheel": 0, "nudge": 0}
+
+    def wheel(*_args, **_kwargs):
+        called["wheel"] += 1
+
+    def nudge(*_args, **_kwargs):
+        called["nudge"] += 1
+        return "absent", None
+
+    monkeypatch.setattr(linux_mod, "_wheel_chromium_document", wheel)
+    monkeypatch.setattr(_atspi, "nudge_viewport_scrollbar", nudge)
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    listing_el = next(el for el in snap.elements if el.role == "AXList")
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 1
+    assert called["nudge"] == 0
+    assert _atspi.scroll_container_kind(listing) == "document"
+    _overflow_window, overflow, _overflow_hit, _overflow_stuck = _chrome_list()
+    assert _atspi.scroll_container_kind(overflow) == "viewport"
+    # After the document moves, the list's top is above the page and the
+    # box no longer sits on the screen. It is still body content.
+    hit.y = -22
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 2
+    assert called["nudge"] == 0
+    # Live Chrome on an 800px screen publishes this 25-row table at about
+    # 857px. That is still the document. A list more than twice the screen
+    # stays a viewport.
+    hit.y, hit.height = 120, 857
+    assert _atspi.scroll_container_kind(listing) == "document"
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 3
+    assert called["nudge"] == 0
+    hit.height = 1601
+    assert _atspi.scroll_container_kind(listing) == "viewport"
+
+
 def test_content_height_line_scroll_does_not_write_the_scroll_bar(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
@@ -3664,9 +6707,10 @@ def test_scroll_to_find_comes_back_after_the_page_stops_past_the_target(
 
     A 5-line step jumps the window by 40 rows, from ITEM-001 to ITEM-193,
     and never shows ITEM-180. The next wheel does not change the grab, so
-    the driver raises page_unchanged and does not install a new head. The
-    search then steps back one line at a time (four rows per step here)
-    until the window contains ITEM-180. This does not prove the live Chrome list.
+    the driver raises page_unchanged and does not install a new head. That
+    still page is repeated once. The search then steps back five lines at
+    a time (four rows per step in this fake) until the window contains
+    ITEM-180. This does not prove the live Chrome list.
     """
     from a11y_computer_use import server
 
@@ -3707,10 +6751,10 @@ def test_scroll_to_find_comes_back_after_the_page_stops_past_the_target(
 
     out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=6)
     assert "ITEM-180" in out
-    assert "found after 10 scroll(s)" in out
+    assert "found after 11 scroll(s)" in out
     assert "found after 0 scroll" not in out
-    assert hit.steps == [5, 5, 5, 5, 5, 5, -1, -1, -1, -1]
-    assert -5 not in hit.steps
+    assert hit.steps == [5, 5, 5, 5, 5, 5, 5, -5, -5, -5, -5]
+    assert -1 not in hit.steps
     titles = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert "ITEM-180" in titles
     assert titles[0] == "ITEM-177"
@@ -3722,8 +6766,8 @@ def test_scroll_to_find_stops_when_the_chrome_list_will_not_move(
     """Synthetic Chromium list, not a live Chrome window.
 
     The window is ITEM-193 through ITEM-200. ITEM-180 is not in it. Neither
-    direction changes the grab, so both wheels are page_unchanged. The
-    search stops on the second one and the snapshot head stays ITEM-193.
+    direction changes the grab. Each direction is page_unchanged twice,
+    and the search stops on the second return. The snapshot head stays ITEM-193.
     A hit test that names ITEM-192 is not installed. This does not prove
     the live Chrome list.
     """
@@ -3757,8 +6801,8 @@ def test_scroll_to_find_stops_when_the_chrome_list_will_not_move(
     assert error.value.code is ErrorCode.UNSUPPORTED
     assert error.value.detail["reason"] == "page_unchanged"
     assert error.value.detail["mean_abs"] == 0
-    assert error.value.detail["dy"] == -1
-    assert hit.steps == [5, -1]
+    assert error.value.detail["dy"] == -5
+    assert hit.steps == [5, 5, -5, -5]
     kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert kept[0] == "ITEM-193"
     assert "ITEM-200" in kept
@@ -5107,6 +8151,1454 @@ def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) ->
         fake_atspi.Value.get_minimum_value = staticmethod(original)
 
 
+def test_writer_cell_replace_writes_a_paragraph_set_text_refuses(fake_atspi) -> None:
+    """A Firefox paragraph stays blocked. A Writer cell paragraph is replaced.
+
+    set_text refuses the role so selecting a page paragraph does not select
+    the page. The cell write forces that same call.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+
+    def set_text_contents(text):
+        paragraph.text = text
+        return True
+
+    paragraph.get_editable_text_iface = lambda: paragraph
+    paragraph.set_text_contents = set_text_contents
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    assert _atspi.set_text(paragraph, "nope") is False
+    assert paragraph.text == "Cell B2"
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+
+
+def test_writer_cell_replace_waits_for_a_stale_paragraph_read(fake_atspi, monkeypatch) -> None:
+    """The paragraph write sticks when the first reads still show the old line.
+
+    ``set_text_contents`` has already replaced the line. A snapshot read can
+    still return ``Cell B2``. That lag is not a miss, and it must not select
+    the paragraph: ctrl+a in Writer selects the document.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    reads = {"n": 0}
+
+    def set_text_contents(text):
+        paragraph.text = text
+        return True
+
+    def delete_text(*_args):
+        raise AssertionError("delete")
+
+    paragraph.get_editable_text_iface = lambda: paragraph
+    paragraph.set_text_contents = set_text_contents
+    paragraph.delete_text = delete_text
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    real_text = _atspi._full_text
+
+    def lagging(acc):
+        shown = real_text(acc)
+        if acc is not paragraph:
+            return shown
+        reads["n"] += 1
+        if reads["n"] <= 4:
+            return "Cell B2"
+        return shown
+
+    monkeypatch.setattr(_atspi, "_full_text", lagging)
+
+    def selected(*_args, **_kwargs):
+        raise AssertionError("ctrl+a")
+
+    monkeypatch.setattr(_atspi, "_x11_select_all_and_delete", selected)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+    assert reads["n"] > 4
+
+
+def test_sheet_formula_match_folds_case_whitespace_and_separators(fake_atspi) -> None:
+    """Synthetic formula text. A range colon stays a colon.
+
+    ``;`` and ``,`` are the same argument separator. A space inside a
+    quoted string is still a difference. The computed number is not the formula.
+    """
+    assert _atspi.formulas_match("=AVERAGE(B2:B5)", "=average( B2:B5 )") is True
+    assert _atspi.formulas_match("AVERAGE(B2\\", "=AVERAGE(B2:B5)") is False
+    assert _atspi.formulas_match("=AVERAGE(B", "=AVERAGE(B2:B5)") is False
+    assert _atspi.formulas_match("SUM(A1:A3)", "=sum( A1:A3 )") is True
+    assert _atspi.formulas_match("SUM(A1\\:A3)", "=SUM(A1:A3)") is True
+    assert _atspi.formulas_match("SUM(A1;A2)", "=SUM(A1,A2)") is True
+    assert _atspi.formulas_match('CONCAT("a b")', '=concat( "a b" )') is True
+    assert _atspi.formulas_match('CONCAT("a b")', '=CONCAT("ab")') is False
+    assert _atspi.formulas_match("SUM(A1:A3)", "=SUM(A1:B9)") is False
+    assert _atspi.formulas_match("SUM(A1\\", "=SUM(A1:A3)") is False
+    cell = _Acc("table cell", name="C1")
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1:A3)"}
+    assert _atspi.sheet_cell_matches(cell, "=sum( A1:A3 )") is True
+    cell.get_attributes = lambda: {"formula": "SUM(A1\\"}
+    assert _atspi.sheet_cell_matches(cell, "=SUM(A1:A3)") is False
+    assert _atspi.sheet_cell_matches(cell, "6") is True
+
+
+def test_sheet_number_match_accepts_calc_display_and_rejects_a_different_number(
+    fake_atspi,
+) -> None:
+    """Synthetic cell text. ``1.50``, ``1e3``, and ``1,200`` match the display."""
+    cell = _Acc("table cell", name="D1")
+    cell.text = "14.6"
+    cell.get_attributes = lambda: {}
+    assert _atspi.sheet_cell_matches(cell, "14.60") is True
+    cell.text = "1.5"
+    assert _atspi.sheet_cell_matches(cell, "1.50") is True
+    assert _atspi.sheet_cell_matches(cell, "14.60") is False
+    cell.text = "1000"
+    assert _atspi.sheet_cell_matches(cell, "1e3") is True
+    cell.text = "1200"
+    assert _atspi.sheet_cell_matches(cell, "1,200") is True
+    assert _atspi.sheet_outcome_text("soffice.bin", "1,200", cell) == "1,200"
+    cell.text = "1.5"
+    assert _atspi.sheet_cell_matches(cell, "1,5") is True
+    cell.text = "1.6"
+    assert _atspi.sheet_cell_matches(cell, "1.50") is False
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1:A3)"}
+    assert _atspi.sheet_cell_matches(cell, "=SUM(A1:A3)") is True
+    assert _atspi._numeric_texts_match("6", "=SUM(A1:A3)") is False
+
+
+def test_sheet_grid_names_the_first_differing_cell(fake_atspi, monkeypatch) -> None:
+    """A Calc grid is compared cell by cell from the starting address.
+
+    The first cell that disagrees is the mismatch. A displayed number is
+    not a formula, and a Formula attribute cut at the colon is not a prefix
+    of the request. F2 is not part of this scan.
+    """
+    assert _atspi.sheet_type_grid("Item\tQ1\nRent\t1200\n") == [
+        ["Item", "Q1"], ["Rent", "1200"],
+    ]
+    assert _atspi.sheet_type_grid("only") is None
+    assert _atspi.shift_sheet_address("A1", 2, 4) == "C5"
+    assert _atspi.shift_sheet_address("B2", 1, 0) == "C2"
+
+    def cell(text, formula=""):
+        node = _Acc("table cell", name="X")
+        node.text = text
+        captured = formula
+        node.get_attributes = lambda captured=captured: {"formula": captured} if captured else {}
+        return node
+
+    assert _atspi._classify_sheet_cell(cell("1200"), "1,200")[0] == "match"
+    assert _atspi._classify_sheet_cell(cell("42"), "=E2+31") == ("differ", "42")
+    assert _atspi._classify_sheet_cell(cell("2850", "SUM(C2\\"), "=SUM(C2:C4)")[0] == "editor"
+    assert _atspi.formulas_match("SUM(C2\\", "=SUM(C2:C4)") is False
+    assert _atspi.formulas_match("SUM(C2", "=SUM(C2:C4)") is False
+
+    nodes = {
+        "A1": cell("Item"),
+        "B1": cell("Q1"),
+        "A2": cell("999"),
+        "B2": cell("1250"),
+    }
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
+    scanned = _atspi._scan_sheet_grid("soffice", "A1", [["Item", "Q1"], ["1200", "1250"]])
+    assert scanned[0] == "differ"
+    assert scanned[1] == "A2"
+    assert scanned[2] == "1200"
+    assert scanned[3] == "999"
+
+    nodes["A2"] = cell("1200")
+    assert _atspi._scan_sheet_grid("soffice", "A1", [["Item", "Q1"], ["1200", "1250"]]) == (
+        "match", None,
+    )
+    nodes = {
+        "B5": cell("1770", "SUM(B2\\"),
+        "C5": cell("nope"),
+    }
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
+    scanned = _atspi._scan_sheet_grid(
+        "soffice", "B5", [["=SUM(B2:B4)", "1250"]],
+    )
+    assert scanned[0] == "editor"
+    assert scanned[2] == "differ"
+    assert scanned[3] == "C5"
+
+
+def test_sheet_grid_commits_an_open_editor_before_the_cell_read(fake_atspi, monkeypatch) -> None:
+    """Sibling cells stay blank while Calc's editor is open.
+
+    One Return commits that editor. The scan after it is what confirms.
+    A grid that already shows every cell does not send the key. No live
+    LibreOffice.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    state = {"editor": "=SUM(C2:C4)", "item": ""}
+    chords: list[str] = []
+
+    def cell_for(_app, address):
+        if address == "A1":
+            node = _Acc("table cell", name="A1")
+            node.text = state["item"]
+            node.get_attributes = lambda: {}
+            return node
+        if address == "B1":
+            node = _Acc("table cell", name="B1")
+            node.text = "Q1"
+            node.get_attributes = lambda: {}
+            return node
+        return None
+
+    def press(chord: str) -> None:
+        chords.append(chord)
+        state["editor"] = None
+        state["item"] = "Item"
+
+    monkeypatch.setattr(_atspi, "_cell_for_address", cell_for)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: state["editor"])
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_COMMIT_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") is None
+    assert chords == ["return"]
+
+    chords.clear()
+    state["editor"] = None
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") is None
+    assert chords == []
+
+
+def test_sheet_grid_waits_for_a_cell_the_table_has_not_published(fake_atspi, monkeypatch) -> None:
+    """A missing cell is not a mismatch while the edit is still committing.
+
+    The first reads have no accessible for A1. Return commits the editor,
+    and the cell that appears after that is the comparison. No live
+    LibreOffice. Extra text is still a mismatch, and it is not held for
+    the wait.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    state = {"editor": "Q1", "reads": 0}
+    chords: list[str] = []
+
+    def cell_for(_app, address):
+        if address == "A1":
+            state["reads"] += 1
+            if state["reads"] < 3:
+                return None
+            node = _Acc("table cell", name="A1")
+            node.text = "Item"
+            node.get_attributes = lambda: {}
+            return node
+        if address == "B1":
+            node = _Acc("table cell", name="B1")
+            node.text = "Q1"
+            node.get_attributes = lambda: {}
+            return node
+        return None
+
+    def press(chord: str) -> None:
+        chords.append(chord)
+        state["editor"] = None
+
+    monkeypatch.setattr(_atspi, "_cell_for_address", cell_for)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: state["editor"])
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_COMMIT_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") is None
+    assert state["reads"] >= 3
+    assert chords == ["return"]
+
+    wrong = _Acc("table cell", name="A1")
+    wrong.text = "ItemX"
+    wrong.get_attributes = lambda: {}
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: wrong if address == "A1" else None)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    slept: list[float] = []
+    monkeypatch.setattr(_atspi.time, "sleep", lambda seconds: slept.append(seconds))
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") == ("A1", "Item", "ItemX")
+    assert slept == []
+
+    blank = _Acc("table cell", name="A1")
+    blank.text = ""
+    blank.get_attributes = lambda: {}
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: blank if address == "A1" else None)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_WAIT_S", 0)
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") == ("A1", "Item", "")
+
+
+def test_sheet_grid_restores_the_caret_after_the_formula_read(fake_atspi, monkeypatch) -> None:
+    """F2 leaves the caret on the formula. It is put back on the next cell.
+
+    Enter from a one-row grid at A1 selects A2. A caret that LibreOffice
+    has already moved off the last typed cell is kept, including when that
+    move is straight down. No live LibreOffice. The formula text still has
+    to match.
+    """
+    placed: list[str | None] = []
+    caret = {"address": "B1"}
+    opened = {"text": "=SUM(B2:B4)"}
+
+    def cell(text, formula=""):
+        node = _Acc("table cell", name="X")
+        node.text = text
+        captured = formula
+        node.get_attributes = lambda captured=captured: {"formula": captured} if captured else {}
+        return node
+
+    nodes = {"A1": cell("Item"), "B1": cell("1", "SUM(B2\\")}
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_sheet_caret_address", lambda _app: caret["address"])
+    monkeypatch.setattr(
+        _atspi, "committed_sheet_formula", lambda _cell, _app="soffice.bin": opened["text"],
+    )
+    monkeypatch.setattr(
+        _atspi, "_place_sheet_caret", lambda _app, address: placed.append(address) or True,
+    )
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_COMMIT_PAUSE_S", 0)
+    assert _atspi.sheet_grid_landing("A1", 5) == "A6"
+    assert _atspi.sheet_grid_landing("C3", 2) == "C5"
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\t=SUM(B2:B4)") is None
+    assert placed == ["A2"]
+
+    placed.clear()
+    caret["address"] = "A2"
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\t=SUM(B2:B4)") is None
+    assert placed == ["A2"]
+
+    placed.clear()
+    caret["address"] = "C6"
+    opened["text"] = "=SUM(C2:C4)"
+    nodes = {
+        "A1": cell("Item"),
+        "B1": cell("Q1"),
+        "C1": cell("1", "SUM(C2\\"),
+    }
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1\t=SUM(C2:C4)") is None
+    assert placed == ["C6"]
+
+    placed.clear()
+    opened["text"] = "=SUM(B2:B9)"
+    mismatch = _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1\t=SUM(C2:C4)")
+    assert mismatch[0] == "C1"
+    assert mismatch[1] == "=SUM(C2:C4)"
+    assert placed == ["C6"]
+
+
+def test_cut_range_formula_outcome_reads_the_editor(fake_atspi, monkeypatch) -> None:
+    """Synthetic cell. The cut Formula attribute is not the comparison.
+
+    The editor text is. A complete formula does not open the editor, and a
+    different range stays a mismatch.
+    """
+    cell = _Acc("table cell", name="C1")
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1\\"}
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    opened = {"text": "=sum( A1:A3 )", "n": 0}
+
+    def read(_acc, _app="soffice.bin"):
+        opened["n"] += 1
+        return opened["text"]
+
+    monkeypatch.setattr(_atspi, "committed_sheet_formula", read)
+    assert _atspi.sheet_outcome_text("soffice.bin", "=SUM(A1:A3)", cell) == "=SUM(A1:A3)"
+    assert opened["n"] == 1
+    opened["text"] = "=SUM(A1:B9)"
+    assert _atspi.sheet_outcome_text("soffice.bin", "=SUM(A1:A3)", cell) is None
+    cell.get_attributes = lambda: {"formula": "E2+31"}
+    assert _atspi.sheet_outcome_text("soffice.bin", "=E2+31", cell) == "=E2+31"
+    assert opened["n"] == 2
+    assert _atspi.sheet_outcome_text("soffice.bin", "=Z9", cell) is None
+    assert opened["n"] == 2
+
+
+def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
+    """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
+
+    A write that does not read back as the request puts the paragraph back.
+    A cell inside a spreadsheet stays on the Calc path.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    assert _atspi.writer_text_cell(cell) is True
+    assert _atspi.writer_cell_text(cell) == "Cell B2"
+
+    def replace(acc, text, force=False):
+        assert force is True
+        acc.text = text
+        return True
+
+    monkeypatch.setattr(_atspi, "set_text", replace)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+    assert _atspi.writer_cell_outcome_text("NEWB2-1", cell) == "NEWB2-1"
+
+    paragraph.text = "Cell B2"
+    calls = {"n": 0}
+    monkeypatch.setattr(_atspi, "_WRITER_CELL_SETTLE_S", 0.15)
+
+    def miss(acc, text, force=False):
+        assert force is True
+        calls["n"] += 1
+        if text == "Cell B2":
+            acc.text = text
+            return True
+        acc.text = "NEWB2-1\nCell B2"
+        return False
+
+    monkeypatch.setattr(_atspi, "set_text", miss)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "NEWB2-1\nCell B2"
+    assert "NEWB2-1\\nCell B2" in exc.value.message
+    assert paragraph.text == "Cell B2"
+    assert calls["n"] == 2
+
+    sheet = _Acc("spreadsheet", name="Sheet")
+    grid = _Acc("table", name="Sheet1")
+    calc = _Acc("table cell", name="B2")
+    calc_text = _Acc("paragraph", name="")
+    calc_text.text = "42"
+    _adopt(sheet, grid)
+    _adopt(grid, calc)
+    _adopt(calc, calc_text)
+    assert _atspi.writer_text_cell(calc) is False
+
+
+def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
+    """Synthetic Writer document. The textarea node stays empty.
+
+    Paragraph breaks compare equal across newline, CR, CRLF, VT, FF, NEL,
+    U+2029, U+2028, and U+FFFC. A repeated break, a trailing break, a missing
+    break, and a space stay different. A Mousepad document is not this path.
+    """
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
+    doc.text = ""
+    doc.get_application = lambda: app
+    blank = _Acc("paragraph", name="")
+    blank.text = ""
+    _adopt(doc, blank)
+
+    def set_text_contents(text):
+        children = []
+        for line in text.split("\n"):
+            child = _Acc("paragraph", name="")
+            child.text = line
+            children.append(child)
+        _adopt(doc, *children)
+        return True
+
+    doc.get_editable_text_iface = lambda: doc
+    doc.set_text_contents = set_text_contents
+    assert _atspi.set_text(doc, "68.3755") is True
+    assert _atspi.writer_document_text(doc) == "68.3755"
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    assert _atspi.set_text(doc, value) is True
+    assert doc.text == ""
+    assert _atspi._value_text(doc, "AXTextArea", "document text") == value
+    assert _atspi.writer_document_outcome_text(value, doc) == value
+    assert _atspi.writer_document_matches(doc, value.replace("\n", "\r\n")) is True
+    assert _atspi.writer_document_matches(doc, value.replace("\n", "\u2029")) is True
+    assert _atspi.paragraph_breaks_match("a\r\nb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u2029b\u2028c", "a\nb\nc") is True
+    assert _atspi.paragraph_breaks_match("a\ufffcb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u000bb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u000cb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u0085b", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\n\nb", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("a\r\n\nb", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("a b", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("ab", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("a\n", "a") is False
+    ended = _Acc("paragraph", name="")
+    ended.text = "Quarterly Update\u0085"
+    follow = _Acc("paragraph", name="")
+    follow.text = "Next\u000c"
+    _adopt(doc, ended, follow)
+    assert _atspi.writer_document_text(doc) == "Quarterly Update\nNext"
+    mousepad = _Acc("application", name="mousepad")
+    other = _Acc("document text", name="notes")
+    other.text = ""
+    other.get_application = lambda: mousepad
+    note = _Acc("paragraph", name="")
+    note.text = "68.3755"
+    _adopt(other, note)
+    assert _atspi.writer_document_text(other) is None
+    assert _atspi.writer_document_outcome_text("68.3755", other) is None
+
+
+def test_writer_type_newline_is_return_and_line_breaks_do_not_confirm(fake_atspi, monkeypatch) -> None:
+    """A Writer newline is Return. U+2028 stays a line break.
+
+    insertText of the whole string is what stored ``\\n`` as a line break
+    and still reported success. The read-back of that one paragraph does
+    not match the requested paragraphs. A text entry is not this path.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc(
+        "document text", name="Untitled 1 - LibreOffice Document", states=("FOCUSED",),
+    )
+    doc.text = ""
+    doc.get_application = lambda: app
+    first = _Acc("paragraph", name="", states=("FOCUSED",))
+    first.text = ""
+    _adopt(doc, first)
+    current = {"node": first}
+    inserted: list[str] = []
+    returns: list[str] = []
+    chords: list[str] = []
+
+    def insert_text(_pos, text, _length):
+        inserted.append(text)
+        current["node"].text += text
+        return True
+
+    def type_string(text):
+        returns.append(text)
+        new = _Acc("paragraph", name="")
+        new.text = ""
+        current["node"] = new
+        doc.children.append(new)
+        new.parent = doc
+
+    def press_chord(chord):
+        chords.append(chord)
+        current["node"].text += "\u2028"
+
+    doc.insert_text = insert_text
+    doc.get_editable_text_iface = lambda: doc
+    first.insert_text = insert_text
+    first.get_editable_text_iface = lambda: first
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0.0)
+
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    assert _atspi.insert_text(first, value) == len(value)
+    assert returns == ["\n", "\n"]
+    assert chords == []
+    assert all("\n" not in piece for piece in inserted)
+    assert [child.text for child in doc.children] == value.split("\n")
+    assert _atspi.writer_document_outcome_text(value, doc) == value
+    assert _atspi.writer_document_outcome_text(value, first) == value
+
+    broken = _Acc("paragraph", name="")
+    broken.text = value.replace("\n", "\u2028")
+    _adopt(doc, broken)
+    assert _atspi.writer_document_text(doc) == broken.text
+    assert _atspi.paragraph_breaks_match(broken.text, value) is True
+    assert _atspi.writer_type_conflict(doc, value) is True
+    readback = _atspi.writer_document_outcome_text(value, doc)
+    assert readback != value
+    assert readback is not None and "\u2028" in readback
+
+    _adopt(doc, first)
+    first.text = ""
+    current["node"] = first
+    inserted.clear()
+    returns.clear()
+    chords.clear()
+    assert _atspi.insert_text(first, "a\u2028b\nc") == len("a\u2028b\nc")
+    assert returns == ["\n"]
+    assert chords == ["shift+return"]
+    assert [child.text for child in doc.children] == ["a\u2028b", "c"]
+    assert _atspi.writer_document_outcome_text("a\u2028b\nc", doc) == "a\u2028b\nc"
+    assert _atspi.writer_type_conflict(doc, "a\nb\nc") is True
+
+    def stay_one_paragraph(text):
+        assert text == "\n"
+        current["node"].text += "\u2028"
+
+    monkeypatch.setattr(_atspi, "_type_string", stay_one_paragraph)
+    _adopt(doc, first)
+    first.text = ""
+    current["node"] = first
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.insert_text(first, "a\nb")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert "inserted as line breaks" in exc.value.message
+    assert "\n" not in "".join(inserted)
+
+    entry = _Acc("entry", name="note")
+    entry.text = ""
+
+    def entry_insert(_pos, text, _length):
+        entry.text += text
+        return True
+
+    entry.insert_text = entry_insert
+    entry.get_editable_text_iface = lambda: entry
+    assert _atspi.insert_text(entry, "a\nb") == 3
+    assert entry.text == "a\nb"
+
+
+def test_writer_document_waits_for_later_paragraphs_and_does_not_clear(fake_atspi, monkeypatch) -> None:
+    """Later paragraphs are the read-back. A partial line is not a miss.
+
+    The document cache is dropped on each read. The document is not selected
+    or deleted while a later paragraph is still unpublished. A stable value
+    that already has every break and differs returns before the deadline.
+    """
+    import time
+
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
+    doc.text = ""
+    doc.get_application = lambda: app
+    deleted = {"n": 0}
+    cleared = {"n": 0}
+
+    def delete_text(*_args):
+        deleted["n"] += 1
+        return True
+
+    def clear_cache():
+        cleared["n"] += 1
+
+    lines = ["Quarterly Update", "Revenue grew 12%.", "We will hire."]
+    children = []
+    for line in lines:
+        child = _Acc("paragraph", name="")
+        child.text = line
+        children.append(child)
+    reads = {"n": 0}
+
+    def get_child_count():
+        reads["n"] += 1
+        visible = children[:1] if reads["n"] < 4 else children
+        doc.children = list(visible)
+        for child in doc.children:
+            child.parent = doc
+        return len(doc.children)
+
+    def set_text_contents(_text):
+        return True
+
+    doc.get_editable_text_iface = lambda: doc
+    doc.set_text_contents = set_text_contents
+    doc.delete_text = delete_text
+    doc.clear_cache = clear_cache
+    doc.get_child_count = get_child_count
+    value = "\n".join(lines)
+    assert _atspi.set_text(doc, value) is True
+    assert deleted["n"] == 0
+    assert cleared["n"] > 1
+    assert reads["n"] >= 4
+    assert _atspi.writer_document_text(doc) == value
+
+    wrong = []
+    for line in ("Other heading", "Other body", "Other close"):
+        child = _Acc("paragraph", name="")
+        child.text = line
+        wrong.append(child)
+
+    def show_wrong():
+        doc.children = list(wrong)
+        for child in doc.children:
+            child.parent = doc
+        return len(doc.children)
+
+    doc.get_child_count = show_wrong
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 2.0)
+    started = time.monotonic()
+    assert _atspi.set_text(doc, value) is False
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0
+    assert deleted["n"] == 0
+
+    def show_first():
+        doc.children = [children[0]]
+        children[0].parent = doc
+        return 1
+
+    doc.get_child_count = show_first
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+    started = time.monotonic()
+    assert _atspi.set_text(doc, value) is False
+    elapsed = time.monotonic() - started
+    assert elapsed >= 0.4
+    assert elapsed < 1.0
+    assert deleted["n"] == 0
+
+
+def test_writer_document_without_editable_text_types_and_waits(fake_atspi, monkeypatch) -> None:
+    """No EditableText, and the document text read fails. Keys still insert.
+
+    The generic key replace treats a missing text read as a miss and deletes
+    the field after a few hundredths of a second. This document is typed,
+    then the paragraphs are polled. Nothing is selected.
+    """
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
+    doc.text = ""
+    doc.text_error = True
+    doc.get_application = lambda: app
+    deleted = {"n": 0}
+    typed = {"n": 0}
+    value = "Quarterly Update\nRevenue grew 12%."
+
+    def delete_text(*_args):
+        deleted["n"] += 1
+        return True
+
+    def type_into(_acc, text):
+        typed["n"] += 1
+        assert text == value
+        lines = []
+        for line in text.split("\n"):
+            child = _Acc("paragraph", name="")
+            child.text = line
+            lines.append(child)
+        _adopt(doc, *lines)
+
+    doc.delete_text = delete_text
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
+    assert _atspi.set_text(doc, value) is True
+    assert typed["n"] == 1
+    assert deleted["n"] == 0
+    assert _atspi.writer_document_text(doc) == value
+
+    bare = _Acc("document text", name="Untitled 2 - LibreOffice Document")
+    bare.text = ""
+    bare.get_application = lambda: app
+    bare.delete_text = delete_text
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: False)
+    assert _atspi.set_text(bare, value) is False
+    assert deleted["n"] == 0
+    assert typed["n"] == 1
+
+
+def _writer_memo() -> str:
+    return (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+
+
+def _writer_doc():
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc(
+        "document text",
+        name="Untitled 1 - LibreOffice Document",
+        states=("FOCUSED", "EDITABLE"),
+    )
+    doc.text = ""
+    doc.get_application = lambda: app
+    blank = _Acc("paragraph", name="")
+    blank.text = ""
+    _adopt(doc, blank)
+    return doc
+
+
+def _install_writer_lines(doc, text: str) -> None:
+    lines = []
+    for line in text.split("\n"):
+        child = _Acc("paragraph", name="")
+        child.text = line
+        lines.append(child)
+    _adopt(doc, *lines)
+
+
+def test_writer_insert_text_confirms_from_paragraphs_not_the_empty_node(fake_atspi, monkeypatch) -> None:
+    """Synthetic Writer document. The textarea node stays empty.
+
+    EditableText inserts each line. Return, injected here, starts the next
+    paragraph. No X display is opened. The document text interface stays
+    ``""``. That is a confirm, not a text_mismatch. An insert that does not
+    change the paragraphs returns None so the caller can send keys, and
+    does not report success.
+    """
+    memo = _writer_memo()
+    doc = _writer_doc()
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    cursor = {"node": doc.children[0]}
+
+    def insert_text(_pos, text, _length):
+        cursor["node"].text += text
+        return True
+
+    def type_string(text):
+        assert text == "\n"
+        new = _Acc("paragraph", name="")
+        new.text = ""
+        doc.children.append(new)
+        new.parent = doc
+        cursor["node"] = new
+
+    doc.get_editable_text_iface = lambda: doc
+    doc.insert_text = insert_text
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    assert _atspi.insert_text(doc, memo) == len(memo)
+    assert doc.text == ""
+    assert _atspi.writer_document_text(doc) == memo
+    assert _atspi._writer_typed_visible("", memo.replace("\n", "\u2029"), memo) is True
+    assert _atspi._writer_typed_visible("other", "other", memo) is False
+
+    empty = _writer_doc()
+
+    def insert_nothing(_pos, _text, _length):
+        return False
+
+    empty.get_editable_text_iface = lambda: empty
+    empty.insert_text = insert_nothing
+    monkeypatch.setattr(_atspi, "_type_string", lambda _text: None)
+    assert _atspi.insert_text(empty, memo) is None
+    assert _atspi.writer_document_text(empty) == ""
+
+
+def test_type_into_writer_multiline_confirms_when_paragraphs_land(fake_atspi, monkeypatch) -> None:
+    """Synthetic type with a ref. No live LibreOffice.
+
+    The document has no EditableText. Keys create three paragraphs and the
+    document node still reads ``""``. The type confirms. A document whose
+    paragraphs are a different line is text_mismatch, and the actual text
+    is that line.
+    """
+    from a11y_computer_use import observe
+
+    memo = _writer_memo()
+    doc = _writer_doc()
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 2)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda _acc: {})
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: doc)
+
+    def type_into(_acc, text):
+        _install_writer_lines(doc, text)
+
+    monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    element = Element(
+        "e20", "AXTextArea", "Untitled 1 - LibreOffice Document", "",
+        Bounds(0, 10, 40, 400, 300), "snap-1", editable=True,
+    )
+    assert driver.type_into(element, memo) == len(memo)
+    assert doc.text == ""
+    assert _atspi.writer_document_text(doc) == memo
+
+    missed = _writer_doc()
+
+    def type_wrong(_acc, _text):
+        _install_writer_lines(missed, "Not the memo")
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: missed)
+    monkeypatch.setattr(_atspi, "_type_into_target", type_wrong)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, memo)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "Not the memo"
+    assert repr(memo) in exc.value.message
+
+
+def test_type_text_writer_multiline_waits_for_later_paragraphs(fake_atspi, monkeypatch) -> None:
+    """Synthetic type with no ref. The first paragraph reads are partial.
+
+    Focus text stays empty. Later paragraphs arrive on the third document
+    read. The type confirms only once every line is there. A document that
+    stays empty is text_mismatch with an empty actual, not a success.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    memo = _writer_memo()
+    doc = _writer_doc()
+    lines = memo.split("\n")
+    children = []
+    for line in lines:
+        child = _Acc("paragraph", name="")
+        child.text = line
+        children.append(child)
+    reads = {"n": 0}
+
+    def get_child_count():
+        reads["n"] += 1
+        visible = children[:1] if reads["n"] < 3 else children
+        doc.children = list(visible)
+        for child in doc.children:
+            child.parent = doc
+        return len(doc.children)
+
+    doc.get_child_count = get_child_count
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 2)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 1.0)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: False)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app, **_kwargs: (doc, False))
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    assert driver.type_text(memo) == len(memo)
+    assert reads["n"] >= 3
+    assert _atspi.writer_document_text(doc) == memo
+
+    empty = _writer_doc()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app, **_kwargs: (empty, False))
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.2)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text(memo)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == ""
+
+
+def _drawing_deck(role="document presentation", name="Untitled 1 - LibreOffice Presentation"):
+    """Impress or Draw focus: the document is focused, the frame's paragraph is not."""
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc(role, name=name, states=("FOCUSED", "SHOWING"))
+    doc.text = ""
+    doc.get_application = lambda: app
+    panel = _Acc("panel", name="PresentationSubtitle", states=("FOCUSED", "SHOWING"))
+    paragraph = _Acc("paragraph", name="", states=("SHOWING",))
+    paragraph.text = "Click to add Text"
+    paragraph.get_editable_text_iface = lambda: paragraph
+    _adopt(panel, paragraph)
+    _adopt(doc, panel)
+    _adopt(app, doc)
+    return doc, panel, paragraph
+
+
+def test_focused_editable_descends_to_the_impress_paragraph(fake_atspi, monkeypatch) -> None:
+    """The presentation container is focused and has no EditableText.
+
+    The paragraph in the focused text frame is the type target. A Draw page
+    uses document frame and does the same. The slide sorter and a browser
+    document frame do not.
+    """
+    doc, _panel, paragraph = _drawing_deck()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (doc, False))
+    assert _atspi.focused_editable("soffice.bin") is paragraph
+
+    draw, _draw_panel, draw_paragraph = _drawing_deck(
+        "document frame", "Untitled 1 - LibreOffice Drawing",
+    )
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (draw, False))
+    assert _atspi.focused_editable("soffice.bin") is draw_paragraph
+
+    app = _Acc("application", name="soffice.bin")
+    slides = _Acc("document frame", name="Slides View", states=("FOCUSED",))
+    slides.text = ""
+    slides.get_application = lambda: app
+    slides.parent = app
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (slides, False))
+    assert _atspi.focused_editable("soffice.bin") is None
+
+    chrome = _Acc("application", name="chrome")
+    frame = _Acc("document frame", name="page", states=("FOCUSED",))
+    frame.text = ""
+    frame.get_application = lambda: chrome
+    frame.parent = chrome
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (frame, False))
+    assert _atspi.focused_editable("chrome") is None
+
+
+class _Grab:
+    """Component.grab_focus sets FOCUSED on the node it was given."""
+
+    def __init__(self, node):
+        self.node = node
+
+    def grab_focus(self):
+        self.node.states.add("FOCUSED")
+        return True
+
+
+def _shape_paragraph(text, *, states, role="document frame", doc_name="Untitled 1 - LibreOffice Drawing",
+                     app_name="soffice.bin", iface=True, read_only=False):
+    """A shape panel and its paragraph under an Impress slide or a Draw page."""
+    app = _Acc("application", name=app_name)
+    doc = _Acc(role, name=doc_name, states=("SHOWING",))
+    doc.get_application = lambda: app
+    held = set(states)
+    if read_only:
+        held.add("READ_ONLY")
+    panel = _Acc("panel", name="EllipseB", states=("SHOWING",))
+    paragraph = _Acc("paragraph", name="", states=held)
+    paragraph.text = text
+    if iface:
+        def set_text_contents(value, _paragraph=paragraph):
+            _paragraph.text = value
+            return True
+
+        def insert_text(pos, value, length, _paragraph=paragraph):
+            body = value[:int(length)]
+            _paragraph.text = _paragraph.text[:int(pos)] + body + _paragraph.text[int(pos):]
+            return True
+
+        paragraph.set_text_contents = set_text_contents
+        paragraph.insert_text = insert_text
+        paragraph.get_editable_text_iface = lambda: paragraph
+    _adopt(panel, paragraph)
+    _adopt(doc, panel)
+    _adopt(app, doc)
+    return panel, paragraph
+
+
+def test_draw_shape_paragraph_is_an_edit_target_and_a_browser_paragraph_is_not(
+    fake_atspi, monkeypatch,
+) -> None:
+    """A Draw or Impress paragraph with EDITABLE and EditableText is edit.
+
+    The role stays static text. set_value replaces through set_text_contents
+    and does not select. type(ref) inserts at the caret. A paragraph that
+    lacks the state or the interface is not edit. A Writer paragraph and a
+    Firefox paragraph stay refused, including when the snapshot flag was set.
+    The shape panel is not an entry.
+    """
+    from a11y_computer_use import observe
+
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: getattr(acc, "text", None))
+    panel, paragraph = _shape_paragraph("ELLIPSE_B", states={"EDITABLE", "ENABLED", "SHOWING", "FOCUSABLE"})
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    raw = accessor.read(paragraph)
+    assert raw.role == "AXStaticText"
+    assert raw.editable is True
+    assert _atspi.drawing_paragraph_shown(paragraph) == "ELLIPSE_B"
+    assert _atspi.drawing_paragraph_shown(panel) is None
+    snap = build_snapshot(
+        (raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="soffice.bin", pid=1, geometry=_geometry(),
+    )
+    assert snap.elements[0].editable is True
+    assert "edit" in observe.render_text(snap)
+    shape = accessor.read(panel)
+    assert shape.editable is False
+
+    _panel, quiet = _shape_paragraph("ELLIPSE_B", states={"ENABLED", "SHOWING"}, iface=True)
+    assert accessor.read(quiet).editable is False
+    _panel, no_iface = _shape_paragraph(
+        "ELLIPSE_B", states={"EDITABLE", "ENABLED"}, iface=False,
+    )
+    assert accessor.read(no_iface).editable is False
+    _panel, frozen = _shape_paragraph(
+        "ELLIPSE_B", states={"EDITABLE", "ENABLED"}, read_only=True,
+    )
+    assert accessor.read(frozen).editable is False
+
+    impress_panel, impress = _shape_paragraph(
+        "Alpha Slide Title", states={"EDITABLE", "ENABLED"},
+        role="document presentation", doc_name="Untitled 1 - LibreOffice Presentation",
+    )
+    del impress_panel
+    assert accessor.read(impress).editable is True
+
+    writer = _Acc("document text", name="notes", states=("SHOWING",))
+    writer_app = _Acc("application", name="soffice.bin")
+    writer.get_application = lambda: writer_app
+    writer_paragraph = _Acc("paragraph", name="", states={"EDITABLE", "SHOWING"})
+    writer_paragraph.text = "Beta"
+    writer_paragraph.get_editable_text_iface = lambda: writer_paragraph
+    _adopt(writer, writer_paragraph)
+    _adopt(writer_app, writer)
+    assert accessor.read(writer_paragraph).editable is False
+    assert _atspi.drawing_text_editable(writer_paragraph) is False
+
+    slides = _Acc("document frame", name="Slides View", states=("SHOWING",))
+    slides.get_application = lambda: writer_app
+    sorter = _Acc("paragraph", name="", states={"EDITABLE", "SHOWING"})
+    sorter.text = "slide"
+    sorter.get_editable_text_iface = lambda: sorter
+    _adopt(slides, sorter)
+    assert _atspi.drawing_text_editable(sorter) is False
+
+    browser = _Acc("application", name="Firefox")
+    page = _Acc("document web", name="page", states=("SHOWING",))
+    page.get_application = lambda: browser
+    gecko = _Acc("paragraph", name="", states={"EDITABLE", "SHOWING"})
+    gecko.text = "idle"
+    gecko.get_editable_text_iface = lambda: gecko
+    _adopt(page, gecko)
+    _adopt(browser, page)
+    plain = _atspi.ATSPIAccessor()
+    assert plain.read(gecko).editable is False
+    assert _atspi._blocks_text_replace(gecko) is True
+
+    deleted = {"n": 0}
+
+    def delete_text(*_args):
+        deleted["n"] += 1
+        raise AssertionError("select")
+
+    paragraph.delete_text = delete_text
+    assert _atspi.set_text(paragraph, "RECT_SET") is True
+    assert paragraph.text == "RECT_SET"
+    assert deleted["n"] == 0
+    paragraph.text = "stuck"
+
+    def set_stuck(_value):
+        return True
+
+    paragraph.set_text_contents = set_stuck
+    assert _atspi.set_text(paragraph, "NOPE") is False
+    assert paragraph.text == "stuck"
+    assert deleted["n"] == 0
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    box = Bounds(0, 8, 40, 120, 20)
+    element = Element(
+        "e26", "AXStaticText", "Paragraph: 0 ELLIPSE_B", "ELLIPSE_B", box, "snap-1",
+        editable=True,
+    )
+    paragraph.text = "ELLIPSE_B"
+    paragraph.set_text_contents = lambda value: (_set_paragraph(paragraph, value))
+    assert LinuxDriver().set_value(element, "SV_e26") is True
+    assert paragraph.text == "SV_e26"
+    refused = Element(
+        "e26", "AXStaticText", "Paragraph: 0 ELLIPSE_B", "ELLIPSE_B", box, "snap-1",
+    )
+    with pytest.raises(ComputerUseError) as missing_flag:
+        LinuxDriver().set_value(refused, "NO")
+    assert missing_flag.value.detail["reason"] == "not_editable"
+    assert paragraph.text == "SV_e26"
+
+    assert accessor.read(panel).editable is False
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: gecko)
+    wrongly = Element("e9", "AXStaticText", "", "idle", box, "snap-1", editable=True)
+    with pytest.raises(ComputerUseError) as gecko_exc:
+        LinuxDriver().set_value(wrongly, "nope")
+    assert gecko_exc.value.detail["reason"] == "not_editable"
+    assert gecko.text == "idle"
+
+    paragraph.component = _Grab(paragraph)
+    paragraph.text = "ELLIPSE_B"
+    # Draw reports offset 0 until the shape is in text edit. type(ref) appends.
+    paragraph.caret = 0
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    assert driver.type_into(element, "_T") == 2
+    assert paragraph.text == "ELLIPSE_B_T"
+    assert paragraph.caret == len("ELLIPSE_B")
+
+    paragraph.text = "ELLIPSE_B"
+    paragraph.caret = 0
+    paragraph.states.add("FOCUSED")
+    assert driver.type_into(element, "Q") == 1
+    assert paragraph.text == "QELLIPSE_B"
+    assert paragraph.caret == 0
+    paragraph.states.discard("FOCUSED")
+
+    bare = _shape_paragraph("ELLIPSE_B", states={"EDITABLE", "ENABLED", "SHOWING"})[1]
+    bare.component = None
+    parent = bare.parent
+    parent.component = _Grab(parent)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: bare)
+    assert driver.type_into(element, "Z") == 1
+    assert bare.text.endswith("Z")
+
+
+def _set_paragraph(paragraph, value):
+    paragraph.text = value
+    return True
+
+
+def test_drawing_type_confirms_multiline_paragraphs(fake_atspi, monkeypatch) -> None:
+    """Synthetic Impress. No display and no LibreOffice.
+
+    Return splits the frame into paragraphs. The document text stays empty.
+    Newline, U+2028, and that paragraph break compare as one break. ``ab``
+    is not ``a\\nb``. A frame that was read and is still empty is a
+    mismatch. A frame with no paragraph cannot be read, so the empty
+    container is unverified instead of text_mismatch.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    doc, panel, _paragraph = _drawing_deck()
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_DRAWING_TYPE_DEADLINE_S", 0)
+    monkeypatch.setattr(_atspi, "_DRAWING_TYPE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (doc, False))
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: _install_frame_lines(panel, text))
+    assert _atspi.drawing_typed_visible("", "A\u2028B", "A\nB") is True
+    assert _atspi.drawing_typed_visible("", "AB", "A\nB") is False
+    assert _atspi.drawing_typed_visible("", "A\n\nB", "A\nB") is False
+    assert _atspi.drawing_typed_visible("A b", "A b", "A\nB") is False
+
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    assert driver.type_text("North\nSouth") == len("North\nSouth")
+    assert _atspi.drawing_focus_text("soffice.bin") == ("text", "North\nSouth")
+    assert driver._type_unverified is False
+
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: _install_frame_lines(panel, "AB"))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("A\nB")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "AB"
+
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: _install_frame_lines(panel, ""))
+    with pytest.raises(ComputerUseError) as empty:
+        driver.type_text("A\nB")
+    assert empty.value.detail["reason"] == "text_mismatch"
+    assert empty.value.detail["actual"] == ""
+
+    bare = _Acc("document presentation", name="deck", states=("FOCUSED",))
+    bare.text = ""
+    bare.get_application = doc.get_application
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (bare, False))
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: sent.append(text))
+    assert driver.type_text("North\nSouth") == len("North\nSouth")
+    assert sent == ["North\nSouth"]
+    assert driver._type_unverified is True
+
+
+def _install_frame_lines(panel, text: str) -> None:
+    children = []
+    for line in (text.split("\n") if text else [""]):
+        child = _Acc("paragraph", name="", states=("SHOWING",))
+        child.text = line
+        child.get_editable_text_iface = lambda: child
+        children.append(child)
+    if children:
+        children[-1].states.add("FOCUSED")
+        children[-1].states.add("ACTIVE")
+    _adopt(panel, *children)
+
+
+def test_drawing_unverified_outcome_is_not_a_mismatch(tmp_path, monkeypatch) -> None:
+    """The judge says unverified when the frame cannot be read.
+
+    A frame that shows the typed lines is confirmed. Neither result is
+    text_mismatch.
+    """
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"),
+        driver=driver,
+    )
+    driver._type_unverified = True
+    driver._drawing_type_state = "unreadable"
+    driver._drawing_type_before = None
+    monkeypatch.setattr(_atspi, "drawing_frame_outcome_text", lambda *_args, **_kwargs: None)
+    verdict = runtime._judge_mutation("soffice.bin", None, None, "North\nSouth")
+    assert verdict == ("unverifiable", "unverified")
+    assert driver._type_unverified is False
+
+    driver._drawing_type_state = "text"
+    driver._drawing_type_before = ""
+    monkeypatch.setattr(
+        _atspi, "drawing_frame_outcome_text", lambda *_args, **_kwargs: "North\nSouth",
+    )
+    confirmed = runtime._judge_mutation("soffice.bin", None, None, "North\nSouth")
+    assert confirmed == ("confirmed", "read back 'North\\nSouth'")
+
+
+def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:
+    """The new paragraph in front of the old line is the committed edit.
+
+    Writer can rebuild the cell child the write was aimed at. The first
+    walk then shows ``NEWB2-1`` and ``Cell B2``. That is not a miss: the
+    new paragraph stays and the old line is cleared.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    fresh = {"node": None}
+
+    def write(acc, text, force=False):
+        assert force is True
+        if text == "":
+            acc.text = ""
+            return True
+        if fresh["node"] is None:
+            created = _Acc("paragraph", name="")
+            created.text = text
+            fresh["node"] = created
+            _adopt(cell, created, paragraph)
+            return False
+        acc.text = text
+        return True
+
+    monkeypatch.setattr(_atspi, "set_text", write)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert fresh["node"] is not None and fresh["node"].text == "NEWB2-1"
+    assert paragraph.text == ""
+    assert _atspi.writer_cell_text(cell) == "NEWB2-1"
+
+
+@pytest.mark.parametrize("value", ["150%", "150 %", "200%", "150"])
+def test_named_percent_slider_explains_unknown_scale_without_writing(fake_atspi, monkeypatch, value):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    def forbid_write(*_args):
+        raise AssertionError("unknown percent scale must not be written")
+
+    monkeypatch.setattr(fake_atspi.Value, "set_current_value", forbid_write)
+    with pytest.raises(ValueError) as exc:
+        _atspi.set_numeric_value(slider, value)
+    message = str(exc.value)
+    assert "185%" in message
+    assert "non-percent scale" in message
+    assert "-2.38087..1.91581" in message
+    assert "conversion is unknown" in message
+    assert slider.value == 0.5
+
+
+def test_named_percent_slider_keeps_verified_raw_values(fake_atspi):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    assert _atspi.set_numeric_value(slider, "0.25") is True
+    assert slider.value == 0.25
+    ordinary = _Acc("slider", name="Volume", value=50, minimum=0, maximum=100)
+    assert _atspi.set_numeric_value(ordinary, "75") is True
+    assert ordinary.value == 75
+
+
+def test_missing_value_interface_is_not_numeric_and_a_real_range_still_is(
+    fake_atspi, monkeypatch,
+) -> None:
+    """A node with no Value interface is not checked as a number.
+
+    AT-SPI reports the interface missing. Minimum and maximum are not read:
+    that read is an uninitialized double, about 6.93e-310. set_numeric_value
+    returns false before parsing, and set_value on the group is not_editable.
+    The same double is not a range when an interface object is handed back.
+    A panel whose minimum and maximum are a real range stays numeric.
+    """
+    junk = 6.93985e-310
+    panel = _Acc("panel", name="EllipseB", value=junk, minimum=junk, maximum=junk)
+    panel.get_value_iface = lambda: None
+    probed = {"n": 0}
+    original_min = fake_atspi.Value.get_minimum_value
+    original_max = fake_atspi.Value.get_maximum_value
+
+    def counting_min(acc):
+        probed["n"] += 1
+        return original_min(acc)
+
+    def counting_max(acc):
+        probed["n"] += 1
+        return original_max(acc)
+
+    fake_atspi.Value.get_minimum_value = staticmethod(counting_min)
+    fake_atspi.Value.get_maximum_value = staticmethod(counting_max)
+    try:
+        assert _atspi._value_interface_present(panel) is False
+        assert _atspi._value_range(panel) is None
+        assert _atspi.control_kind(panel) is None
+        assert _atspi.set_numeric_value(panel, "NOPE") is False
+        assert probed["n"] == 0
+    finally:
+        fake_atspi.Value.get_minimum_value = staticmethod(original_min)
+        fake_atspi.Value.get_maximum_value = staticmethod(original_max)
+
+    handed = _Acc("panel", name="EllipseB", value=junk, minimum=junk, maximum=junk)
+    handed.get_value_iface = lambda: handed
+    assert _atspi._value_range(handed) is None
+    assert _atspi.control_kind(handed) is None
+    assert _atspi.set_numeric_value(handed, "NOPE") is False
+
+    box = Bounds(0, 100, 80, 100, 80)
+    element = Element("e25", "AXGroup", "EllipseB", None, box, "snap-1")
+    target = {"node": handed}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: target["node"])
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    with pytest.raises(ComputerUseError) as group_exc:
+        driver.set_value(element, "NOPE")
+    assert group_exc.value.detail["reason"] == "not_editable", group_exc.value
+    assert "not a number" not in str(group_exc.value)
+    assert "e-310" not in str(group_exc.value)
+    target["node"] = panel
+    with pytest.raises(ComputerUseError) as missing_exc:
+        driver.set_value(element, "NOPE")
+    assert missing_exc.value.detail["reason"] == "not_editable", missing_exc.value
+    assert "e-310" not in str(missing_exc.value)
+
+    meter = _Acc("filler", name="Meter", value=1.0, minimum=0.0, maximum=10.0)
+    assert _atspi.control_kind(meter) == "value"
+    with pytest.raises(ValueError, match="not a number") as numeric:
+        _atspi.set_numeric_value(meter, "NOPE")
+    assert "0" in str(numeric.value) and "10" in str(numeric.value)
+    assert "e-310" not in str(numeric.value)
+
+
+def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:
+    """Synthetic AT-SPI nodes. Not a live LibreOffice.
+
+    A dialog and a checkbox whose CurrentValue is a subnormal double publish
+    no value. Zero, 0.001, and 1e-6 stay. A slider at 0 and a spin button at
+    0.001 stay. A filler keeps the subnormal, because that role is not a
+    dialog or a checkbox.
+    """
+    junk = 6.9305862814588e-310
+    dialog = _Acc("dialog", name="Text Import", value=junk)
+    box = _Acc("check box", name="Comma", value=junk)
+    assert _atspi._value_text(dialog, "AXDialog", "dialog") is None
+    assert _atspi._value_text(box, "AXCheckBox", "check box") is None
+    dialog.value = 0.0
+    box.value = 0.001
+    assert _atspi._value_text(dialog, "AXDialog", "dialog") == 0.0
+    assert _atspi._value_text(box, "AXCheckBox", "check box") == 0.001
+    tip = _Acc("alert", name="Tip of the Day", value=1e-6)
+    assert _atspi._value_text(tip, "AXDialog", "alert") == 1e-6
+    broken = _Acc("dialog", name="Broken", value=float("nan"))
+    assert _atspi._value_text(broken, "AXDialog", "dialog") is None
+    slider = _Acc("slider", name="Volume", value=0.0, minimum=0.0, maximum=1.0)
+    assert _atspi._value_text(slider, "AXSlider", "slider") == 0.0
+    spin = _Acc("spin button", name="Count", value=0.001, minimum=0.0, maximum=10.0)
+    assert _atspi._value_text(spin, "AXSpinButton", "spin button") == 0.001
+    filler = _Acc("filler", name="Meter", value=junk)
+    assert _atspi._value_text(filler, "AXGroup", "filler") == junk
+
+
 def test_sheet_outcome_reads_the_editor_or_the_formula_not_the_display(
     fake_atspi, monkeypatch
 ) -> None:
@@ -5240,6 +9732,221 @@ def test_huge_calc_table_uses_accessible_at(fake_atspi) -> None:
         del fake_atspi.Table
 
 
+def _col_letters(index: int) -> str:
+    """0 → A, 15 → P, 26 → AA."""
+    number = index + 1
+    letters = []
+    while number:
+        number, rem = divmod(number - 1, 26)
+        letters.append(chr(ord("A") + rem))
+    return "".join(reversed(letters))
+
+
+class _Click:
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, _index):
+        return "click"
+
+
+def _calc_grid(
+    fake_atspi,
+    *,
+    origin_row: int = 0,
+    visible_rows: int = 29,
+    visible_cols: int = 16,
+    pitch_x: float = 60.0,
+    pitch_y: float = 20.0,
+    origin: tuple[float, float] = (80.0, 140.0),
+    hits: bool = False,
+):
+    """A million-row sheet whose painted box holds ``visible_rows`` × ``visible_cols``.
+
+    Cell ``(origin_row, 0)`` sits at the top of the box. Later rows step down
+    by ``pitch_y`` and leave the box. ``get_child_at_index`` is not a cell.
+    """
+    ox, oy = origin
+    width = visible_cols * pitch_x
+    height = visible_rows * pitch_y
+    calls: list[tuple[int, int]] = []
+    index_reads = {"n": 0}
+    hit_reads = {"n": 0}
+    cache: dict[tuple[int, int], _Acc] = {}
+
+    def cell(row: int, col: int) -> _Acc:
+        key = (row, col)
+        found = cache.get(key)
+        if found is not None:
+            return found
+        made = _Acc(
+            "table cell",
+            name=f"{_col_letters(col)}{row + 1}",
+            states=("ENABLED", "SENSITIVE", "FOCUSABLE"),
+            width=pitch_x,
+            height=pitch_y,
+        )
+        made.component = _Geom(
+            pitch_x, pitch_y, x=ox + col * pitch_x, y=oy + (row - origin_row) * pitch_y,
+        )
+        made.get_action_iface = lambda: _Click()
+        if row == origin_row + 10 and col == 0:
+            made.text = "Row10"
+        cache[key] = made
+        return made
+
+    table = _Acc("table", name="Sheet", width=width, height=height)
+    table.component = _Geom(width, height, x=ox, y=oy)
+    table.calls = calls
+    table.index_reads = index_reads
+    table.hit_reads = hit_reads
+
+    def child_count():
+        return 2147483647
+
+    def child_at(_index):
+        index_reads["n"] += 1
+        return _Acc("table cell", name="ROW1")
+
+    table.get_child_count = child_count
+    table.get_child_at_index = child_at
+
+    if hits:
+        class _Hits(_Geom):
+            def get_accessible_at_point(self, x, y, _coord):
+                hit_reads["n"] += 1
+                if x < ox or y < oy or x >= ox + width or y >= oy + height:
+                    return None
+                col = int((x - ox) // pitch_x)
+                row = origin_row + int((y - oy) // pitch_y)
+                return cell(row, col)
+
+        table.component = _Hits(width, height, x=ox, y=oy)
+
+    class _Table:
+        @staticmethod
+        def get_n_rows(_acc):
+            return 1048576
+
+        @staticmethod
+        def get_n_columns(_acc):
+            return 16384
+
+        @staticmethod
+        def get_accessible_at(_acc, row, col):
+            calls.append((int(row), int(col)))
+            if row < 0 or col < 0:
+                return None
+            return cell(row, col)
+
+    fake_atspi.Table = _Table
+    return table
+
+
+def _sheet_snapshot(table):
+    geometry = (
+        DisplayGeometry(display=Display(0, 1280, 800, 1.0, True), origin=(0.0, 0.0)),
+    )
+    return build_snapshot(
+        table, _atspi.ATSPIAccessor(), scope=Scope.WINDOW, app="soffice", pid=1, geometry=geometry,
+    )
+
+
+def test_huge_calc_sheet_lists_the_visible_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet. The on-screen box is 29×16; row 7 and A29 stay in the snapshot.
+
+    Child count is INT_MAX. The first 96 row-major cells would be A1..P6.
+    Extents name the visible rows, so find sees A29 and the text in A11,
+    and the ref has a box. Probes stay far below the million-row sheet.
+    """
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi)
+    try:
+        cells = _atspi._sheet_window_cells(table)
+        names = {_atspi._node_name(cell) for cell in cells}
+        assert len(cells) == 29 * 16
+        assert {"A1", "B2", "A7", "A11", "P6", "A29", "P29"} <= names
+        assert "A30" not in names and "Q1" not in names and "ROW1" not in names
+        assert table.index_reads["n"] == 0
+        assert table.calls and max(row for row, _col in table.calls) < 200
+        assert len(table.calls) < 800
+
+        snap = _sheet_snapshot(table)
+        titles = {el.title for el in snap.elements}
+        assert "A29" in titles and "A11" in titles and "A7" in titles
+        assert "A30" not in titles and "ROW1" not in titles
+        row10 = observe.find_elements(snap, text="Row10")
+        assert any(el.title == "A11" and el.value == "Row10" for el in row10)
+        found = observe.find_elements(snap, text="A29")
+        assert len(found) == 1 and found[0].clickable
+        assert found[0].bounds is not None and found[0].bounds.width > 0 and found[0].bounds.height > 0
+        assert "A29" in observe.render_text(snap, mode="full")
+        assert "A29" in observe.render_text(snap, mode="interactive")
+        assert "Row10" in observe.render_text(snap, mode="full")
+    finally:
+        del fake_atspi.Table
+
+
+def test_huge_calc_sheet_follows_a_scrolled_visible_band(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet scrolled so row 5001 is the first painted row."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, origin_row=5000)
+    try:
+        names = {_atspi._node_name(cell) for cell in _atspi._sheet_window_cells(table)}
+        assert "A5001" in names and "A5029" in names and "B5002" in names
+        assert "A5000" not in names and "A5030" not in names and "ROW1" not in names
+        assert table.index_reads["n"] == 0
+        assert max(row for row, _col in table.calls) < 20000
+        assert not any(row > 100000 for row, _col in table.calls)
+        assert len(table.calls) < 800
+    finally:
+        del fake_atspi.Table
+
+
+def test_huge_calc_sheet_hit_test_names_the_span_when_extents_do_not(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet. Extent search is unavailable; hit-testing the box still lists A29."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(_atspi, "_sheet_span_from_extents", lambda *_args, **_kwargs: None)
+    table = _calc_grid(fake_atspi, hits=True)
+    try:
+        names = {_atspi._node_name(cell) for cell in _atspi._sheet_window_cells(table)}
+        assert table.hit_reads["n"] > 0
+        assert "A1" in names and "A7" in names and "A29" in names and "P29" in names
+        assert "A30" not in names and "ROW1" not in names
+        snap = _sheet_snapshot(table)
+        assert "A29" in {el.title for el in snap.elements}
+        assert observe.find_elements(snap, text="A11")
+    finally:
+        del fake_atspi.Table
+
+
+def test_huge_calc_sheet_with_a_short_visible_box_does_not_pad_to_96(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet. Three visible rows are not filled out to A1..P6."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, visible_rows=3, visible_cols=4)
+    try:
+        names = [_atspi._node_name(cell) for cell in _atspi._sheet_window_cells(table)]
+        assert len(names) == 12
+        assert set(names) == {
+            "A1", "B1", "C1", "D1",
+            "A2", "B2", "C2", "D2",
+            "A3", "B3", "C3", "D3",
+        }
+        assert table.index_reads["n"] == 0
+    finally:
+        del fake_atspi.Table
+
+
+def test_small_table_is_walked_by_child_index(fake_atspi) -> None:
+    """A short table keeps the children it already exposed. Not a sheet sample."""
+    first = _Acc("table cell", name="A1", width=20, height=16)
+    later = _Acc("table cell", name="A7", width=20, height=16)
+    table = _Acc("table", name="grid")
+    _adopt(table, first, later)
+    names = [kid.get_name() for kid in _atspi.ATSPIAccessor().children(table)]
+    assert names == ["A1", "A7"]
+
+
 def test_sheet_editor_paragraph_is_the_in_progress_text(fake_atspi, monkeypatch) -> None:
     """Synthetic tree. The table's child count is not walked."""
     paragraph = _Acc("paragraph", name="")
@@ -5299,6 +10006,109 @@ def test_type_into_calc_reads_the_editor_and_a_terminal_still_mismatches(
     assert exc.value.detail["actual"] == "01"
 
 
+def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monkeypatch) -> None:
+    """Synthetic Calc. The editor can publish after the keys, then the cell.
+
+    A prefix does not end the poll. A sheet that never shows the text is a
+    mismatch. No live LibreOffice.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 6)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: True)
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    editor_reads = iter(["4", "4", "42"])
+
+    def editor(_app):
+        try:
+            return next(editor_reads)
+        except StopIteration:
+            return "42"
+
+    monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
+    assert driver.type_text("42") == 2
+
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: "42")
+    assert driver.type_text("42") == 2
+
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("42")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] in {None, ""}
+
+
+def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
+    """Synthetic. Chrome's Open File dialog has no AT-SPI entry.
+
+    The page focus stays empty. The location field is read by select-all and
+    copy. Right then collapses that selection so the Open button is not left
+    under the popup, and the clipboard from before the read is restored. A
+    window that is not that dialog still mismatches on the empty page focus.
+    """
+    from a11y_computer_use.drivers import _linux_input, _linux_system
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("chrome", 1)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "focused_location_entry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focus_in_browser_chrome", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "libreoffice_app", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "_focused_contenteditable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_chrome_rewrite", lambda *_args, **_kwargs: None)
+    window = {"title": "Open File", "app": "chrome"}
+    monkeypatch.setattr(_linux_system, "active_window", lambda: window)
+    board = {"value": "keep-me"}
+    chords: list[str] = []
+
+    def write_clipboard(text: str) -> None:
+        board["value"] = text
+
+    def read_clipboard() -> str:
+        return board["value"]
+
+    def press_chord(chord: str) -> None:
+        chords.append(chord)
+        if chord == "ctrl+c":
+            board["value"] = "/tmp/notes/draft.txt"
+
+    monkeypatch.setattr(_linux_system, "write_clipboard", write_clipboard)
+    monkeypatch.setattr(_linux_system, "read_clipboard", read_clipboard)
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    assert driver.type_text("/tmp/notes/draft.txt") == len("/tmp/notes/draft.txt")
+    assert driver._chooser_readback == "/tmp/notes/draft.txt"
+    assert chords == ["ctrl+a", "ctrl+c", "right"]
+    assert board["value"] == "keep-me"
+
+    window["title"] = "cuaprobe - Google Chrome"
+    board["value"] = "keep-me"
+    chords.clear()
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("/tmp/notes/draft.txt")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == ""
+    assert chords == []
+    assert board["value"] == "keep-me"
+
+
 def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) -> None:
     """Synthetic cell. No keystroke reaches an X server."""
     from a11y_computer_use.drivers import _linux_input
@@ -5319,6 +10129,43 @@ def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) ->
     element = Element("e3", "AXCell", "D1", None, Bounds(0, 10, 10, 40, 16), "snap")
     assert LinuxDriver().set_value(element, "setv") is True
     assert sent == ["setv", "return"]
+
+
+def test_range_formula_set_value_confirms_from_the_editor(fake_atspi, monkeypatch) -> None:
+    """Synthetic cell. No keystroke reaches an X server.
+
+    The Formula attribute is the cut string. The editor read is the formula,
+    so set_value returns. A different editor formula is still a mismatch.
+    """
+    from a11y_computer_use.drivers import _linux_input
+    import a11y_computer_use.drivers.linux as linux_mod
+
+    cell = _Acc("table cell", name="C1", value=0.0, minimum=-1e308, maximum=1e308, width=40, height=16)
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1\\"}
+    cell.component.grab_focus = lambda: True
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(linux_mod.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda _chord: None)
+    reads = {"text": "=SUM(A1:A3)", "n": 0}
+
+    def read(_acc, _app="soffice.bin"):
+        reads["n"] += 1
+        return reads["text"]
+
+    monkeypatch.setattr(_atspi, "committed_sheet_formula", read)
+    element = Element("e9", "AXCell", "C1", None, Bounds(0, 10, 10, 40, 16), "snap")
+    assert LinuxDriver().set_value(element, "=SUM(A1:A3)") is True
+    assert reads["n"] == 1
+    reads["text"] = "=SUM(A1:B9)"
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(element, "=SUM(A1:A3)")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["formula"] == "=SUM(A1:B9)"
+    assert reads["n"] == 2
 
 
 def test_soffice_without_a_bridge_is_unsupported_and_other_apps_stay_missing(
@@ -5530,6 +10377,83 @@ def test_unlisted_app_does_not_wait_for_atspi(fake_atspi, monkeypatch) -> None:
     with pytest.raises(ComputerUseError) as exc:
         LinuxDriver().snapshot(Scope.WINDOW, "gedit")
     assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert slept["n"] == 0
+
+
+def _write_proc(root, pid: str, comm: str, state: str, environ: dict[str, str] | None) -> None:
+    folder = root / pid
+    folder.mkdir()
+    (folder / "comm").write_text(comm + "\n", encoding="utf-8")
+    (folder / "stat").write_text(f"{pid} ({comm}) {state} 1\n", encoding="utf-8")
+    if environ is None:
+        return
+    raw = b"\0".join(f"{key}={value}".encode() for key, value in environ.items()) + b"\0"
+    (folder / "environ").write_bytes(raw)
+
+
+def test_libreoffice_process_running_is_this_session_only(tmp_path, monkeypatch) -> None:
+    """Synthetic /proc. Another display's soffice is not this session.
+
+    The same display number matches with or without the screen suffix.
+    A zombie on this display does not count. An unreadable environ does
+    not count. With no DISPLAY here, a process that has one is not local.
+    A matching AT-SPI bus counts when the displays do not disagree.
+    """
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(_atspi, "_proc_root", lambda: str(proc))
+    monkeypatch.setenv("DISPLAY", ":1.0")
+    monkeypatch.delenv("AT_SPI_BUS_ADDRESS", raising=False)
+    monkeypatch.delenv("AT_SPI_BUS", raising=False)
+
+    _write_proc(proc, "10", "soffice.bin", "S", {"DISPLAY": ":2"})
+    assert _atspi.libreoffice_process_running() is False
+
+    _write_proc(proc, "11", "soffice.bin", "S", {"DISPLAY": ":1"})
+    assert _atspi.libreoffice_process_running() is True
+
+    for child in proc.iterdir():
+        for path in child.iterdir():
+            path.unlink()
+        child.rmdir()
+    _write_proc(proc, "12", "soffice.bin", "Z", {"DISPLAY": ":1"})
+    _write_proc(proc, "13", "gedit", "S", {"DISPLAY": ":1"})
+    _write_proc(proc, "14", "soffice", "S", None)
+    assert _atspi.libreoffice_process_running() is False
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    _write_proc(proc, "15", "oosplash", "S", {"DISPLAY": ":2"})
+    assert _atspi.libreoffice_process_running() is False
+
+    monkeypatch.setenv("AT_SPI_BUS_ADDRESS", "unix:path=/tmp/bus-a")
+    _write_proc(proc, "16", "soffice.bin", "S", {"AT_SPI_BUS_ADDRESS": "unix:path=/tmp/bus-a"})
+    assert _atspi.libreoffice_process_running() is True
+
+
+def test_snapshot_does_not_wait_for_soffice_on_another_display(fake_atspi, monkeypatch) -> None:
+    """Synthetic. A foreign soffice process is app_not_found with no sleep."""
+    from a11y_computer_use.drivers import _linux_system
+
+    slept = {"n": 0}
+
+    def sleep(seconds):
+        slept["n"] += 1
+
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.delenv("AT_SPI_BUS_ADDRESS", raising=False)
+    monkeypatch.delenv("AT_SPI_BUS", raising=False)
+    monkeypatch.setattr(
+        _atspi, "_libreoffice_processes",
+        lambda: [("soffice.bin", "S", {"DISPLAY": ":2"})],
+    )
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _name: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda identifier: identifier)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "LibreOffice")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "accessibility bridge" not in exc.value.message
     assert slept["n"] == 0
 
 
@@ -6019,3 +10943,1535 @@ def test_sixty_scrolls_toward_item_0400_are_not_rows_stale(
     assert painted[0] == "ITEM-0301"
     assert "ITEM-0329" in painted
     assert "ITEM-0400" not in painted
+
+def _bind_gtk_app(node: _Acc) -> _Acc:
+    """Toolkit ``gtk`` so the table is not Qt, Chromium, or Firefox."""
+    app = getattr(node, "_gtk_app", None)
+    if app is None:
+        app = _Acc("application", name="treeprobe")
+        app.get_toolkit_name = lambda: "gtk"
+        node._gtk_app = app
+    node.get_application = lambda: app
+    return node
+
+
+def _gtk_tree_page():
+    """Synthetic 300×2 GTK tree. Not a live window.
+
+    Twenty rows fit in the 484px body. Cells outside that run sit at the
+    GTK off-screen sentinel. Child 0 is a column header, so a walk that
+    stops at child 250 never reaches row 281.
+    """
+    state = {"head": 0}
+    headers = [
+        _Acc("table column header", name=name, width=180, height=24)
+        for name in ("Name", "Value")
+    ]
+    cells = [
+        [_Acc("table cell", name=f"ROW-{row:05d}" if col == 0 else f"val{row}", width=180, height=23)
+         for col in range(2)]
+        for row in range(300)
+    ]
+    action = _NS(get_n_actions=lambda: 1, get_action_name=lambda _index: "activate")
+    table = _Acc("table", name="Rows", width=600, height=484)
+    _bind_gtk_app(table)
+    ordered: list[_Acc] = list(headers)
+    for row in range(300):
+        for col in range(2):
+            cell = cells[row][col]
+            cell.get_action_iface = lambda action=action: action
+            cell.get_index_in_parent = lambda row=row, col=col: 2 + row * 2 + col
+            ordered.append(cell)
+    for index, header in enumerate(headers):
+        header.get_index_in_parent = lambda index=index: index
+    _adopt(table, *ordered)
+
+    def place(head: int) -> None:
+        state["head"] = head
+        for col, header in enumerate(headers):
+            _place_row(header, 110 + col * 200, 100, 180, 24)
+        for row in range(300):
+            on_screen = head <= row < head + 20
+            for col in range(2):
+                y = 124 + (row - head) * 23 if on_screen else -2147483648
+                x = 110 + col * 200 if on_screen else -2147483648
+                _place_row(cells[row][col], x, y, 180, 23)
+
+    def scroll_to(_scroll_type, row: int) -> bool:
+        place(row)
+        return True
+
+    for row in range(300):
+        for col in range(2):
+            cells[row][col].component.scroll_to = lambda _scroll_type, row=row: scroll_to(_scroll_type, row)
+    place(0)
+    _place_row(table, 100, 100, 600, 484)
+
+    def at_point(_x, y, _coord):
+        y = int(y)
+        if y < 124:
+            return headers[0]
+        slot = (y - 124) // 23
+        if slot < 0 or slot >= 20:
+            return None
+        row = state["head"] + int(slot)
+        if row < 0 or row >= 300:
+            return None
+        return cells[row][0]
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: 300
+    table.get_n_columns = lambda: 2
+    table.get_accessible_at = lambda row, col: cells[row][col]
+    table.get_column_header = lambda col: headers[col]
+
+    def row_at_index(index: int) -> int:
+        if index < 2:
+            return -1
+        return (index - 2) // 2
+
+    table.get_row_at_index = row_at_index
+    window = _Acc("frame", name="TreeProbe", width=640, height=560)
+    _place_row(window, 80, 40, 640, 560)
+    scroll = _Acc("scroll pane", width=600, height=484)
+    _place_row(scroll, 100, 100, 600, 484)
+    _bind_gtk_app(window)
+    _bind_gtk_app(scroll)
+    # Share the application the table already bound.
+    app = table.get_application()
+    window.get_application = lambda: app
+    scroll.get_application = lambda: app
+    _adopt(scroll, table)
+    _adopt(window, scroll)
+    return window, table, state, place
+
+
+def _wire_gtk_tree(monkeypatch, window) -> LinuxDriver:
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    driver.menu_state = lambda _app: {"open": False, "path": []}
+    return driver
+
+
+def _gtk_row_titles(snap) -> list[str]:
+    return [el.title for el in snap.elements if el.title.startswith("ROW-")]
+
+
+def _large_gtk_tree(rows: int = 10_000, cols: int = 3):
+    """Synthetic GTK ListStore tree. Cells are created when the table is asked.
+
+    Twenty body rows fit in the 484px box. The rest sit at the GTK off-screen
+    sentinel. ``scroll_to`` returns false. The vertical bar's fraction of
+    ``row / (rows - 1)`` is what moves the painted run. Not a live window.
+    """
+    state = {"head": 0}
+    headers = [
+        _Acc("table column header", name=name, width=180, height=24)
+        for name in ("Name", "Value", "Note")[:cols]
+    ]
+    cache: dict[tuple[int, int], _Acc] = {}
+    table = _Acc("table", name="Rows", width=600, height=484)
+    _bind_gtk_app(table)
+
+    def position(cell: _Acc, row: int, col: int, head: int) -> None:
+        on_screen = head <= row < head + 20
+        y = 124 + (row - head) * 23 if on_screen else -2147483648
+        x = 110 + col * 200 if on_screen else -2147483648
+        _place_row(cell, x, y, 180, 23)
+
+    def cell_at(row: int, col: int) -> _Acc | None:
+        if row < 0 or row >= rows or col < 0 or col >= cols:
+            return None
+        key = (row, col)
+        cell = cache.get(key)
+        if cell is None:
+            if col == 0:
+                name = f"ROW-{row:05d}"
+            elif col == 1:
+                name = f"val{row}"
+            else:
+                name = f"note{row}"
+            cell = _Acc("table cell", name=name, width=180, height=23)
+            cell.parent = table
+            cell.get_index_in_parent = lambda row=row, col=col: cols + row * cols + col
+            if cell.component is not None:
+                cell.component.scroll_to = lambda *_args, **_kwargs: False
+            cache[key] = cell
+        position(cell, row, col, state["head"])
+        return cell
+
+    def place(head: int) -> None:
+        state["head"] = max(0, min(int(head), max(0, rows - 20)))
+        for col, header in enumerate(headers):
+            _place_row(header, 110 + col * 200, 100, 180, 24)
+        for (row, col), cell in list(cache.items()):
+            position(cell, row, col, state["head"])
+
+    place(0)
+    _place_row(table, 100, 100, 600, 484)
+
+    def at_point(_x, y, _coord):
+        yy = int(y)
+        if yy < 124:
+            return headers[0]
+        slot = (yy - 124) // 23
+        if slot < 0 or slot >= 20:
+            return None
+        row = state["head"] + int(slot)
+        if row < 0 or row >= rows:
+            return None
+        return cell_at(row, 0)
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: rows
+    table.get_n_columns = lambda: cols
+    table.get_accessible_at = cell_at
+    table.get_column_header = lambda col: headers[col] if 0 <= col < len(headers) else None
+
+    def row_at_index(index: int) -> int:
+        if index < cols:
+            return -1
+        return (index - cols) // cols
+
+    table.get_row_at_index = row_at_index
+    window = _Acc("frame", name="TreeProbe", width=640, height=560)
+    _place_row(window, 80, 40, 640, 560)
+    scroll = _Acc("scroll pane", width=600, height=484)
+    _place_row(scroll, 100, 100, 600, 484)
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * (rows - 1)))
+        place(head)
+        return True
+
+    bar.on_value = on_value
+    app = table.get_application()
+    window.get_application = lambda: app
+    scroll.get_application = lambda: app
+    bar.get_application = lambda: app
+    _adopt(scroll, table, bar)
+    _adopt(window, scroll)
+    return window, table, state, place, bar
+
+
+def _found_scrolls(text: str) -> int:
+    return int(text.split(" scroll", 1)[0].removeprefix("found after "))
+
+
+def test_scrolled_gtk_tree_lists_the_painted_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic 300-row GTK tree, not a live window.
+
+    At the top the painted run is ROW-00000 through ROW-00019. After the
+    view moves to row 281, those cells are past child 250 and the rows
+    that were on screen are at the GTK sentinel. The snapshot lists the
+    painted run, including both columns, and does not drop the tail under
+    the dense child cap.
+    """
+    window, _table, _state, place = _gtk_tree_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    top = driver.snapshot(Scope.WINDOW, "treeprobe")
+    titles = _gtk_row_titles(top)
+    assert titles[0] == "ROW-00000"
+    assert "ROW-00019" in titles
+    assert "ROW-00020" not in titles
+    assert "val0" in [el.title for el in top.elements]
+    assert "Name" in [el.title for el in top.elements]
+    _assert_no_elision(top)
+    assert observe.interactive_count(top) > 0
+    place(281)
+    painted = driver.snapshot(Scope.WINDOW, "treeprobe")
+    late = _gtk_row_titles(painted)
+    assert "ROW-00281" in late
+    assert "ROW-00293" in late
+    assert "ROW-00299" in late
+    assert "ROW-00000" not in late
+    assert "val293" in [el.title for el in painted.elements]
+    _assert_no_elision(painted)
+    assert observe.interactive_count(painted) > 0
+    from a11y_computer_use import server
+
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    text = runtime.desktop_snapshot("treeprobe")
+    assert "ROW-00293" in text
+    assert "custom-drawn" not in text
+
+
+def test_find_reaches_a_gtk_tree_row_that_is_off_screen(fake_atspi, monkeypatch) -> None:
+    """Synthetic 300-row GTK tree, not a live window.
+
+    ROW-00293 is off screen at the top. ``find`` reads it through the Table
+    interface, scrolls it into view, and returns the on-screen cell.
+    ``scroll_to_find`` matches that cell once it is already painted, and a
+    name the table does not have does not move the view.
+    """
+    from a11y_computer_use import server
+
+    window, _table, state, place = _gtk_tree_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    opening = _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    assert "ROW-00000" in opening
+    assert "ROW-00293" not in opening
+    missed = runtime.find("treeprobe", text="ROW-00999")
+    assert "no elements match" in missed
+    assert state["head"] == 0
+    found = runtime.find("treeprobe", text="row-00293")
+    assert "ROW-00293" in found
+    assert "no elements match" not in found
+    assert state["head"] == 293
+    assert "ROW-00293" in _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    place(281)
+    landed = runtime.scroll_to_find("treeprobe", text="ROW-00293", max_scrolls=0)
+    assert landed.startswith("found after 0 scroll")
+    assert "ROW-00293" in landed
+
+
+def test_find_scrolls_a_gtk_tree_with_the_scrollbar_when_scroll_to_is_unsupported(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic tree. GTK ``scroll_to`` returns false, including on screen.
+
+    The vertical bar is a pixel Value. ``find`` sets it from the row index
+    and the painted run then contains the name. Not a live window.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _gtk_tree_page()
+    for child in table.children:
+        if child.component is not None:
+            child.component.scroll_to = lambda *_args, **_kwargs: False
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * 299))
+        place(max(0, min(head, 299)))
+        return True
+
+    bar.on_value = on_value
+    scroll = window.children[0]
+    _adopt(scroll, table, bar)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text="ROW-00293")
+    assert "ROW-00293" in found
+    assert "no elements match" not in found
+    assert state["head"] == 293
+    assert bar.value > 5000
+
+
+def _large_gtk_tree(*, rows: int = 10000, cols: int = 3, expose_table: bool = True):
+    """Synthetic GTK tree of ``rows``. Not a live window.
+
+    Cells are built when the Table interface or the child list asks for
+    them. Off-screen cells sit at the GTK sentinel. ``expose_table`` false
+    makes ``get_accessible_at`` return None so the child list is the only
+    way to name a deep row.
+    """
+    state = {"head": 0, "shown": set()}
+    sentinel = -2147483648
+    titles = ("Name", "Payload", "Index")
+    headers = [
+        _Acc("table column header", name=titles[col], width=180, height=24)
+        for col in range(cols)
+    ]
+    action = _NS(get_n_actions=lambda: 1, get_action_name=lambda _index: "activate")
+    table = _Acc("table", name="Rows", width=600, height=484)
+    _bind_gtk_app(table)
+    cells: dict[tuple[int, int], _Acc] = {}
+
+    def cell_name(row: int, col: int) -> str:
+        if col == 0:
+            return f"ROW-{row:05d}"
+        if col == 1:
+            return f"payload-{row}"
+        return str(row)
+
+    def cell(row: int, col: int) -> _Acc:
+        key = (row, col)
+        found = cells.get(key)
+        if found is not None:
+            return found
+        acc = _Acc("table cell", name=cell_name(row, col), width=180, height=23)
+        acc.get_action_iface = lambda action=action: action
+        acc.get_index_in_parent = lambda row=row, col=col: cols + row * cols + col
+        acc.parent = table
+        acc.component.scroll_to = lambda *_args, **_kwargs: False
+        _place_row(acc, sentinel, sentinel, 180, 23)
+        cells[key] = acc
+        return acc
+
+    def place(head: int) -> None:
+        previous = set(state["shown"])
+        state["head"] = head
+        now: set[tuple[int, int]] = set()
+        for col, header in enumerate(headers):
+            _place_row(header, 110 + col * 200, 100, 180, 24)
+        for row in range(head, min(rows, head + 20)):
+            for col in range(cols):
+                now.add((row, col))
+                _place_row(
+                    cell(row, col), 110 + col * 200, 124 + (row - head) * 23, 180, 23,
+                )
+        for key in previous - now:
+            acc = cells.get(key)
+            if acc is not None:
+                _place_row(acc, sentinel, sentinel, 180, 23)
+        state["shown"] = now
+
+    def at_point(_x, y, _coord):
+        y = int(y)
+        if y < 124:
+            return headers[0]
+        slot = (y - 124) // 23
+        if slot < 0 or slot >= 20:
+            return None
+        row = state["head"] + int(slot)
+        if row < 0 or row >= rows:
+            return None
+        return cell(row, 0)
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: rows
+    table.get_n_columns = lambda: cols
+
+    def accessible_at(row, col):
+        if not expose_table or row < 0 or row >= rows or col < 0 or col >= cols:
+            return None
+        return cell(row, col)
+
+    table.get_accessible_at = accessible_at
+    table.get_column_header = lambda col: headers[col] if 0 <= col < cols else None
+
+    def row_at_index(index: int) -> int:
+        if index < cols:
+            return -1
+        return (index - cols) // cols
+
+    table.get_row_at_index = row_at_index
+    ordered = list(headers)
+    if not expose_table:
+        for row in range(20):
+            for col in range(cols):
+                ordered.append(cell(row, col))
+        deep = min(rows - 1, 5000)
+        for col in range(cols):
+            ordered.append(cell(deep, col))
+        end = rows - 1
+        if end != deep:
+            for col in range(cols):
+                ordered.append(cell(end, col))
+    for index, header in enumerate(headers):
+        header.get_index_in_parent = lambda index=index: index
+    _adopt(table, *ordered)
+    place(0)
+    _place_row(table, 100, 100, 600, 484)
+    window = _Acc("frame", name="TreeProbe", width=640, height=560)
+    _place_row(window, 80, 40, 640, 560)
+    scroll = _Acc("scroll pane", width=600, height=484)
+    _place_row(scroll, 100, 100, 600, 484)
+    _bind_gtk_app(window)
+    _bind_gtk_app(scroll)
+    app = table.get_application()
+    window.get_application = lambda: app
+    scroll.get_application = lambda: app
+    _adopt(scroll, table)
+    _adopt(window, scroll)
+    return window, table, state, place
+
+
+def test_find_reports_an_offscreen_cell_past_the_old_seek_window(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 10k-row GTK tree, not a live window.
+
+    ``scroll_to`` is unsupported and there is no bar, so the cell stays at
+    the sentinel. ``find`` still names it, with no bounds and an off-screen
+    note. The view does not move, and a missing name does not invent a cell.
+    """
+    import time
+
+    from a11y_computer_use import server
+
+    window, _table, state, _place = _large_gtk_tree()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    opening = _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    assert "ROW-00000" in opening
+    assert "ROW-05000" not in opening
+    assert "ROW-09999" not in opening
+    missed = runtime.find("treeprobe", text="ROW-99999")
+    assert "no elements match" in missed
+    assert state["head"] == 0
+    found = runtime.find("treeprobe", text="ROW-05000")
+    assert "no elements match" not in found
+    assert "ROW-05000" in found
+    assert "off-screen" in found
+    assert state["head"] == 0
+    shot = runtime._current
+    cell = next(el for el in shot.elements if el.title == "ROW-05000")
+    assert cell.role == "AXCell"
+    assert cell.bounds is None
+    end = runtime.find("treeprobe", text="ROW-09999")
+    assert "off-screen" in end
+    assert "ROW-09999" in end
+    assert state["head"] == 0
+    end_cell = next(el for el in runtime._current.elements if el.title == "ROW-09999")
+    assert end_cell.bounds is None
+
+
+def test_find_scrolls_a_10k_gtk_row_when_the_bar_can_reach_it(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 10k-row tree. The bar fraction, not a fabricated box, reveals the cell.
+
+    Row 5000 is past the old 4096-row seek window. Not a live window.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _large_gtk_tree()
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * 9999))
+        place(max(0, min(head, 9999)))
+        return True
+
+    bar.on_value = on_value
+    scroll = window.children[0]
+    _adopt(scroll, table, bar)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text="ROW-05000")
+    assert "ROW-05000" in found
+    assert "no elements match" not in found
+    assert "off-screen" not in found
+    assert state["head"] == 5000
+    cell = next(el for el in runtime._current.elements if el.title == "ROW-05000")
+    assert cell.bounds is not None
+    assert cell.bounds.x >= 0 and cell.bounds.y >= 0
+    assert cell.bounds.width > 1 and cell.bounds.height > 1
+
+
+def test_find_names_an_offscreen_child_when_the_table_interface_has_no_cell(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic tree. ``get_accessible_at`` is empty. The child list still has the row.
+
+    The deep cell is not showing. ``find`` reports it off screen and does
+    not give it a box. Not a live window.
+    """
+    import time
+
+    from a11y_computer_use import server
+
+    window, _table, state, _place = _large_gtk_tree(expose_table=False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text="ROW-05000")
+    assert "no elements match" not in found
+    assert "ROW-05000" in found
+    assert "off-screen" in found
+    assert state["head"] == 0
+    cell = next(el for el in runtime._current.elements if el.title == "ROW-05000")
+    assert cell.bounds is None
+    end = runtime.find("treeprobe", text="ROW-09999")
+    assert "ROW-09999" in end
+    assert "off-screen" in end
+
+
+def _found_scrolls(text: str) -> int:
+    return int(text.split(" scroll", 1)[0].removeprefix("found after "))
+
+
+def _attach_large_tree_bar(window, table, place, *, rows: int = 10000):
+    """The vertical bar #440 uses. The default tree has none, so find stays off screen."""
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * (rows - 1)))
+        place(max(0, min(head, rows - 1)))
+        return True
+
+    bar.on_value = on_value
+    app = table.get_application()
+    bar.get_application = lambda: app
+    scroll = window.children[0]
+    _adopt(scroll, table, bar)
+    place(0)
+    return bar
+
+
+def test_scroll_to_find_reaches_a_10k_gtk_row_inside_the_scroll_budget(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 10000×3 GTK tree, not a live window.
+
+    Five wheel lines move about a dozen rows, so 50 of them stay near row
+    650. The table row index sets the vertical bar once. ROW-05000 and
+    ROW-09999 are on screen inside that budget, and a line wheel is not sent.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _large_gtk_tree()
+    _attach_large_tree_bar(window, table, place)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    wheels = {"n": 0}
+    keys = {"n": 0}
+    original = driver.scroll
+
+    def counting_scroll(*args, **kwargs):
+        wheels["n"] += 1
+        return original(*args, **kwargs)
+
+    driver.scroll = counting_scroll
+    driver.key_chord = lambda *_args, **_kwargs: keys.__setitem__("n", keys["n"] + 1)
+    driver.type_text = lambda *_args, **_kwargs: keys.__setitem__("n", keys["n"] + 1)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    opening = runtime.scroll_to_find("treeprobe", text="ROW-00000", max_scrolls=50)
+    assert opening.startswith("found after 0 scroll"), opening
+    assert state["head"] == 0
+    found = runtime.scroll_to_find("treeprobe", text="ROW-05000", max_scrolls=50)
+    assert found.startswith("found after "), found
+    assert "not found" not in found
+    assert "ROW-05000" in found
+    assert _found_scrolls(found) <= 6
+    assert state["head"] == 5000
+    shot = driver.snapshot(Scope.WINDOW, "treeprobe")
+    cell = next(
+        el for el in shot.elements
+        if el.title == "ROW-05000" and el.bounds is not None and el.bounds.y >= 0
+    )
+    assert cell.bounds.width > 1 and cell.bounds.height > 1
+    assert cell.bounds.x >= 0
+    far = runtime.scroll_to_find("treeprobe", text="ROW-09999", max_scrolls=50)
+    assert far.startswith("found after "), far
+    assert "not found" not in far
+    assert "ROW-09999" in far
+    assert _found_scrolls(far) <= 6
+    assert state["head"] >= 9980
+    assert "ROW-09999" in _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    assert wheels["n"] == 0
+    assert keys["n"] == 0
+
+
+def test_gtk_viewport_page_moves_a_large_tree_by_painted_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic tree. One viewport step is the painted run, not five lines.
+
+    The scroll anchor is the scroll pane. A Chromium table is left alone.
+    Not a live window.
+    """
+    window, table, state, place = _large_gtk_tree()
+    bar = _attach_large_tree_bar(window, table, place)
+    _wire_gtk_tree(monkeypatch, window)
+    scroll = window.children[0]
+    assert scroll.get_role_name() == "scroll pane"
+    assert _atspi.scroll_gtk_viewport_page(scroll, 1) is True
+    assert 15 <= state["head"] <= 25
+    assert bar.value > 0
+    chrome = _Acc("table", name="chrome")
+    app = _Acc("application", name="chrome")
+    app.get_toolkit_name = lambda: ""
+    chrome.get_application = lambda: app
+    assert _atspi.scroll_gtk_viewport_page(chrome, 1) is False
+    assert _atspi.reveal_gtk_named_cell(chrome, "ROW-05000") is None
+
+
+def test_short_gtk_tree_keeps_the_index_walk(fake_atspi, monkeypatch) -> None:
+    """Synthetic 5-row tree, not a live window. The visible-span walk is not used."""
+    table = _Acc("table", name="Rows", width=200, height=140)
+    _bind_gtk_app(table)
+    table.get_n_rows = lambda: 5
+    table.get_n_columns = lambda: 1
+    rows = []
+    for index, name in enumerate(("Row A", "Row B", "Row C", "Row D", "Row E")):
+        row = _Acc("table cell", name=name, width=180, height=20)
+        _place_row(row, 10, 20 + index * 20, 180, 20)
+        rows.append(row)
+    _adopt(table, *rows)
+    _place_row(table, 10, 10, 200, 140)
+
+    def boom(*_args):
+        raise AssertionError("a short tree was hit-tested")
+
+    table.component.get_accessible_at_point = boom
+    window = _Acc("frame", name="short", width=400, height=300)
+    _place_row(window, 0, 0, 400, 300)
+    _adopt(window, table)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    titles = [el.title for el in driver.snapshot(Scope.WINDOW, "short").elements]
+    for name in ("Row A", "Row B", "Row C", "Row D", "Row E"):
+        assert name in titles
+
+
+def test_header_only_table_still_adds_its_body_cells(fake_atspi) -> None:
+    """Synthetic file list. No on-screen span, so the body still comes from the Table."""
+    header = _Acc("table column header", name="Name")
+    cells = [_Acc("table cell", name=f"file-{index}") for index in range(40)]
+    table = _Acc("table", name="Files")
+    _bind_gtk_app(table)
+    table.get_n_rows = lambda: 40
+    table.get_n_columns = lambda: 1
+    table.get_accessible_at = lambda row, _col: cells[row]
+    _adopt(table, header)
+    names = [kid.get_name() for kid in _atspi.ATSPIAccessor().children(table)]
+    assert names[0] == "Name"
+    assert "file-0" in names
+    assert "file-39" in names
+
+
+def test_shared_java_column_headers_keep_each_columns_name(fake_atspi, monkeypatch) -> None:
+    """Synthetic headers that share one Java ATK name. Not a live table.
+
+    ``get_column_header`` rewrites the name on every object already
+    returned. The snapshot still shows ID, Item, and Qty at their own x,
+    and ``find`` hits Item. Reading the raw objects afterwards yields Qty.
+    """
+    from a11y_computer_use import server
+
+    shared = {"name": ""}
+    columns = ("ID", "Item", "Qty")
+    xs = (46, 263, 481)
+    headers = []
+    for x in xs:
+        header = _Acc("table column header", name="unset", width=200, height=24)
+        header.get_name = lambda shared=shared: shared["name"]
+        headers.append(header)
+    app = _Acc("application", name="swingprobe")
+    app.get_toolkit_name = lambda: "JAVA"
+    table = _Acc("table", name="Rows", width=640, height=400)
+    table.get_application = lambda: app
+    cells = []
+    for col in range(3):
+        cell = _Acc("table cell", name=f"cell-{col}", width=200, height=22)
+        cell.get_index_in_parent = lambda index=3 + col: index
+        cell.get_application = lambda: app
+        cells.append(cell)
+    _adopt(table, *headers, *cells)
+    for col, header in enumerate(headers):
+        _place_row(header, xs[col], 80, 200, 24)
+        header.get_application = lambda: app
+    for col, cell in enumerate(cells):
+        _place_row(cell, xs[col], 110, 200, 22)
+    _place_row(table, 40, 70, 640, 400)
+
+    def column_header(col):
+        shared["name"] = columns[col]
+        return headers[col]
+
+    table.get_column_header = column_header
+    table.get_n_rows = lambda: 30
+    table.get_n_columns = lambda: 3
+    table.get_accessible_at = lambda row, col: cells[col] if row == 0 else None
+    table.get_row_at_index = lambda index: -1 if index < 3 else 0
+    table.component.get_accessible_at_point = lambda _x, _y, _coord: cells[0]
+    window = _Acc("frame", name="SwingHeaders", width=720, height=500)
+    _place_row(window, 20, 40, 720, 500)
+    window.get_application = lambda: app
+    _adopt(window, table)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    snap = driver.snapshot(Scope.WINDOW, "swingprobe")
+    titles = [el.title for el in snap.elements]
+    assert titles.count("ID") == 1
+    assert titles.count("Item") == 1
+    assert titles.count("Qty") == 1
+    by_title = {el.title: el for el in snap.elements if el.title in columns}
+    assert by_title["ID"].bounds.x == 46
+    assert by_title["Item"].bounds.x == 263
+    assert by_title["Qty"].bounds.x == 481
+    assert all(header.get_name() == "Qty" for header in headers)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    found = _bare_runtime(driver).find("swingprobe", text="Item")
+    assert "no elements match" not in found
+    assert "Item" in found
+def _bind_java_app(node: _Acc) -> _Acc:
+    """Toolkit ``JAVA`` so the table takes the large-table walk and not Qt."""
+    app = getattr(node, "_java_app", None)
+    if app is None:
+        app = _Acc("application", name="swingprobe")
+        app.get_toolkit_name = lambda: "JAVA"
+        node._java_app = app
+    node.get_application = lambda app=app: app
+    return app
+
+
+def _java_table_page():
+    """Synthetic 200×3 Swing table. Not a live window.
+
+    The table box runs to the bottom of a 1280×800 screen. The scroll pane
+    ends at y=616 and the window at y=635. Rows below the pane keep screen
+    coordinates and omit SHOWING. The item text lives on a child label.
+    """
+    state = {"head": 0}
+    headers = [
+        _Acc("table column header", name=name, width=170, height=24, states={"SHOWING", "VISIBLE"})
+        for name in ("ID", "Item", "Qty")
+    ]
+    cells: list[list[tuple[_Acc, _Acc]]] = []
+    for row in range(200):
+        pair = []
+        for col, text in enumerate((str(row), f"ROW-{row:03d}", str(row))):
+            label = _Acc("label", name=text, width=170, height=22)
+            cell = _Acc("table cell", name="", width=170, height=22)
+            cell.get_index_in_parent = lambda index=3 + row * 3 + col: index
+            _adopt(cell, label)
+            pair.append((cell, label))
+        cells.append(pair)
+    table = _Acc("table", name="Rows", width=540, height=720)
+    app = _bind_java_app(table)
+    ordered: list[_Acc] = list(headers)
+    for row in cells:
+        for cell, label in row:
+            ordered.append(cell)
+            _bind_java_app(cell)
+            _bind_java_app(label)
+            cell._java_app = table._java_app
+            label._java_app = table._java_app
+            cell.get_application = lambda app=app: app
+            label.get_application = lambda app=app: app
+    for header in headers:
+        _bind_java_app(header)
+        header._java_app = table._java_app
+        header.get_application = lambda app=app: app
+    _adopt(table, *ordered)
+
+    def place(head: int) -> None:
+        state["head"] = head
+        for col, header in enumerate(headers):
+            _place_row(header, 46 + col * 180, 80, 170, 24)
+        for row in range(200):
+            y = 104 + (row - head) * 22
+            showing = 80 <= y < 616 and y + 22 > 80
+            states = {"ENABLED", "VISIBLE", "SENSITIVE"}
+            if showing:
+                states.add("SHOWING")
+            for col, (cell, label) in enumerate(cells[row]):
+                _place_row(cell, 46 + col * 180, y, 170, 22)
+                _place_row(label, 46 + col * 180, y, 170, 22)
+                cell.states = set(states)
+                label.states = set(states)
+
+    def scroll_to(_scroll_type, row: int) -> bool:
+        place(row)
+        return True
+
+    for row in range(200):
+        for cell, _label in cells[row]:
+            cell.component.scroll_to = lambda _scroll_type, row=row: scroll_to(_scroll_type, row)
+    place(0)
+    _place_row(table, 46, 80, 540, 720)
+
+    def at_point(_x, y, _coord):
+        y = int(y)
+        if y < 104:
+            return headers[0]
+        row = state["head"] + (y - 104) // 22
+        if row < 0 or row >= 200:
+            return None
+        return cells[row][0][0]
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: 200
+    table.get_n_columns = lambda: 3
+    table.get_accessible_at = lambda row, col: cells[row][col][0]
+    table.get_column_header = lambda col: headers[col]
+    table.get_row_at_index = lambda index: -1 if index < 3 else (index - 3) // 3
+    window = _Acc("frame", name="SwingTable", width=640, height=595)
+    _place_row(window, 20, 40, 640, 595)
+    scroll = _Acc("scroll pane", width=560, height=536)
+    _place_row(scroll, 40, 80, 560, 536)
+    for node in (window, scroll):
+        node._java_app = table._java_app
+        node.get_application = lambda app=app: app
+    _adopt(scroll, table)
+    _adopt(window, scroll)
+    return window, table, state, place, cells
+
+
+def _swing_row_titles(snap) -> list[str]:
+    return [el.title for el in snap.elements if el.title.startswith("ROW-")]
+
+
+def test_swing_table_lists_only_rows_inside_the_viewport(fake_atspi, monkeypatch) -> None:
+    """Synthetic Swing table, not a live window.
+
+    Rows below the scroll pane still overlap the screen. They are not
+    listed, and their coordinates are not published.
+    """
+    window, _table, _state, _place, _cells = _java_table_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    snap = driver.snapshot(Scope.WINDOW, "swingprobe")
+    titles = _swing_row_titles(snap)
+    assert "ROW-000" in titles
+    assert "ROW-023" in titles
+    assert "ROW-024" not in titles
+    assert "ROW-030" not in titles
+    assert "ROW-150" not in titles
+    names = [el.title for el in snap.elements]
+    assert names.count("ID") == 1
+    assert "Item" in names
+    for el in snap.elements:
+        if not el.title.startswith("ROW-") or el.bounds is None:
+            continue
+        assert el.bounds.y < 616, (el.title, el.bounds)
+        assert el.bounds.y + el.bounds.height <= 800
+
+
+def test_find_scrolls_a_swing_row_that_is_below_the_viewport(fake_atspi, monkeypatch) -> None:
+    """Synthetic Swing table. The item name is on the cell's child.
+
+    ``find`` reaches ROW-030, which overlaps the screen below the pane,
+    and ROW-150, which is off the screen. Both come back inside the
+    viewport. A missing name does not move the view.
+    """
+    from a11y_computer_use import server
+
+    window, _table, state, _place, _cells = _java_table_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    missed = runtime.find("swingprobe", text="ROW-999")
+    assert "no elements match" in missed
+    assert state["head"] == 0
+    found = runtime.find("swingprobe", text="ROW-030")
+    assert "no elements match" not in found
+    assert "ROW-030" in found
+    assert state["head"] == 30
+    shown = next(el for el in runtime._current.elements if el.title == "ROW-030")
+    assert shown.bounds is not None and shown.bounds.y < 616
+    far = runtime.find("swingprobe", text="ROW-150")
+    assert "no elements match" not in far
+    assert "ROW-150" in far
+    assert state["head"] == 150
+    landed = next(el for el in runtime._current.elements if el.title == "ROW-150")
+    assert landed.bounds is not None and landed.bounds.y < 616
+
+
+def test_find_does_not_publish_a_swing_row_it_cannot_scroll(fake_atspi, monkeypatch) -> None:
+    """Synthetic Swing table. A failed scroll does not invent a box."""
+    from a11y_computer_use import server
+
+    window, _table, state, _place, cells = _java_table_page()
+    for row in cells:
+        for cell, _label in row:
+            cell.component.scroll_to = lambda *_args, **_kwargs: False
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("swingprobe", text="ROW-150")
+    assert "no elements match" in found
+    assert state["head"] == 0
+    assert not any(el.title == "ROW-150" for el in runtime._current.elements)
+
+
+def _record_clicks(monkeypatch) -> list:
+    clicks: list[tuple] = []
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(
+        _linux_input, "click",
+        lambda x, y, *, button="left", count=1: clicks.append((int(x), int(y), count)),
+    )
+    monkeypatch.setattr(LinuxDriver, "_pointer", lambda self, x, y: (int(x), int(y)))
+    monkeypatch.setattr(LinuxDriver, "_note_pointer", lambda self, x, y: None)
+    return clicks
+
+
+def test_click_scrolls_an_unpainted_swing_cell_and_uses_the_new_center(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic Swing cell. The published box is below the window.
+
+    The click scrolls that same cell and lands on its new center. A cell
+    that is already painted keeps the published point. A point target is
+    those pixels.
+    """
+    window, _table, state, _place, cells = _java_table_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    clicks = _record_clicks(monkeypatch)
+    painted = cells[0][1][1]
+    published = Element(
+        "e0", "AXStaticText", "ROW-000", "ROW-000",
+        Bounds(0, 10, 20, 30, 40), "snap-painted", clickable=True,
+    )
+    observe._register_epoch(published.snapshot_id, {}, {"e0": painted})
+    driver.click(published)
+    assert clicks[-1] == (25, 40, 1)
+    assert state["head"] == 0
+
+    driver.click(Point(0, 400, 700))
+    assert clicks[-1] == (400, 700, 1)
+    assert state["head"] == 0
+
+    label = cells[30][1][1]
+    element = Element(
+        "e30", "AXStaticText", "ROW-030", "ROW-030",
+        Bounds(0, 226, 764, 170, 22), "snap-swing", clickable=True,
+    )
+    observe._register_epoch(element.snapshot_id, {}, {"e30": label})
+    driver.click(element)
+    assert state["head"] == 30
+    x, y, _count = clicks[-1]
+    assert y < 616
+    assert abs(x - (226 + 85)) <= 1
+    assert abs(y - (104 + 11)) <= 1
+
+
+def test_click_refuses_an_unpainted_swing_cell_that_cannot_be_scrolled(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic Swing cell. No pointer event is sent, and no center is invented."""
+    _window, _table, state, _place, cells = _java_table_page()
+    for row in cells:
+        for cell, _label in row:
+            cell.component.scroll_to = lambda *_args, **_kwargs: False
+    driver = _wire_gtk_tree(monkeypatch, _window)
+    clicks = _record_clicks(monkeypatch)
+    label = cells[30][1][1]
+    element = Element(
+        "e30", "AXStaticText", "ROW-030", "ROW-030",
+        Bounds(0, 226, 764, 170, 22), "snap-hidden", clickable=True,
+    )
+    observe._register_epoch(element.snapshot_id, {}, {"e30": label})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(element)
+    assert exc.value.code is ErrorCode.NOT_VISIBLE
+    assert exc.value.detail["reason"] == "not_visible"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "clicked" not in exc.value.message
+    assert "not sent" in exc.value.message
+    assert clicks == []
+    assert state["head"] == 0
+
+
+def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> None:
+    """Synthetic Qt grid, not a live Qt window. The GTK span walk is not used."""
+    table = _Acc("table", name="grid", width=200, height=400)
+    app = _Acc("application", name="qtprobe")
+    app.get_toolkit_name = lambda: "Qt"
+    table.get_application = lambda: app
+    table.get_n_rows = lambda: 40
+    table.get_n_columns = lambda: 1
+    rows = []
+    for index in range(40):
+        row = _Acc("table cell", name=f"R{index}", width=180, height=16)
+        _place_row(row, 8, 8 + index * 16, 180, 16)
+        rows.append(row)
+    _adopt(table, *rows)
+    _place_row(table, 8, 8, 200, 400)
+
+    def boom(*_args):
+        raise AssertionError("a Qt table was hit-tested as a GTK tree")
+
+    table.component.get_accessible_at_point = boom
+    window = _Acc("frame", name="qtprobe", width=400, height=700)
+    _place_row(window, 0, 0, 400, 700)
+    window.get_application = lambda: app
+    _adopt(window, table)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    titles = [el.title for el in driver.snapshot(Scope.WINDOW, "qtprobe").elements]
+    assert "R0" in titles
+    assert "R11" in titles
+
+
+class _WindowNode:
+    """AT-SPI stand-in for showing_toplevels. No bus."""
+
+    def __init__(self, role, name="", states=(), children=()):
+        self.role = role
+        self.name = name
+        self.states = set(states)
+        self.children = list(children)
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+    def get_application(self):
+        node = self
+        while node.parent is not None:
+            node = node.parent
+        return node
+
+    def get_state_set(self):
+        return _NS(names=set(self.states))
+
+
+def test_showing_toplevels_lists_showing_windows_active_first() -> None:
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    hidden = _WindowNode("frame", "Minimized")
+    menu = _WindowNode("menu", "File", states={"SHOWING"})
+    _WindowNode("application", "mousepad", children=[dialog, editor, hidden, menu])
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Editor", "Preferences"]
+    only = _WindowNode(
+        "application", "solo",
+        children=[_WindowNode("frame", "Only", states={"SHOWING", "ACTIVE"})],
+    )
+    assert [node.name for node in _atspi.showing_toplevels(only)] == ["Only"]
+
+
+def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
+    dialog = _WindowNode("dialog", "Form", states={"SHOWING"})
+    popup = _WindowNode("window", "", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "app", children=[popup, dialog])
+
+    def owns(node):
+        return node if node is popup else None
+
+    monkeypatch.setattr(_atspi, "_combo_owning_popup", owns)
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Form"]
+
+
+def test_snapshot_window_list_skips_chrome_cache_frames() -> None:
+    """A find bar and an empty cached frame are not sibling windows.
+
+    Chrome keeps both beside the page, and both are SHOWING. Listing them
+    made the snapshot an untitled group with no rows, so scroll_to_find
+    stopped before the wheel. The named page is the only window. A GTK
+    dialog beside its editor stays.
+    """
+    filler = _WindowNode("panel", "")
+    panel = _WindowNode("panel", "", children=[filler])
+    empty = _WindowNode("frame", "", states={"SHOWING", "ACTIVE"}, children=[panel])
+    page = _WindowNode("frame", "rowtable - Google Chrome", states={"SHOWING"})
+    bar = _WindowNode("frame", "Find in page", states={"SHOWING"})
+    _WindowNode("application", "Google Chrome", children=[empty, bar, page])
+    assert [node.name for node in _atspi.snapshot_window_list(empty)] == [
+        "rowtable - Google Chrome",
+    ]
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "mousepad", children=[dialog, editor])
+    assert [node.name for node in _atspi.snapshot_window_list(dialog)] == [
+        "Editor", "Preferences",
+    ]
+
+
+def test_raise_skips_a_window_that_is_already_the_ewmh_active_one(monkeypatch) -> None:
+    driver = LinuxDriver()
+    raised: list[int] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        _atspi, "toplevel_raise_target",
+        lambda node: (False, "cuatypeform", 9, (10.0, 20.0, 800.0, 600.0)),
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.window_id_for_toplevel",
+        lambda **_kwargs: 42,
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 42, "app": "chrome", "pid": 9, "title": "cuatypeform"},
+    )
+    monkeypatch.setattr(driver, "raise_window", raised.append)
+    driver._raise_handle_window(object())
+    assert raised == []
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 7, "app": "mousepad", "pid": 3, "title": "Editor"},
+    )
+    driver._raise_handle_window(object())
+    assert raised == [42]
+
+
+def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    rows = [
+        {"window_id": 1, "title": "Editor", "pid": 9, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 400, "height": 300}},
+        {"window_id": 2, "title": "Preferences", "pid": 9, "on_screen": True,
+         "bounds": {"x": 420, "y": 40, "width": 280, "height": 200}},
+        {"window_id": 3, "title": "Editor", "pid": 4, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 400, "height": 300}},
+        {"window_id": 4, "title": "Hidden", "pid": 9, "on_screen": False, "bounds": None},
+    ]
+    monkeypatch.setattr(_linux_system, "windows", lambda: rows)
+    assert _linux_system.window_id_for_toplevel(
+        title="Preferences", pid=9, extents=(430, 50, 100, 80),
+    ) == 2
+    assert _linux_system.window_id_for_toplevel(
+        title="", pid=9, extents=(10, 10, 100, 80),
+    ) == 1
+    assert _linux_system.window_id_for_toplevel(
+        title="Missing", pid=9, extents=None,
+    ) is None
+
+
+def _outline_cell(name: str, actions: list[str]) -> _Acc:
+    cell = _Acc(
+        "table cell", name=name, width=180, height=21,
+        states=("SHOWING", "VISIBLE", "SELECTABLE", "ENABLED", "SENSITIVE"),
+    )
+    _place_row(cell, 48, 100, 180, 21)
+    cell.actions = list(actions)
+    if actions:
+        cell.get_action_iface = lambda cell=cell: cell
+        cell.get_n_actions = lambda cell=cell: len(cell.actions)
+        cell.get_action_name = lambda index, cell=cell: cell.actions[index]
+    return cell
+
+
+def _outline_window(*cells: _Acc, role: str = "tree table") -> _Acc:
+    """A GTK outline. Not a live Geany window."""
+    tree = _Acc(role, name="Symbols", width=220, height=320)
+    _bind_gtk_app(tree)
+    _place_row(tree, 40, 80, 220, 320)
+
+    def select_child(index: int) -> bool:
+        child = tree.children[index]
+        child.states.add("SELECTED")
+        return True
+
+    tree.select_child = select_child
+    tree.get_selection_iface = lambda: tree
+    _adopt(tree, *cells)
+    window = _Acc("frame", name="outline", width=640, height=480)
+    _place_row(window, 20, 20, 640, 480)
+    app = tree.get_application()
+    window.get_application = lambda: app
+    for cell in cells:
+        cell.get_application = lambda app=app: app
+    _adopt(window, tree)
+    return window
+
+
+def test_gtk_outline_row_says_it_activates_on_double_click(fake_atspi) -> None:
+    """Synthetic GTK tree table. Not a live Geany window.
+
+    A cell whose actions are expand, edit, then activate only selects on a
+    single click. The snapshot says the row activates on double-click. A
+    cell whose own action is click, and a cell in a plain table, do not.
+    The table check does not walk that table's children.
+    """
+    symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
+    bare = _outline_cell("plain_row", [])
+    clicking = _outline_cell("opens_on_click", ["click"])
+    _outline_window(symbol, bare, clicking)
+    assert _atspi.outline_double_click_note(symbol) == "activates on double-click"
+    assert _atspi.outline_double_click_note(bare) == "activates on double-click"
+    assert _atspi.outline_double_click_note(clicking) == ""
+    table = _Acc("table", name="grid")
+    _bind_gtk_app(table)
+    table.get_selection_iface = lambda: table
+    scanned: list[int] = []
+
+    def child_at(index, table=table):
+        scanned.append(index)
+        return table.children[index]
+
+    table.get_child_at_index = child_at
+    grid = _outline_cell("A1", [])
+    _adopt(table, grid)
+    grid.get_application = table.get_application
+    assert _atspi.outline_double_click_note(grid) == ""
+    assert scanned == []
+
+
+def test_click_on_an_outline_row_stays_a_single_click(
+    fake_atspi, monkeypatch, xtest_recorder, tmp_path
+) -> None:
+    """Synthetic GTK tree table. Not a live Geany window.
+
+    count=1 selects the row and says it activates on double-click. It does
+    not send a double-click and it does not run the activate action.
+    count=2 is the double-click the caller asked for.
+    """
+    from a11y_computer_use import observe, safety, server
+
+    events, _display = xtest_recorder
+    symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    named: list[str] = []
+    real_named = _atspi.do_named_action
+
+    def record(acc, name: str) -> bool:
+        named.append(name)
+        return real_named(acc, name)
+
+    monkeypatch.setattr(_atspi, "do_named_action", record)
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(shot.app or "outline", safety.Tier.FULL)
+    runtime = server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    runtime._current = shot
+    # count=2 is a real pointer click. The recheck hit-tests the desktop
+    # under this synthetic box, which is the runner's own terminal.
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
+    assert cell.note == "activates on double-click"
+    rendered = observe.render_matches(shot, (cell,))
+    assert "(activates on double-click)" in rendered
+    events.clear()
+    single = runtime.click(cell.ref)
+    assert "clicked" in single
+    assert "(activates on double-click)" in single
+    assert single.outcome == "partial"
+    assert single.evidence == "the row was selected and activates on double-click"
+    presses = [event for event in events if event[0] == _X_BPRESS]
+    assert len(presses) <= 1, events
+    assert named == []
+    events.clear()
+    named.clear()
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    runtime._current = shot
+    cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
+    double = runtime.click(cell.ref, count=2)
+    assert "clicked" in double
+    assert "(activates on double-click)" not in double
+    assert double.outcome != "partial"
+    assert double.evidence != "the row was selected and activates on double-click"
+    presses = [event for event in events if event[0] == _X_BPRESS]
+    assert len(presses) == 2, events
+    assert named == []
+
+
+def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake_atspi) -> None:
+    """Synthetic Java button. Not a live dialog.
+
+    DEFUNCT is gone on every toolkit. A Java state set that was reported
+    and does not include SHOWING is the disposed dialog button. A showing
+    Java button, and a GTK button that simply omits SHOWING, are not.
+    """
+    app = _Acc("application", name="java")
+    app.get_toolkit_name = lambda: "JAVA"
+    hidden = _Acc("push button", name="Yes", states={"ENABLED", "SENSITIVE", "VISIBLE"})
+    hidden.get_application = lambda: app
+    showing = _Acc("push button", name="Yes", states={"ENABLED", "SHOWING", "VISIBLE"})
+    showing.get_application = lambda: app
+    empty = _Acc("push button", name="Yes", states=())
+    empty.get_application = lambda: app
+    assert _atspi.target_vanished(hidden) is True
+    assert _atspi.target_vanished(showing) is False
+    assert _atspi.target_vanished(empty) is False
+    dead = _Acc("push button", name="Save", states={"DEFUNCT"})
+    assert _atspi.target_vanished(dead) is True
+    gtk = _Acc("push button", name="Save", states={"ENABLED"})
+    gtk_app = _Acc("application", name="gtk")
+    gtk_app.get_toolkit_name = lambda: "gtk"
+    gtk.get_application = lambda: gtk_app
+    assert _atspi.target_vanished(gtk) is False
+    cell = _Acc("table cell", name="ROW-030", states={"ENABLED", "VISIBLE"})
+    cell.get_application = lambda: app
+    assert _atspi.target_vanished(cell) is False
+
+
+
+@pytest.mark.parametrize("name", [
+    "xfce4-terminal", "gnome-terminal", "gnome-terminal-", "xterm", "konsole",
+    "/usr/bin/xfce4-terminal", "org.gnome.Terminal.desktop", "x-terminal-emulator",
+])
+def test_terminal_launch_exec_disabled_is_audited(monkeypatch, tmp_path, name) -> None:
+    """A FULL app grant cannot authorize shell execution through a terminal."""
+    import json
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "launch_app", lambda *_args, **_kwargs: pytest.fail("launched"))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(name, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", name)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["action"] == "appop" and row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+@pytest.mark.parametrize("operation", ["type", "set_value", "key", "cached_type"])
+def test_embedded_terminal_input_is_refused_and_redacted(
+    fake_atspi, monkeypatch, tmp_path, operation,
+) -> None:
+    """Native terminal ancestry survives AXTextArea mapping in an ordinary app."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    terminal = _Acc("terminal")
+    text = _Acc("text")
+    _adopt(_Acc("frame"), _adopt(terminal, text))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    focused = _Acc("text") if operation in {"set_value", "cached_type"} else text
+    if operation == "cached_type":
+        driver._focused_editable = text
+        monkeypatch.setattr(driver, "_verify_remembered_editable", lambda handle: "editor")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (focused, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    element = Element(
+        ref="e2", role="AXTextArea", title="", value=None, bounds=None,
+        snapshot_id="terminal-shot",
+    )
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
+    actions = {
+        "type": TypeText(text="touch /tmp/forbidden\n"),
+        "cached_type": TypeText(text="touch /tmp/forbidden\n"),
+        "set_value": TypeText(text="touch /tmp/forbidden\n"),
+        "key": KeyChord(chord="Return"),
+    }
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    action = actions[operation]
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(
+            action, "editor", lambda: pytest.fail("injected input"),
+            input_target=element if operation == "set_value" else None,
+        )
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert "forbidden" not in json.dumps(row)
+    # Explicit opt-in permits this path; a normal text area never needs it.
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, "editor", lambda: "allowed") == "allowed"
+    runtime.allow_exec = False
+    terminal.role = "text"
+    assert runtime._run_gated(action, "editor", lambda: "editor input") == "editor input"
+
+
+def test_terminal_focus_change_before_input_is_audited(fake_atspi, monkeypatch, tmp_path) -> None:
+    """A terminal appearing during the recheck cannot receive keyboard input."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import TypeText
+
+    field = _Acc("text")
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (field, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(
+            TypeText(text="command\n"), "editor", lambda: pytest.fail("injected input"),
+            recheck=lambda app: setattr(field, "role", "terminal"),
+        )
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_terminal_launch_alias_is_checked_after_resolution(monkeypatch, tmp_path) -> None:
+    """A launcher label is checked against the executable it would start."""
+    import json
+    from a11y_computer_use import safety, server
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda name: ("xterm", "Terminal", None))
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "Terminal")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["app"] == "xterm" and row["result"] == "exec_disabled"
+
+
+def test_terminal_observation_remains_available(monkeypatch, tmp_path) -> None:
+    """Execution permission does not gate read-only terminal observations."""
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import AppOp, AppVerb
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xterm", safety.Tier.READ)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "terminal_target", lambda *_args, **_kwargs: pytest.fail("read gate"))
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    assert runtime._run_gated(AppOp(verb=AppVerb.LIST), "xterm", lambda: "observed") == "observed"
+
+
+@pytest.mark.parametrize("chord", [None, "Return", "ctrl+v", "a"])
+def test_granted_terminal_window_requires_explicit_exec(monkeypatch, tmp_path, chord):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    driver = LinuxDriver()
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: "xfce4-terminal")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("Terminal", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    action = TypeText(text="command\n") if chord is None else KeyChord(chord=chord)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(action, "Terminal", lambda: pytest.fail("input reached terminal"))
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["metrics"]["security_violation"] == "exec_disabled"
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, "Terminal", lambda: "injected") == "injected"
+
+
+def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
+    terminal = tmp_path / "xfce4-terminal"
+    terminal.touch()
+    alias = tmp_path / "console-alias"
+    alias.symlink_to(terminal)
+    monkeypatch.setattr("shutil.which", lambda app: str(alias))
+    assert LinuxDriver().terminal_target("console-alias", launch=True)

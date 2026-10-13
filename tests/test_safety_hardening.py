@@ -402,6 +402,107 @@ def test_atspi_focused_secure_respects_the_node_bound(fake_atspi, monkeypatch) -
     assert _atspi.focused_secure("app", max_nodes=10_000) is None
 
 
+def test_focus_walk_skips_a_calc_sheet_and_still_sees_a_later_password(fake_atspi, monkeypatch) -> None:
+    """A closed menu bar plus a 2**31-cell sheet must not exhaust the probe.
+
+    The focused password is a sibling after the sheet. Indexing the sheet
+    would spend the child cap and report the walk exhausted.
+    """
+    class _Sheet(_FakeAcc):
+        def __init__(self):
+            super().__init__("table")
+            self.parent = _FakeAcc("spreadsheet")
+            self.indexed = 0
+
+        def get_child_count(self):
+            return 2**31 - 1
+
+        def get_child_at_index(self, _index):
+            self.indexed += 1
+            raise AssertionError("sheet cell indexed")
+
+        def get_parent(self):
+            return self.parent
+
+    items = [_FakeAcc("menu item") for _ in range(40)]
+    menus = [_FakeAcc("menu", children=list(items)) for _ in range(12)]
+    bar = _FakeAcc("menu bar", children=menus)
+    sheet = _Sheet()
+    password = _FakeAcc("password text", focused=True)
+    root = _FakeAcc("frame", children=[bar, sheet, password])
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    assert _atspi.focused_secure("app") is True
+    assert sheet.indexed == 0
+
+
+def test_calc_cell_editor_is_not_a_password_when_the_focus_walk_is_exhausted(
+    fake_atspi, monkeypatch
+) -> None:
+    """A truncated Calc walk classifies the cell editor and the selected cell.
+
+    The editor is a panel named Cell A1, not a password field. A password
+    the walk reaches is still refused. An exhausted walk with no editor and
+    no selected cell stays unknown, including when the app is not LibreOffice.
+    """
+
+    class _Named(_FakeAcc):
+        def __init__(self, role: str, name: str = "", **kwargs):
+            super().__init__(role, **kwargs)
+            self._name = name
+            self.parent = None
+
+        def get_name(self):
+            return self._name
+
+        def get_parent(self):
+            return self.parent
+
+    def wide():
+        return _FakeAcc("table", children=[_FakeAcc("panel")] * (_atspi._MAX_CHILDREN_FETCH + 1))
+
+    paragraph = _Named("paragraph", "")
+    editor = _Named("panel", "Cell A1", children=[paragraph])
+    root = _FakeAcc("frame", children=[wide(), editor])
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    assert _atspi.focused_secure("soffice.bin", max_nodes=2) is False
+
+    secret = _Named("password text", "")
+    password_editor = _Named("panel", "Cell B1", children=[secret])
+    monkeypatch.setattr(
+        _atspi, "find_root",
+        lambda app, scope: _FakeAcc("frame", children=[wide(), password_editor]),
+    )
+    assert _atspi.focused_secure("soffice.bin", max_nodes=2) is True
+
+    cell = _Named("table cell", "A1")
+    grid = _Named("table", "grid")
+    grid.parent = _Named("spreadsheet", "Sheet")
+
+    class _Selection:
+        def get_selected_child(self, _index):
+            return cell
+
+    grid.get_selection_iface = lambda: _Selection()
+    monkeypatch.setattr(
+        _atspi, "find_root",
+        lambda app, scope: _FakeAcc("frame", children=[wide(), grid]),
+    )
+    assert _atspi.focused_secure("soffice.bin", max_nodes=2) is False
+
+    monkeypatch.setattr(
+        _atspi, "find_root",
+        lambda app, scope: _FakeAcc("frame", children=[wide()]),
+    )
+    assert _atspi.focused_secure("soffice.bin", max_nodes=2) is None
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    assert _atspi.focused_secure("gedit", max_nodes=2) is None
+
+    password = _FakeAcc("password text", focused=True)
+    seen = _FakeAcc("frame", children=[password, wide(), editor])
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: seen)
+    assert _atspi.focused_secure("soffice.bin") is True
+
+
 def test_atspi_focused_secure_asks_the_collection_interface_first(fake_atspi, monkeypatch) -> None:
     """GTK3/Chromium/Firefox/Electron frames expose org.a11y.atspi.Collection: one
     round-trip finds the FOCUSED node wherever it sits, so a login form behind a

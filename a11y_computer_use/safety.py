@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
-from a11y_computer_use.untrusted import fence_untrusted
+from a11y_computer_use.untrusted import render_untrusted
 from a11y_computer_use.schema import (
     Action,
     AppOp,
@@ -417,7 +417,7 @@ class PermissionStore:
         if changed:
             self._load()
 
-    def policy(self, bundle_id: str) -> tuple[Tier | None, bool, str | None, str | None]:
+    def policy(self, bundle_id: str, *, launching: bool = False) -> tuple[Tier | None, bool, str | None, str | None]:
         """Return grant, denial, config error, and list block from one policy.
 
         The list block is ``"deny"`` when the app is on the deny list and
@@ -437,6 +437,16 @@ class PermissionStore:
             denied = self._load_error is not None or block is not None
             granted = None
             for key in keys:
+                if launching:
+                    from a11y_computer_use.app_identity import normalize
+                    editor_families = (
+                        {"mousepad", "org.xfce.mousepad"},
+                        {"gedit", "org.gnome.gedit"},
+                        {"gnome-text-editor", "org.gnome.texteditor"},
+                    )
+                    family = next((names for names in editor_families if normalize(bundle_id) in names), None)
+                    if family and normalize(key) not in family and normalize(key) != "text editor":
+                        continue
                 if key in self._tiers:
                     granted = self._tiers[key]
                     break
@@ -643,7 +653,9 @@ def check_action(action: Action, target_app: str, *, store: PermissionStore | No
         store = PermissionStore()
     required = required_tier(action)
     kind = type(action).__name__.lower()
-    granted, denied, config_error, block = store.policy(target_app)
+    granted, denied, config_error, block = store.policy(
+        target_app, launching=isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH,
+    )
     if denied:
         if config_error:
             reason = f"{config_error}; repair {store.path} before retrying"
@@ -748,7 +760,7 @@ class ApprovalPrompt(str):
 
     It is a ``str``, so elicitation and ``prompt in text`` checks keep
     working. ``role``, ``target_name``, ``window``, and ``summary`` are the
-    trimmed, unfenced values. The string itself fences page text.
+    trimmed, unfenced values. The string quotes page text for a person.
     """
 
     role: str | None
@@ -832,16 +844,18 @@ def _confirmation_text(
     parts = [f"Confirm a potentially irreversible action: {verb}"]
     if role:
         parts.append(f"role={role}")
-    fenced_name = fence_untrusted(name, limit=_NAME_LIMIT)
-    if fenced_name:
-        parts.append("name=" + fenced_name)
+    shown_name = render_untrusted(name, limit=_NAME_LIMIT)
+    if shown_name:
+        parts.append("name=" + shown_name)
     if window:
-        fenced_window = fence_untrusted(window, limit=_NAME_LIMIT)
-        if fenced_window:
-            parts.append("window=" + fenced_window)
+        shown_window = render_untrusted(window, limit=_NAME_LIMIT)
+        if shown_window:
+            parts.append("window=" + shown_window)
     parts.append(f"in {app}")
     if summary:
-        parts.append("args=" + fence_untrusted(summary, limit=_SUMMARY_LIMIT))
+        shown_summary = render_untrusted(summary, limit=_SUMMARY_LIMIT)
+        if shown_summary:
+            parts.append("args=" + shown_summary)
     return " ".join(parts) + f"? (matched \u201c{match}\u201d)"
 
 
@@ -861,7 +875,7 @@ def confirmation_prompt(
     The question names the control's role, its accessible name, the window
     title when ``window`` is passed, and a short argument summary. A click
     summary redacts the element's value. WebMCP arguments are redacted. Page
-    text in the question is trimmed and wrapped by ``fence``. The return value
+    text in the question is quoted with ``render_untrusted``. The return value
     is an :class:`ApprovalPrompt` (a ``str`` with those fields) when a prompt
     is warranted.
 
@@ -874,11 +888,13 @@ def confirmation_prompt(
         return None
     verb, role, name, summary, match = described
     shown_window = _clip(window, _NAME_LIMIT)
+    # The question sees the raw title so a newline is escaped. ``shown_window``
+    # stays the collapsed, unfenced value on the prompt object.
     text = _confirmation_text(
         verb=verb,
         role=role,
         name=name,
-        window=shown_window,
+        window=window,
         app=target_app,
         summary=summary,
         match=match,

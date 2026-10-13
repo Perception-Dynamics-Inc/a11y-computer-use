@@ -22,7 +22,11 @@ def test_parse_error_text_maps_codes_and_strips_the_mcp_prefix() -> None:
 
 def test_remote_runtime_lists_tools_and_returns_refusals_as_text(tmp_path, monkeypatch) -> None:
     """A local `a11y-computer-use mcp` stands in for the remote machine."""
-    monkeypatch.setenv("HOME", str(tmp_path))  # isolated grants: everything is refused
+    # Isolated grants: everything is refused. Windows ``Path.home()`` reads
+    # USERPROFILE and ignores HOME, so both have to point at the temp dir or
+    # a grant left in the real profile lets ``app list`` through.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     rt = remote.RemoteRuntime([sys.executable, "-m", "a11y_computer_use", "mcp"], start_timeout_s=60)
     try:
         names = {t["name"] for t in rt.remote_tool_specs()}
@@ -30,18 +34,35 @@ def test_remote_runtime_lists_tools_and_returns_refusals_as_text(tmp_path, monke
         assert all("input_schema" in t for t in rt.remote_tool_specs())
         # macOS resolves the app before the gate (structured app_not_found);
         # Linux and Windows gate the ungranted app first (a refusal, as text).
-        # Both keep their meaning across the wire.
+        # A Linux child without python-xlib returns missing_dependency. The
+        # pytest fixture does not apply to this process. Both keep their
+        # meaning across the wire.
         try:
             out = rt.call_tool("desktop_snapshot", {"app": "com.example.nothing"})
         except ComputerUseError as exc:
-            assert exc.code in (ErrorCode.APP_NOT_FOUND, ErrorCode.PERMISSION_DENIED_ACCESSIBILITY)
+            if exc.code is ErrorCode.UNSUPPORTED:
+                assert (exc.detail or {}).get("reason") == "missing_dependency"
+            else:
+                assert exc.code in (
+                    ErrorCode.APP_NOT_FOUND,
+                    ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
+                )
         else:
             assert isinstance(out, str) and out.startswith("needs_permission"), out
         # `app list` is gated: on a machine with no grants it is a refusal, as
         # text; where the runner's grant store already trusts an app (the live
-        # suites grant one) it is the JSON list. Both are the wire form, unwrapped.
-        out = rt.call_tool("app", {"action": "list"})
-        assert isinstance(out, str) and (out.startswith("needs_permission") or out.startswith("[")), out
+        # suites grant one) it is the JSON list. Without python-xlib on Linux
+        # the child returns the same missing_dependency error. All three are
+        # the wire form, unwrapped.
+        try:
+            out = rt.call_tool("app", {"action": "list"})
+        except ComputerUseError as exc:
+            assert exc.code is ErrorCode.UNSUPPORTED
+            assert (exc.detail or {}).get("reason") == "missing_dependency"
+        else:
+            assert isinstance(out, str) and (
+                out.startswith("needs_permission") or out.startswith("[")
+            ), out
         assert rt._frontmost() == "unknown" or isinstance(rt._frontmost(), str)
         assert rt._resolve_app("x") == (None, "x")
         assert rt.driver.name.startswith("remote:")

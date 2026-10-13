@@ -15,6 +15,7 @@ EventType = Literal[
     "done",
     "error",
     "stuck",
+    "timeout",
 ]
 
 

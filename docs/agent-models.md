@@ -8,8 +8,9 @@ HTTP providers speak to OpenAI-compatible chat completions (OpenAI, xAI, Ollama,
 pip install 'a11y-computer-use[agent]'
 ```
 
-On Linux, install the desktop backend in the same command. `gi` (PyGObject)
-and `Xlib` (python-xlib) are not pulled in by `[agent]` alone:
+On Linux, install the AT-SPI backend in the same command. `gi` (PyGObject)
+is not pulled in by `[agent]` alone. `Xlib` (python-xlib) is a core
+dependency when `sys_platform == 'linux'`:
 
 ```bash
 pip install 'a11y-computer-use[agent,linux]'
@@ -69,6 +70,21 @@ Base URL shape:
 * Gemini's default base is `https://generativelanguage.googleapis.com/v1beta`. The client posts to `{base}/models/{model}:generateContent`. Do not include `/models/...` in the base. A `models/` prefix on the model id is stripped.
 
 Auth headers: `Authorization: Bearer` for OpenAI-compatible APIs, `x-api-key` plus `anthropic-version: 2023-06-01` for Anthropic, `x-goog-api-key` for Gemini.
+
+## Sampling
+
+Every built-in model defaults to temperature 0 and seed 0. `make_model(spec, temperature=..., seed=...)`, `Agent(..., temperature=..., seed=...)`, `a11y-agent run --temperature --seed`, and the HTTP / MCP run body (`temperature`, `seed`) override either value. Omit a value to keep that default. A `Model` instance already carries its sampling; passing an override next to one raises `ModelError`.
+
+A provider sends a field only when its API has that parameter. The others are left off the request. Nothing is raised for the skip. `model.sampling` records what was sent (`None` when it was not) and a `notes` entry for each skip. The agent writes that object on the first `trajectory.jsonl` line (`kind` `sampling`) and again under `model.sampling` on each step.
+
+| Provider | temperature | seed | Where |
+|---|---|---|---|
+| `openai`, `xai`, `ollama`, `vllm` | sent | sent | chat completions body |
+| `anthropic` | sent | not sent | Messages API has temperature and no seed parameter |
+| `gemini` | sent | sent | `generationConfig` |
+| `scripted` | not sent | not sent | a script does not sample |
+| `command` | not sent | not sent | stdin is `messages` and `tools` only |
+| `command` whose argv[0] is `codex` (`model.name` is `codex`) | not sent | not sent | the Codex CLI has no temperature or seed flag, and `config.toml` (`ConfigToml`, unknown fields denied) has neither key. Checked against `openai/codex` `main` on 2026-10-12. No flag is invented |
 
 ## Messages
 
@@ -180,6 +196,8 @@ json.dump({
 
 `make_model("command:/path/to/script.py")` runs a single existing `.py` file with the current Python interpreter, so the script does not need a shebang. Any other command is split with `shlex` (Windows rules on Windows) unless the string is itself an existing file, in which case it is executed as that one argv entry. `CommandModel([sys.executable, script])` passes argv through unchanged.
 
+Temperature and seed are not written into that JSON and are not added to argv. When argv[0] is the Codex CLI (`codex` or `codex.exe`, basename, any directory), the same skip applies: that CLI has no temperature or seed flag and no `config.toml` key for either, so the trace note names the Codex CLI and the process is started with the argv you passed.
+
 ```python
 model = make_model("command:/path/to/script.py")
 turn = model.complete(messages, tools, timeout=10)
@@ -209,8 +227,8 @@ Raise `ModelError` for anything the caller should see (auth, a down process, a b
 
 `tests/test_agent_models.py` and `tests/test_agent_models_http.py` are hermetic.
 
-* Scripted models: a list, a dict, a JSON file (list, `{"turns": ...}`, and one object), a reactive callable, image blocks left unchanged, and exhaustion.
-* Command models: a fake Python script on stdin/stdout, two tool calls, an image block passed through, timeout, non-zero exit, non-JSON stdout, and a missing executable.
+* Scripted models: a list, a dict, a JSON file (list, `{"turns": ...}`, and one object), a reactive callable, image blocks left unchanged, and exhaustion. Temperature and seed are not applied; the sampling note names the requested values.
+* Command models: a fake Python script on stdin/stdout, two tool calls, an image block passed through, timeout, non-zero exit, non-JSON stdout, and a missing executable. The request JSON stays `messages` and `tools`. A `command:codex ...` argv is not given a temperature or seed flag; the test stubs `subprocess.run` and does not call a live Codex binary.
 * Each HTTP provider: the recorded request for a tool-call round trip (previous call plus tool result), a response with two tool calls, a user message with `b64` and `path` images, a tool result that contains an image, and error mapping (400 and 401 are not retried, 429 and 502 are retried with backoff, timeouts are retried, `Retry-After` is honored, a missing key raises before a request).
 * Gemini: `thoughtSignature` from the recorded response is sent back on the next request.
 * `make_model` for xAI, Ollama, vLLM, Anthropic, and Gemini posts at the endpoint above. Those calls use `MockTransport`. They do not reach the network.

@@ -27,6 +27,7 @@ from a11y_computer_use.agent.models.base import (
     tool_schema,
     usage_dict,
 )
+from a11y_computer_use.agent.models.sampling import resolve_sampling
 
 __all__ = ["AnthropicModel"]
 
@@ -51,6 +52,8 @@ class AnthropicModel:
         sleep: Callable[[float], None] | None = None,
         max_attempts: int = 3,
         default_timeout: float = 120.0,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> None:
         require_httpx()
         if not model:
@@ -67,6 +70,15 @@ class AnthropicModel:
                 "anthropic model needs ANTHROPIC_API_KEY (no key in the environment or constructor)"
             )
         self.max_tokens = max_tokens
+        # Messages API has temperature. It has no seed parameter.
+        self.sampling = resolve_sampling(
+            temperature=temperature,
+            seed=seed,
+            supports_temperature=True,
+            supports_seed=False,
+            temperature_gap="",
+            seed_gap="the Anthropic Messages API has no seed parameter",
+        )
         self._client = client
         self._sleep = sleep
         self._max_attempts = max_attempts
@@ -82,6 +94,7 @@ class AnthropicModel:
         check_tools(tools)
         system, wire = _wire_messages(messages)
         body: dict = {"model": self.model, "max_tokens": self.max_tokens, "messages": wire}
+        body.update(self.sampling.request_fields())
         if system:
             body["system"] = system
         if tools:

@@ -363,7 +363,13 @@ def test_missing_atspi_import_is_not_reported_as_an_unreachable_bus(monkeypatch)
     monkeypatch.setattr(_atspi, "_atspi", boom)
     with pytest.raises(ComputerUseError) as exc:
         LinuxDriver().ensure_trusted()
-    assert exc.value.code is ErrorCode.PERMISSION_DENIED_ACCESSIBILITY
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "missing_dependency"
     assert "bindings are missing" in exc.value.message
     assert "bus is not reachable" not in exc.value.message
-    assert "agent,linux" in exc.value.detail["hint"]
+    assert "System Settings" not in exc.value.detail["hint"]
+    assert "python3-gi" in exc.value.detail["hint"]
+    assert "--system-site-packages" in exc.value.detail["hint"]
+    assert "[linux]" in exc.value.detail["hint"]
+    assert "libgirepository" in exc.value.detail["hint"]
+    assert "cairo" in exc.value.detail["hint"]

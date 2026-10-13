@@ -203,6 +203,54 @@ def test_runtime_crop_rejects_bad_padding_scale_and_a_huge_edge(tmp_path) -> Non
     assert driver.shots == shots
 
 
+def test_crop_includes_fenced_ocr_lines_with_screen_bounds(tmp_path, monkeypatch) -> None:
+    """crop reads words when an engine is installed and keeps the image either way."""
+    from a11y_computer_use import ocr as ocr_mod
+
+    display = Display(0, 100, 80, 1.0, True)
+    element = _element("e2", Bounds(0, 10, 12, 20, 16))
+    driver = CropDriver([element], _png(100, 80), display)
+    runtime = _runtime(tmp_path, driver)
+
+    def fake(image, **kwargs):
+        del kwargs
+        png, region = image
+        assert png.startswith(b"\x89PNG")
+        return [{
+            "text": "SUBMIT",
+            "bounds": {
+                "display_id": region.display_id,
+                "x": region.x + 4,
+                "y": region.y + 6,
+                "width": 40,
+                "height": 12,
+            },
+            "confidence": 0.9,
+        }]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake)
+    text, image = runtime.crop("e2")
+    assert "SUBMIT" in text
+    assert "[14,18,40,12]" in text
+    assert "<untrusted nonce=" in text
+    assert "No text was read" not in text
+    assert image.width == 20 and image.height == 16
+
+    def missing(image, **kwargs):
+        del image, kwargs
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "no OCR engine is available",
+            detail={"reason": "missing_dependency"},
+        )
+
+    monkeypatch.setattr(ocr_mod, "ocr", missing)
+    text, image = runtime.crop("e2")
+    assert "No text was read" in text
+    assert "SUBMIT" not in text
+    assert image.width == 20 and image.height == 16
+
+
 def test_crop_action_is_not_turned_into_a_click() -> None:
     action = Action("crop", {"ref": "e2"})
     forced, label = forced_method(action, 2, None)
@@ -228,3 +276,118 @@ def test_linux_occlusion_matches_pid_before_comm(monkeypatch) -> None:
 
     monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: None)
     assert driver.occlusion(element, "cuaswatch") is None
+
+
+class _ScrolledDriver(CropDriver):
+    """resolve_ref raises stale_ref for refs listed in ``offscreen``.
+
+    ``offscreen[ref]`` is the live box when the node is still valid, or None
+    when the node is gone. Click stays on the stale path. Crop asks
+    ``alive_offscreen``.
+    """
+
+    def __init__(self, elements, png, display) -> None:
+        super().__init__(elements, png, display)
+        self.offscreen: dict[str, Bounds | None] = {}
+        self.resolved: list[str] = []
+        self.revealed: list[str] = []
+        self.reveal_ok = True
+
+    def resolve_ref(self, snap, ref, live=None):
+        self.resolved.append(ref)
+        if ref in self.offscreen:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{ref} (AXButton 'Red swatch') is no longer in the tree under that title; "
+                "the AXButton at that position is now 'Reload'. The list may have reordered: "
+                "use find(text=...) or scroll_to_find to locate it again rather than clicking the slot",
+                detail={"reason": "title_changed", "ref": ref},
+            )
+        return snap.element(ref)
+
+    def alive_offscreen(self, snap, ref):
+        if ref not in self.offscreen:
+            return None
+        return self.offscreen[ref]
+
+    def scroll_into_view(self, element) -> bool:
+        self.revealed.append(element.ref)
+        return self.reveal_ok
+
+
+def test_crop_of_a_scrolled_off_ref_is_off_screen_and_click_stays_stale(tmp_path) -> None:
+    """A still-valid ref that left the viewport is not_visible, not stale_ref.
+
+    The driver reports the Reload occupant the way a live browser does. Crop
+    names off_screen and scroll(into_view=true), and it does not take a
+    screenshot, including with padding. A gone ref stays stale_ref. Click and
+    a wheel scroll stay stale_ref. into_view uses the original handle.
+    """
+    display = Display(0, 100, 80, 1.0, True)
+    visible = _element("e2", Bounds(0, 10, 12, 20, 16), title="Stay")
+    scrolled = _element("e3", Bounds(0, 8, 40, 200, 60), title="Red swatch")
+    gone = _element("e9", Bounds(0, 8, 40, 200, 60), title="Red swatch")
+    driver = _ScrolledDriver([visible, scrolled, gone], _png(100, 80), display)
+    driver.offscreen["e3"] = Bounds(0, 8, -80, 200, 60)
+    driver.offscreen["e9"] = None
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("demo", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    runtime.desktop_snapshot("demo")
+    shots = driver.shots
+
+    try:
+        runtime.crop("e3", padding=512)
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.NOT_VISIBLE
+        assert exc.detail["reason"] == "off_screen"
+        assert exc.detail["hint"] == "scroll(ref='e3', into_view=true)"
+        assert "e3 is off-screen" in exc.message
+        assert "still valid" in exc.message
+        assert "Reload" not in exc.message
+        text = server.error_text(exc)
+        assert text.startswith("not_visible:")
+        assert "hint: scroll(ref='e3', into_view=true)" in text
+    else:
+        raise AssertionError("a scrolled-off ref must be not_visible")
+    assert driver.shots == shots
+
+    try:
+        runtime.click("e3")
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.STALE_REF
+        assert exc.detail["reason"] == "title_changed"
+        assert "Reload" in exc.message
+    else:
+        raise AssertionError("click on a reordered slot stays stale_ref")
+
+    try:
+        runtime.scroll("e3", dy=4)
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.STALE_REF
+    else:
+        raise AssertionError("a wheel scroll must not land on the old slot")
+
+    driver.resolved.clear()
+    revealed = runtime.scroll("e3", into_view=True)
+    assert "into view" in revealed
+    assert driver.revealed == ["e3"]
+    assert driver.resolved == []
+
+    driver.reveal_ok = False
+    try:
+        runtime.scroll("e3", into_view=True)
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.NOT_VISIBLE
+        assert exc.detail["reason"] == "off_screen"
+    else:
+        raise AssertionError("a failed reveal must not wheel the old point")
+
+    try:
+        runtime.crop("e9")
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.STALE_REF
+        assert "Reload" in exc.message
+    else:
+        raise AssertionError("a gone ref stays stale_ref")
+    assert driver.shots == shots

@@ -19,7 +19,8 @@ from a11y_computer_use.agent.httpapi import bind_server, loopback_host
 from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
 from a11y_computer_use.agent.models.scripted import ScriptedModel
 from a11y_computer_use.agent.service import RunStore
-from tests.test_agent_core import FakeRuntime, el, window
+from a11y_computer_use.schema import Bounds
+from tests.test_agent_core import FakeRuntime, _solid_png, el, window
 
 @pytest.fixture(autouse=True)
 def _restore_display():
@@ -51,6 +52,7 @@ _CLI_KEYS = {
     "needs_human",
     "trace_dir",
     "step_log",
+    "evidence",
 }
 
 
@@ -247,7 +249,7 @@ def test_payment_stops_unless_opted_out_and_approval_names_the_target(tmp_path: 
         title="Checkout - Google Chrome",
     )
     turns = [
-        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "note": "4111111111111111"})]),
+        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "button": "4111111111111111"})]),
         _done_turn(),
     ]
     store, runtime = _store(tmp_path, ScriptedModel(turns), elements=elements)
@@ -269,7 +271,7 @@ def test_payment_stops_unless_opted_out_and_approval_names_the_target(tmp_path: 
         httpd.shutdown()
 
     opted_turns = [
-        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "note": "4111111111111111"})]),
+        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "button": "4111111111111111"})]),
         ModelTurn(calls=[ToolCall(
             "done",
             {"answer": "held", "conditions": [{"element": {"role": "AXButton", "name": "Pay now"}}]},
@@ -356,6 +358,7 @@ def test_cancel_before_the_action(tmp_path: Path) -> None:
         code, body = _request(port, "POST", f"/runs/{started['id']}/cancel", {})
         assert code == 202 and body["cancel"] is True
         result = _wait(port, started["id"])
+        assert result["status"] == "cancelled"
         assert result["reason"] == "cancelled"
         assert runtime.calls == []
     finally:
@@ -444,6 +447,55 @@ def _assert_reforged(text: str) -> None:
     assert text.count("</untrusted nonce=") == 1
 
 
+def _assert_fenced_once(text: str, raw: str) -> None:
+    assert text.count("<untrusted ") == 1
+    assert text.count("</untrusted nonce=") == 1
+    assert _plain(text) == raw
+    assert "<untrusted" not in _plain(text)
+
+
+def test_step_result_is_fenced_once(tmp_path: Path) -> None:
+    """A tool result the agent already fenced leaves the server as one fence."""
+    store, runtime = _store(
+        tmp_path,
+        ScriptedModel([
+            ModelTurn(calls=[ToolCall("click", {"ref": "e2"})]),
+            _done_turn(),
+        ]),
+    )
+    httpd, port = _serve(store)
+    try:
+        status, started = _post_run(port)
+        assert status == 202
+        events = _events(port, started["id"])
+        finished = [
+            event["data"]["result"]
+            for event in events
+            if event["type"] == "step_finished" and event["data"].get("result")
+        ]
+        click_events = [text for text in finished if _plain(text) == "click ok"]
+        assert len(click_events) == 1
+        _assert_fenced_once(click_events[0], "click ok")
+        for text in finished:
+            assert text.count("<untrusted ") == 1
+            assert "<untrusted" not in _plain(text)
+        result = _wait(port, started["id"])
+        click_steps = [
+            step["result"] for step in result["step_log"]
+            if step.get("action") == "click" and step.get("result")
+        ]
+        assert len(click_steps) == 1
+        _assert_fenced_once(click_steps[0], "click ok")
+        logged = [step["result"] for step in result["step_log"] if step.get("result")]
+        assert logged
+        for text in logged:
+            assert text.count("<untrusted ") == 1
+            assert "<untrusted" not in _plain(text)
+        assert runtime.calls == [("click", {"ref": "e2"})]
+    finally:
+        httpd.shutdown()
+
+
 def test_forged_fence_in_a_response_is_escaped_and_wrapped(tmp_path: Path) -> None:
     """A page-supplied fence must not be returned as a trusted boundary."""
     store, _runtime = _store(
@@ -486,10 +538,15 @@ def test_ui_text_is_fenced_on_events_and_trace(tmp_path: Path) -> None:
             event["data"]["text"] for event in events if event["type"] == "observation"
         ]
         assert observations
+        # The first observation is the full tree, so the injection phrase is
+        # fenced and flagged. A later observation of the same window is a
+        # diff and does not repeat an unchanged title.
+        assert "<untrusted nonce=" in observations[0]
+        assert "suspicious=1" in observations[0]
+        assert title in observations[0]
         for text in observations:
-            assert "<untrusted nonce=" in text
-            assert "suspicious=1" in text
-            assert title in text
+            assert text.count("<untrusted ") == 1
+            assert "<untrusted" not in _plain(text)
         result = _wait(port, started["id"])
         assert result["status"] == "success"
         assert "<untrusted nonce=" in result["conditions"][0]["detail"]
@@ -551,5 +608,171 @@ def test_scripted_file_spec_without_a_factory(tmp_path: Path) -> None:
         result = _wait(port, started["id"])
         assert result["status"] == "success"
         assert _plain(result["answer"]) == "saved"
+    finally:
+        httpd.shutdown()
+
+
+def test_unknown_http_fields_are_rejected_before_a_run(tmp_path: Path) -> None:
+    """POST /runs, approve, and cancel name unknown keys and do no work."""
+    built: list[str] = []
+    runtime = FakeRuntime(_elements())
+
+    def factory(spec: str):
+        built.append(spec)
+        return ScriptedModel([_done_turn()])
+
+    store = RunStore(
+        runtime_factory=lambda: runtime,
+        model_factory=factory,
+        trace_root=tmp_path / "traces",
+    )
+    httpd, port = _serve(store)
+    try:
+        status, body = _request(port, "POST", "/runs", {
+            "goal": "save the form",
+            "model": "scripted:unused",
+            "ref": "e2",
+            "poll": 1,
+        })
+        assert status == 400
+        assert body["error"].startswith("invalid_arguments:")
+        assert "unknown fields" in body["error"]
+        assert "'poll'" in body["error"] and "'ref'" in body["error"]
+        assert "goal" in body["error"] and "model" in body["error"]
+        assert built == []
+        assert store._runs == {}
+        assert runtime.calls == []
+
+        status, body = _request(port, "POST", "/runs", {
+            "goal": "save the form",
+            "model": "scripted:unused",
+            "limits": {"max_steps": 2, "poll_s": 1},
+        })
+        assert status == 400
+        assert body["error"].startswith("invalid_arguments: limits:")
+        assert "unknown field 'poll_s'" in body["error"]
+        assert "max_steps" in body["error"]
+        assert "model_timeout_s" in body["error"]
+        assert built == []
+        assert store._runs == {}
+
+        status, body = _request(
+            port, "POST", "/runs/missing/approvals/a1", {"approve": True, "note": "x"},
+        )
+        assert status == 400
+        assert "invalid_arguments:" in body["error"]
+        assert "unknown field 'note'" in body["error"]
+        assert "approve" in body["error"]
+
+        status, body = _request(port, "POST", "/runs/missing/approvals/a1", {"note": "x"})
+        assert status == 400
+        assert "unknown field 'note'" in body["error"]
+
+        status, body = _request(port, "POST", "/runs/missing/cancel", {"force": True})
+        assert status == 400
+        assert body["error"].startswith("invalid_arguments:")
+        assert "unknown field 'force'" in body["error"]
+        assert "no fields" in body["error"]
+        assert built == []
+        assert store._runs == {}
+
+        missing_approve, _payload = _request(
+            port, "POST", "/runs/missing/approvals/a1", {"approve": False},
+        )
+        assert missing_approve == 404
+        missing_cancel, _payload = _request(port, "POST", "/runs/missing/cancel", {})
+        assert missing_cancel == 404
+    finally:
+        httpd.shutdown()
+
+
+def _point_tree():
+    """Upload is focused and named. The window contains the click point."""
+    return [
+        el("e1", "AXWindow", "Demo", bounds=Bounds(0, 0, 0, 1280, 800)),
+        el(
+            "e2", "AXButton", "Upload", parent="e1", clickable=True, focused=True,
+            bounds=Bounds(0, 10, 10, 40, 20),
+        ),
+    ]
+
+
+def _point_script():
+    point = {"x": 640, "y": 360, "display_id": 0}
+    order = [
+        ToolCall("click", dict(point)),
+        ToolCall("double_click", {**point, "button": "right", "count": 1}),
+        ToolCall("right_click", {**point, "button": "left", "count": 1}),
+    ]
+    sent = {"n": 0}
+
+    def script(messages):
+        content = messages[-1].content
+        text = content if isinstance(content, str) else ""
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            text = str(content[0].get("text") or "")
+        if "proposed image pixel" in text:
+            return ModelTurn(text='{"point":[900, 900],"space":"image"}', calls=[])
+        if sent["n"] < len(order):
+            call = order[sent["n"]]
+            sent["n"] += 1
+            return ModelTurn(calls=[call])
+        return ModelTurn(calls=[ToolCall(
+            "done",
+            {"answer": "stayed", "conditions": [{"window_title_contains": "Demo"}]},
+        )])
+
+    return point, script
+
+
+def test_http_explicit_point_is_not_rewritten_to_the_goal(tmp_path: Path) -> None:
+    """POST /runs keeps a model x/y click, including double and right."""
+    point, script = _point_script()
+    store, runtime = _store(tmp_path, ScriptedModel(script), elements=_point_tree())
+    runtime.png = _solid_png(1280, 800)
+    httpd, port = _serve(store)
+    try:
+        status, started = _request(port, "POST", "/runs", {
+            "goal": "Open the B5 total in Chrome. Do not click Upload.",
+            "model": "scripted:unused",
+        })
+        assert status == 202
+        result = _wait(port, started["id"])
+        assert result["status"] == "success", result
+        assert runtime.calls == [
+            ("click", point),
+            ("click", {**point, "button": "left", "count": 2}),
+            ("click", {**point, "button": "right", "count": 1}),
+        ]
+        assert all(call[1].get("ref") != "e2" for call in runtime.calls)
+    finally:
+        httpd.shutdown()
+
+
+def test_http_ref_plus_point_is_invalid_arguments(tmp_path: Path) -> None:
+    store, runtime = _store(
+        tmp_path,
+        ScriptedModel([
+            ModelTurn(calls=[ToolCall("right_click", {"ref": "e2", "x": 640, "y": 360})]),
+            ModelTurn(calls=[ToolCall(
+                "done",
+                {"answer": "stayed", "conditions": [{"window_title_contains": "Demo"}]},
+            )]),
+        ]),
+        elements=_point_tree(),
+    )
+    httpd, port = _serve(store)
+    try:
+        status, started = _request(port, "POST", "/runs", {
+            "goal": "Click Upload.",
+            "model": "scripted:unused",
+        })
+        assert status == 202
+        result = _wait(port, started["id"])
+        assert result["status"] == "success", result
+        assert runtime.calls == []
+        error = result["step_log"][0]["error"] or ""
+        assert "invalid_arguments: right_click:" in error
+        assert "ref and x/y" in error
     finally:
         httpd.shutdown()

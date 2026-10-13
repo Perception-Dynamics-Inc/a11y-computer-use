@@ -13,21 +13,35 @@ defensive — AT-SPI is a D-Bus protocol with no batch read, so any single call
 can be slow or fail cross-process, and a flaky read must degrade to a sane
 default, not crash the walk. (The batch/prefetch weakness AT-SPI has vs UIA's
 `CacheRequest` / AX's multi-attribute reads is why we cap the fetched children:
-see `_MAX_CHILDREN_FETCH`. A subtree cache/diff is the perf follow-up.)
+see `_MAX_CHILDREN_FETCH`. Duplicate stable getters inside one
+`LinuxDriver._run` are reused by `read_cache`; a mutator drops that cache.
+A subtree cache/diff across calls is still the follow-up.)
 
 Linux-only; imported lazily by `drivers/linux.py`.
 """
 
 from __future__ import annotations
 
+import html
 import math
 import os
 import re
+import subprocess
+import sys
+import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 
-from a11y_computer_use.observe import MAX_CHILDREN, DisplayGeometry, RawNode
-from a11y_computer_use.schema import Display
+from a11y_computer_use.observe import (
+    MAX_CHILDREN,
+    SHEET_MAX_CHILDREN,
+    DisplayGeometry,
+    RawNode,
+    _generic_region_name,
+    normalize_document_title,
+)
+from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
 # Keyed by the human role-name string rather than the numeric Atspi.Role enum
@@ -47,6 +61,12 @@ _ROLE = {
     "text": "AXTextArea",
     "document text": "AXTextArea",
     "terminal": "AXTextArea",  # VTE (gnome-terminal, tilix): its Text iface is the screen contents
+    # ATSPI_ROLE_PAGE. Evince puts the PDF page on this role: an empty name
+    # and a Text interface that holds the page. The AXGroup fallback never
+    # reads that text, and the pruner then publishes the page as an unnamed
+    # opaque_region. AXStaticText is not an editable field. A blank page is
+    # put back to a group while reading, so the box is not dropped.
+    "page": "AXStaticText",
     "document frame": "AXGroup",
     "document web": "AXGroup",
     "document email": "AXGroup",
@@ -60,11 +80,18 @@ _ROLE = {
     "caption": "AXStaticText",
     "image": "AXImage",
     "icon": "AXImage",
+    # A canvas or GTK drawing area has bounds and no accessible children.
+    # The pruner publishes it as opaque_region. WebGL is a canvas.
+    "canvas": "AXCanvas",
+    "drawing area": "AXCanvas",
     "frame": "AXWindow",
     "window": "AXWindow",
     "dialog": "AXDialog",
     "alert": "AXDialog",
-    "file chooser": "AXWindow",
+    # ATSPI_ROLE_FILE_CHOOSER is a dialog (Ristretto Open, GTK FileChooserDialog).
+    # AXWindow rendered it as a document window. The name is the title; the
+    # Value interface is not the chosen path, so the value probe stays off.
+    "file chooser": "AXDialog",
     "color chooser": "AXWindow",
     "menu item": "AXMenuItem",
     "menu bar": "AXMenuBar",
@@ -91,6 +118,9 @@ _ROLE = {
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "progress bar": "AXProgressIndicator",
+    # Ristretto's image metadata bar is ATSPI_ROLE_STATUS_BAR. The name is
+    # the status text. AXGroup, the unmapped fallback, hid it among layout.
+    "status bar": "AXStatusBar",
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
@@ -159,6 +189,11 @@ def _atspi():
         raise ImportError("the AT-SPI2 typelib is not available") from exc
 
     if not _inited:
+        # Before the first bus connection: a last-unref inside libatspi must
+        # not abort this process. See drivers/_dbus_guard.py.
+        from a11y_computer_use.drivers import _dbus_guard
+
+        _dbus_guard.install()
         _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
         # Per-call D-Bus wait is 300ms. The second argument is the startup
         # grace: while an app is younger than that, libatspi waits the grace
@@ -170,11 +205,331 @@ def _atspi():
     return Atspi
 
 
-def _safe(fn, default=None):
+# libatspi's per-call D-Bus wait is 300ms (`Atspi.set_timeout` above). A call
+# that raises after this long did not answer. A call that returns, however
+# long it took, is a live app: Firefox, Chrome, and LibreOffice cross 300ms
+# on startup and on large documents while still replying.
+ATSPI_SLOW_CALL_S = 0.25
+# A process that is still scheduled is frozen only after this much consecutive
+# unanswered time, and only when a cheap ping also gets no reply.
+ATSPI_PING_WINDOW_S = 4.0
+ATSPI_PING_TRIES = 3
+ATSPI_PING_CALL_MS = 2000
+# Matches the registration wait. A young live process is retried by the
+# caller instead of declared frozen; SIGSTOP is not given this grace.
+ATSPI_STARTUP_GRACE_S = 15.0
+
+_APP_NOT_RESPONDING_HINT = "The app is not responding. Wait, then snapshot again."
+
+_reply_local = threading.local()
+
+
+class _ReplyWatch:
+    """Unanswered-call streak for the application currently being read."""
+
+    def __init__(self, app: str, pid: int | None, target: object | None) -> None:
+        self.app = app or "application"
+        self.pid = pid
+        self.target = target
+        self.unanswered = 0
+        self.unanswered_s = 0.0
+        self.checked_stopped = False
+
+
+@contextmanager
+def app_reply_watch(app: str, pid: int | None, target: object | None = None):
+    """Charge unanswered AT-SPI reads to ``app`` until the block exits.
+
+    A call that returns is never a hang. A call that raises after
+    `ATSPI_SLOW_CALL_S` is unanswered. That fails the read only with evidence
+    the app is actually wedged: ``/proc/<pid>/stat`` state ``T`` or ``t``, or
+    no reply to a cheap ping across `ATSPI_PING_WINDOW_S` after
+    `ATSPI_PING_TRIES` misses. A process younger than `ATSPI_STARTUP_GRACE_S`
+    is not failed for those misses; the caller retries. Reads outside a watch
+    keep today's default-on-failure behavior, so one frozen sibling cannot
+    fail a different application's snapshot.
+    """
+    previous = getattr(_reply_local, "watch", None)
+    watch = _ReplyWatch(app, pid, target)
+    _reply_local.watch = watch
     try:
-        return fn()
+        yield watch
+    finally:
+        _reply_local.watch = previous
+
+
+def _current_watch() -> _ReplyWatch | None:
+    return getattr(_reply_local, "watch", None)
+
+
+def _proc_stat_after_comm(pid: int) -> list[bytes] | None:
+    """Fields of ``/proc/<pid>/stat`` after the comm, or None when unreadable.
+
+    The comm is wrapped in parentheses and may itself contain spaces and
+    parentheses, so the state is the token after the last ``)``.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    end = data.rfind(b")")
+    if end == -1 or end + 2 >= len(data):
+        return None
+    return data[end + 2 :].split()
+
+
+def process_is_stopped(pid: int | None) -> bool:
+    """True when the process is stopped (``T`` or ``t``), the SIGSTOP hang."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    fields = _proc_stat_after_comm(pid)
+    if not fields:
+        return False
+    return fields[0] in {b"T", b"t"}
+
+
+def process_age_s(pid: int | None) -> float | None:
+    """Seconds since the process started, or None when ``/proc`` cannot say."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    fields = _proc_stat_after_comm(pid)
+    # starttime is field 22; field 3 (state) is the first token after comm.
+    if not fields or len(fields) <= 19:
+        return None
+    try:
+        start_ticks = int(fields[19])
+    except ValueError:
+        return None
+    try:
+        ticks = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        ticks = 100
+    if not ticks:
+        return None
+    try:
+        with open("/proc/uptime", "rb") as handle:
+            uptime = float(handle.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    age = uptime - (start_ticks / float(ticks))
+    return age if age >= 0 else 0.0
+
+
+def process_in_startup(pid: int | None) -> bool:
+    """True while the process is younger than the registration grace.
+
+    Snapshot waits already retry ``app_not_found`` through this window. A
+    busy launch that misses a few reads is the same kind of delay, not a hang.
+    """
+    age = process_age_s(pid)
+    return age is not None and age < ATSPI_STARTUP_GRACE_S
+
+
+def stopped_pid_for_app(app: str) -> int | None:
+    """The stopped pid for ``app``, when one process is unambiguously it.
+
+    Window owners come first: a single managed window whose process is
+    ``T``/``t``. A GTK fixture registers on AT-SPI as its program name
+    (``cuatestapp``) while ``/proc/<pid>/comm`` stays ``python``, so the
+    window lookup misses. The fallback is the one stopped process whose
+    command line contains that program name. A live window owner is not
+    replaced by some other stopped process.
+    """
+    needle = (app or "").strip().lower()
+    if len(needle) < 3:
+        return None
+    try:
+        from a11y_computer_use.drivers import _linux_system
+
+        owners = _linux_system.pids_matching(app)
     except Exception:
-        return default
+        owners = set()
+    if owners:
+        stopped = [pid for pid in owners if process_is_stopped(pid)]
+        if len(owners) == 1 and len(stopped) == 1:
+            return stopped[0]
+        return None
+    found: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if not process_is_stopped(pid):
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        text = raw.replace(b"\x00", b" ").decode("utf-8", "replace").lower()
+        if needle in text:
+            found.append(pid)
+            if len(found) > 1:
+                return None
+    return found[0] if found else None
+
+
+def raise_if_app_stopped(app: str) -> None:
+    """Raise ``app_not_responding`` when ``app`` is already stopped.
+
+    A ``SIGSTOP`` is visible in ``/proc`` before the next AT-SPI call. Waiting
+    for that call to time out walks every other desktop child first, which
+    turned a stopped GTK fixture into an 8s snapshot. The pid check is the
+    whole test.
+    """
+    pid = stopped_pid_for_app(app)
+    if not isinstance(pid, int) or pid <= 0 or not process_is_stopped(pid):
+        return
+    _raise_not_responding(_ReplyWatch(app or "application", pid, None))
+
+
+def _raise_not_responding(watch: _ReplyWatch) -> None:
+    pid = watch.pid
+    pid_text = f" (pid {pid})" if isinstance(pid, int) and pid > 0 else ""
+    raise ComputerUseError(
+        ErrorCode.APP_NOT_RESPONDING,
+        f"{watch.app} did not answer accessibility queries{pid_text}",
+        detail={
+            "app": watch.app,
+            "pid": pid if isinstance(pid, int) and pid > 0 else None,
+            "hint": _APP_NOT_RESPONDING_HINT,
+        },
+    )
+
+
+def _ping_answers(acc: object) -> bool:
+    """True when ``acc`` answers a cheap read inside a longer budget.
+
+    The walk stays on the 300ms per-call wait. This probe is the hang check
+    for a process that is still scheduled: a few tries, each allowed
+    `ATSPI_PING_CALL_MS`. A return, including an empty name, is a reply. An
+    exception is a miss.
+    """
+    if acc is None:
+        return False
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return False
+    try:
+        Atspi.set_timeout(ATSPI_PING_CALL_MS, 0)
+    except Exception:
+        return False
+    try:
+        for _ in range(ATSPI_PING_TRIES):
+            for method_name in ("get_name", "get_process_id"):
+                method = getattr(acc, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    method()
+                except Exception:
+                    continue
+                return True
+        return False
+    finally:
+        try:
+            Atspi.set_timeout(300, 0)
+        except Exception:
+            pass
+
+
+def _note_answered(watch: _ReplyWatch) -> None:
+    watch.unanswered = 0
+    watch.unanswered_s = 0.0
+
+
+def _note_unanswered(watch: _ReplyWatch, elapsed: float) -> None:
+    watch.unanswered += 1
+    watch.unanswered_s += elapsed
+    if not watch.checked_stopped and not process_is_stopped(watch.pid):
+        watch.checked_stopped = True
+        stopped = stopped_pid_for_app(watch.app)
+        if isinstance(stopped, int) and stopped > 0:
+            watch.pid = stopped
+    if process_is_stopped(watch.pid):
+        _raise_not_responding(watch)
+    # A just-started app misses reads while it builds its tree. The snapshot
+    # wait retries those; declaring it frozen here fails a live Firefox.
+    if process_in_startup(watch.pid):
+        return
+    if watch.unanswered < ATSPI_PING_TRIES or watch.unanswered_s < ATSPI_PING_WINDOW_S:
+        return
+    if watch.target is None or _ping_answers(watch.target):
+        _note_answered(watch)
+        return
+    _raise_not_responding(watch)
+
+
+def call_went_unanswered() -> bool:
+    """True when the last `_safe` call raised and used the D-Bus timeout.
+
+    A slow call that returned is not unanswered. Desktop listing and the
+    Gtk.Dialog.run revive use this so a busy app is not dropped or skipped.
+    """
+    return bool(getattr(_reply_local, "last_failed", False)) and (
+        float(getattr(_reply_local, "last_elapsed", 0.0)) >= ATSPI_SLOW_CALL_S
+    )
+
+
+def _safe(fn, default=None):
+    watch = _current_watch()
+    start = time.monotonic()
+    failed = False
+    try:
+        result = fn()
+    except ComputerUseError:
+        raise
+    except Exception:
+        failed = True
+        result = default
+    elapsed = time.monotonic() - start
+    _reply_local.last_failed = failed
+    _reply_local.last_elapsed = elapsed
+    if watch is not None:
+        if failed and elapsed >= ATSPI_SLOW_CALL_S:
+            _note_unanswered(watch, elapsed)
+        elif not failed:
+            _note_answered(watch)
+    return result
+
+
+class DesktopApplications:
+    """Applications on the AT-SPI desktop, split by whether they answered."""
+
+    def __init__(self, ready: list[tuple[str, object]], silent: int) -> None:
+        self.ready = ready
+        self.silent = silent
+
+
+def collect_app_snapshots(items: Sequence[tuple[str, int | None, Callable[[], object]]]) -> list:
+    """Run each ``(app, pid, fn)`` under that app's reply budget.
+
+    An application that does not answer is omitted. The others are returned
+    in order. When every application fails, the first `app_not_responding`
+    error is raised so the desktop does not look like an empty success.
+    """
+    kept: list = []
+    first_fail: ComputerUseError | None = None
+    for app, pid, fn in items:
+        try:
+            with app_reply_watch(app, pid):
+                kept.append(fn())
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_RESPONDING:
+                raise
+            if first_fail is None:
+                first_fail = exc
+    if not kept and first_fail is not None:
+        raise first_fail
+    return kept
 
 
 _a11y_status_forced = False
@@ -219,14 +574,239 @@ def enable_a11y_status() -> bool:
         return False
 
 
+class _ReadCacheState:
+    """Successful getter results for one ``read_cache`` block on this thread."""
+
+    __slots__ = ("store", "pinned")
+
+    def __init__(self) -> None:
+        # id(obj) -> {(method name, args): value}. The object itself is pinned
+        # so a freed proxy cannot reuse the id while the entry is live.
+        self.store: dict[int, dict[tuple, object]] = {}
+        self.pinned: dict[int, object] = {}
+
+
+_read_cache_local = threading.local()
+
+
+def _read_cache_stack() -> list[_ReadCacheState]:
+    stack = getattr(_read_cache_local, "stack", None)
+    if stack is None:
+        stack = []
+        _read_cache_local.stack = stack
+    return stack
+
+
+@contextmanager
+def read_cache():
+    """Reuse successful stable getter results until this block exits.
+
+    The cache is per thread. An inner block sees an outer hit, and a
+    mutator drops every block on this thread. ``get_name`` is never
+    cached: a root probe retries an empty name. A child count of -1 is
+    not cached: that value is a failed read the walk revives.
+    ``get_state_set`` is never cached: a pointer click or Escape changes
+    SELECTED and EXPANDED inside the same call, and those inputs are not
+    AT-SPI mutators. An attribute dict that carries ``valuetext`` or an
+    ``aria-*`` state is not cached either: typing into a date segment
+    updates ``valuetext`` while the same call is still polling.
+    """
+    stack = _read_cache_stack()
+    stack.append(_ReadCacheState())
+    try:
+        yield
+    finally:
+        stack.pop()
+
+
+def _drop_read_cache() -> None:
+    """Forget cached getters on this thread. Called before a mutator runs."""
+    for state in _read_cache_stack():
+        state.store.clear()
+        state.pinned.clear()
+
+
+def _cache_key(name: str, args: tuple) -> tuple | None:
+    key = (name, args)
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
+def _lookup_read_cache(obj, key: tuple):
+    oid = id(obj)
+    for state in reversed(_read_cache_stack()):
+        slot = state.store.get(oid)
+        if slot is not None and key in slot:
+            found = slot[key]
+            return dict(found) if isinstance(found, dict) else found
+    return _CACHE_MISS
+
+
+def _store_read_cache(obj, key: tuple, result) -> None:
+    stack = _read_cache_stack()
+    if not stack:
+        return
+    state = stack[-1]
+    state.pinned[id(obj)] = obj
+    slot = state.store.setdefault(id(obj), {})
+    slot[key] = dict(result) if isinstance(result, dict) else result
+
+
+class _CacheMiss:
+    """Sentinel: a missing cache entry is distinct from a cached None."""
+
+
+_CACHE_MISS = _CacheMiss()
+
+
+def _nonempty_str(value) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _any_str(value) -> bool:
+    return isinstance(value, str)
+
+
+def _nonneg_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _present(value) -> bool:
+    return value is not None
+
+
+# These change when the user types or clicks, and the same driver call
+# polls them until the new value is visible. Caching the dict freezes
+# the first read.
+_VOLATILE_ATTRIBUTES = frozenset({
+    "valuetext",
+    "aria-valuetext",
+    "aria-valuenow",
+    "aria-expanded",
+    "aria-selected",
+    "aria-checked",
+    "aria-pressed",
+})
+
+
+def _attribute_keys(value) -> set[str] | None:
+    try:
+        keys = value.keys()
+    except Exception:
+        return None
+    try:
+        return {str(key).lower() for key in keys}
+    except Exception:
+        return None
+
+
+def _attributes(value) -> bool:
+    if isinstance(value, dict) or (
+        value is not None and hasattr(value, "keys") and hasattr(value, "get")
+    ):
+        keys = _attribute_keys(value)
+        return keys is not None and not (keys & _VOLATILE_ATTRIBUTES)
+    return False
+
+
+# Stable for the length of one driver call. Names, descriptions, extents,
+# text, and state sets are read again: they change without a method we
+# can see here, or a caller retries an empty result. A cached state set
+# kept a combo EXPANDED after Escape and a Qt cell unselected after the
+# pointer click that selected it. Attribute dicts are cached only when
+# they have no valuetext or aria state key.
+_CACHEABLE = {
+    "get_role_name": _nonempty_str,
+    "get_action_name": _any_str,
+    "get_n_actions": _nonneg_int,
+    "get_nActions": _nonneg_int,
+    "get_attributes": _attributes,
+    "get_component_iface": _present,
+    "get_component": _present,
+    "get_action_iface": _present,
+    "get_action": _present,
+    "get_accessible_id": _nonempty_str,
+    "get_toolkit_name": _nonempty_str,
+    "getToolkitName": _nonempty_str,
+    # Toolkit/browser probes repeatedly resolve the same node's owner.
+    # LibreOffice makes this a costly bus call; ownership is stable until
+    # the operation ends or a mutator invalidates this cache.
+    "get_application": _present,
+    "getApplication": _present,
+    "get_process_id": _positive_int,
+    "get_child_at_index": _present,
+    "getChildAtIndex": _present,
+    "get_child_count": _nonneg_int,
+    "get_childCount": _nonneg_int,
+}
+
+_MUTATORS = frozenset({
+    "clear_cache", "clearCache",
+    "set_text_contents", "setTextContents",
+    "insert_text", "insertText",
+    "set_current_value", "setCurrentValue",
+    "scroll_to", "scrollTo",
+    "do_action", "doAction",
+    "grab_focus", "grabFocus",
+    "select_child", "selectChild",
+    "set_caret_offset", "setCaretOffset",
+    "delete_text", "deleteText",
+})
+
+
+def _is_mutator(name: str) -> bool:
+    if name in _MUTATORS:
+        return True
+    return name.replace("_", "").lower().startswith("deselect")
+
+
 def _call_first(obj, names, *args, default=None):
     """Call the first method in ``names`` that exists on ``obj`` (binding-version
-    tolerant — atspi2 renamed a few getters across releases)."""
+    tolerant — atspi2 renamed a few getters across releases).
+
+    Inside ``read_cache``, a successful stable getter is remembered for
+    this object and these arguments. A mutator drops that memory first.
+    """
+    if obj is None:
+        return default
     for name in names:
         method = getattr(obj, name, None)
-        if method is not None:
+        if method is None:
+            continue
+        if _is_mutator(name):
+            _drop_read_cache()
             return _safe(lambda m=method: m(*args), default)
+        key = _cache_key(name, args)
+        if key is not None and _read_cache_stack():
+            cached = _lookup_read_cache(obj, key)
+            if cached is not _CACHE_MISS:
+                _reply_local.last_failed = False
+                _reply_local.last_elapsed = 0.0
+                return cached
+        result = _safe(lambda m=method: m(*args), default)
+        if (
+            key is not None
+            and _read_cache_stack()
+            and not getattr(_reply_local, "last_failed", False)
+        ):
+            accept = _CACHEABLE.get(name)
+            if accept is not None and accept(result):
+                _store_read_cache(obj, key, result)
+        return result
     return default
+
+
+def _move_caret(atspi_mod, acc, offset):
+    """Move the caret and drop cached getters; the tree may have changed."""
+    _drop_read_cache()
+    return _safe(lambda: atspi_mod.Text.set_caret_offset(acc, int(offset)))
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +852,815 @@ def _extents(acc, *, keep_zero: bool = False):
     return (float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)), (w, h)
 
 
+def _raw_rect(acc, coord_name: str):
+    """(x, y, width, height) in one AT-SPI coord type, or None.
+
+    ``SCREEN`` uses coord 0 when the binding has no ``CoordType``. A missing
+    ``WINDOW`` type is None rather than a second screen read. The GTK
+    no-allocation sentinel is returned as-is. This does not add the
+    LibreOffice title-bar shift.
+    """
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return None
+    coord_type = getattr(Atspi, "CoordType", None)
+    coord = getattr(coord_type, coord_name, None) if coord_type is not None else None
+    if coord is None:
+        if coord_name != "SCREEN":
+            return None
+        coord = 0
+    rect = _safe(lambda: comp.get_extents(coord))
+    if rect is None:
+        return None
+    return (
+        float(getattr(rect, "x", 0) or 0),
+        float(getattr(rect, "y", 0) or 0),
+        float(getattr(rect, "width", 0) or 0),
+        float(getattr(rect, "height", 0) or 0),
+    )
+
+
+def _frame_ancestor(acc):
+    """The top-level frame that contains ``acc``, or ``acc`` when it is one."""
+    node = acc
+    for _ in range(32):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role == "frame":
+            return node
+        if role == "application":
+            return None
+        node = _call_first(node, ("get_parent", "getParent"))
+    return None
+
+
+def _negative_extent(size) -> bool:
+    """True for GTK's no-allocation sentinel, (-1, -1) width and height."""
+    if size is None:
+        return False
+    try:
+        return float(size[0]) < 0 or float(size[1]) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _frame_accessible_name(node) -> str:
+    """Accessible name of the frame that contains ``node``, or empty."""
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return ""
+    return str(_call_first(frame, ("get_name",), default="") or "").strip()
+
+
+# GIMP action buttons append modifier help to the tooltip:
+# ``tooltip + "\n<b>" + modifier + "</b> " + ext``. GTK strips the markup
+# and leaves two spaces between the modifier and the rest of the line
+# (``Shift  Create new layers with last used values``). A single space
+# (``Shift the layer``) is a sentence, not that help.
+_MODIFIER_HINT_LINE = re.compile(
+    r"(?i)^(?:shift|ctrl|control|alt|super|meta|primary)"
+    r"(?:\+(?:shift|ctrl|control|alt|super|meta|primary))*"
+    r"[ \t]{2,}\S"
+)
+
+
+def _modifier_hint_body(text: str) -> tuple[str, str] | None:
+    """``(primary line, hint lines)`` when every extra line is modifier help.
+
+    None when ``text`` is a single line, the first line is empty, or any
+    extra line is not the GIMP modifier pattern. Plug-in blurbs such as
+    ``Align Visible Layers...\\nThis plug-in only works...`` stay whole.
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in raw:
+        return None
+    lines = raw.split("\n")
+    label = lines[0].strip()
+    if not label:
+        return None
+    hints = [line.strip() for line in lines[1:] if line.strip()]
+    if not hints or any(_MODIFIER_HINT_LINE.match(line) is None for line in hints):
+        return None
+    return label, "\n".join(hints)
+
+
+def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
+    """Keep the visible label as the name and the modifier lines as the description.
+
+    GIMP leaves the accessible name empty and puts the whole tooltip,
+    including Shift/Ctrl lines, in the description. The snapshot uses the
+    description when the name is empty, so the button's name becomes those
+    lines. The first line is the label drawn on the button. The rest is
+    modifier help and stays on the description, which the snapshot does not
+    render. A name that already contains the same lines is split the same
+    way. Anything that is not that pattern is unchanged.
+    """
+    split = _modifier_hint_body(name)
+    if split is not None:
+        label, hints = split
+        if not str(description).strip():
+            return label, hints
+        return label, description
+    if str(name).strip():
+        return name, description
+    split = _modifier_hint_body(description)
+    if split is None:
+        return name, description
+    return split
+
+
+# Inkscape toolbox rows put the short name on the first line and the tooltip
+# plus a parenthetical shortcut on the last: ``Text Tool\nCreate and edit
+# text objects (T)``. The chord is a key, not a sentence in parentheses.
+_TOOL_SHORTCUT = re.compile(
+    r"(?i)^(?:(?:ctrl|control|shift|alt|super|meta|primary|cmd|command|option)\+)*"
+    r"(?:f\d{1,2}|[a-z]|[0-9]|plus|minus|esc|escape|del|delete|tab|space|"
+    r"return|enter|backspace|up|down|left|right|home|end|insert|"
+    r"pageup|pagedown|page\s*up|page\s*down)$"
+)
+_TOOLTIP_SHORTCUT_LINE = re.compile(r"^(?P<hint>.+?) \((?P<shortcut>[^)]+)\)$")
+
+
+def _tooltip_shortcut_body(text: str) -> tuple[str, str, str] | None:
+    """``(label, hint, shortcut)`` for a name plus a tooltip ending in a chord.
+
+    None when the text is one line, a line is blank, or the last line does
+    not end in a parenthetical key. A sentence without that chord stays
+    whole, and so does a GIMP modifier line.
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in raw:
+        return None
+    lines = [line.strip() for line in raw.split("\n")]
+    if not lines or any(not line for line in lines):
+        return None
+    label = lines[0]
+    if _generic_region_name(label):
+        return None
+    match = _TOOLTIP_SHORTCUT_LINE.match(lines[-1])
+    if match is None:
+        return None
+    shortcut = match.group("shortcut").strip()
+    if _TOOL_SHORTCUT.match(shortcut) is None:
+        return None
+    hint_bits = lines[1:-1] + [match.group("hint").strip()]
+    hint = "\n".join(bit for bit in hint_bits if bit)
+    if not hint:
+        return None
+    return label, hint, shortcut
+
+
+def _split_tooltip_fields(name: str, description: str) -> tuple[str, str, str, str]:
+    """``(name, description, hint, shortcut)`` for an Inkscape tool row.
+
+    The visible name is the first line. The tooltip sentence is the hint
+    and the parenthetical chord is the shortcut. A description that already
+    has text is kept. A name that is not this pattern is unchanged, so the
+    GIMP modifier split that ran first still owns those lines.
+    """
+    split = _tooltip_shortcut_body(name)
+    if split is not None:
+        label, hint, shortcut = split
+        kept = description if str(description).strip() else hint
+        return label, kept, hint, shortcut
+    if str(name).strip():
+        return name, description, "", ""
+    split = _tooltip_shortcut_body(description)
+    if split is None:
+        return name, description, "", ""
+    label, hint, shortcut = split
+    return label, hint, hint, shortcut
+
+
+# A GIMP image window's canvas is a focusable childless panel. Its name is
+# not on that panel. The image title is a label elsewhere in the frame, and
+# the frame name is the window title. This search is local to that one
+# panel; it does not raise the snapshot's depth or child caps.
+_SURFACE_SKIP_ROLES = frozenset({"layered pane", "menu", "menu bar", "table", "tree table"})
+_SURFACE_WALK_NODES = 480
+_SURFACE_WALK_DEPTH = 16
+_SURFACE_WALK_CHILDREN = 48
+_TITLE_PREFIX_NEXT = frozenset(" .-(–—")
+
+
+def _page_tab_ancestor(acc):
+    """Nearest page tab above ``acc``, or None when a window comes first."""
+    node = acc
+    for _ in range(32):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role == "page tab":
+            return node
+        if role in {"application", "frame", "window", "dialog"}:
+            return None
+        node = _parent_of(node)
+    return None
+
+
+def _title_prefix_label(name: str, title: str) -> bool:
+    """True when ``name`` is the image title copied into the window title.
+
+    GIMP's frame name starts with the image title and then a view suffix
+    (``[Untitled]-1.0 (RGB...``). The next character is ``.``, a space, a
+    dash, or ``(``. A label that merely shares a shorter stem is not used.
+    """
+    if not name or _generic_region_name(name):
+        return False
+    if not title.startswith(name) or len(title) <= len(name):
+        return False
+    return title[len(name)] in _TITLE_PREFIX_NEXT
+
+
+def _prefix_image_labels(frame, title: str) -> list[str]:
+    """Label names under ``frame`` that are the image-title prefix.
+
+    Menus, icon grids, and tables are not walked. The budget stops the
+    search; a miss falls back to the frame title rather than a guess.
+    """
+    found: list[str] = []
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth: int) -> None:
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH or len(found) > 1:
+            return
+        budget -= 1
+        role = _role_name(node)
+        if role == "label":
+            name = _node_name(node)
+            if _title_prefix_label(name, title):
+                found.append(name)
+        if role in _SURFACE_SKIP_ROLES:
+            return
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return
+        for index in range(min(int(count), _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None:
+                walk(child, depth + 1)
+
+    walk(frame, 0)
+    return found
+
+
+def _panel_surface_name(node, size, focusable: bool) -> str:
+    """Image or window title for a focusable childless unnamed panel.
+
+    Empty unless the panel sits under a page tab, which is the GIMP image
+    canvas. The name is a label that prefixes the frame title when exactly
+    one such label is in the frame, otherwise the frame title itself. No
+    string is invented: an empty frame title leaves the panel unnamed.
+    """
+    if not focusable or size is None:
+        return ""
+    try:
+        if float(size[0]) < 32 or float(size[1]) < 32:
+            return ""
+    except (TypeError, ValueError, IndexError):
+        return ""
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count != 0:
+        return ""
+    if _page_tab_ancestor(node) is None:
+        return ""
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return ""
+    title = str(_call_first(frame, ("get_name",), default="") or "").strip()
+    if not title or _generic_region_name(title):
+        return ""
+    labels = _prefix_image_labels(frame, title)
+    if len(labels) == 1:
+        return labels[0]
+    return title
+
+
+def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
+    """Role, surface name, and note for Audacity's childless wx panels.
+
+    Toolbar tools put their label in the tooltip. The track view and Time
+    clock paint their contents without publishing controls or a value. Keep
+    those surfaces opaque; never invent track names or clock readings.
+    """
+    if _child_count(node) != 0 or not _parent_of(node):
+        return "", "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "audacity":
+        return "", "", ""
+    toolbar = None
+    parent = _parent_of(node)
+    for _ in range(20):
+        if parent is None:
+            return "", "", ""
+        role = _role_name(parent)
+        if role == "dialog":
+            return "", "", ""
+        if role == "tool bar" and toolbar is None:
+            toolbar = parent
+        if role in {"frame", "window"}:
+            break
+        if role == "application":
+            return "", "", ""
+        parent = _parent_of(parent)
+    else:
+        return "", "", ""
+    name = _node_name(node).strip()
+    description = str(_call_first(node, ("get_description",), default="") or "").strip()
+    if toolbar is not None:
+        if description and not name:
+            return "AXButton", "", ""
+        if not name and not description and _node_name(toolbar).casefold() in {"time", "time toolbar"}:
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
+    elif not name and not description and focusable and size is not None:
+        if size[0] >= 300 and size[1] >= 100:
+            return (
+                "", "Audacity track / waveform",
+                "Track controls are not exposed by AT-SPI; use Tracks > Mute/Unmute menus.",
+            )
+    return "", "", ""
+
+
+def _direct_label_names(acc) -> list[str]:
+    """Non-generic names of ``acc``'s immediate label children.
+
+    Stops once two names are found. The caller treats that as ambiguous.
+    """
+    count = _child_count(acc)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    found: list[str] = []
+    for index in range(min(int(count), 48)):
+        child = _child_at(acc, index)
+        if child is None or _role_name(child) != "label":
+            continue
+        name = _node_name(child)
+        if name and not _generic_region_name(name):
+            found.append(name)
+        if len(found) > 1:
+            return found
+    return found
+
+
+def _selected_icon_name(acc) -> str:
+    """The one label beside a selected icon, or empty.
+
+    GIMP brush-grid icons expose no name, description, text, or tooltip.
+    The dock's selected brush is a label on the filler that also holds the
+    scroll pane. Unselected icons have nothing to read, so this returns
+    empty for them only because the caller skips them. An ancestor with
+    two labels is ambiguous. The walk stops at a page tab or a window so
+    a label from another dock is not borrowed.
+    """
+    node = acc
+    for _ in range(6):
+        node = _parent_of(node)
+        if node is None:
+            return ""
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog", "page tab", "page tab list"}:
+            return ""
+        labels = _direct_label_names(node)
+        if len(labels) == 1:
+            return labels[0]
+        if len(labels) > 1:
+            return ""
+    return ""
+
+
+def _hidden_page_tab(node) -> bool:
+    """True when ``node`` is a page tab GTK gave no allocation of its own."""
+    if node is None or _role_name(node) != "page tab":
+        return False
+    _pos, size = _extents(node, keep_zero=True)
+    return _negative_extent(size)
+
+
+def _direct_children(node) -> list:
+    """Immediate children, without the snapshot's page-tab hoist."""
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    found = []
+    for index in range(min(int(count), _MAX_CHILDREN_FETCH)):
+        child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), index)
+        if child is not None:
+            found.append(child)
+    return found
+
+
+def _hoist_hidden_page_tabs(kids: list) -> list:
+    """Lift a hidden page tab's page up to the tab list.
+
+    The page stays in the snapshot, and it is not a child of the tab button.
+    A page tab that has a real box keeps its own children.
+    """
+    out = []
+    for kid in kids:
+        out.append(kid)
+        if _hidden_page_tab(kid):
+            out.extend(_direct_children(kid))
+    return out
+
+
+def _usable_window_rect(rect) -> bool:
+    """False for a missing box, a zero box, or GTK's off-screen sentinel."""
+    if rect is None:
+        return False
+    x, y, width, height = rect
+    if width <= 0 or height <= 0:
+        return False
+    return x > -1_000_000 and y > -1_000_000
+
+
+def _coords_close(a: float, b: float, tol: float = 4.0) -> bool:
+    return abs(a - b) <= tol
+
+
+def _client_area_is_on_screen(frame, frame_screen, client) -> bool:
+    """True when SCREEN coordinates already include the window-manager frame.
+
+    The X client origin sits below the outer frame by the title bar. A
+    direct child whose SCREEN top is that client origin — LibreOffice's
+    root pane — is already on the pixels, so adding the origin again drops
+    every box by one title bar. A child whose SCREEN top is still the outer
+    frame's top is the build that omits the title bar. No such child means
+    the node's own SCREEN point is kept.
+    """
+    if frame is None or frame_screen is None or client is None:
+        return True
+    fx, fy = float(frame_screen[0]), float(frame_screen[1])
+    cx, cy = float(client[0]), float(client[1])
+    if _coords_close(cx, fx) and _coords_close(cy, fy):
+        return True
+    count = _child_count(frame)
+    if count < 0:
+        count = 0
+    saw_outer = False
+    for index in range(min(count, 6)):
+        child = _child_at(frame, index)
+        if child is None or _role_name(child) == "frame":
+            continue
+        rect = _raw_rect(child, "SCREEN")
+        if rect is None or rect[2] <= 0 or rect[3] <= 0:
+            continue
+        if _coords_close(float(rect[0]), cx, 8) and _coords_close(float(rect[1]), cy, 8):
+            return True
+        if _coords_close(float(rect[0]), fx, 4) and _coords_close(float(rect[1]), fy, 4):
+            saw_outer = True
+    return not saw_outer
+
+
+def _libreoffice_content_origin(
+    screen, window, frame_screen, client, *, screen_is_absolute: bool,
+):
+    """Screen top-left for one LibreOffice content node.
+
+    ``screen`` and ``window`` are that node's SCREEN and WINDOW points.
+    ``frame_screen`` is the frame's outer SCREEN rectangle. ``client`` is
+    the X client origin inside that frame. ``screen_is_absolute`` is the
+    frame-child check in ``_client_area_is_on_screen``.
+
+    A node whose SCREEN point is already the client origin plus its WINDOW
+    point is on the pixels. When SCREEN and WINDOW are the same point, the
+    client origin is added only if the frame's client area was reported at
+    the outer corner. Adding it on a build whose SCREEN point already
+    matches the screen drops the box by one title bar.
+    """
+    sx, sy = float(screen[0]), float(screen[1])
+    wx, wy = float(window[0]), float(window[1])
+    cx, cy = float(client[0]), float(client[1])
+    fx, fy = float(frame_screen[0]), float(frame_screen[1])
+    if _coords_close(sx, cx + wx) and _coords_close(sy, cy + wy):
+        return (sx, sy)
+    if _coords_close(sx, wx) and _coords_close(sy, wy):
+        if screen_is_absolute:
+            return (sx, sy)
+        return (cx + wx, cy + wy)
+    if _coords_close(sx, fx + wx) and _coords_close(sy, fy + wy):
+        return (sx, sy)
+    if not screen_is_absolute:
+        return (cx + wx, cy + wy)
+    return (sx, sy)
+
+
+def _libreoffice_pointer_delta(
+    screen_is_absolute: bool,
+    major: int | None,
+    client,
+    frame_screen,
+) -> tuple[float, float]:
+    """Pointer adjustment so a pixel point hits that pixel.
+
+    The published box stays on the pixels. LibreOffice 24.2 gtk3 still
+    hit-tests one title bar above those pixels, so a click on the published
+    centre selects the row above. The title bar is added to the event only.
+    Adding it to the box as well drops a crop onto the next line. LibreOffice
+    25 hit-tests the published point, and a build whose client area is still
+    reported at the outer corner already has the title bar in the box.
+    """
+    if not screen_is_absolute or client is None or frame_screen is None:
+        return (0.0, 0.0)
+    if major is None or major >= 25:
+        return (0.0, 0.0)
+    return (
+        float(client[0]) - float(frame_screen[0]),
+        float(client[1]) - float(frame_screen[1]),
+    )
+
+
+_lo_major: int | None = None
+_lo_major_known = False
+
+
+def libreoffice_major() -> int | None:
+    """Major version of the installed ``soffice``, or None when it cannot be read.
+
+    Cached for the process. ``LibreOffice 24.2.7.2`` is 24. A missing binary
+    is None, which does not move the pointer.
+    """
+    global _lo_major, _lo_major_known
+    if _lo_major_known:
+        return _lo_major
+    _lo_major_known = True
+    try:
+        out = subprocess.check_output(
+            ["soffice", "--version"], text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for token in out.split():
+        head, dot, _rest = token.partition(".")
+        if dot and head.isdigit():
+            _lo_major = int(head)
+            return _lo_major
+    return None
+
+
+def _libreoffice_frame_at(x: int, y: int):
+    """The LibreOffice frame whose SCREEN rectangle contains ``(x, y)``."""
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    count = _child_count(desktop)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 40)):
+        app = _child_at(desktop, index)
+        if app is None:
+            continue
+        name = str(_call_first(app, ("get_name",), default="") or "")
+        if not libreoffice_app(name):
+            continue
+        frames = _child_count(app)
+        if frames < 0:
+            frames = 0
+        for child_index in range(min(int(frames), 8)):
+            frame = _child_at(app, child_index)
+            if frame is None or _role_name(frame) != "frame":
+                continue
+            rect = _raw_rect(frame, "SCREEN")
+            if rect is None or rect[2] <= 0 or rect[3] <= 0:
+                continue
+            if (
+                rect[0] - 2 <= x <= rect[0] + rect[2] + 2
+                and rect[1] - 2 <= y <= rect[1] + rect[3] + 2
+            ):
+                return frame
+    return None
+
+
+# After the first pointer event, LibreOffice 24.2 republishes content
+# extents in the hit-test space (about one title bar lower). A later event
+# in that process must not add the inset again. A new soffice process, even
+# one whose frame lands on the same screen rectangle, still needs the first
+# inset. Keyed by process id plus the frame's SCREEN rectangle.
+_lo_pointer_aligned: set[tuple[int, int, int, int, int]] = set()
+
+
+def _libreoffice_frame_key(frame) -> tuple[int, int, int, int] | None:
+    screen = _raw_rect(frame, "SCREEN")
+    if screen is None or screen[2] <= 0 or screen[3] <= 0:
+        return None
+    return (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
+
+
+def _libreoffice_align_key(frame) -> tuple[int, int, int, int, int] | None:
+    rect = _libreoffice_frame_key(frame)
+    if rect is None:
+        return None
+    return (pid_of(frame) or 0, *rect)
+
+
+def libreoffice_pointer_shift(x: int, y: int) -> tuple[float, float]:
+    """``(dx, dy)`` added to a pointer event aimed at pixel ``(x, y)``.
+
+    Zero when the point is not in a LibreOffice frame, when that frame's
+    client area is still reported at the outer corner, on LibreOffice 25
+    and newer, or after a pointer event has already landed in that process's
+    frame. That first event moves the hit-test onto the published extents, so
+    a second click must use the new box as-is. Failures are zero so a click
+    outside LibreOffice is unchanged.
+    """
+    try:
+        frame = _libreoffice_frame_at(int(x), int(y))
+        if frame is None:
+            return (0.0, 0.0)
+        key = _libreoffice_frame_key(frame)
+        align = _libreoffice_align_key(frame)
+        if key is None or align is None or align in _lo_pointer_aligned:
+            return (0.0, 0.0)
+        screen = _raw_rect(frame, "SCREEN")
+        if screen is None:
+            return (0.0, 0.0)
+        from a11y_computer_use.drivers import _linux_system
+
+        title = str(_call_first(frame, ("get_name",), default="") or "")
+        origin = _linux_system.client_origin_for_outer_frame(
+            key[0], key[1], key[2], key[3], title=title,
+        )
+        absolute = True if origin is None else _client_area_is_on_screen(frame, screen, origin)
+        return _libreoffice_pointer_delta(absolute, libreoffice_major(), origin, screen)
+    except Exception:
+        return (0.0, 0.0)
+
+
+# LibreOffice 25.2 keeps content SCREEN about one title bar above WINDOW
+# until the first pointer event. The gap is that bar (about 21–29px), so
+# anything smaller is the ordinary LO 24 reading, where the two already
+# agree and a motion would drop the published box into the hit-test.
+_LO_PRE_MOTION_GAP = 12
+_lo_settle_attempts: dict[int, int] = {}
+
+
+def libreoffice_pre_motion(screen_y: float, window_y: float) -> bool:
+    """True when a content SCREEN top is about a title bar above WINDOW.
+
+    That is the pre-motion reading on LibreOffice 25.2. LibreOffice 24
+    reports the two equal before the first pointer event, and moves SCREEN
+    down afterwards. Neither of those is this gap.
+    """
+    return float(window_y) - float(screen_y) >= _LO_PRE_MOTION_GAP
+
+
+def libreoffice_status_point(x: int, y: int, width: int, height: int) -> tuple[int, int] | None:
+    """A point in the status bar of a client rectangle, or None when it is tiny.
+
+    The bottom centre is status text. It is not a cell, a menu, or a toolbar
+    button, so the motion does not select or press anything.
+    """
+    if width < 40 or height < 40:
+        return None
+    return (int(x) + int(width) // 2, int(y) + int(height) - 8)
+
+
+def _client_box_for_frame(frame) -> tuple[int, int, int, int] | None:
+    """``(x, y, width, height)`` of the X client area under ``frame``.
+
+    The origin is the managed window that sits on the frame's outer SCREEN
+    rectangle. None when that window is not listed.
+    """
+    screen = _raw_rect(frame, "SCREEN")
+    if screen is None or screen[2] <= 0 or screen[3] <= 0:
+        return None
+    from a11y_computer_use.drivers import _linux_system
+
+    title = str(_call_first(frame, ("get_name",), default="") or "")
+    origin = _linux_system.client_origin_for_outer_frame(
+        int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]), title=title,
+    )
+    if origin is None:
+        return None
+    try:
+        listed = _linux_system.windows()
+    except Exception:
+        return None
+    for row in listed:
+        bounds = row.get("bounds") if isinstance(row, dict) else None
+        if not isinstance(bounds, dict):
+            continue
+        if abs(int(bounds.get("x", 0)) - origin[0]) > 4:
+            continue
+        if abs(int(bounds.get("y", 0)) - origin[1]) > 4:
+            continue
+        width = int(bounds.get("width") or 0)
+        height = int(bounds.get("height") or 0)
+        if width > 0 and height > 0:
+            return (origin[0], origin[1], width, height)
+    return None
+
+
+def _pre_motion_nodes(root) -> list:
+    """Content nodes whose SCREEN/WINDOW pair can show the pre-motion gap.
+
+    The frame itself is the outer window and is not content. A spreadsheet
+    contributes one cell; its other cells are not walked.
+    """
+    found: list = []
+    stack: list[tuple] = [(root, 0)]
+    while stack and len(found) < 24:
+        node, depth = stack.pop()
+        if node is None or depth > 5:
+            continue
+        role = _role_name(node)
+        if role not in {"frame", "application"}:
+            found.append(node)
+        if role in {"menu", "menu bar", "popup menu", "tool bar"} or role == "table":
+            if _spreadsheet_table(node):
+                cell = _table_cell_at(node, 0, 0)
+                if cell is not None:
+                    found.append(cell)
+            continue
+        if depth >= 5:
+            continue
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 6) - 1, -1, -1):
+            stack.append((_child_at(node, index), depth + 1))
+    return found
+
+
+def _frame_is_pre_motion(frame) -> bool:
+    for node in _pre_motion_nodes(frame):
+        screen = _raw_rect(node, "SCREEN")
+        window = _raw_rect(node, "WINDOW")
+        if screen is None or window is None:
+            continue
+        if screen[2] <= 0 or screen[3] <= 0 or window[2] <= 0 or window[3] <= 0:
+            continue
+        if libreoffice_pre_motion(screen[1], window[1]):
+            return True
+    return False
+
+
+def settle_libreoffice_geometry(root) -> None:
+    """Move the pointer once when this window's content is still pre-motion.
+
+    LibreOffice 25.2 then republishes SCREEN on the pixels. The snapshot
+    that follows reads those extents. The placement cache and the
+    LibreOffice 24 pointer inset are unchanged: a window whose SCREEN
+    already matches WINDOW is not moved, so the first click there still
+    uses the title-bar shift. The motion is two points in the status bar.
+    A process is tried at most twice. Failures leave the bounds as read.
+    """
+    try:
+        frame = root if _role_name(root) == "frame" else _frame_ancestor(root)
+        if frame is None:
+            count = _child_count(root)
+            if count < 0:
+                count = 0
+            for index in range(min(int(count), 4)):
+                child = _child_at(root, index)
+                if child is not None and _role_name(child) == "frame":
+                    frame = child
+                    break
+        if frame is None or not _frame_is_pre_motion(frame):
+            return
+        pid = pid_of(frame) or pid_of(root) or 0
+        if _lo_settle_attempts.get(pid, 0) >= 2:
+            return
+        box = _client_box_for_frame(frame)
+        if box is None:
+            return
+        point = libreoffice_status_point(*box)
+        if point is None:
+            return
+        from a11y_computer_use.drivers import _linux_input
+
+        x, y = point
+        _linux_input.hover(x, y)
+        _linux_input.hover(min(x + 3, box[0] + box[2] - 4), y)
+        _lo_settle_attempts[pid] = _lo_settle_attempts.get(pid, 0) + 1
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            if not _frame_is_pre_motion(frame):
+                return
+            time.sleep(0.05)
+    except Exception:
+        return
+
+
+def note_libreoffice_pointer(x: int, y: int) -> None:
+    """Remember that a pointer event landed in the LibreOffice frame at ``(x, y)``."""
+    try:
+        frame = _libreoffice_frame_at(int(x), int(y))
+        if frame is None:
+            return
+        key = _libreoffice_align_key(frame)
+        if key is not None:
+            _lo_pointer_aligned.add(key)
+    except Exception:
+        return
+
+
 def _action_iface(acc):
     return _call_first(acc, ("get_action_iface", "get_action"))
 
@@ -297,8 +1686,9 @@ def _action_names(acc) -> tuple[str, ...]:
 # groups/buttons/windows are the bulk of a tree. Their label lives in the Name
 # (title), not the value, so skipping the value read is a pure speedup.
 _NO_VALUE_ROLES = frozenset({
-    "AXButton", "AXImage", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
+    "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
+    "AXStatusBar",
 })
 
 
@@ -334,6 +1724,121 @@ def _strip_objects(text: str) -> str:
     return text.replace(_OBJECT_REPLACEMENT, "").strip()
 
 
+# Qt rich-text names (FeatherPad's word-count control) are HTML. Only these
+# names are tags. ``<not-a-tag>`` and ``a < b`` are text and stay.
+_HTML_TAG_NAMES = (
+    "a|b|i|u|s|p|br|hr|img|div|span|em|strong|font|qt|html|body|head|title|"
+    "table|thead|tbody|tfoot|tr|td|th|ul|ol|li|pre|blockquote|center|big|small|"
+    "sub|sup|tt|nobr|code|meta|style|script|h1|h2|h3|h4|h5|h6|dl|dt|dd|caption"
+)
+# The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
+# not a tag: HTML does not allow a space between ``<`` and the name.
+_HTML_TAG_RE = re.compile(
+    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    re.IGNORECASE,
+)
+_HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
+_HTML_BLOCK_TAGS = frozenset({
+    "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "qt", "html",
+    "body", "pre", "blockquote", "ul", "ol", "table", "head", "title", "dl",
+    "dt", "dd", "caption",
+})
+
+
+def _html_markup(tags: list[re.Match[str]]) -> bool:
+    """True when ``tags`` are rich text, not a lone ``<a>`` or ``<not-a-tag>``.
+
+    A tag with attributes, a void tag, or an open/close pair is markup.
+    ``<a>`` with no attributes and no closer is left alone, and so is any
+    name that is not an HTML tag.
+    """
+    opened: set[str] = set()
+    closed: set[str] = set()
+    for match in tags:
+        name = match.group(2).lower()
+        rest = (match.group(3) or "").strip(" /")
+        if name in _HTML_VOID_TAGS or rest:
+            return True
+        if match.group(1):
+            closed.add(name)
+        else:
+            opened.add(name)
+    return bool(opened & closed)
+
+
+def _strip_known_markup(text: str) -> str:
+    """Remove rich-text tags. Text that is not markup is returned unchanged."""
+    tags = list(_HTML_TAG_RE.finditer(text))
+    if not _html_markup(tags):
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(2).lower()
+        if name in _HTML_VOID_TAGS or (match.group(1) and name in _HTML_BLOCK_TAGS):
+            return " "
+        return ""
+
+    cleaned = _HTML_TAG_RE.sub(replace, text)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+    return cleaned.strip()
+
+
+def _plain_accessible_name(text: str) -> str:
+    """Accessible name with rich-text markup removed and entities decoded.
+
+    ``<p style='white-space:pre'>Calculate number of words</p>`` becomes
+    ``Calculate number of words``. ``&amp;`` becomes ``&``. ``<not-a-tag>``,
+    ``a < b``, and a bare ``<a>`` are not markup and are kept. A name with
+    no ``<`` and no ``&`` is returned unchanged.
+    """
+    if "<" not in text and "&" not in text:
+        return text
+    current = text
+    for _ in range(3):
+        decoded = html.unescape(current)
+        if decoded != current:
+            decoded = decoded.replace("\xa0", " ")
+        stripped = _strip_known_markup(decoded)
+        if stripped == current:
+            return current
+        current = stripped
+    return current
+
+
+# An unnamed icon's Text is a caption, not a document. Evince thumbnail
+# page numbers are one or two characters. 80 holds a label and does not
+# raise the snapshot value caps.
+_IMAGE_LABEL_CHARS = 80
+
+
+def _image_text_label(acc) -> str:
+    """Text of an unnamed icon or image, used as its name.
+
+    Evince thumbnail icons have an empty name and a Text interface whose
+    string is the page label (``1``, ``2``, ``3``). A missing interface, a
+    blank string, or a generic word such as ``image`` stays empty, and the
+    pruner can still fold the icon. The read is bounded. ``get_text`` is
+    not asked for ``-1``.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return ""
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return ""
+    limit = min(int(count), _IMAGE_LABEL_CHARS)
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, limit))
+    if not isinstance(got, str):
+        return ""
+    text = " ".join(
+        got.replace("\u00a0", " ").replace(_OBJECT_REPLACEMENT, " ").split()
+    )
+    if not text or _generic_region_name(text):
+        return ""
+    return text
+
+
 def _is_choice_role(role: str, role_name: str) -> bool:
     return role in _CHOICE_ROLES or role_name in _CHOICE_ROLE_NAMES
 
@@ -349,6 +1854,19 @@ def _texts_match(got: str | None, wanted: str | None) -> bool:
     if got is None or wanted is None:
         return False
     return _norm_nbsp(got) == _norm_nbsp(wanted)
+
+
+def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which paragraph separator was used.
+
+    Newline, CR, CRLF, VT, FF, NEL, U+2028, U+2029, and U+FFFC are the same
+    break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
+    ``a b`` is not ``a\\nb``, and ``ab`` is not ``a\\nb``. A trailing break
+    is kept.
+    """
+    from a11y_computer_use.outcome import paragraph_breaks_match as same_breaks
+
+    return same_breaks(got, wanted)
 
 
 def _text_is_blank(text: str | None) -> bool:
@@ -468,13 +1986,55 @@ def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
     return raw.strip() or None
 
 
+_BLOCK_TAGS = frozenset({
+    "p", "div", "li", "pre", "blockquote", "address",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+})
+
+
+def _block_boundary(obj) -> bool:
+    """True when ``obj`` is a paragraph or block, not an inline embed.
+
+    A bold word and a link are inline. A contenteditable paragraph, heading,
+    or block tag is the boundary a newline asked for.
+    """
+    if obj is None:
+        return False
+    try:
+        role = _role_name(obj)
+    except Exception:
+        return False
+    if role in {"paragraph", "heading"}:
+        return True
+    try:
+        tag = str(_get_attributes(obj).get("tag") or "").lower()
+    except Exception:
+        return False
+    return tag in _BLOCK_TAGS
+
+
+def _with_block_boundary(preceding: str, obj, piece: str) -> str:
+    """``piece`` with a newline in front when ``obj`` starts another block.
+
+    The first block has no leading break. A piece that already starts with a
+    break is left as it is. An empty block still contributes the break, so
+    two boundaries stay two.
+    """
+    if not preceding or not _block_boundary(obj):
+        return piece
+    if piece.startswith(("\n", "\r", "\u2028", "\u2029")):
+        return piece
+    return "\n" + piece
+
+
 def _expand_embedded(acc, text: str, depth: int = 0) -> str:
     """Replace each U+FFFC with the embedded child's text.
 
     ``"The \\ufffc fox jumps over the \\ufffc dog."`` with a link "quick brown"
     and an emphasis "lazy" becomes "The quick brown fox jumps over the lazy
     dog." A leftover object character with no child is dropped, which is what
-    a label around a select already did.
+    a label around a select already did. A paragraph or block boundary is a
+    newline between those children, not a character that is dropped.
     """
     if not isinstance(text, str):
         return ""
@@ -489,7 +2049,8 @@ def _expand_embedded(acc, text: str, depth: int = 0) -> str:
         if index >= len(parts) - 1:
             break
         obj = targets[index] if index < len(targets) else None
-        out.append(_object_text(obj, depth + 1, surrounding))
+        piece = _object_text(obj, depth + 1, surrounding)
+        out.append(_with_block_boundary("".join(out), obj, piece))
     return "".join(out).strip()
 
 
@@ -615,6 +2176,180 @@ def _qt_app(acc) -> bool:
     return "qt" in _toolkit_name(acc)
 
 
+def _java_app(acc) -> bool:
+    """True when this node belongs to the Java ATK wrapper.
+
+    The toolkit name is ``JAVA``. GTK, Qt, and a fake with no toolkit are not.
+    """
+    return "java" in _toolkit_name(acc)
+
+
+def _gtk_combo(acc) -> bool:
+    """A GTK combo box. Chromium, Firefox, Qt, and a fake with no toolkit are not.
+
+    The toolkit name is what distinguishes a GtkComboBox from a web select
+    that happens to use the same AT-SPI role. An empty toolkit stays on the
+    EXPANDABLE flag the snapshot already had.
+    """
+    if acc is None or _role_name(acc) != "combo box":
+        return False
+    try:
+        if _chromium_app(acc) or _gecko_app(acc) or _qt_app(acc):
+            return False
+    except Exception:
+        return False
+    return "gtk" in _toolkit_name(acc)
+
+
+def _toolkit_version(acc) -> str:
+    """AT-SPI toolkit version for ``acc``'s application, cached per application.
+
+    An empty string means the application did not report one. Callers that
+    need GTK 4 do not guess from a missing version.
+    """
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    cached = getattr(app, "_a11y_toolkit_version", None)
+    if isinstance(cached, str):
+        return cached
+    version = _call_first(app, ("get_toolkit_version", "getToolkitVersion"), default="") or ""
+    text = str(version).strip()
+    try:
+        setattr(app, "_a11y_toolkit_version", text)
+    except Exception:
+        pass
+    return text
+
+
+def _gtk_major(acc) -> int | None:
+    """Major GTK version, or None when the toolkit is not GTK or has no version."""
+    if "gtk" not in _toolkit_name(acc):
+        return None
+    text = _toolkit_version(acc)
+    if not text:
+        return None
+    head = text.split(".", 1)[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _gtk4_app(acc) -> bool:
+    """True for GTK 4 or newer. GTK 3, Qt, Chromium, and a missing version are not."""
+    major = _gtk_major(acc)
+    return major is not None and major >= 4
+
+
+def _gtk4_frame_size(acc) -> tuple[int, int]:
+    """Client size of ``acc``'s frame, from WINDOW extents, else SCREEN."""
+    frame = _frame_ancestor(acc) or acc
+    rect = _raw_rect(frame, "WINDOW")
+    if rect is None or rect[2] <= 0 or rect[3] <= 0:
+        rect = _raw_rect(frame, "SCREEN")
+    if rect is None or rect[2] <= 0 or rect[3] <= 0:
+        return 0, 0
+    return int(rect[2]), int(rect[3])
+
+
+def _gtk4_client_origin(acc, cache: dict | None = None) -> tuple[int, int] | None:
+    """X client origin for a GTK 4 accessible, or None when it cannot be read.
+
+    The result is cached by pid and frame size for one snapshot. None is
+    cached too, so a missing window is not looked up again for every node.
+    """
+    if not _gtk4_app(acc):
+        return None
+    pid = pid_of(acc)
+    if not pid:
+        app = _call_first(acc, ("get_application", "getApplication"))
+        pid = pid_of(app)
+    width, height = _gtk4_frame_size(acc)
+    key = (int(pid or 0), width, height)
+    if cache is not None and key in cache:
+        return cache[key]
+    origin: tuple[int, int] | None = None
+    if pid:
+        try:
+            from a11y_computer_use.drivers import _linux_system
+
+            origin = _linux_system.gtk4_content_origin(int(pid), width, height)
+        except Exception:
+            origin = None
+    if cache is not None:
+        cache[key] = origin
+    return origin
+
+
+def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
+    """Screen position and size for a GTK 4 node, or None to keep SCREEN.
+
+    GTK 4 reports every SCREEN origin as (0, 0) while WINDOW coordinates are
+    relative to the X client window. The screen point is that window's origin
+    plus the WINDOW box. A sum that is already the SCREEN point is left
+    alone, including a window that really sits at the origin. A missing
+    origin is None: the SCREEN point is not replaced with a guess. Negative
+    extents and a non-zero SCREEN origin are left alone.
+    """
+    if position is None or size is None or not _gtk4_app(acc):
+        return None
+    x, y = float(position[0]), float(position[1])
+    width, height = float(size[0]), float(size[1])
+    if width < 0 or height < 0 or x < 0 or y < 0:
+        return None
+    if abs(x) > 0.5 or abs(y) > 0.5:
+        return None
+    window = _raw_rect(acc, "WINDOW")
+    if window is None or window[2] <= 0 or window[3] <= 0:
+        return None
+    origin = _gtk4_client_origin(acc, cache)
+    if origin is None:
+        return None
+    nx = float(origin[0]) + float(window[0])
+    ny = float(origin[1]) + float(window[1])
+    if abs(nx - x) <= 1 and abs(ny - y) <= 1:
+        return None
+    return (nx, ny), (float(window[2]), float(window[3]))
+
+
+def gtk4_window_origin_untrusted(acc) -> bool:
+    """GTK 4 header-bar boxes can lie outside the frame's content origin.
+
+    Adding the recovered content origin fixes body widgets, but does not
+    make these negative WINDOW coordinates reliable pointer targets (#502).
+    Use the control's activation action rather than guessing another offset.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    window = _raw_rect(acc, "WINDOW")
+    return window is not None and (window[0] < 0 or window[1] < 0)
+
+
+def published_origin_untrusted(acc) -> bool:
+    """True when a box published at screen (0, 0) is not that pixel.
+
+    GTK 4's SCREEN origin is (0, 0) while the WINDOW box is elsewhere, and
+    the X client origin was not added (or could not be read). A window whose
+    origin plus its WINDOW box is (0, 0) really is at the origin. Other
+    toolkits, and a GTK build with no version, are not this case.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    screen = _raw_rect(acc, "SCREEN")
+    window = _raw_rect(acc, "WINDOW")
+    if screen is None or window is None:
+        return True
+    if screen[2] <= 0 or screen[3] <= 0 or window[2] <= 0 or window[3] <= 0:
+        return True
+    if abs(float(screen[0])) > 0.5 or abs(float(screen[1])) > 0.5:
+        return False
+    origin = _gtk4_client_origin(acc, None)
+    if origin is None:
+        return True
+    nx = float(origin[0]) + float(window[0])
+    ny = float(origin[1]) + float(window[1])
+    return abs(nx) > 1 or abs(ny) > 1
+
+
 def _sane_range(low: float, high: float) -> bool:
     """True when minimum and maximum are a real widget range.
 
@@ -629,6 +2364,42 @@ def _sane_range(low: float, high: float) -> bool:
         if number != 0.0 and abs(number) < 1e-200:
             return False
     return True
+
+
+# LibreOffice GTK dialogs and checkboxes expose an AtkValue that is not
+# AtkValue. CurrentValue then reads an uninitialized double (about
+# 6.93e-310), which is subnormal. Zero and ordinary small values stay.
+_UNINITIALIZED_VALUE_ROLES = frozenset({"AXDialog", "AXCheckBox"})
+_UNINITIALIZED_VALUE_ROLE_NAMES = frozenset({"dialog", "alert", "check box"})
+#: An empty text control whose character count is 0. ``document text`` is
+#: absent: a Writer document's text lives in its paragraphs, and that read
+#: has to run. A filler is absent too, so its Value stays.
+_EMPTY_TEXT_VALUE_NAMES = frozenset({
+    "entry", "text", "password text", "terminal", "paragraph",
+})
+#: Roles whose Value interface is not the text a person reads. A subnormal
+#: double on these is dropped. A filler is not here.
+_SUBNORMAL_TEXT_ROLES = frozenset({
+    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText",
+})
+_SUBNORMAL_TEXT_ROLE_NAMES = frozenset({
+    "entry", "text", "static", "label", "password text", "paragraph",
+    "terminal", "document text",
+})
+
+
+def _uninitialized_double(value: object) -> bool:
+    """True for a non-finite number or a subnormal double.
+
+    ``0``, ``0.0``, and small normalized values such as ``0.001`` and
+    ``1e-6`` are not this. The uninitialized LibreOffice reading is.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    number = float(value)
+    if not math.isfinite(number):
+        return True
+    return number != 0.0 and abs(number) < sys.float_info.min
 
 
 def _relation_type_token(value) -> str:
@@ -698,19 +2469,210 @@ def _labelled_by_name(acc) -> str:
     return ""
 
 
+def _strip_label_colon(label: str) -> str:
+    """``Orientation:`` is the label text. The control's title is ``Orientation``."""
+    text = label.strip()
+    if text.endswith(":"):
+        text = text[:-1].rstrip()
+    return text
+
+
 def _combo_display_name(acc, name: str) -> str:
     """Title for a combo box.
 
-    On Linux, Qt puts the current item in the accessible name and says the
-    label relation is the widget's name. A GTK combo already carries the name
-    it was given, so this returns that name unchanged.
+    Qt puts the current item in the accessible name and says the label
+    relation is the widget's name. That override is unchanged.
+
+    Any other combo that was given a name keeps it. LibreOffice's GTK
+    sidebar combos are not given one: the name is empty and the label is a
+    LABELLED_BY relation (``Orientation:``). The title is that label without
+    the trailing colon, so find can match ``Orientation``.
     """
-    if not _qt_app(acc):
+    if _qt_app(acc):
+        label = _labelled_by_name(acc)
+        if label and label != name:
+            return label
+        return name
+    if str(name).strip():
         return name
     label = _labelled_by_name(acc)
-    if label and label != name:
-        return label
-    return name
+    if not label:
+        return name
+    title = _strip_label_colon(label)
+    return title or name
+
+
+def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
+    """True for a Chromium custom ``role=spinbutton``, not a native number input.
+
+    Chrome exposes both as AT-SPI ``spin button``. The custom control's
+    ``xml-roles`` is ``spinbutton`` and its tag is not an ``<input
+    type=number>``. A date, time, or month segment also carries
+    ``xml-roles=spinbutton``; that segment stays on the valuetext path.
+    A GTK spin button is not Chromium.
+    """
+    role = role_name if role_name is not None else _role_name(acc)
+    if role != "spin button" or not _chromium_app(acc):
+        return False
+    if _number_input(acc) or _chrome_date_segment(acc):
+        return False
+    if attrs is None:
+        attrs = _get_attributes(acc)
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    return "spinbutton" in xml
+
+
+def _aria_spin_value(acc) -> str | None:
+    """The spin button's displayed value, then its minimum and maximum.
+
+    ``valuetext`` is Chrome's ``GetValueForControl``: ``aria-valuetext`` when
+    that attribute is set, otherwise the numeric value. A blank attribute
+    falls back to the Value interface (``aria-valuenow``). Minimum and
+    maximum are included only when that interface reports a real range, the
+    same range a slider's value comes from.
+    """
+    raw = _get_attributes(acc).get("valuetext")
+    shown = raw.strip() if isinstance(raw, str) else ""
+    if not shown:
+        cur = _safe(lambda: _atspi().Value.get_current_value(acc))
+        if isinstance(cur, bool) or not isinstance(cur, (int, float)):
+            return None
+        number = float(cur)
+        if not math.isfinite(number):
+            return None
+        shown = _format_bound(number)
+    span = _value_range(acc)
+    if span is None or not _sane_range(*span):
+        return shown
+    low, high = span
+    return f"{shown} (min {_format_bound(low)}, max {_format_bound(high)})"
+
+
+def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
+    """Whether ``rect`` intersects ``box``, or None when the rect is unreadable.
+
+    A zero-size glyph is off the widget. Coordinates are the same space as
+    ``box`` (screen pixels).
+    """
+    if rect is None:
+        return None
+    try:
+        x = float(getattr(rect, "x"))
+        y = float(getattr(rect, "y"))
+        width = float(getattr(rect, "width"))
+        height = float(getattr(rect, "height"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if width <= 0 or height <= 0:
+        return False
+    left, top, box_w, box_h = box
+    return y < top + box_h and y + height > top and x < left + box_w and x + width > left
+
+
+def _terminal_on_screen(acc, full: str) -> str:
+    """The on-screen slice of a VTE buffer.
+
+    ``Text.get_text`` is the scrollback plus the screen on some builds and
+    only the screen on others. Characters above the widget are omitted and
+    a leading ellipsis marks that cut. When a character cannot be placed,
+    the whole buffer is returned and the snapshot cap keeps its tail.
+    """
+    text = full
+    count = len(text)
+    if count <= 1:
+        return text
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return text
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+
+    def on_screen(offset: int) -> bool | None:
+        rect = _safe(lambda index=offset: Atspi.Text.get_character_extents(acc, index, coord))
+        return _rect_hits_box(rect, box)
+
+    first = on_screen(0)
+    last = on_screen(count - 1)
+    if first is None or last is None:
+        return text
+    start = 0
+    end = count
+    if not first:
+        if not last:
+            return text
+        lo, hi = 0, count - 1
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            flag = on_screen(mid)
+            if flag is None:
+                return text
+            if flag:
+                hi = mid
+            else:
+                lo = mid
+        start = hi
+    if not last:
+        lo, hi = start, count - 1
+        if not (0 <= start < count - 1):
+            return text
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            flag = on_screen(mid)
+            if flag is None:
+                return text
+            if flag:
+                lo = mid
+            else:
+                hi = mid
+        end = lo + 1
+    screen = text[start:end]
+    if not screen:
+        return text
+    if start > 0 and not screen.startswith("…"):
+        return "…" + screen
+    return screen
+
+
+# Characters taken from a page's Text interface. The snapshot still clips
+# what the model reads (`observe._MAX_VALUE_CHARS`) and what the line shows
+# (`observe._RENDER_VALUE_CHARS`). Find searches this string, including the
+# part past those caps. A longer page is cut here. This does not raise a
+# walk, depth, or child cap, and ``get_text`` is not asked for ``-1``.
+_PAGE_TEXT_CHARS = 4000
+
+
+def _page_text(acc) -> str | None:
+    """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
+
+    Evince (and poppler) expose each PDF page as AT-SPI role ``page``. The
+    name is empty. The words are ``Text.get_text`` from the start through
+    the character count, or through ``_PAGE_TEXT_CHARS`` when the page is
+    longer. ``None`` is a missing interface or a blank page. An embedded
+    object character is expanded the same way a paragraph's is.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    limit = min(int(count), _PAGE_TEXT_CHARS)
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, limit))
+    if not isinstance(got, str) or not got:
+        return None
+    if _OBJECT_REPLACEMENT in got:
+        expanded = _expand_embedded(acc, got)
+        if expanded.strip():
+            got = expanded
+        else:
+            got = got.replace(_OBJECT_REPLACEMENT, "")
+    text = got.replace("\u00a0", " ").strip()
+    return text or None
 
 
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
@@ -731,20 +2693,36 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     delete: a paragraph then reads as the sentence, and a paragraph whose only
     content is a control is not an empty text leaf. An empty number field
     exposes Value 0.0 with no text; that default is not shown. A slider has no
-    text interface and still reports its Value.
+    text interface and still reports its Value. A custom ARIA spin button's
+    text interface is empty too; its value is ``valuetext`` when Chrome set
+    one, otherwise ``aria-valuenow``, with the minimum and maximum when the
+    Value interface has a real range. An ``<input type=number>`` and a date
+    segment are not that control.
 
     Qt publishes a Value interface on labels, checks, rows, and empty text
     fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
     Text, or the accessible name, is what those roles show. Value is read for
     a slider, spin button, or progress bar, and only when Qt's minimum and
     maximum are a real range. GTK's fallback for a non-range control is
-    unchanged.
+    unchanged, except a dialog or a checkbox whose CurrentValue is a
+    subnormal double: that reading is absent. Zero and a small normalized
+    value on those roles stay. An empty entry, text field, or paragraph
+    (character count 0) has no value either: Chromium's empty input
+    publishes a subnormal double on Value, and that number is not the
+    field. A filler still keeps that double. An empty GTK text field
+    implements Text and not Value. CurrentValue is then an uninitialized
+    double (about ``6.93e-310``). That read is skipped when the Value
+    interface is absent. When the text interface does not report a
+    character count, a subnormal on a text role is absent too, and zero
+    and a small normalized value stay when the interface is present.
     """
     if role == "AXSecureTextField":
         return None
     Atspi = _atspi()
     if role_name is None:
         role_name = _role_name(acc)
+    if role_name == "spin button" and _aria_spinbutton(acc):
+        return _aria_spin_value(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
@@ -759,6 +2737,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
                     if expanded:
                         return expanded
             else:
+                # A terminal keeps the whole buffer here. ``read`` records
+                # the on-screen slice separately so the snapshot can show
+                # that text while find still searches this string.
                 return got
         handled, choice = _choice_value(acc, role, role_name)
         if handled:
@@ -778,6 +2759,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         if role_name == "spin button" and _chrome_date_segment(acc):
             return _date_segment_text(acc)
         return None
+    elif count == 0 and role_name in _EMPTY_TEXT_VALUE_NAMES:
+        # Text is present and empty. Chromium's Value on that entry is a
+        # subnormal double (about 4e-323), which is not the field.
+        return None
     handled, choice = _choice_value(acc, role, role_name)
     if handled:
         return choice
@@ -793,14 +2778,36 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
             return None
     if role_name in _RANGE_ROLE_NAMES:
         return _range_value(acc)
+    if role_name == "document text":
+        # The document node's own text is empty. Paragraphs hold the lines.
+        # The Value interface on that node is an uninitialized double
+        # (about 4e-323), which is not the document.
+        document = writer_document_text(acc)
+        if document:
+            return document
+        if document == "":
+            return None
     # A Qt label, check, row, or empty line edit has a Value interface whose
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
         return None
+    # GTK 4 text (the calculator display, a new text-editor document) has
+    # Text and no Value. Reading CurrentValue is an uninitialized double.
+    # ``_value_interface_present`` is false only when the accessible reports
+    # the interface missing. A test double with no getter still reads Value.
+    if role_name in _TEXT_ROLE_NAMES and not _value_interface_present(acc):
+        return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
-    if cur is not None:
-        return cur
-    return None
+    if cur is None:
+        return None
+    if (
+        role in _UNINITIALIZED_VALUE_ROLES
+        or role_name in _UNINITIALIZED_VALUE_ROLE_NAMES
+        or role in _SUBNORMAL_TEXT_ROLES
+        or role_name in _SUBNORMAL_TEXT_ROLE_NAMES
+    ) and _uninitialized_double(cur):
+        return None
+    return cur
 
 
 def _range_value(acc):
@@ -826,19 +2833,28 @@ def _range_value(acc):
 
 
 def _state_flags(acc):
-    """(enabled, focused, checked, selected, expanded, focusable) from the state set.
+    """(enabled, focused, checked, selected, expanded, focusable, editable).
 
     checked/expanded are None when the element is not checkable/expandable so
-    the shared schema can tell "off" apart from "not a checkbox"."""
+    the shared schema can tell "off" apart from "not a checkbox". ``editable``
+    is ``STATE_EDITABLE``. A fake state set that lists names and has no
+    ``StateType`` member matches the name string."""
     Atspi = _atspi()
+    _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
-        return True, False, None, False, None, False
+        return True, False, None, False, None, False, False
     st = getattr(Atspi, "StateType", None)
 
     def has(name: str) -> bool:
         member = getattr(st, name, None)
-        return bool(member is not None and _safe(lambda: sset.contains(member), False))
+        if member is not None:
+            return bool(_safe(lambda: sset.contains(member), False))
+        names = getattr(sset, "names", None)
+        if isinstance(names, (set, frozenset, list, tuple)):
+            folded = {str(item).upper() for item in names}
+            return name.upper() in folded
+        return False
 
     enabled = has("ENABLED") or has("SENSITIVE")
     focused = has("FOCUSED")
@@ -850,7 +2866,8 @@ def _state_flags(acc):
     selected = has("SELECTED")
     expanded = has("EXPANDED") if has("EXPANDABLE") else None
     focusable = has("FOCUSABLE")
-    return enabled, focused, checked, selected, expanded, focusable
+    editable = has("EDITABLE")
+    return enabled, focused, checked, selected, expanded, focusable, editable
 
 
 # ARIA role (AT-SPI 'xml-roles' attribute, set by Chromium/GTK for web content)
@@ -883,6 +2900,28 @@ def _get_attributes(acc) -> dict:
     return {}
 
 
+def _opaque_surface_role(role: str, role_str: str, attrs: dict) -> str:
+    """``AXCanvas`` for a canvas, a drawing area, or a WebGL/graphics node.
+
+    Chromium sometimes reports ``<canvas>`` as a section. The tag and the
+    graphics ARIA roles are the same surface. An image stays ``AXImage``;
+    the pruner turns an unnamed one into ``opaque_region``.
+    """
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if (
+        role_str in {"canvas", "drawing area"}
+        or tag == "canvas"
+        or xml & {"graphics-document", "graphics-symbol"}
+    ):
+        return "AXCanvas"
+    return role
+
+
 def _refine_web_role(role: str, attrs: dict) -> str:
     """Upgrade a generic container role to the ARIA role its xml-roles declares,
     so ARIA-widget <div>s become real interactive elements in the snapshot."""
@@ -891,6 +2930,33 @@ def _refine_web_role(role: str, attrs: dict) -> str:
             if token in _XML_ROLE:
                 return _XML_ROLE[token]
     return role
+
+
+def _entry_is_multiline(node, attrs: dict) -> bool:
+    """True when an AT-SPI ``entry`` is a multi-line ``<textarea>``.
+
+    Chromium exposes ``<input>`` and ``<textarea>`` as role ``entry``.
+    The textarea carries ``STATE_MULTI_LINE``, or the ``multiline``
+    attribute. A contenteditable ``role=textbox`` with ``aria-multiline``
+    is also an entry and can carry ``STATE_MULTI_LINE``. That editor stays
+    a text field: its tag is not ``textarea``.
+    """
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    if tag and tag != "textarea":
+        return False
+    roles = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if "textbox" in roles and tag != "textarea":
+        return False
+    if _state_has(node, "MULTI_LINE"):
+        return True
+    flag = attrs.get("multiline")
+    if isinstance(flag, bool):
+        return flag
+    return str(flag or "").strip().lower() in {"true", "1", "yes"}
 
 
 def _stable_id(acc, attrs: dict | None = None) -> str | None:
@@ -924,11 +2990,13 @@ class _OnScreenBand:
     The shared pruner keeps at most ``MAX_CHILDREN`` children of one node and
     drops the rest. A Chromium list can paint more rows than that (29 rows of
     18px in a 520px box). A band stays within the cap, so find still matches
-    the last painted row. A shorter run is not wrapped.
+    the last painted row. A shorter run is not wrapped. A Calc band uses the
+    table role so the sheet cap, not the dense cap, applies to its cells.
     """
 
-    def __init__(self, rows: list[tuple]) -> None:
+    def __init__(self, rows: list[tuple], *, role: str = "panel") -> None:
         self._rows = rows
+        self._role = role
         left = min(float(pos[0]) for _acc, pos, _size in rows)
         top = min(float(pos[1]) for _acc, pos, _size in rows)
         right = max(float(pos[0]) + float(size[0]) for _acc, pos, size in rows)
@@ -936,7 +3004,7 @@ class _OnScreenBand:
         self._rect = _BandRect(left, top, max(1.0, right - left), max(1.0, bottom - top))
 
     def get_role_name(self) -> str:
-        return "panel"
+        return self._role
 
     def get_name(self) -> str:
         return ""
@@ -995,13 +3063,58 @@ class ATSPIAccessor:
     A saved head from a different Python wrapper is not that list: a live
     walk wraps a new object each time, and the 0.4.16 retest still showed
     the pre-scroll row at y=-2. ``scroll_to_find`` searches this snapshot.
-    A non-Chromium tree is read from ``get_child_at_index`` as before.
+    A GTK table whose rows do not fit the child cap lists the cells that
+    overlap the screen, grouped so the cap keeps that whole run. ``find``
+    scrolls a named Table cell into the run when the name is not already
+    on screen. A cell the table still exposes that stays off screen is
+    remembered here and attached with no bounds. A short table and a Qt
+    grid keep the walks they already had.
+    A Calc sheet lists the cells inside its on-screen box, banded so the
+    child cap does not stop at the first six rows.
     """
 
     def __init__(self) -> None:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
+        # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
+        # snapshot, so listing the window does not scroll the tree.
+        self._table_seek: str | None = None
+        # ``(cell, table)`` pairs ``find`` matched that are still off screen.
+        # Bounds are not invented for them; the snapshot attaches them as-is.
+        self._offscreen_seek: list[tuple[object, object]] = []
+        # ``(cache key, start index, page size)`` set for one snapshot so
+        # expand lists that node's next children instead of the visible band.
+        self._expand_page: tuple | None = None
+        # Children a list or table did not publish. ``take_unlisted`` moves
+        # the count onto the prune elision for ``… N more``.
+        self._unlisted: dict[object, int] = {}
+        # Expand-page nodes the pruner must keep even when their box is
+        # below the viewport. Empty on a normal snapshot.
+        self._page_keep: set[object] = set()
+        # Set by the Linux snapshot when the tree is LibreOffice. Content
+        # bounds then pick SCREEN or the client origin plus WINDOW, per node.
+        self.libreoffice = False
+        self._lo_placements: dict[
+            tuple[int, int, int, int],
+            tuple[tuple[int, int] | None, bool],
+        ] = {}
+        # One process identity for the whole walk. The root is read first.
+        self._instance_id: str | None = None
+        self._instance_ready = False
+        # Whether this tree is Chromium or Firefox. None until the first read.
+        # A childless browser-frame view is not a page region.
+        self._browser_app: bool | None = None
+        self._browser_chrome_cache: dict[object, bool] = {}
+        # GTK 4 client origins for this walk, keyed by pid and frame size.
+        # None means the origin could not be read and must not be invented.
+        self._gtk4_origins: dict[tuple[int, int, int], tuple[int, int] | None] = {}
+
+    def _bound_instance_id(self, node: object) -> str | None:
+        if not self._instance_ready:
+            self._instance_id = app_instance_id(node)
+            self._instance_ready = True
+        return self._instance_id
 
     def refresh_visible(self, root: object) -> None:
         """Point Chromium lists at the rows inside their boxes.
@@ -1023,6 +3136,20 @@ class ATSPIAccessor:
             for acc, pos, size in rows:
                 self._visible_bounds[id(acc)] = (pos, size)
 
+    def _drawing_paragraph(self, node: object, role_str: str, state_editable: bool) -> bool:
+        """True for an editable Impress or Draw paragraph in this snapshot.
+
+        Only a LibreOffice snapshot asks. A Firefox paragraph that reports
+        ``STATE_EDITABLE`` is not walked. Both the state and EditableText
+        are required, and the paragraph has to sit in a slide or a Draw page.
+        """
+        if not self.libreoffice or role_str not in {"paragraph", "heading"} or not state_editable:
+            return False
+        try:
+            return drawing_text_editable(node, role_str=role_str, state_editable=state_editable)
+        except Exception:
+            return False
+
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
@@ -1032,7 +3159,25 @@ class ATSPIAccessor:
         if role_str == "text" and _state_has(node, "SINGLE_LINE") and not _state_has(node, "MULTI_LINE"):
             role = "AXTextField"
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
+        # Chromium maps <input> and <textarea> both to entry. MULTI_LINE,
+        # or a multiline attribute, is the textarea.
+        if role_str == "entry" and _entry_is_multiline(node, attrs):
+            role = "AXTextArea"
         role = _refine_web_role(role, attrs)
+        role = _opaque_surface_role(role, role_str, attrs)
+        # A custom role=spinbutton is an AT-SPI spin button, which this map
+        # sends to AXTextField. That renders as textfield (edit) and hides
+        # the number. AXSpinButton is the slider treatment: the role is the
+        # control, and it is not an editable text field. A native number
+        # input and a date segment stay on the text-field mapping.
+        if _aria_spinbutton(node, role_str, attrs):
+            role = "AXSpinButton"
+        # `_entry_is_multiline` already mapped a tagged <textarea>. A Gecko
+        # entry that check left as a text field is still a textarea when it
+        # carries MULTI_LINE, multiline, or aria-multiline. A single-line
+        # input stays a text field. Chromium entries are not matched here.
+        if role == "AXTextField" and role_str == "entry" and _gecko_multiline_entry(node, attrs):
+            role = "AXTextArea"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
@@ -1040,27 +3185,114 @@ class ATSPIAccessor:
             # Keep a 0-height section's size. Hit-testing still treats it as
             # no box; only the snapshot walk needs the zero extent.
             position, size = _extents(node, keep_zero=True)
-        enabled, focused, checked, selected, expanded, focusable = _state_flags(node)
-        name = _call_first(node, ("get_name",), default="") or ""
+            if self.libreoffice:
+                shifted = self._libreoffice_position(node, position, size)
+                if shifted is not None:
+                    position = shifted
+            else:
+                recovered = gtk4_recovered_box(node, position, size, self._gtk4_origins)
+                if recovered is not None:
+                    position, size = recovered
+        enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
+        # A GTK combo does not set EXPANDABLE, so the shared flag stays unset
+        # while its menu is on screen. The open popup is that menu becoming
+        # SHOWING. expanded follows the menu, including after it closes.
+        if role_str == "combo box" and _gtk_combo(node):
+            expanded = bool(_popup_open(node))
+        name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
         description = _call_first(node, ("get_description",), default="") or ""
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
+        # An unnamed icon can still carry a caption on its Text interface.
+        # Evince thumbnail icons do: the text is the page number under the
+        # image. That string is the name, so the pruner does not fold the
+        # thumbnail into an opaque region. A named image is left alone.
+        if (
+            role == "AXImage"
+            and not str(name).strip()
+            and _generic_region_name(str(description))
+        ):
+            label = _image_text_label(node)
+            if label:
+                name = label
+        unallocated = False
+        if role_str == "page tab" and _negative_extent(size):
+            # A notebook with one page hides the tab bar. GTK reports no
+            # allocation and, for a terminal, an empty name. The frame name
+            # is the page label. Inventing a box would put a click on the
+            # menu or the page, so this control stays hidden: named, with
+            # no bounds and no press action.
+            label = str(name).strip()
+            if not label:
+                label = _frame_accessible_name(node)
+            name = label
+            position, size = None, None
+            unallocated = True
         if checked is None and role == "AXButton":
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
                 checked = flag == "true"
+        # A Gecko contenteditable is a section with STATE_EDITABLE and a text
+        # interface. That is a text control: textarea when it is multi-line.
+        # Chromium's roleless contenteditable stays a group.
+        role = _gecko_contenteditable_role(node, role, role_str, attrs, state_editable)
         # Groups skip the value probe. A div is a section, and its text is
         # the inline sentence; reading that one string is what find matches.
-        value = None if role in _NO_VALUE_ROLES else _value_text(node, role, role_str)
+        # A file chooser is a dialog, but its name is the title. Probing Value
+        # used to be skipped when the role was a window.
+        # A PDF page is the exception: its Text interface is the page, and
+        # the name is empty. The read is bounded. A blank page stays a group
+        # so a childless on-screen page is still a region, not a dropped label.
+        if role_str == "page":
+            page_text = _page_text(node)
+            if page_text:
+                value = page_text
+            else:
+                role = "AXGroup"
+                value = None
+        else:
+            value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
+                node, role, role_str,
+            )
+        if (
+            role_str == "section"
+            and role in {"AXTextField", "AXTextArea"}
+            and not isinstance(value, str)
+        ):
+            # An empty contenteditable can publish a Value double. The text
+            # interface is the value. A number is not that text.
+            value = _div_inline_sentence(node, role_str, attrs)
         if value is None:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        screen_text = None
+        if role_str == "terminal" and isinstance(value, str) and value:
+            screen_text = _terminal_on_screen(node, value)
+        name, description = _split_modifier_hints(str(name), str(description))
+        name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        surface_name = ""
+        panel_note = ""
+        if role_str == "panel" and role == "AXGroup":
+            panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
+            if panel_role:
+                role = panel_role
+        if role_str == "panel" and not str(name).strip() and not str(description).strip():
+            surface_name = surface_name or _panel_surface_name(node, size, focusable)
+        if (
+            role_str == "icon"
+            and selected
+            and not str(name).strip()
+            and not str(description).strip()
+        ):
+            label = _selected_icon_name(node)
+            if label:
+                name = label
         return RawNode(
             role=role,
-            subrole=None,
+            subrole="terminal" if role_str == "terminal" else None,
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -1068,29 +3300,158 @@ class ATSPIAccessor:
             focusable=focusable,
             position=position,
             size=size,
-            actions=_action_names(node),
+            actions=() if unallocated else _action_names(node),
+            unallocated=unallocated,
             value=value,
             checked=checked,
             selected=selected,
             expanded=expanded,
             stable_id=_stable_id(node, attrs),
             atspi_web=atspi_web_kind(role_str),
+            editable=editable_entry(
+                node, role_str=role_str, attrs=attrs, state_editable=state_editable,
+                drawing=self._drawing_paragraph(node, role_str, state_editable),
+            ),
+            instance_id=self._bound_instance_id(node),
+            document_id=window_document_id(node, role_str, str(name)),
+            # Only a group can be suppressed as browser chrome. A button,
+            # cell, or canvas does not pay for the parent walk.
+            browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
+            screen_text=screen_text,
+            surface_name=surface_name,
+            hint=hint,
+            shortcut=shortcut,
+            note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else panel_note,
         )
+
+    def _browser_frame(self, node: object, role_str: str) -> bool:
+        """True when ``node`` is browser UI outside a content document.
+
+        GTK and Qt are false after one toolkit check. Page content under a
+        document web is false. The cache is per snapshot.
+        """
+        if self._browser_app is None:
+            try:
+                self._browser_app = bool(_chromium_app(node) or _gecko_app(node))
+            except Exception:
+                self._browser_app = False
+        if not self._browser_app:
+            return False
+        try:
+            return browser_frame_view(node, self._browser_chrome_cache, role_str=role_str)
+        except Exception:
+            return False
+
+    def _note_unlisted(self, node: object, count: int) -> None:
+        if count > 0:
+            self._unlisted[_frame_cache_key(node)] = int(count)
+
+    def take_unlisted(self, node: object) -> int:
+        """Hidden children recorded for ``node`` during ``children``, once."""
+        return int(self._unlisted.pop(_frame_cache_key(node), 0))
+
+    def keep_offscreen(self, node: object) -> bool:
+        """True for an expand-page child the pruner must list below the viewport."""
+        return _frame_cache_key(node) in self._page_keep
+
+    def _mark_page(self, node: object, depth: int) -> None:
+        """Remember ``node`` and one level of its children so their text is listed."""
+        if node is None or depth < 0:
+            return
+        self._page_keep.add(_frame_cache_key(node))
+        if depth == 0:
+            return
+        count = _child_count(node)
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return
+        for index in range(min(int(count), 6)):
+            self._mark_page(_child_at(node, index), depth - 1)
+
+    def _expanded_child_page(self, node: object, start: int, limit: int) -> list:
+        """Children ``[start, start + limit)``, in that order.
+
+        Every child in the slice is returned, including ones below the
+        viewport. Replacing the slice with whichever rows happen to be
+        painted skips the ones in between. The first child is scrolled
+        toward the screen; the rest stay in the page even if they do not
+        fit. The pruner keeps them via ``keep_offscreen``.
+        """
+        count = _child_count(node)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            count = 0
+        start = max(0, int(start))
+        limit = max(1, int(limit))
+        end = min(count, start + limit)
+
+        def read() -> list:
+            found = []
+            for index in range(start, end):
+                child = _child_at(node, index)
+                if child is not None:
+                    found.append(child)
+            return found
+
+        kids = read()
+        if kids:
+            _bring_cell_on_screen(kids[0], _screen_size(), start, max(count, 1))
+            _invalidate_tree_cache(node)
+            kids = read()
+        for child in kids:
+            self._mark_page(child, 1)
+        remaining = max(0, count - (start + len(kids)))
+        if remaining:
+            self._note_unlisted(node, remaining)
+        return kids
 
     def children(self, node: object) -> Sequence[object]:
         # The pruner's list object is not the wrapper ``refresh_visible``
         # probed. Keying the overlay by ``id()`` published the cached first
         # child, whose live top was above the viewport (y=-2, y=-18, y=-26
         # on the 0.4.16 retest). Read this node.
+        page = self._expand_page
+        if page is not None and _frame_cache_key(node) == page[0]:
+            return self._expanded_child_page(node, int(page[1]), int(page[2]))
         if _role_name(node) in _LIST_ROLES and _chromium_app(node):
-            live = _in_view_named_rows(node)
+            seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
+            role = _role_name(node)
+            if seek and role in {"table", "tree table"}:
+                live = _in_view_named_rows(node)
+                if not _visible_tree_matches(live, seek):
+                    if _reveal_chromium_table_match(node, seek):
+                        live = _in_view_named_rows(node)
+            else:
+                live = _in_view_named_rows(node)
             if len(_row_names(live)) >= 2:
                 for acc, pos, size in live:
                     self._visible_bounds[id(acc)] = (pos, size)
+                # The band is the on-screen rows only. The rest of a long
+                # table is still there; record it so the fold note names
+                # this node and expand can page it.
+                if role in {"table", "tree table"}:
+                    total = _child_count(node)
+                    if (
+                        isinstance(total, int)
+                        and not isinstance(total, bool)
+                        and total > len(live)
+                    ):
+                        self._note_unlisted(node, total - len(live))
                 return _bands_for_snapshot(live)
         visible = self._visible_children.get(id(node))
         if visible is not None:
             return _cached_rows_for_snapshot(self._visible_bounds, visible)
+        # A GTK TreeView keeps every cell as a child and parks the ones
+        # outside the scrolled window at the G_MININT sentinel. Reading
+        # child 0..249 after End never reaches the painted rows (they sit
+        # near the end of the child list), and a few hundred rows also
+        # matches the Calc shortcut that only samples the first rows.
+        # The on-screen span is what snapshot and scroll_to_find list.
+        painted = _gtk_table_rows_for_snapshot(
+            node, self._table_seek, self._offscreen_seek,
+        )
+        if painted:
+            for acc, pos, size in painted:
+                self._visible_bounds[id(acc)] = (pos, size)
+            return _bands_for_snapshot(painted)
         # -1 is a wedged D-Bus read. Revive once, then treat a still-negative
         # count as empty so range() does not walk nothing and hide the dialog.
         count = _child_count(node)
@@ -1099,21 +3460,90 @@ class ATSPIAccessor:
         # Calc reports 1048576×16384 and get_child_at_index is row-major, so
         # the first fetch is all of row 1. A modest child count is the
         # visible cells (LibreOffice 25.2 exposes about 65) and is walked
-        # as usual. The observe cap for address-titled cells is 96.
+        # as usual. A million-row sheet lists the cells in its on-screen
+        # box. Those are banded: a flat list would keep the first 96 and
+        # drop the rows below that, which is most of a 1280×800 sheet.
         if count > _MAX_CHILDREN_FETCH and _spreadsheet_table(node):
-            return _sheet_window_cells(node)
+            return _publish_sheet_cells(_sheet_window_cells(node))
         count = min(count, _MAX_CHILDREN_FETCH)
         kids = []
         for i in range(count):
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
             if child is not None:
                 kids.append(child)
+        role = _role_name(node)
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
-        return _with_table_body(node, kids)
+        if role == "application":
+            # The combo menu is already a child of the combo. A top-level
+            # window or a second menu for that same popup would list the
+            # items again.
+            kids = [child for child in kids if _combo_owning_popup(child) is None]
+        if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
+            return []
+        kids = _with_table_body(node, kids)
+        if role == "page tab list":
+            return _hoist_hidden_page_tabs(kids)
+        return kids
+
+    def _lo_placement(self, frame):
+        """``(client origin, screen coordinates already include the frame)``.
+
+        The client origin is None when no managed window sits on the frame's
+        SCREEN rectangle. The flag is the root-pane check against that origin.
+        """
+        screen = _raw_rect(frame, "SCREEN")
+        if screen is None or screen[2] <= 0 or screen[3] <= 0:
+            return None, True
+        key = (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
+        cached = self._lo_placements.get(key)
+        if cached is not None:
+            return cached
+        from a11y_computer_use.drivers import _linux_system
+
+        title = str(_call_first(frame, ("get_name",), default="") or "")
+        origin = _linux_system.client_origin_for_outer_frame(
+            key[0], key[1], key[2], key[3], title=title,
+        )
+        absolute = True if origin is None else _client_area_is_on_screen(frame, screen, origin)
+        placed = (origin, absolute)
+        self._lo_placements[key] = placed
+        return placed
+
+    def _libreoffice_position(self, node, position, size):
+        """Screen top-left for a LibreOffice content node, or None.
+
+        The frame's own SCREEN rectangle is the outer window, so it is left
+        alone. A content node uses ``_libreoffice_content_origin``. The
+        client origin is added only when this frame's client area is still
+        reported at the outer corner.
+        """
+        if position is None or size is None:
+            return None
+        if size[0] < 0 or size[1] < 0:
+            return None
+        if position[0] < -1_000_000 or position[1] < -1_000_000:
+            return None
+        if _role_name(node) == "frame":
+            return None
+        frame = _frame_ancestor(node)
+        if frame is None:
+            return None
+        client, screen_is_absolute = self._lo_placement(frame)
+        if client is None:
+            return None
+        window = _raw_rect(node, "WINDOW")
+        if not _usable_window_rect(window):
+            return None
+        frame_screen = _raw_rect(frame, "SCREEN")
+        if frame_screen is None:
+            return None
+        return _libreoffice_content_origin(
+            position, window, frame_screen, client, screen_is_absolute=screen_is_absolute,
+        )
 
     def _tree_is_gecko(self, node: object) -> bool:
         if self._gecko is None:
@@ -1172,6 +3602,92 @@ def pid_of(acc) -> int | None:
         return None
     pid = _call_first(acc, ("get_process_id",))
     return int(pid) if pid else None
+
+
+def process_instance_id(pid: int | None) -> str | None:
+    """``pid:<pid>|start:<ticks>`` for a live Linux process, else None.
+
+    Start time is field 22 of ``/proc/<pid>/stat`` (clock ticks since boot).
+    A pid reused by a later process has a different start time, so a ref
+    bound to this token does not resolve against the replacement.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    # comm is field 2 and may contain spaces and parentheses. Fields after
+    # the last ``)`` start at field 3. starttime is field 22, index 19.
+    end = raw.rfind(")")
+    if end < 0:
+        return None
+    fields = raw[end + 2:].split()
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return f"pid:{pid}|start:{fields[19]}"
+
+
+def _bus_name_of(acc) -> str | None:
+    """Unique AT-SPI bus name of ``acc``'s application, or None.
+
+    libatspi stores it on ``AtspiApplication.bus_name`` (``:1.N``). A
+    relaunched process connects again and gets a new name.
+    """
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    inner = getattr(app, "app", None)
+    if inner is None:
+        inner = getattr(acc, "app", None)
+    name = getattr(inner, "bus_name", None) if inner is not None else None
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", "replace")
+    text = str(name or "")
+    if text.startswith(":"):
+        return text
+    return None
+
+
+def app_instance_id(acc) -> str | None:
+    """Process identity for ``acc``: pid and start time, plus the bus name.
+
+    None when neither the pid nor a unique bus name can be read. Callers
+    that cannot record an identity leave the ref unbound rather than
+    inventing one.
+    """
+    if acc is None:
+        return None
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    pid = pid_of(app) or pid_of(acc)
+    token = process_instance_id(pid)
+    bus = _bus_name_of(acc)
+    if token and bus:
+        return f"{token}|bus:{bus}"
+    if token:
+        return token
+    if bus:
+        return f"bus:{bus}"
+    return None
+
+
+_DOCUMENT_WINDOW_ROLES = frozenset({"frame", "window", "dialog"})
+
+
+def window_document_id(_acc, role: str, title: str) -> str | None:
+    """Identity of a top-level window or dialog, else None.
+
+    The accessible name, with one leading ``*`` removed so a dirty GTK
+    buffer (``*/tmp/a.txt - Mousepad``) stays the same document as the
+    clean title. Descendants inherit the id while the snapshot is flattened.
+    The accessible is accepted so a later reader can prefer a document URL
+    without changing the call.
+    """
+    if role not in _DOCUMENT_WINDOW_ROLES:
+        return None
+    text = normalize_document_title(title)
+    if not text:
+        return None
+    return f"title:{text}"
 
 
 _DOC_URL_KEYS = ("docurl", "uri", "url")
@@ -1285,6 +3801,21 @@ def _collected_content_document(root) -> str | None:
     return _pick_content_document(held)
 
 
+def _libreoffice_accessible(acc) -> bool:
+    """True when ``acc`` belongs to LibreOffice.
+
+    The application name is ``soffice`` (the frame title also says
+    LibreOffice). A browser window whose page title mentions LibreOffice is
+    not this: its application name is Firefox or Chrome.
+    """
+    if acc is None:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    target = app if app is not None else acc
+    name = _call_first(target, ("get_name", "getName"), default="") or ""
+    return libreoffice_app(str(name))
+
+
 def document_url_of(root) -> str | None:
     """Content-document URL under ``root``.
 
@@ -1295,8 +3826,14 @@ def document_url_of(root) -> str | None:
     a page URL. An iframe's document is nested; the page URL is the document
     that is not inside another one. The walk is bounded so one policy check
     cannot become a full tree walk.
+
+    LibreOffice has no page URL. Collection ``get_matches`` on a Calc sheet
+    walks the table (about a million by sixteen thousand cells, child count
+    2**31, ``MANAGES_DESCENDANTS``) and wedges that app's accessibility
+    connection: the next child count is -1 and the following snapshot spends
+    the per-call timeout on every read. Return None before any of that.
     """
-    if root is None:
+    if root is None or _libreoffice_accessible(root):
         return None
     collected = _collected_content_document(root)
     if collected:
@@ -1421,6 +3958,214 @@ def document_url_for(acc) -> str | None:
             return None
         node = parent
     return None
+
+
+def _atspi_object_path(acc) -> str | None:
+    """The AT-SPI object path, or None for a test double.
+
+    Read from the libatspi object. This does not call D-Bus. A path that is
+    not an accessibility object is ignored.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+
+        class _GObject(ctypes.Structure):
+            _fields_ = [
+                ("g_class", ctypes.c_void_p),
+                ("ref_count", ctypes.c_uint),
+                ("pad", ctypes.c_uint),
+                ("qdata", ctypes.c_void_p),
+            ]
+
+        class _AtspiObject(ctypes.Structure):
+            _fields_ = [
+                ("parent", _GObject),
+                ("app", ctypes.c_void_p),
+                ("path", ctypes.c_char_p),
+            ]
+
+        raw = _AtspiObject.from_address(pointer).path or b""
+        if not raw.startswith(b"/org/a11y/atspi/"):
+            return None
+        return raw.decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
+    """``(bus_name, object_path)`` for one libatspi accessible, else None.
+
+    ``get_child_at_index`` can return a new Python wrapper after the previous
+    one is collected, and CPython can reuse that wrapper's ``id()``. The bus
+    name and object path stay on the C object. This does not call D-Bus. A
+    test double has no gpointer. An object whose unique bus name cannot be
+    read is None, so the caller does not treat two applications that happen
+    to publish the same path as one node.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    class _GObject(ctypes.Structure):
+        _fields_ = [
+            ("g_class", ctypes.c_void_p),
+            ("ref_count", ctypes.c_uint),
+            ("pad", ctypes.c_uint),
+            ("qdata", ctypes.c_void_p),
+        ]
+
+    class _AtspiObject(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("app", ctypes.c_void_p),
+            ("path", ctypes.c_char_p),
+        ]
+
+    class _AtspiApplication(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("hash", ctypes.c_void_p),
+            ("bus_name", ctypes.c_char_p),
+            ("bus", ctypes.c_void_p),
+        ]
+
+    try:
+        obj = _AtspiObject.from_address(pointer)
+        raw_path = obj.path or b""
+        if not raw_path.startswith(b"/org/a11y/atspi/") or not obj.app:
+            return None
+        raw_bus = _AtspiApplication.from_address(obj.app).bus_name or b""
+        if not raw_bus.startswith(b":"):
+            return None
+        return (raw_bus.decode("utf-8", "replace"), raw_path.decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def _ancestor_key(acc) -> object:
+    """Identity of one accessible across recreated Python wrappers.
+
+    The AT-SPI bus name and object path when both are on the GObject.
+    Otherwise ``id()`` of this wrapper. A collected wrapper's ``id()`` can
+    be reused for a different accessible, so a walk that falls back to
+    ``id()`` keeps every wrapper alive until it finishes.
+    """
+    stable = _atspi_wrapper_key(acc)
+    if stable is not None:
+        return stable
+    return id(acc)
+
+
+def _ancestor_chain(acc, limit: int = 32):
+    """Yield ``acc`` and its parents, nearest first.
+
+    Each wrapper stays referenced until this generator is closed. The seen
+    set is `_ancestor_key`: the bus name and object path when the GObject
+    has them. ``get_parent`` returns a new proxy, and CPython reuses the
+    ``id()`` of one that nothing else references. Electron's page sits
+    several panels under the frame; that collision used to end the walk
+    on a panel and report the showing document hidden.
+    """
+    node = acc
+    pinned: list = []
+    seen: set[object] = set()
+    for _ in range(limit):
+        if node is None:
+            return
+        identity = _ancestor_key(node)
+        if identity in seen:
+            return
+        seen.add(identity)
+        pinned.append(node)
+        yield node
+        parent = _parent_of(node)
+        if parent is None:
+            return
+        if _ancestor_key(parent) == identity:
+            return
+        node = parent
+
+
+def _frame_cache_key(acc) -> object:
+    """A stable key for one accessible across wrapper objects.
+
+    ``get_parent`` returns a new proxy each call. ``id()`` would miss, and
+    every node would walk to the application over D-Bus. The object path is
+    the same proxy to proxy. A test double has no path and uses ``id()``.
+    """
+    path = _atspi_object_path(acc)
+    if path:
+        return path
+    return id(acc)
+
+
+def browser_frame_view(
+    acc,
+    cache: dict[object, bool],
+    *,
+    role_str: str | None = None,
+) -> bool:
+    """True when ``acc`` is Chromium or Firefox UI outside a content document.
+
+    The caller has already decided ``acc`` belongs to a browser. A
+    ``document web`` or ``internal frame`` is page content, including when
+    its URL is not published yet. An omnibox-popup URL is still browser UI.
+    ``cache`` remembers each object path so a snapshot walks each parent
+    once. GTK and Qt must not call this: a walk that never meets a content
+    document would mark the whole tree as browser UI.
+    """
+    if acc is None:
+        return False
+    found = cache.get(_frame_cache_key(acc))
+    if found is not None:
+        return found
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    chain: list = []
+    current = acc
+    current_role = role_str
+    seen: set[int] = set()
+    result = True
+    for _ in range(32):
+        if current is None or id(current) in seen:
+            result = True
+            break
+        seen.add(id(current))
+        if current is not acc:
+            cached = cache.get(_frame_cache_key(current))
+            if cached is not None:
+                result = cached
+                break
+        chain.append(current)
+        role = current_role if current_role is not None else _role_name(current)
+        current_role = None
+        if role in {"document web", "internal frame"}:
+            url = _doc_url(current)
+            result = bool(url and is_browser_chrome_url(url))
+            break
+        if "document" in role:
+            url = _doc_url(current)
+            if url:
+                result = bool(is_browser_chrome_url(url))
+                break
+        if role == "application":
+            result = True
+            break
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            result = True
+            break
+        current = parent
+    for item in chain:
+        cache[_frame_cache_key(item)] = result
+    return result
 
 
 def in_browser_chrome(acc) -> bool:
@@ -1805,13 +4550,285 @@ def _window_is_only_browser_chrome(root) -> bool:
     return chrome
 
 
+def _showing_menu_labels(menu):
+    """Ordered item names of an unnamed open menu, or None.
+
+    A named menu is an application menu. Open means the menu or one of its
+    items is SHOWING. A closed model is not this menu.
+    """
+    if menu is None:
+        return None
+    try:
+        if _role_name(menu) not in {"menu", "popup menu"}:
+            return None
+        if _node_name(menu):
+            return None
+        menu_showing = _state_has(menu, "SHOWING")
+    except Exception:
+        return None
+    count = _child_count(menu)
+    if count < 0:
+        count = 0
+    labels = []
+    item_showing = False
+    for index in range(min(int(count), 64)):
+        child = _child_at(menu, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu item", "check menu item", "radio menu item"}:
+            continue
+        if _state_has(child, "SHOWING"):
+            item_showing = True
+        labels.append(_node_name(child))
+    if not labels or not any(labels) or not (menu_showing or item_showing):
+        return None
+    return tuple(labels)
+
+
+def _popup_item_labels(node):
+    """Item names of an unnamed showing popup, or None.
+
+    A window counts when it holds one such menu. A second menu is a menu
+    bar tear-off, not a combo popup. A named window or menu is not one.
+    """
+    if node is None or _node_name(node):
+        return None
+    role = _role_name(node)
+    if role in {"menu", "popup menu"}:
+        return _showing_menu_labels(node)
+    if role != "window":
+        return None
+    count = _child_count(node)
+    if count < 0:
+        count = 0
+    labels = None
+    for index in range(min(int(count), 4)):
+        child = _child_at(node, index)
+        child_labels = _showing_menu_labels(child)
+        if child_labels is None:
+            continue
+        if labels is not None:
+            return None
+        labels = child_labels
+    return labels
+
+
+def _application_ancestor(node):
+    """The application that contains ``node``, or None."""
+    current = node
+    for _ in range(20):
+        if current is None:
+            return None
+        if _role_name(current) == "application":
+            return current
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return _call_first(current, ("get_application", "getApplication"))
+        current = parent
+    return None
+
+
+def _open_gtk_combo_menus(application):
+    """``(combo, item names)`` for each GTK combo whose menu is open.
+
+    Tables, documents, and menus are not descended into. A combo's menu is
+    read from the combo itself.
+    """
+    found = []
+    stack = [application]
+    seen: set[int] = set()
+    # Keep each wrapper alive. ``id()`` is reused after a PyGObject proxy is freed.
+    held: list[object] = []
+    steps = 0
+    skip = {
+        "table", "tree table", "tree", "list", "list box",
+        "document web", "document frame", "menu bar", "menu", "popup menu",
+    }
+    while stack and steps < 250:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        held.append(node)
+        steps += 1
+        role = _role_name(node)
+        if role == "combo box" and _gtk_combo(node):
+            count = _child_count(node)
+            if count < 0:
+                count = 0
+            for index in range(min(int(count), 8)):
+                labels = _showing_menu_labels(_child_at(node, index))
+                if labels is not None:
+                    found.append((node, labels))
+                    break
+            continue
+        if role in skip:
+            continue
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 30)):
+            child = _child_at(node, index)
+            if child is not None:
+                stack.append(child)
+    return found
+
+
+def _combo_with_same_open_menu(window):
+    """The GTK combo whose open menu lists the same items as ``window``, or None.
+
+    Used when the popup's parent is the application or the popup window, so
+    the parent walk never reaches the combo. The item names have to match
+    the combo's open menu exactly. A context menu with different items
+    stays. Chromium, Firefox, and Qt are not matched.
+    """
+    try:
+        if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
+            return None
+        labels = _popup_item_labels(window)
+        if labels is None:
+            return None
+        app = _application_ancestor(window)
+        if app is None or app is window:
+            return None
+        for combo, item_labels in _open_gtk_combo_menus(app):
+            if item_labels == labels:
+                return combo
+    except Exception:
+        return None
+    return None
+
+
+def _combo_owning_popup(window):
+    """The GTK combo whose menu this top-level popup is showing, or None.
+
+    GtkComboBox puts the open menu in its own window and marks that window
+    ACTIVE. The menu's parent is still the combo, so the options are already
+    under the combo. GTK also exposes that same popup as its own menu under
+    the application. When that menu's parent is not the combo, the SHOWING
+    item names still identify it. A named frame, a dialog, a menu-bar menu,
+    a context menu with different items, and a Chromium or Qt popup are not
+    this window.
+    """
+    if window is None:
+        return None
+    try:
+        role = _role_name(window)
+        if role not in {"window", "popup menu", "menu"}:
+            return None
+        if role == "window" and _node_name(window):
+            return None
+        if role == "menu" and _node_name(window):
+            return None
+        if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
+            return None
+    except Exception:
+        return None
+    if role == "menu":
+        # A context menu can be parented to the combo it was opened on.
+        # Item names, not that parent, decide whether this is the combo popup.
+        return _combo_with_same_open_menu(window)
+    starts = []
+    if role == "popup menu":
+        starts.append(window)
+    else:
+        count = _child_count(window)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 4)):
+            child = _child_at(window, index)
+            if child is not None and _role_name(child) in {"menu", "popup menu"}:
+                starts.append(child)
+    for start in starts:
+        node = start
+        for _ in range(8):
+            parent = _parent_of(node)
+            if parent is None or parent is node:
+                break
+            parent_role = _role_name(parent)
+            if parent_role == "combo box":
+                if _gtk_combo(parent):
+                    return parent
+                return None
+            if parent_role in {
+                "menu bar", "frame", "dialog", "application", "window",
+                "document web", "document frame",
+            }:
+                break
+            node = parent
+    # The popup menu is a different object, parented to the application or
+    # to this window, so the walk above never reaches the combo.
+    return _combo_with_same_open_menu(window)
+
+
+def _frame_containing(node, frames):
+    """The frame or dialog in ``frames`` that contains ``node``, or None."""
+    if node is None:
+        return None
+    wanted = {id(frame): frame for frame in frames}
+    current = node
+    for _ in range(20):
+        if current is None:
+            return None
+        found = wanted.get(id(current))
+        if found is not None:
+            return found
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return None
+        current = parent
+    return None
+
+
+def _preferred_window(frames, is_active):
+    """The window a snapshot should root at.
+
+    An ACTIVE frame or dialog wins. When the only ACTIVE top-level is a GTK
+    combo popup, the frame that contains that combo stays the root, so the
+    popup's menu items are listed under the combo instead of replacing it.
+    """
+    if not frames:
+        return None
+    popup_ids = {id(frame) for frame in frames if _combo_owning_popup(frame) is not None}
+    ordinary = [frame for frame in frames if id(frame) not in popup_ids]
+    for frame in ordinary:
+        if is_active(frame):
+            return frame
+    if popup_ids:
+        owners = []
+        for frame in frames:
+            if id(frame) not in popup_ids:
+                continue
+            combo = _combo_owning_popup(frame)
+            owner = _frame_containing(combo, ordinary)
+            if owner is not None and all(owner is not item for item in owners):
+                owners.append(owner)
+        if len(owners) == 1:
+            return owners[0]
+        showing = [frame for frame in ordinary if _state_has(frame, "SHOWING")]
+        dialogs = [frame for frame in showing if _role_name(frame) == "dialog"]
+        if len(dialogs) == 1:
+            return dialogs[0]
+        if len(showing) == 1:
+            return showing[0]
+        if dialogs:
+            return dialogs[0]
+        if showing:
+            return showing[0]
+    if ordinary:
+        return ordinary[0]
+    return frames[0]
+
+
 def find_root(app: str, scope) -> object | None:
     """The AT-SPI root for ``app`` at ``scope``.
 
     ``app`` matches an application accessible by name substring (case-insensitive)
     — the Linux analog of a bundle id / process exe. For `Scope.APP` the app
     accessible is returned; for `Scope.WINDOW` its active (else first) top-level
-    frame. None when nothing matches (the engine yields an empty snapshot)."""
+    frame. A GTK combo popup that is the only ACTIVE window does not replace
+    the frame that contains the combo. None when nothing matches (the engine
+    yields an empty snapshot)."""
     from a11y_computer_use.schema import Scope
 
     Atspi = _atspi()
@@ -1850,30 +4867,41 @@ def find_root(app: str, scope) -> object | None:
     # "cuatestapp"), while the Linux app id used for permissions is the window
     # owner's comm (e.g. "python3"); match by PID as well as by name so an id
     # resolved from X11 finds the same application on the a11y bus.
-    try:
-        from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import ComputerUseError
 
+    try:
         pids = _linux_system.pids_matching(app)
+    except ComputerUseError:
+        raise
     except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
         pids = set()
     best = None
     best_rank = -1
+    hinted = next(iter(pids)) if len(pids) == 1 else None
     for i in range(int(count)):
         candidate = _call_first(desktop, ("get_child_at_index",), i)
         if candidate is None:
             continue
         name = (_call_first(candidate, ("get_name",), default="") or "").lower()
+        name_unanswered = call_went_unanswered()
         # A dialog opened with Gtk.Dialog.run() wedges this process's
         # connection to the app: get_name comes back empty and child count
         # is -1 until the bus is replaced. Revive before treating the
         # registrant as unnamed, then read the name on the fresh connection.
-        if not name:
+        # A read that timed out is not that dialog: reviving it would spend
+        # another timeout per child. A slow reply that returned still can be.
+        if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
         if needle not in name and not (pids and pid_of(candidate) in pids):
             continue
-        frames = _frames(candidate)
-        rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
+        with app_reply_watch(app, hinted, candidate) as watch:
+            pid = pid_of(candidate)
+            if pid:
+                watch.pid = pid
+            frames = _frames(candidate)
+            rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
         if rank > best_rank:
             best, best_rank = candidate, rank
             if rank == 2:
@@ -1882,11 +4910,163 @@ def find_root(app: str, scope) -> object | None:
     if app_acc is None or scope is Scope.APP:
         return app_acc
     # WINDOW scope: prefer the ACTIVE top-level frame, else the first child.
-    frames = _frames(app_acc)
-    for frame in frames:
-        if _is_active(frame):
-            return frame
-    return frames[0] if frames else app_acc
+    # The same per-app budget covers this second frame read. A stopped
+    # target raises here instead of walking every child at 300ms each.
+    with app_reply_watch(app, hinted, app_acc) as watch:
+        pid = pid_of(app_acc)
+        if pid:
+            watch.pid = pid
+        frames = _frames(app_acc)
+        picked = _preferred_window(frames, _is_active)
+        return picked if picked is not None else app_acc
+
+
+# Top-level windows a named-app snapshot lists. Menus, popups, and tooltips
+# are not windows: they belong to the frame that owns them.
+_TOPLEVEL_ROLES = frozenset({
+    "frame", "window", "dialog", "alert", "file chooser", "color chooser",
+})
+
+
+def _application_of(node):
+    """The AT-SPI application that owns ``node``, or None."""
+    if node is None:
+        return None
+    if _role_name(node) == "application":
+        return node
+    app = _call_first(node, ("get_application", "getApplication"))
+    if app is not None and _role_name(app) == "application":
+        return app
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and _role_name(parent) == "application":
+        return parent
+    return None
+
+
+def _toplevel_of(node):
+    """The showing-window ancestor of ``node``, or None at the application."""
+    current = node
+    for _ in range(32):
+        if current is None:
+            return None
+        role = _role_name(current)
+        if role in _TOPLEVEL_ROLES:
+            return current
+        if role == "application":
+            return None
+        current = _call_first(current, ("get_parent", "getParent"))
+    return None
+
+
+def showing_toplevels(node) -> list:
+    """Showing top-level windows of ``node``'s application, active first.
+
+    One showing window is that window alone, so a single-window snapshot
+    stays one tree. A window that is not SHOWING (minimized) is left out, as
+    are menus and tooltips. A GTK combo's popup window is left out too: its
+    items already sit under the combo, and listing it would replace the
+    frame that owns the combo. When several windows are ACTIVE, the first in
+    child order leads and the rest keep that order.
+    """
+    if node is None:
+        return []
+    app = _application_of(node)
+    if app is None:
+        return [node]
+    count = _child_count(app)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = 0
+    frames = []
+    for index in range(int(count)):
+        child = _child_at(app, index)
+        if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
+            continue
+        if not _state_has(child, "SHOWING"):
+            continue
+        if _combo_owning_popup(child) is not None:
+            continue
+        frames.append(child)
+    if len(frames) <= 1:
+        return frames or [node]
+    active = [frame for frame in frames if _state_has(frame, "ACTIVE")]
+    head = active[:1]
+    if not head and _role_name(node) in _TOPLEVEL_ROLES and _state_has(node, "SHOWING"):
+        # find_root already chose this window. Lead with it when AT-SPI has
+        # not marked any frame ACTIVE.
+        chosen = _frame_cache_key(node)
+        head = [frame for frame in frames if _frame_cache_key(frame) == chosen][:1]
+    head_keys = {_frame_cache_key(frame) for frame in head}
+    return head + [frame for frame in frames if _frame_cache_key(frame) not in head_keys]
+
+
+def snapshot_window_list(node) -> list:
+    """Showing windows to snapshot, active first.
+
+    A find bar, an omnibox popup, and Chrome's empty cached frame are
+    showing siblings of the page. They are not windows. Merging one of
+    them is the untitled group with no rows that stops ``scroll_to_find``
+    before the wheel. A GTK dialog stays in the list. One real window is
+    a one-item list, so the snapshot stays a single tree.
+    """
+    if node is None:
+        return []
+    chrome = _chromium_app(node)
+    frames = []
+    for item in showing_toplevels(node):
+        if _is_browser_bar_frame(item):
+            continue
+        if chrome and _sparse_untitled_chrome_frame(item):
+            continue
+        frames.append(item)
+    return frames or [node]
+
+
+def toplevel_raise_target(node):
+    """``(active, title, pid, extents)`` for the window that owns ``node``.
+
+    None when ``node`` is not inside a top-level window. ``active`` is
+    STATE_ACTIVE on that window. ``extents`` is ``(x, y, width, height)`` in
+    screen pixels, or None when the window has no box. The caller raises the
+    matching X window before it acts, and leaves an already active window
+    alone.
+    """
+    top = _toplevel_of(node)
+    if top is None:
+        return None
+    title = str(_call_first(top, ("get_name", "getName"), default="") or "")
+    position, size = _extents(top)
+    extents = None
+    if position is not None and size is not None:
+        extents = (float(position[0]), float(position[1]), float(size[0]), float(size[1]))
+    return (_state_has(top, "ACTIVE"), title, pid_of(top), extents)
+
+
+def desktop_application_roots() -> DesktopApplications:
+    """Every application under the AT-SPI desktop.
+
+    A child whose name read times out and whose process is stopped is counted
+    as silent and is not walked. A slow reply is a live app and stays in the
+    list, as does a live process that missed this one read. Applications that
+    answer are returned with the name the registry reported. An empty desktop
+    is ``ready`` empty and ``silent`` 0.
+    """
+    Atspi = _atspi()
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return DesktopApplications([], 0)
+    count = _call_first(desktop, ("get_child_count",), default=0) or 0
+    ready: list[tuple[str, object]] = []
+    silent = 0
+    for index in range(int(count)):
+        child = _call_first(desktop, ("get_child_at_index",), index)
+        if child is None:
+            continue
+        name = str(_call_first(child, ("get_name",), default="") or "").strip()
+        if call_went_unanswered() and process_is_stopped(pid_of(child)):
+            silent += 1
+            continue
+        ready.append((name or "application", child))
+    return DesktopApplications(ready, silent)
 
 
 def is_secure(acc) -> bool:
@@ -1911,6 +5091,30 @@ def _focused_via_collection(root, Atspi, focused_state):
     except Exception:  # noqa: BLE001 - GTK4/Qt expose no Collection; fall back to the walk
         return False, None
     return True, (hits[0] if hits else None)
+
+
+def _focused_sheet_selection(table):
+    """The focused selected cell of a spreadsheet table, or None.
+
+    ``Selection.get_selected_child`` is one round-trip. Indexing the table
+    is not: Calc's child count is 2**31 and the cells are row-major.
+    """
+    iface = _call_first(table, ("get_selection_iface", "get_selection"))
+    if iface is None:
+        return None
+    child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+    if child is None:
+        return None
+    sset = _call_first(child, ("get_state_set",))
+    if sset is None:
+        return None
+    try:
+        focused = _atspi().StateType.FOCUSED
+    except Exception:
+        return None
+    if not _safe(lambda state=sset: state.contains(focused), False):
+        return None
+    return child
 
 
 def _focused_node(app: str, *, max_nodes: int = 400):
@@ -1949,6 +5153,23 @@ def _focused_node(app: str, *, max_nodes: int = 400):
         if sset is not None and _safe(lambda state=sset: state.contains(focused_state), False):
             return acc, False
         n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
+        # A Calc table reports 2**31 children. Indexing them materializes
+        # cells and, past the first row, never reaches the focused cell.
+        # The table or its selected cell is the focus target. A closed menu
+        # is the same kind of skip: its items are in the tree while it is
+        # shut, and walking them spends the node budget before the sheet.
+        if _spreadsheet_table(acc) and n > _MAX_CHILDREN_FETCH:
+            selected = _focused_sheet_selection(acc)
+            if selected is not None:
+                return selected, False
+            continue
+        role = _role_name(acc)
+        if role in {"menu", "popup menu"} and not (
+            _state_has(acc, "EXPANDED")
+            or _state_has(acc, "FOCUSED")
+            or _state_has(acc, "SELECTED")
+        ):
+            continue
         if n > _MAX_CHILDREN_FETCH:
             truncated = True
         for j in range(min(n, _MAX_CHILDREN_FETCH)):
@@ -1971,20 +5192,356 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     (or a node had more than `_MAX_CHILDREN_FETCH` children) and no focused node
     was met, so focus is UNKNOWN; the caller must not type blind on None.
 
+    A truncated LibreOffice walk is not unknown when the open cell editor or
+    the selected sheet cell is in hand. The editor is a panel or group named
+    ``Cell A1`` and a paragraph under it, not a password field. It is True
+    only when that panel or its text child has the password-text role. A
+    password the walk itself reaches still wins.
+
     This is the check `LinuxDriver.type_text` runs before the XTEST path,
     which types into whatever holds focus."""
     acc, truncated = _focused_node(app, max_nodes=max_nodes)
-    if truncated:
-        return None
-    if acc is None:
-        return False
-    return is_secure(acc)
+    if not truncated:
+        if acc is None:
+            return False
+        return is_secure(acc)
+    editor = _cell_editor_is_secure(app)
+    if editor is not None:
+        return editor
+    cell = _selected_sheet_cell(app)
+    if cell is not None:
+        return is_secure(cell)
+    return None
 
 
 # Chrome UI fields whose text is not the web page. The address bar rewrites
 # while suggestions settle. The find bar reopens with the previous query
 # selected, so typing that query again leaves the same string.
 _CHROME_REWRITE_NAMES = frozenset({"Address and search bar", "Find"})
+
+# Pids whose find bar or omnibox popup has been in a snapshot, or whose find
+# field had keyboard focus. libatspi keeps the child list from that. Closing
+# the bar and Reload do not drop it, so later reads still walk the bar or an
+# empty document. The next snapshot of that process clears the client cache
+# once and uses the page frame. Clearing on every later snapshot walks the
+# document again and blows the short-page scroll budget.
+_BROWSER_BAR_PIDS: set[int] = set()
+_BROWSER_BAR_CLEARED: set[int] = set()
+# Pids whose find bar or omnibox is still the same opening. A later snapshot
+# of that opening must not schedule another cache clear: clearing on every
+# read walks an empty document and blows the scroll budget.
+_BROWSER_BAR_OPEN: set[int] = set()
+
+
+def snapshot_shows_browser_bar(elements) -> bool:
+    """True when a snapshot still contains the find bar or an omnibox popup.
+
+    The address bar itself is always present and is not this. A page button
+    titled Find is not this either: only the find field, the close button,
+    the find-in-page frame, and an omnibox URL count.
+    """
+    for el in elements:
+        title = getattr(el, "title", None) or ""
+        role = getattr(el, "role", None) or ""
+        value = str(getattr(el, "value", None) or "")
+        folded = title.lstrip().lower()
+        if title == "Close find bar" or folded.startswith("find in page"):
+            return True
+        if title == "Find" and role in {"AXTextField", "AXSearchField", "AXTextArea"}:
+            return True
+        if "omnibox" in folded or "omnibox" in value.lower():
+            return True
+    return False
+
+
+def note_browser_bar(root, elements) -> None:
+    """Remember that ``root``'s process showed a find bar or omnibox popup.
+
+    The first snapshot of an opening schedules one cache clear. Further
+    snapshots of that same opening do not. The next opening, after the bar
+    has been absent, schedules a clear again.
+    """
+    if root is None:
+        return
+    showing = snapshot_shows_browser_bar(elements)
+    if not showing:
+        if not _BROWSER_BAR_OPEN:
+            return
+        try:
+            pid = pid_of(root)
+        except Exception:
+            return
+        if pid:
+            _BROWSER_BAR_OPEN.discard(int(pid))
+        return
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return
+    if not pid:
+        return
+    pid = int(pid)
+    if pid in _BROWSER_BAR_OPEN:
+        return
+    _BROWSER_BAR_PIDS.add(pid)
+    # The bar is on screen again. The cache from the last clear is stale.
+    _BROWSER_BAR_CLEARED.discard(pid)
+    _BROWSER_BAR_OPEN.add(pid)
+
+
+def _browser_bar_latched(root) -> bool:
+    if not _BROWSER_BAR_PIDS or root is None:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    return bool(pid and int(pid) in _BROWSER_BAR_PIDS)
+
+
+def note_focused_find_bar(app: str | None) -> None:
+    """Latch Chrome when keyboard focus is in the find field.
+
+    ``scroll_to_find`` opens the bar, types, and closes it before the next
+    snapshot, so that snapshot never contains the find field and would not
+    otherwise remember the process. The address bar does not latch.
+    """
+    if not app:
+        return
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return
+    if truncated or acc is None or not _chrome_rewrite_field(acc):
+        return
+    if (_node_name(acc) or "") != "Find":
+        return
+    try:
+        pid = pid_of(acc)
+    except Exception:
+        return
+    if pid:
+        pid = int(pid)
+        _BROWSER_BAR_PIDS.add(pid)
+        _BROWSER_BAR_CLEARED.discard(pid)
+
+
+def latch_chromium_find(app: str) -> bool:
+    """Record Chrome's pid so the next snapshot drops the find-bar cache.
+
+    ``scroll_to_find`` closes the bar before a snapshot can see the Find
+    field, so the focus latch misses. The next walk is then an empty
+    document or the find frame. True when a Chrome pid was recorded.
+    """
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    try:
+        if not _chromium_app(root):
+            return False
+    except Exception:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    pid = int(pid)
+    _BROWSER_BAR_PIDS.add(pid)
+    _BROWSER_BAR_CLEARED.discard(pid)
+    # This opening is already handled. A snapshot that still shows the
+    # closing bar must not schedule a second clear.
+    _BROWSER_BAR_OPEN.add(pid)
+    return True
+
+
+def _is_browser_bar_frame(node) -> bool:
+    """True for the find-in-page frame or an omnibox popup, not the page window."""
+    if node is None:
+        return False
+    name = (_node_name(node) or "").lstrip().lower()
+    if name.startswith("find in page"):
+        return True
+    url = _doc_url(node) or ""
+    return "omnibox" in url.lower()
+
+
+def _clear_browser_bar_cache(node, depth: int = 0) -> None:
+    """Drop libatspi's child cache on the window and its documents.
+
+    The walk stops at a document, so the page's own nodes are fetched again
+    by the snapshot instead of being cleared one by one.
+    """
+    if node is None or depth > 12:
+        return
+    role = _role_name(node)
+    if depth == 0 or role in {
+        "application", "frame", "window", "document web", "document frame", "internal frame",
+    }:
+        _call_first(node, ("clear_cache", "clearCache"))
+    if depth and role in {"document web", "document frame"}:
+        return
+    count = _child_count(node)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 8)):
+        _clear_browser_bar_cache(_child_at(node, index), depth + 1)
+
+
+def _application_bar_frame(app):
+    """A find-in-page or omnibox frame cached under ``app``, else None."""
+    if app is None:
+        return None
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is not None and _is_browser_bar_frame(frame):
+            return frame
+    return None
+
+
+def _sparse_untitled_chrome_frame(frame) -> bool:
+    """True for an empty cached Chrome frame, not a real window.
+
+    Beside the page, Chrome keeps untitled frames whose only child is an
+    empty panel. After find-in-page that frame can be the active root.
+    Its snapshot is an untitled group with no rows, and ``scroll_to_find``
+    then stops before the wheel. A named window, the open find bar, and a
+    frame that already holds a document are not this.
+    """
+    if frame is None or _is_browser_bar_frame(frame):
+        return False
+    if (_node_name(frame) or "").strip():
+        return False
+    try:
+        count = _child_count(frame)
+    except Exception:
+        return False
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or count > 2:
+        return False
+    for index in range(int(count)):
+        child = _child_at(frame, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if role in {"document web", "document frame", "internal frame"}:
+            return False
+        if (_node_name(child) or "").strip():
+            return False
+        try:
+            kids = _child_count(child)
+        except Exception:
+            kids = 0
+        if isinstance(kids, int) and not isinstance(kids, bool) and kids > 2:
+            return False
+    return True
+
+
+def _chrome_page_window(app, root):
+    """The named page window when ``root`` is an empty untitled frame.
+
+    ``root`` is unchanged when it already has a title, or when no titled
+    sibling exists. A showing titled window wins over one that is not.
+    """
+    if app is None or root is None or not _sparse_untitled_chrome_frame(root):
+        return root
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    named = []
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is None or _is_browser_bar_frame(frame):
+            continue
+        if _role_name(frame) == "alert":
+            continue
+        if not (_node_name(frame) or "").strip():
+            continue
+        named.append(frame)
+    if not named:
+        return root
+    for frame in named:
+        if _state_has(frame, "ACTIVE") or _state_has(frame, "SHOWING"):
+            return frame
+    return named[0]
+
+
+def chromium_snapshot_root(root):
+    """Page frame for a Chrome snapshot after the find bar or omnibox was open.
+
+    ``root`` is unchanged until that bar has appeared, or a find-in-page or
+    omnibox frame is still cached beside the page window. After that, the
+    client cache on the application is dropped, and a leftover find-in-page
+    or omnibox frame is not the root. The frame that holds the selected tab
+    is. Reload then reads the new document instead of the cached bar. The
+    open bar itself stays the root the first time it is active, so Find and
+    Close find bar stay in that snapshot. An empty untitled frame cached
+    beside the page is not the root either: that walk is an untitled group
+    with no rows, and ``scroll_to_find`` stops before the wheel.
+    """
+    if root is None or not _chromium_app(root):
+        return root
+    app = _call_first(root, ("get_application", "getApplication")) or root
+    latched = _browser_bar_latched(root)
+    if not latched:
+        # This snapshot is the open bar. Show it. The elements record the pid.
+        if _is_browser_bar_frame(root):
+            return root
+        # scroll_to_find closes the bar before the snapshot, so the page
+        # window is the root and the bar frame is only a cached sibling.
+        # The document walk is then the empty cached tree.
+        if _application_bar_frame(app) is None:
+            return _chrome_page_window(app, root)
+    else:
+        try:
+            pid = pid_of(root)
+        except Exception:
+            pid = None
+        # One clear per latch. A bar frame that is still cached asks for
+        # another, which covers Reload. Further snapshots keep the fresh tree.
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid in _BROWSER_BAR_CLEARED
+            and _application_bar_frame(app) is None
+            and not _is_browser_bar_frame(root)
+        ):
+            return _chrome_page_window(app, root)
+    _clear_browser_bar_cache(app)
+    try:
+        pid = pid_of(root)
+    except Exception:
+        pid = None
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        _BROWSER_BAR_CLEARED.add(int(pid))
+    if not latched or not _is_browser_bar_frame(root):
+        return _chrome_page_window(app, root)
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    pages = []
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is None or _is_browser_bar_frame(frame):
+            continue
+        if _role_name(frame) == "alert":
+            continue
+        # An empty cached frame can be ACTIVE. It is not the page.
+        if _sparse_untitled_chrome_frame(frame):
+            continue
+        pages.append(frame)
+    for frame in pages:
+        if _state_has(frame, "ACTIVE"):
+            return frame
+    for frame in pages:
+        if _selected_tab_name(frame):
+            return frame
+    return pages[0] if pages else _chrome_page_window(app, root)
 
 
 def _chrome_rewrite_field(acc) -> bool:
@@ -2038,6 +5595,20 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     except Exception:
         return None
     if truncated or acc is None:
+        return None
+    # GTK can return an empty string from Text.get_text even for a drawing
+    # area without Text. That is no read-back, not a readable empty field.
+    getter = getattr(acc, "get_text_iface", None)
+    if callable(getter) and _safe(lambda: getter()) is None:
+        return None
+    # A PDF page's Text interface is the document, not a field. Evince
+    # leaves that page focused while Ctrl+F types into the find bar. Using
+    # the page as the read-back makes the type look like a mismatch and
+    # scroll_to_find never confirms the hit.
+    try:
+        if _role_name(acc) == "page":
+            return None
+    except Exception:
         return None
     try:
         return _readable_text(acc)
@@ -2100,36 +5671,362 @@ def _type_needles(text: str, *, chrome: bool) -> tuple[str, ...]:
     return (needle, trimmed)
 
 
-def _typed_visible(before: str | None, after: str | None, text: str, *, chrome: bool = False) -> bool:
+def _expansion_starts(acc, raw: str) -> tuple[str, list[int]]:
+    """Expanded text and the expanded index of each raw character.
+
+    ``starts[i]`` is where raw character ``i`` begins. The last entry is the
+    length, so an exclusive end offset has a place to land. A U+FFFC begins
+    at the child text that replaces it. NBSP is a space, matching the
+    read-back. No embedded objects leaves the raw string unchanged.
+    """
+    if _OBJECT_REPLACEMENT not in raw:
+        text = raw.replace("\u00a0", " ")
+        return text, list(range(len(text) + 1))
+    targets = _embedded_targets(acc, raw)
+    parts = raw.split(_OBJECT_REPLACEMENT)
+    surrounding = "".join(parts)
+    out: list[str] = []
+    starts: list[int] = []
+    built = 0
+    obj_i = 0
+    for part_index, part in enumerate(parts):
+        for ch in part:
+            starts.append(built)
+            piece = " " if ch == "\u00a0" else ch
+            out.append(piece)
+            built += 1
+        if part_index >= len(parts) - 1:
+            break
+        obj = targets[obj_i] if obj_i < len(targets) else None
+        obj_i += 1
+        piece = _with_block_boundary(
+            "".join(out), obj, _object_text(obj, 1, surrounding).replace("\u00a0", " "),
+        )
+        starts.append(built)
+        out.append(piece)
+        built += len(piece)
+    starts.append(built)
+    return "".join(out), starts
+
+
+def _span_in_contribution(
+    readable: str, span: tuple[int, int], contributed: str,
+) -> tuple[int, int] | None:
+    """``span`` moved from ``readable`` into ``contributed``, or None.
+
+    The embed's read-back and the slice spliced into the parent can differ by
+    a stripped edge. Offsets that fall outside the contribution are None.
+    """
+    start, end = span
+    read_n = readable.replace("\u00a0", " ")
+    contrib = contributed.replace("\u00a0", " ")
+    if start < 0 or end <= start or end > len(read_n):
+        return None
+    lead = 0
+    if read_n == contrib:
+        lead = 0
+    elif contrib and read_n.strip() == contrib:
+        lead = len(read_n) - len(read_n.lstrip())
+    elif contrib and contrib in read_n:
+        lead = read_n.find(contrib)
+    else:
+        return None
+    placed_start = start - lead
+    placed_end = end - lead
+    if placed_start < 0 or placed_end > len(contrib) or placed_end <= placed_start:
+        return None
+    return placed_start, placed_end
+
+
+def _descendant_text_span(acc, readable: str, depth: int) -> tuple[int, int] | None:
+    """Selection on a descendant, expressed in ``readable``.
+
+    A paragraph can leave its own Text selection empty while the static text
+    that holds the word reports one. The child's offsets are placed where
+    that child's text sits in ``readable``.
+    """
+    if depth > 6 or not readable:
+        return None
+    text = readable.replace("\u00a0", " ")
+    cursor = 0
+    spans: list[tuple[int, int]] = []
+    for index in range(min(_child_count(acc), 32)):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        try:
+            child_raw = _full_text(child)
+        except Exception:
+            child_raw = None
+        if isinstance(child_raw, str) and child_raw and _OBJECT_REPLACEMENT not in child_raw:
+            child_text = child_raw.replace("\u00a0", " ")
+        else:
+            try:
+                child_text = _readable_text(child) or ""
+            except Exception:
+                child_text = ""
+        if not child_text:
+            continue
+        at = text.find(child_text, cursor)
+        if at < 0:
+            continue
+        local = _selection_span(child, child_text, depth + 1)
+        if local is None:
+            local = _descendant_text_span(child, child_text, depth + 1)
+        if local is not None and local[1] <= len(child_text):
+            spans.append((at + local[0], at + local[1]))
+        cursor = at + len(child_text)
+    if not spans:
+        return None
+    return spans[0][0], spans[-1][1]
+
+
+def _embed_inner_span(obj, contributed: str, depth: int) -> tuple[int, int] | None:
+    """Selection inside one embedded paragraph, relative to ``contributed``.
+
+    None keeps the whole embed. Chrome's contenteditable parent selects the
+    paragraph object, and the paragraph (or the static text inside it)
+    selects the word. Typing replaces the word.
+    """
+    if obj is None or not contributed or depth > 6:
+        return None
+    try:
+        readable = _readable_text(obj)
+    except Exception:
+        return None
+    if not isinstance(readable, str) or not readable:
+        return None
+    span = _selection_span(obj, readable, depth + 1)
+    if span is None:
+        span = _descendant_text_span(obj, readable, depth + 1)
+    if span is None:
+        return None
+    return _span_in_contribution(readable, span, contributed)
+
+
+def _refine_embedded_selection(
+    acc, raw: str, start: int, end: int, expanded: str, starts: list[int], depth: int,
+) -> tuple[int, int] | None:
+    """The expanded span, shrunk to a word selected inside a U+FFFC.
+
+    A selection that also covers ordinary characters keeps the object
+    mapping. An embed with no inner selection stays the whole embed, which
+    is a selected paragraph. The word's range is what a selected word
+    inside that paragraph reports.
+    """
+    targets = _embedded_targets(acc, raw)
+    obj_i = 0
+    pieces: list[tuple[int, int]] = []
+    saw_object = False
+    for index, ch in enumerate(raw):
+        if ch != _OBJECT_REPLACEMENT:
+            if start <= index < end:
+                return None
+            continue
+        contrib_s = starts[index] if index < len(starts) else len(expanded)
+        contrib_e = starts[index + 1] if index + 1 < len(starts) else len(expanded)
+        if start <= index < end:
+            saw_object = True
+            contributed = expanded[contrib_s:contrib_e]
+            inner = _embed_inner_span(
+                targets[obj_i] if obj_i < len(targets) else None, contributed, depth,
+            )
+            if inner is None:
+                pieces.append((contrib_s, contrib_e))
+            else:
+                pieces.append((contrib_s + inner[0], contrib_s + inner[1]))
+        obj_i += 1
+    if not saw_object or not pieces:
+        return None
+    refined_start, refined_end = pieces[0][0], pieces[-1][1]
+    if refined_end <= refined_start:
+        return None
+    return refined_start, refined_end
+
+
+def _selection_span(acc, readable: str | None, _depth: int = 0) -> tuple[int, int] | None:
+    """Active ``[start, end)`` in ``readable``, or None.
+
+    The Text interface counts characters in its own string. A contenteditable
+    parent is often one U+FFFC per paragraph, while the read-back is the
+    children's words. The span is translated into that read-back. When that
+    object is selected only because the caret is inside it, the paragraph's
+    own selection is the word, and that word is the span. A collapsed
+    caret, a missing selection, and offsets that are not in ``readable`` are
+    None, and the caller keeps the append check.
+    """
+    if _depth > 6 or not isinstance(readable, str) or not readable:
+        return None
+    try:
+        raw = _full_text(acc)
+    except Exception:
+        return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        Atspi = _atspi()
+        count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    except Exception:
+        count = None
+    nchars = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else len(raw)
+    try:
+        _caret, start, end = _caret_and_selection(acc, nchars)
+    except Exception:
+        return None
+    if end <= start:
+        return None
+    readable_n = readable.replace("\u00a0", " ")
+    if _OBJECT_REPLACEMENT not in raw:
+        raw_n = raw.replace("\u00a0", " ")
+        if end <= len(readable_n) and (
+            nchars == len(readable_n)
+            or raw_n == readable_n
+            or raw_n.rstrip("\n") == readable_n
+            or readable_n.rstrip("\n") == raw_n
+        ):
+            return start, end
+        return None
+    expanded, starts = _expansion_starts(acc, raw)
+    if start >= len(starts):
+        return None
+    r_start = starts[start]
+    r_end = starts[end] if end < len(starts) else len(expanded)
+    try:
+        refined = _refine_embedded_selection(acc, raw, start, end, expanded, starts, _depth)
+    except Exception:
+        refined = None
+    if refined is not None:
+        r_start, r_end = refined
+    lead = 0
+    if expanded != readable_n:
+        stripped = expanded.strip()
+        if stripped != readable_n and stripped.rstrip("\n") != readable_n.rstrip("\n"):
+            if nchars == len(readable_n) and end <= len(readable_n):
+                return start, end
+            return None
+        found = expanded.find(stripped) if stripped else 0
+        lead = found if found > 0 else 0
+    r_start -= lead
+    r_end -= lead
+    if r_start < 0 or r_end < r_start or r_end > len(readable_n):
+        return None
+    return r_start, r_end
+
+
+def _selection_replaced(
+    before_n: str,
+    after_n: str,
+    needles: tuple[str, ...],
+    start: int,
+    end: int,
+    typed: str,
+) -> bool:
+    """True when ``after_n`` is ``before_n`` with ``[start, end)`` replaced."""
+    from a11y_computer_use.outcome import replaced_text
+
+    if end <= start or end > len(before_n):
+        return False
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    for needle in needles:
+        if not needle:
+            continue
+        expected = replaced_text(before_n, needle, start, end)
+        if expected is None:
+            continue
+        if typed_breaks_match(_field_text_for_type(expected, typed), after_n):
+            return True
+    return False
+
+
+def _matched_replacement(
+    before: str | None,
+    after: str | None,
+    text: str,
+    selection: tuple[int, int] | None,
+    *,
+    chrome: bool = False,
+) -> str | None:
+    """The final field text when ``after`` is the selection replacement.
+
+    None when there is no selection or ``after`` is some other edit. The
+    outcome check compares the snapshot with this string.
+    """
+    if not selection or len(selection) != 2:
+        return None
+    before_n = _field_text_for_type(before, text)
+    after_n = _field_text_for_type(after, text)
+    if before_n is None or after_n is None:
+        return None
+    start, end = selection
+    if not _selection_replaced(before_n, after_n, _type_needles(text, chrome=chrome), start, end, text):
+        return None
+    from a11y_computer_use.outcome import replaced_text, typed_breaks_match
+
+    for needle in _type_needles(text, chrome=chrome):
+        expected = replaced_text(before_n, needle, start, end)
+        shown = _field_text_for_type(expected, text) if expected is not None else None
+        if shown is not None and typed_breaks_match(shown, after_n):
+            return shown
+    return None
+
+
+def _typed_visible(
+    before: str | None,
+    after: str | None,
+    text: str,
+    *,
+    chrome: bool = False,
+    selection: tuple[int, int] | None = None,
+) -> bool:
     """Whether ``text`` showed up in the focused text.
 
     A readable field that still shows the pre-type text, or that shows the
-    case-inverted string, does not count. A suffix or an insertion does.
-    NBSP compares as a space, and one trailing contenteditable newline is
-    not part of the value. ``chrome`` also accepts the typed text with its
-    trailing spaces removed, which is the string Chrome keeps. A field that
-    settled without the characters is not a match. A field whose whole text
-    is already exactly the typed string is a match: Chrome's find bar
-    reopens with that query selected, and typing it again does not change
-    the string.
+    case-inverted string, does not count. With an active selection the
+    expected result is the previous text with that range replaced, and the
+    final text has to be that string. A suffix or an insertion is the check
+    when the caret is collapsed. NBSP compares as a space, and one trailing
+    contenteditable newline is not part of the value. A newline, CRLF,
+    U+2028, U+2029, and a paragraph or block boundary are the same break.
+    A missing or extra character is not. ``chrome`` also accepts the typed
+    text with its trailing spaces removed, which is the string Chrome keeps.
+    A field that settled without the characters is not a match. A field
+    whose whole text is already exactly the typed string is a match:
+    Chrome's find bar reopens with that query selected, and typing it again
+    does not change the string.
     """
+    from a11y_computer_use.outcome import normalize_typed_breaks
+
     before_n = _field_text_for_type(before, text)
     after_n = _field_text_for_type(after, text)
     needles = _type_needles(text, chrome=chrome)
-    if after_n is None or not any(needle and needle in after_n for needle in needles):
+    after_b = None if after_n is None else normalize_typed_breaks(after_n)
+    before_b = None if before_n is None else normalize_typed_breaks(before_n)
+    needles_b = tuple(normalize_typed_breaks(needle) for needle in needles)
+    if after_b is None or not any(needle and needle in after_b for needle in needles_b):
         return False
+    if (
+        selection is not None
+        and len(selection) == 2
+        and before_n is not None
+        and int(selection[1]) > int(selection[0])
+        and int(selection[1]) <= len(before_n)
+    ):
+        return _selection_replaced(
+            before_n, after_n, needles, int(selection[0]), int(selection[1]), text,
+        )
     if before_n is None:
         return True
-    if after_n == before_n:
+    if after_b == before_b:
         # The field already showed exactly the typed text. Chrome's find bar
         # reopens with that query selected, and typing it again leaves the
         # same string. That is the text landing. A longer field that did not
         # change still does not count: the needle is only a piece of it.
-        return any(needle and after_n == needle for needle in needles)
-    for needle in needles:
-        if needle and (after_n.endswith(needle) or after_n == (before_n + needle)):
+        return any(needle and after_b == needle for needle in needles_b)
+    for needle in needles_b:
+        if needle and (after_b.endswith(needle) or after_b == ((before_b or "") + needle)):
             return True
-    return before_n in after_n or len(after_n) > len(before_n)
+    return (before_b or "") in after_b or len(after_b) > len(before_b or "")
 
 
 # Chrome publishes a contenteditable's new characters a beat after the keys.
@@ -2140,7 +6037,14 @@ _TYPE_SETTLE_PAUSE_S = 0.05
 _TYPE_SETTLE_STABLE = 2
 
 
-def _poll_typed_text(read, before: str | None, text: str, *, chrome: bool = False) -> str | None:
+def _poll_typed_text(
+    read,
+    before: str | None,
+    text: str,
+    *,
+    chrome: bool = False,
+    selection: tuple[int, int] | None = None,
+) -> str | None:
     """Poll ``read`` until ``text`` is visible or the field settles.
 
     ``read`` returns the current readable text. The first hit wins. A read
@@ -2156,7 +6060,7 @@ def _poll_typed_text(read, before: str | None, text: str, *, chrome: bool = Fals
     before_n = _field_text_for_type(before, text)
     for attempt in range(_TYPE_SETTLE_POLLS):
         seen = read()
-        if _typed_visible(before, seen, text, chrome=chrome):
+        if _typed_visible(before, seen, text, chrome=chrome, selection=selection):
             return seen
         norm = _field_text_for_type(seen, text)
         if norm is not None and norm == last and norm != before_n:
@@ -2177,9 +6081,11 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     A password field is returned so the caller can refuse it before any
     write. None means there is no focused editable: nothing is focused, the
     focused node has no EditableText, the walk could not find focus, or
-    PyGObject is not installed. The caller then uses keystrokes. The same
-    node `insert_text` accepts, so a coordinate click and a ref click share
-    that helper.
+    PyGObject is not installed. The caller then uses keystrokes. An Impress
+    or Draw frame is the exception: the focused container has no
+    EditableText, and the focused or caret paragraph inside it is returned.
+    The same node `insert_text` accepts, so a coordinate click and a ref
+    click share that helper.
     """
     try:
         acc, truncated = _focused_node(app, max_nodes=max_nodes)
@@ -2190,8 +6096,66 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     if is_secure(acc):
         return acc
     if _editable_iface(acc) is None:
-        return None
+        # Impress and Draw focus the presentation or the text frame. The
+        # paragraph being edited is below that container and is the node
+        # insert_text can write.
+        paragraph = _drawing_edit_paragraph(acc)
+        if paragraph is None:
+            return None
+        return paragraph
     return acc
+
+
+def gtk_toggle_cell(acc) -> bool:
+    """GTK renderer toggle cells need pointer input, not row selection."""
+    return (
+        _toolkit_name(acc).lower() == "gtk"
+        and not _gtk4_app(acc)
+        and _role_name(acc) == "table cell"
+        and "toggle" in _raw_action_names(acc)
+    )
+
+
+def checked_state(acc) -> bool:
+    """Read the cell itself, even when unchecked GTK cells omit CHECKABLE."""
+    return _state_has(acc, "CHECKED")
+
+
+def checked_state_flipped(acc, before: bool) -> bool:
+    """Require a stable checked change, independent of row selection."""
+    for attempt in range(8):
+        if checked_state(acc) != before:
+            time.sleep(0.04)
+            if checked_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def qt_toggle_only_control(acc) -> bool:
+    """Qt buttons and list items whose only activating action is Toggle.
+
+    Qt's Toggle changes checked/selected state without emitting the user
+    click signals. SetFocus is harmless here, but a real Press/Click or any
+    other activating action keeps the existing AT-SPI path. Table cells
+    and tree items keep their separate selection handling.
+    """
+    if not _qt_app(acc) or _role_name(acc) not in {
+        "check box", "radio button", "toggle button", "push button", "button",
+        "list item", "list box item",
+    }:
+        return False
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    activating = set()
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+            activating.add(raw)
+    return activating == {"toggle"}
 
 
 def do_press(acc) -> bool:
@@ -2208,6 +6172,493 @@ def do_press(acc) -> bool:
     return False
 
 
+# Window titles of a GTK file chooser. A bare "Open" is a document title often
+# enough that Return in that window must stay a key.
+_FILE_CHOOSER_TITLES = frozenset({
+    "open file",
+    "save file",
+    "save as",
+    "select file",
+    "select a file",
+    "choose a file",
+    "open document",
+    "save document",
+})
+_FILE_CHOOSER_ACCEPT = frozenset({"open", "save", "ok", "select"})
+_FILE_CHOOSER_BUTTON_ROLES = frozenset({"push button", "button"})
+_FILE_CHOOSER_ENTRY_ROLES = frozenset({
+    "entry", "text", "editable text", "combo box", "combo-box", "text entry",
+})
+_FILE_CHOOSER_ROW_ROLES = frozenset({"table cell", "list item", "tree item", "table row"})
+_FILE_CHOOSER_TABLE_ROLES = frozenset({"table", "tree table", "tree", "list", "list box"})
+_CHOOSER_WALK_BUDGET = 500
+
+
+def file_chooser_window_title(title: str) -> bool:
+    """True when ``title`` is a GTK open or save dialog, not a document."""
+    return _folded_title(title) in _FILE_CHOOSER_TITLES
+
+
+def file_basename(path: str) -> str:
+    """The last path segment of ``path``, without a ``file://`` prefix."""
+    text = str(path or "").strip().replace("\\", "/")
+    if text.lower().startswith("file://"):
+        text = text[7:]
+    text = text.rstrip("/")
+    if not text:
+        return ""
+    return text.rsplit("/", 1)[-1]
+
+
+def file_chooser_controls(pid: int | None, title: str):
+    """``(button, path, app)`` for the active GTK chooser, or None.
+
+    ``button`` is the Open or Save push button. ``path`` is the location
+    entry text, or the selected file name when the entry is empty. ``app``
+    is the application accessible, so a later read can see the opener after
+    the dialog closes. None when the window title is not a chooser, or the
+    tree has no accept button. Chrome's chooser sets ``NO_AT_BRIDGE`` and
+    has no button here.
+    """
+    if not file_chooser_window_title(title):
+        return None
+    Atspi = _atspi()
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    folded = _folded_title(title)
+    apps = _desktop_apps(desktop)
+    owned = [app for app in apps if pid and pid_of(app) == pid]
+    found = _chooser_in_apps(owned, folded, title)
+    if found is not None:
+        return found
+    rest = [app for app in apps if app not in owned]
+    return _chooser_in_apps(rest, folded, title)
+
+
+def chooser_controls_under(root, title: str):
+    """``(button, path)`` under ``root``, or None when no Open/Save button.
+
+    The file list is walked only for a selected name. Its rows are not
+    allowed to consume the budget before the action button, which sits
+    beside the list rather than inside it.
+    """
+    if root is None:
+        return None
+    accept: list[tuple[object, str]] = []
+    entries: list[tuple[str, bool, str]] = []
+    selected: list[str] = []
+    _walk_chooser(root, accept, entries, selected, [_CHOOSER_WALK_BUDGET], 0)
+    if not accept:
+        return None
+    return _prefer_accept(accept, title), _chooser_path(entries, selected)
+
+
+def tree_shows_file(root, filename: str, *, skip_titles: tuple[str, ...] = ()) -> bool:
+    """True when ``filename``'s basename appears outside a skipped chooser frame.
+
+    The chooser itself shows the typed path. That text does not mean the
+    opener accepted the file. Frames whose title is in ``skip_titles`` are
+    left out of the search.
+    """
+    base = file_basename(filename)
+    full = str(filename or "").strip()
+    if not base and not full:
+        return False
+    skip = {_folded_title(item) for item in skip_titles if _folded_title(item)}
+    blob: list[str] = []
+    _collect_opener_text(root, skip, blob, [_CHOOSER_WALK_BUDGET], 0)
+    text = "\n".join(blob)
+    if base and base in text:
+        return True
+    return bool(full and full in text)
+
+
+def _folded_title(title: str) -> str:
+    return " ".join(str(title or "").casefold().split())
+
+
+def _button_label(name: str) -> str:
+    text = str(name or "").replace("_", " ").strip().casefold()
+    return text.split("(", 1)[0].strip()
+
+
+def _desktop_apps(desktop) -> list:
+    count = _child_count(desktop)
+    if count < 0:
+        return []
+    apps = []
+    for index in range(min(int(count), 80)):
+        child = _child_at(desktop, index)
+        if child is not None:
+            apps.append(child)
+    return apps
+
+
+def _chooser_in_apps(apps, folded: str, title: str):
+    for app in apps:
+        frames = _direct_children(app)
+        named = [
+            frame for frame in frames
+            if _folded_title(_node_name(frame)) == folded
+            or _role_name(frame) == "file chooser" and _folded_title(_node_name(frame)) in {"", folded}
+        ]
+        if named:
+            targets = named
+        else:
+            # Buttons elsewhere in the app are not an active chooser frame.
+            continue
+        for target in targets:
+            found = chooser_controls_under(target, title)
+            if found is not None:
+                button, path = found
+                return button, path, app
+    return None
+
+
+def _direct_children(acc) -> list:
+    count = _child_count(acc)
+    if count < 0:
+        return []
+    out = []
+    for index in range(min(int(count), 40)):
+        child = _child_at(acc, index)
+        if child is not None:
+            out.append(child)
+    return out
+
+
+def _walk_chooser(node, accept, entries, selected, budget, depth: int) -> None:
+    if node is None or budget[0] <= 0 or depth > 16:
+        return
+    budget[0] -= 1
+    role = _role_name(node)
+    name = _node_name(node)
+    if role in _FILE_CHOOSER_BUTTON_ROLES:
+        label = _button_label(name)
+        if label in _FILE_CHOOSER_ACCEPT and _chooser_enabled(node):
+            accept.append((node, label))
+    elif role in _FILE_CHOOSER_ENTRY_ROLES:
+        text = _chooser_field_text(node).strip()
+        if text:
+            entries.append((text, "FOCUSED" in _state_names(node), name.casefold()))
+    elif role in _FILE_CHOOSER_ROW_ROLES and "SELECTED" in _state_names(node):
+        label = name.strip() or _chooser_field_text(node).strip()
+        if label and label not in {".", ".."}:
+            selected.append(label)
+    structural, tables = [], []
+    for child in _direct_children(node):
+        if _role_name(child) in _FILE_CHOOSER_TABLE_ROLES:
+            tables.append(child)
+        else:
+            structural.append(child)
+    for child in structural:
+        _walk_chooser(child, accept, entries, selected, budget, depth + 1)
+    for child in tables:
+        _walk_chooser_selection(child, selected, [40], 0)
+
+
+def _walk_chooser_selection(node, selected, budget, depth: int) -> None:
+    if node is None or budget[0] <= 0 or depth > 8:
+        return
+    budget[0] -= 1
+    role = _role_name(node)
+    if role in _FILE_CHOOSER_ROW_ROLES and "SELECTED" in _state_names(node):
+        label = _node_name(node).strip() or _chooser_field_text(node).strip()
+        if label and label not in {".", ".."}:
+            selected.append(label)
+    count = _child_count(node)
+    if count < 0:
+        return
+    for index in range(min(int(count), 40)):
+        _walk_chooser_selection(_child_at(node, index), selected, budget, depth + 1)
+
+
+def _chooser_enabled(node) -> bool:
+    states = _state_names(node)
+    if not states:
+        return True
+    if "SENSITIVE" in states or "ENABLED" in states:
+        return True
+    return not ({"SHOWING", "VISIBLE", "FOCUSABLE"} & states)
+
+
+def _chooser_path(entries, selected) -> str:
+    """Location text when it was typed, otherwise the selected file name."""
+    for text, focused, name in entries:
+        if focused and ("/" in text or "\\" in text or "location" in name or name == "name"):
+            return text
+    for text, _focused, name in entries:
+        if "location" in name or name in {"name", "filename"}:
+            return text
+    for text, _focused, _name in entries:
+        if "/" in text or "\\" in text:
+            return text
+    if selected:
+        return selected[-1]
+    if entries:
+        return entries[-1][0]
+    return ""
+
+
+def _prefer_accept(accept, title: str):
+    folded = title.casefold()
+    want = "save" if "save" in folded else "open"
+    for button, label in accept:
+        if label == want:
+            return button
+    for button, label in accept:
+        if label in _FILE_CHOOSER_ACCEPT:
+            return button
+    return accept[0][0]
+
+
+def _chooser_field_text(acc) -> str:
+    """Text of a chooser entry. A real accessible uses ``Text.get_text``.
+
+    ``Accessible.get_text`` is the deprecated wrapper. A test double has no
+    GObject pointer and exposes ``get_text`` or ``text`` itself.
+    """
+    if getattr(acc, "__gpointer__", None) is not None:
+        try:
+            got = _full_text(acc)
+        except Exception:
+            return ""
+        return got or ""
+    getter = getattr(acc, "get_text", None)
+    if callable(getter):
+        got = None
+        try:
+            try:
+                got = getter(0, -1)
+            except TypeError:
+                got = getter()
+        except Exception:
+            got = None
+        if isinstance(got, str):
+            return got
+    direct = getattr(acc, "text", None)
+    if isinstance(direct, str):
+        return direct
+    return ""
+
+
+def _state_names(acc) -> set[str]:
+    direct = getattr(acc, "states", None)
+    if isinstance(direct, (set, frozenset, list, tuple)) and direct:
+        return {str(item).upper() for item in direct}
+    sset = _call_first(acc, ("get_state_set",))
+    if sset is None:
+        return set()
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return set()
+    st = getattr(Atspi, "StateType", None)
+    if st is None:
+        return set()
+    found = set()
+    for label in ("FOCUSED", "SELECTED", "SHOWING", "VISIBLE", "SENSITIVE", "ENABLED", "FOCUSABLE"):
+        token = getattr(st, label, None)
+        if token is not None and _safe(lambda t=token: sset.contains(t), False):
+            found.add(label)
+    return found
+
+
+def _collect_opener_text(node, skip: set[str], blob: list[str], budget, depth: int) -> None:
+    if node is None or budget[0] <= 0 or depth > 16:
+        return
+    role = _role_name(node)
+    name = _node_name(node)
+    if role in {"frame", "dialog", "window", "file chooser"} and _folded_title(name) in skip:
+        return
+    budget[0] -= 1
+    if name:
+        blob.append(name)
+    if role in _FILE_CHOOSER_ENTRY_ROLES or role in {"label", "static"}:
+        text = _chooser_field_text(node).strip()
+        if text:
+            blob.append(text)
+    count = _child_count(node)
+    if count < 0:
+        return
+    for index in range(min(int(count), 60)):
+        _collect_opener_text(_child_at(node, index), skip, blob, budget, depth + 1)
+
+
+# Chrome's doAction("click") on a canvas or image synthesizes a DOM click at
+# the element's top-left. offsetX/offsetY are then 0. A button, link, or
+# checkbox keeps that action. These roles need a pointer click at the center.
+_COORDINATE_CLICK_ROLES = frozenset({"image", "icon", "canvas", "drawing area"})
+_CANVAS_XML_ROLES = frozenset({"img", "image", "graphics-document", "graphics-symbol"})
+
+
+def coordinate_click_target(acc) -> bool:
+    """A Chromium canvas or image. Its action click has no pointer position."""
+    if acc is None or not _chromium_app(acc):
+        return False
+    if _role_name(acc) in _COORDINATE_CLICK_ROLES:
+        return True
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    if tag == "canvas":
+        return True
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    return bool(xml & _CANVAS_XML_ROLES)
+
+
+def atspi_screen_box(acc) -> tuple[float, float, float, float] | None:
+    """SCREEN ``(x, y, width, height)``, including a zero width or height.
+
+    None when the node has no component, or the box is GTK's negative
+    sentinel. A zero side is kept so the caller can replace the size from
+    the DOM and still use a real origin.
+    """
+    position, size = _extents(acc, keep_zero=True)
+    if position is None or size is None:
+        return None
+    x, y = float(position[0]), float(position[1])
+    width, height = float(size[0]), float(size[1])
+    if x < 0 and y < 0 and width < 0 and height < 0:
+        return None
+    return (x, y, width, height)
+
+
+def opaque_click_target(acc) -> bool:
+    """A canvas, or an image with no name.
+
+    The accessibility tree does not contain the pixels, so a focus or
+    state change is not evidence the click landed inside the drawing.
+    A named image that is not a canvas can still change the page, and
+    that change remains evidence.
+    """
+    if acc is None:
+        return False
+    role = _role_name(acc)
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if role in {"canvas", "drawing area"} or tag == "canvas" or xml & {"graphics-document", "graphics-symbol"}:
+        return True
+    if role in {"image", "icon"} or bool(xml & {"img", "image"}):
+        name = str(_call_first(acc, ("get_name",), default="") or "").strip()
+        if name:
+            return False
+        # The accessible name is empty. A Text caption (a thumbnail's page
+        # number) is still a label, so the click is not an unnamed image.
+        return not _image_text_label(acc)
+    return False
+
+
+def opaque_click_verdict(acc) -> tuple[str, str] | None:
+    """``(unverifiable, evidence)`` for a canvas or unnamed image. None otherwise.
+
+    The click may already have been sent. This does not claim it missed.
+    Accessibility cannot see the pixels, so the result is not confirmed
+    from the tree. The evidence tells the caller to check a crop or a
+    screenshot.
+    """
+    if not opaque_click_target(acc):
+        return None
+    return (
+        "unverifiable",
+        "accessibility cannot see inside this canvas or unnamed image, so the click is not confirmed; "
+        "verify with crop or a screenshot",
+    )
+
+
+def coordinate_click_info(acc) -> dict | None:
+    """Identity and AT-SPI box for a canvas or image click, or None.
+
+    The box may have a zero side. ``element_id``, ``label``, and ``tag`` are
+    plain strings so a DOM lookup does not touch AT-SPI again.
+    """
+    if not coordinate_click_target(acc):
+        return None
+    attrs = _get_attributes(acc)
+    return {
+        "box": atspi_screen_box(acc),
+        "pid": pid_of(acc),
+        "element_id": str(attrs.get("id") or attrs.get("html-id") or "").strip(),
+        "label": str(_call_first(acc, ("get_name",), default="") or "").strip(),
+        "tag": str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower(),
+    }
+
+
+# A canvas ancestor sits between the control and its document. Stopping at
+# the document keeps a normal button from walking the whole window. The
+# canvas itself is not fallback content: a click on it stays a center click.
+_CANVAS_FALLBACK_STOP_ROLES = frozenset({
+    "document web", "document frame", "application", "frame", "window", "desktop frame",
+})
+
+
+def _canvas_surface(acc) -> bool:
+    """A Chromium ``<canvas>``. A GTK drawing area and an image are not one.
+
+    Chrome exposes ``<canvas>`` as role ``embedded`` with ``tag=canvas``, and
+    sometimes as role ``canvas``. The tag is the boundary. Fallback content
+    nested in that element is in the tree and is not painted.
+    """
+    if acc is None:
+        return False
+    if _role_name(acc) == "canvas":
+        return True
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    return tag == "canvas"
+
+
+def canvas_fallback_content(acc) -> bool:
+    """True when ``acc`` is Chromium content nested inside a canvas.
+
+    That content is not painted, so a pointer click lands on the canvas and
+    the control's handler does not run. False for the canvas element itself,
+    for GTK, and for anything that is not inside a canvas.
+    """
+    if acc is None or not _chromium_app(acc) or _canvas_surface(acc):
+        return False
+    current = acc
+    seen: set[int] = set()
+    for _ in range(40):
+        parent = _parent_of(current)
+        if parent is None or id(parent) in seen:
+            return False
+        seen.add(id(parent))
+        if _canvas_surface(parent):
+            return True
+        if _role_name(parent) in _CANVAS_FALLBACK_STOP_ROLES:
+            return False
+        current = parent
+    return False
+
+
+def canvas_fallback_dom_spec(acc) -> dict:
+    """DOM id, name, and tag for a click on canvas fallback content.
+
+    The caller has already decided ``acc`` is fallback content. The strings
+    are plain so the DOM lookup does not touch AT-SPI again.
+    """
+    attrs = _get_attributes(acc) if acc is not None else {}
+    label = ""
+    if acc is not None:
+        label = str(_call_first(acc, ("get_name",), default="") or "").strip()
+    return {
+        "pid": pid_of(acc),
+        "element_id": str(attrs.get("id") or attrs.get("html-id") or "").strip(),
+        "label": label,
+        "tag": str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower(),
+    }
+
+
 def grab_focus(acc) -> bool:
     """Give ``acc`` keyboard focus via AT-SPI (True on success) — no cursor move."""
     comp = _component(acc)
@@ -2216,8 +6667,406 @@ def grab_focus(acc) -> bool:
     return bool(_call_first(comp, ("grab_focus", "grabFocus"), default=False))
 
 
+_TEXT_CARET_ROLES = frozenset({"paragraph", "heading"})
+_WRITER_DOCUMENT_ROLES = frozenset({"document text"})
+_SHAPE_DOCUMENT_ROLES = frozenset({"document presentation", "document drawing"})
+_SHAPE_FRAME_ROLES = frozenset({"shape", "text frame", "text-frame"})
+_SHAPE_TEXT_ROLES = _TEXT_CARET_ROLES | _SHAPE_FRAME_ROLES
+
+
+def _ancestor_nodes(acc, limit: int = 40) -> list:
+    """``acc`` and its parents, nearest first. Cycles stop the walk."""
+    nodes = []
+    node = acc
+    seen: set[int] = set()
+    for _ in range(limit):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        nodes.append(node)
+        node = _parent_of(node)
+    return nodes
+
+
+def _document_roles(acc) -> set[str]:
+    """Document roles on ``acc`` and its parents."""
+    found = set()
+    for node in _ancestor_nodes(acc):
+        role = _role_name(node)
+        if role in _WRITER_DOCUMENT_ROLES or role in _SHAPE_DOCUMENT_ROLES:
+            found.add(role)
+        if role == "application":
+            break
+    return found
+
+
+def is_libreoffice_text_paragraph(acc) -> bool:
+    """A Writer paragraph or heading under ``document text``.
+
+    Impress and Draw paragraphs live in a shape's text frame. Setting their
+    caret does not start text editing, so they are not this shortcut.
+    """
+    if acc is None or _role_name(acc) not in _TEXT_CARET_ROLES:
+        return False
+    if not _libreoffice_accessible(acc):
+        return False
+    roles = _document_roles(acc)
+    if roles & _SHAPE_DOCUMENT_ROLES:
+        return False
+    return bool(roles & _WRITER_DOCUMENT_ROLES)
+
+
+def _text_frame_panel(acc) -> bool:
+    """A panel LibreOffice names as a text frame. The role stays ``panel``."""
+    if acc is None or _role_name(acc) != "panel":
+        return False
+    name = str(_call_first(acc, ("get_name",), default="") or "").strip().casefold()
+    return name.startswith("text frame")
+
+
+def _shape_text_node(acc) -> bool:
+    """A paragraph, shape, text-frame role, or a panel named as a text frame."""
+    if acc is None:
+        return False
+    role = _role_name(acc)
+    if role in _SHAPE_TEXT_ROLES:
+        return True
+    return _text_frame_panel(acc)
+
+
+def is_libreoffice_shape_text(acc) -> bool:
+    """An Impress or Draw shape, text frame, or a paragraph inside one."""
+    if not _shape_text_node(acc) or not _libreoffice_accessible(acc):
+        return False
+    return bool(_document_roles(acc) & _SHAPE_DOCUMENT_ROLES)
+
+
+def _shape_text_frame(acc):
+    """The shape or text frame that holds ``acc``, or ``acc`` when it is one."""
+    fallback = acc
+    for node in _ancestor_nodes(acc):
+        if _role_name(node) in _SHAPE_FRAME_ROLES or _text_frame_panel(node):
+            return node
+        if _role_name(node) in _SHAPE_DOCUMENT_ROLES:
+            break
+    return fallback
+
+
+def _bounded_descendants(acc, *, limit: int = 48) -> list:
+    """``acc`` and descendants, capped so a slide tree cannot walk the app."""
+    found: list = []
+    stack = [acc]
+    seen: set[int] = set()
+    while stack and len(found) < limit:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        found.append(node)
+        count = _raw_child_count(node)
+        if count <= 0:
+            continue
+        for index in range(min(count, 24)):
+            if len(found) + len(stack) >= limit:
+                break
+            stack.append(_child_at(node, index))
+    return found
+
+
+def _shape_text_nodes(acc) -> list:
+    """The frame, its descendants, and ``acc`` when the frame did not list it."""
+    frame = _shape_text_frame(acc)
+    nodes = _bounded_descendants(frame)
+    if acc is not None and all(node is not acc for node in nodes):
+        nodes.append(acc)
+    return nodes
+
+
+def _caret_offset(acc):
+    """The text caret, or None when this node has none."""
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    if isinstance(caret, bool) or not isinstance(caret, int) or caret < 0:
+        return None
+    return caret
+
+
+def _focused_editable_paragraph(acc) -> bool:
+    """True when ``acc`` is a focused paragraph that can take text."""
+    if acc is None or _role_name(acc) not in _TEXT_CARET_ROLES:
+        return False
+    if not _state_has(acc, "FOCUSED"):
+        return False
+    if _state_has(acc, "EDITABLE"):
+        return True
+    return _editable_iface(acc) is not None
+
+
+def shape_text_click_verdict(acc) -> tuple[str, str] | None:
+    """``(outcome, evidence)`` for an Impress or Draw text click.
+
+    Confirmed when a paragraph inside the frame is focused and editable, or
+    when the caret is in that frame and the frame has focus. A caret set on
+    an unfocused paragraph is not text editing, and that click is partial.
+    None when ``acc`` is not shape text.
+    """
+    if not is_libreoffice_shape_text(acc):
+        return None
+    nodes = _shape_text_nodes(acc)
+    if any(_focused_editable_paragraph(node) for node in nodes):
+        return "confirmed", "a focused editable paragraph is inside the text frame"
+    focused = any(_state_has(node, "FOCUSED") for node in nodes)
+    if focused and any(
+        _role_name(node) in _TEXT_CARET_ROLES and _caret_offset(node) is not None
+        for node in nodes
+    ):
+        return "confirmed", "the caret is inside the text frame"
+    return "partial", "the text frame is not in text edit"
+
+
+def shape_text_editing(acc) -> bool:
+    """True when an Impress or Draw click has entered text editing."""
+    verdict = shape_text_click_verdict(acc)
+    return verdict is not None and verdict[0] == "confirmed"
+
+
+def _shape_document(acc):
+    """The presentation or drawing that contains ``acc``, or None."""
+    for node in _ancestor_nodes(acc):
+        if _role_name(node) in _SHAPE_DOCUMENT_ROLES:
+            return node
+    return None
+
+
+def _shape_edit_paragraph_text(acc) -> str | None:
+    """Text of the paragraph in text edit, or None.
+
+    The document presentation stays focused and its own text stays empty.
+    The paragraph inside the text frame is where the keys land. A caret on
+    an unfocused paragraph is still that frame. None when ``acc`` is not in
+    a LibreOffice presentation or drawing, or no paragraph there is editing.
+    """
+    root = _shape_document(acc)
+    if root is None or not _libreoffice_accessible(root):
+        return None
+    caret_text = None
+    for node in _bounded_descendants(root, limit=96):
+        if _role_name(node) not in _TEXT_CARET_ROLES:
+            continue
+        try:
+            text = _full_text(node)
+        except Exception:
+            text = None
+        if text is None:
+            continue
+        shown = text.replace("\u00a0", " ")
+        if _state_has(node, "FOCUSED"):
+            return shown
+        if caret_text is None and _caret_offset(node) is not None:
+            caret_text = shown
+    return caret_text
+
+
+def focused_shape_edit_text(app: str) -> str | None:
+    """Paragraph text of the Impress or Draw frame in text edit, or None.
+
+    None when focus is not in a presentation or drawing, so a Writer
+    document and a Calc cell keep their own read-back.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    try:
+        return _shape_edit_paragraph_text(acc)
+    except Exception:
+        return None
+
+
+def poll_focused_shape_type(app: str, before: str | None, text: str) -> str | None:
+    """Settled paragraph text of the Impress or Draw frame in edit.
+
+    None when that frame is no longer in text edit. ``before`` is the
+    paragraph captured before the keys. The document's empty text is not
+    this result, so a title that gains the typed characters confirms.
+    """
+    def read():
+        return focused_shape_edit_text(app)
+
+    try:
+        current = read()
+    except Exception:
+        return None
+    if current is None:
+        return None
+    return _poll_typed_text(read, before, text)
+
+
+def place_paragraph_caret(acc, x: int, y: int) -> bool:
+    """Put the caret in this Writer paragraph. False when ``acc`` is not one.
+
+    A coordinate click uses LibreOffice screen extents, which sit about one
+    title bar above the text, so the pointer lands in the paragraph above.
+    ``set_caret_offset`` addresses the paragraph itself. A point inside that
+    paragraph's text uses that character. Any other point uses the end,
+    which is where a following ``type`` appends. Impress and Draw shapes
+    are not this path: a pointer click enters their text edit.
+    """
+    if not is_libreoffice_text_paragraph(acc):
+        return False
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return False
+    grab_focus(acc)
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        text = _full_text(acc)
+        if text is None:
+            return False
+        count = len(text)
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    point = _safe(lambda: Atspi.Text.get_offset_at_point(acc, int(x), int(y), coord))
+    offset = count
+    if isinstance(point, int) and not isinstance(point, bool) and 0 <= point <= count:
+        offset = point
+    wrote = _move_caret(Atspi, acc, offset)
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    if isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0:
+        return True
+    return bool(wrote)
+
+
+def paragraph_click_verdict(acc) -> tuple[str, str] | None:
+    """``(outcome, evidence)`` for a paragraph click, or None for any other target.
+
+    Writer is confirmed only when the caret is in that paragraph. A click
+    that changes focus and leaves the caret in the line above is not
+    confirmed. Impress and Draw are confirmed only when the frame is in
+    text edit.
+    """
+    shape = shape_text_click_verdict(acc)
+    if shape is not None:
+        return shape
+    if not is_libreoffice_text_paragraph(acc):
+        return None
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+
+    def read():
+        return _safe(lambda: Atspi.Text.get_caret_offset(acc))
+
+    caret = read()
+    if isinstance(caret, bool) or not isinstance(caret, int) or caret < 0:
+        time.sleep(0.05)
+        caret = read()
+    if isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0:
+        return "confirmed", "the caret is in the target paragraph"
+    return "partial", "the caret is not in the target paragraph"
+
+
 def _editable_iface(acc):
     return _call_first(acc, ("get_editable_text_iface", "get_editable_text"))
+
+
+_CONTAINER_TEXT_ROLES = frozenset({"section", "paragraph", "panel", "grouping", "filler"})
+# Roles whose text interface is the document or a static node. Selecting one
+# selects the page. A combo is not an entry either; set_value writes it first.
+_STATIC_REPLACE_ROLES = frozenset({
+    "paragraph", "heading", "label", "static", "caption",
+    "panel", "grouping", "filler",
+    "document web", "document frame", "document email",
+    "page",
+    "combo box", "combo-box",
+})
+_ENTRY_ROLE_NAMES = frozenset({
+    "entry", "password text", "text", "editable text", "terminal", "document text",
+})
+_CONTENTEDITABLE_TAGS = frozenset({"div", "span"})
+
+
+def editable_entry(
+    acc,
+    *,
+    role_str: str | None = None,
+    attrs: dict | None = None,
+    state_editable: bool | None = None,
+    drawing: bool = False,
+) -> bool:
+    """True when this node itself is an editable text entry.
+
+    Firefox reports ``STATE_EDITABLE``, and exposes EditableText, on
+    document and static nodes. Those are not entries. A paragraph, panel,
+    document, or combo/select is not an entry. A read-only node is not.
+    ``drawing`` is the one exception: an Impress or Draw paragraph that has
+    ``STATE_EDITABLE`` and EditableText. The snapshot sets that only for a
+    LibreOffice tree. A browser paragraph stays false.
+
+    An entry, password, or text role is an entry when it has EditableText or
+    ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
+    whose tag is ``div`` or ``span`` and whose state is ``EDITABLE``.
+    Chromium often has no EditableText (#221). Firefox's own roleless
+    contenteditable has EditableText. A browser paragraph is not that section.
+    """
+    if acc is None:
+        return False
+    role = role_str if role_str is not None else _role_name(acc)
+    if role in {"paragraph", "heading"}:
+        return bool(drawing)
+    if role in {"combo box", "combo-box"} or role in _STATIC_REPLACE_ROLES:
+        return False
+    if role in _ENTRY_ROLE_NAMES:
+        if _state_has(acc, "READ_ONLY"):
+            return False
+        if state_editable is None:
+            state_editable = _state_has(acc, "EDITABLE")
+        if state_editable:
+            return True
+        return _editable_iface(acc) is not None
+    if role != "section":
+        return False
+    if attrs is None:
+        attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    if tag not in _CONTENTEDITABLE_TAGS:
+        return False
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return False
+    if state_editable is None:
+        state_editable = _state_has(acc, "EDITABLE")
+    if not state_editable or _state_has(acc, "READ_ONLY"):
+        return False
+    if _chromium_app(acc):
+        return True
+    return bool(_gecko_app(acc) and _editable_iface(acc) is not None)
+
+
+def _blocks_text_replace(acc) -> bool:
+    """True when ``set_text`` must not select or type into this node.
+
+    A role-less object is a synthetic field. A browser paragraph, panel,
+    document, or combo is blocked even when it exposes EditableText or
+    ``STATE_EDITABLE``. An Impress or Draw paragraph with both is not
+    blocked. A contenteditable section and a real entry are not.
+    """
+    role = _role_name(acc)
+    if role == "":
+        return False
+    if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
+        return False
+    if role in _STATIC_REPLACE_ROLES:
+        return True
+    if role == "section":
+        return not (editable_entry(acc) or _chromium_contenteditable(acc))
+    return _state_has(acc, "READ_ONLY")
 
 
 def _state_has(acc, name: str) -> bool:
@@ -2225,7 +7074,21 @@ def _state_has(acc, name: str) -> bool:
 
     A fake state set matches the name string. The GI binding matches
     ``Atspi.StateType``. Missing gi, or a node with no state set, is false.
+    The event-thread property cache is dropped first so a SELECTED or
+    SHOWING bit is the bus value.
     """
+    return _state_flag(acc, name, drop_cache=True)
+
+
+def _state_flag(acc, name: str, *, drop_cache: bool) -> bool:
+    """Whether the state set contains ``name``.
+
+    ``drop_cache`` is false when the caller is about to read text on this
+    same node. ``clear_cache_single`` on a Chromium contenteditable makes
+    the following ``get_text`` return NULL.
+    """
+    if drop_cache:
+        _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return False
@@ -2348,6 +7211,13 @@ def insert_text(acc, text: str) -> int | None:
     if eti is None:
         return None
     typed = text.replace("\r\n", "\n")
+    # A Writer document's own text stays empty. The paragraphs are the
+    # read-back, captured before the insert so a later poll can see them
+    # arrive. An entry is not this document and does not walk.
+    writer_doc = writer_document_for(acc)
+    writer_before = None
+    if writer_doc is not None:
+        writer_before = writer_document_text(writer_doc) or ""
     current = _full_text(acc)
     # Read the words, not the U+FFFC placeholders, before the insert. A
     # contenteditable's parent text can stay ``\ufffc`` while the child gains
@@ -2359,6 +7229,19 @@ def insert_text(acc, text: str) -> int | None:
             "the field text could not be read, so type was not reported as success",
         )
     caret, start, end = _caret_and_selection(acc, len(current))
+    if "\n" in typed and _writer_document_type_target(acc) is not None:
+        if end > start:
+            _call_first(eti, ("delete_text",), start, end, default=False)
+            cleared = _full_text(acc)
+            wanted = current[:start] + current[end:]
+            if cleared != wanted:
+                raise _text_mismatch(
+                    "selection_not_replaced",
+                    "the selection was not removed, so the text was not inserted",
+                    expected=_excerpt(wanted),
+                    actual=_excerpt(cleared),
+                )
+        return _type_writer_paragraphs(acc, typed, eti)
     if end > start:
         _call_first(eti, ("delete_text",), start, end, default=False)
         cleared = _full_text(acc)
@@ -2405,6 +7288,28 @@ def insert_text(acc, text: str) -> int | None:
     ) and _qt_text_count_matches(acc, expected):
         return len(typed)
     actual = _full_text(acc)
+    if writer_doc is not None:
+        # The document node reads "" while the paragraphs hold the lines.
+        # Poll only when the insert reported a write or the node text
+        # changed; otherwise one read decides. Unchanged paragraphs mean
+        # the caller may send keys. A different paragraph text is a miss,
+        # and keys are not sent on top of it.
+        if wrote or actual != current:
+            shown = poll_writer_document(writer_doc, writer_before, typed)
+        else:
+            shown = writer_document_text(writer_doc)
+        if _writer_typed_visible(writer_before, shown, typed):
+            return len(typed)
+        if (shown or "") == (writer_before or ""):
+            return None
+        raise _text_mismatch(
+            "text_mismatch",
+            "the field text after type does not match what was inserted",
+            expected=_excerpt(typed),
+            actual=_excerpt(shown),
+            inserted_chars=len(typed),
+            unchanged=False,
+        )
     if actual == current and not wrote:
         return None
     # ``unchanged`` is the words, not the raw object-replacement string.
@@ -2491,18 +7396,174 @@ def _wait_until_gone(acc) -> bool:
 
 
 def _x11_select_all_and_delete(acc) -> None:
-    """Focus the field and replace its selection with nothing. X11 only."""
-    grab_focus(acc)
-    from a11y_computer_use.drivers import _linux_input
+    """Focus the field and replace its selection with nothing. X11 only.
 
-    _linux_input.press_chord("ctrl+a")
-    _linux_input.press_chord("backspace")
+    Each chord is sent only after focus is on ``acc``. A field that does not
+    take focus raises ``focus_lost`` and the chord is not sent.
+    """
+    grab_focus(acc)
+    _chord_into_target(acc, "ctrl+a")
+    _chord_into_target(acc, "backspace")
 
 
 def _type_string(text: str) -> None:
     from a11y_computer_use.drivers import _linux_input
 
     _linux_input.type_string(text)
+
+
+# A click or grab_focus can move focus after it returns. Firefox on a busy
+# AT-SPI bus publishes FOCUSED later than one short pass, and one grab_focus
+# can be dropped. The first 10 polls are that short pass. A miss asks for
+# focus again and keeps waiting. 40 polls is 1.6s. A node that is still
+# unfocused is not typed into.
+_FOCUS_CONFIRM_POLLS = 40
+_FOCUS_CONFIRM_PAUSE_S = 0.04
+_FOCUS_CONFIRM_REGRAB = 10
+
+
+def _focus_lost_error(message: str):
+    """Refused set_value: focus is not on the target, so no key was sent."""
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.FOCUS_LOST,
+        message,
+        detail={
+            "platform": "linux",
+            "reason": "focus_lost",
+            "outcome": "refused",
+            "next": ["ref", "cdp"],
+            "evidence": message,
+        },
+    )
+
+
+def _focus_candidates(acc, *, embedded: bool) -> list:
+    """Children that can hold the caret for ``acc``.
+
+    Indexed children cover a paragraph or static text under a contenteditable
+    section. Hypertext covers a text node Chrome embeds as U+FFFC and does
+    not also return from ``get_child_at_index``. Only the top of the walk
+    asks for those embeds; a nested call already came from one.
+    """
+    found = []
+    count = _child_count(acc)
+    if count > 0:
+        for index in range(min(count, 16)):
+            found.append(_child_at(acc, index))
+    if embedded:
+        for obj in _hypertext_objects(acc):
+            found.append(obj)
+    return found
+
+
+def _descendant_focused(
+    acc, depth: int = 0, budget: list | None = None, seen: set | None = None,
+) -> bool:
+    """True when a descendant, not ``acc`` itself, has ``FOCUSED``.
+
+    A roleless contenteditable is a section. Chrome reports ``FOCUSED`` on
+    that section or on a child text node: an indexed paragraph or static
+    text, or a hypertext embed. A focused node inside this subtree counts.
+    A focused node outside it does not.
+    """
+    if depth > 3:
+        return False
+    if budget is None:
+        budget = [24]
+    if seen is None:
+        seen = set()
+    for child in _focus_candidates(acc, embedded=(depth == 0)):
+        if budget[0] <= 0:
+            return False
+        budget[0] -= 1
+        if child is None or id(child) in seen:
+            continue
+        seen.add(id(child))
+        _call_first(child, ("clear_cache", "clearCache"))
+        if _state_has(child, "FOCUSED"):
+            return True
+        if _descendant_focused(child, depth + 1, budget, seen):
+            return True
+    return False
+
+
+def _focus_on_target(acc) -> bool | None:
+    """Whether keyboard focus is on ``acc`` or a descendant inside it.
+
+    True: the target has ``FOCUSED``, or a descendant does. A roleless
+    contenteditable section counts when focus is on the section itself or
+    on a child text node.
+    False: the node can report focus and it is elsewhere or absent.
+    None: the node has no state set, so focus cannot be read. That is a
+    test double. A live control has a state set; unknown focus there is
+    False, and the caller does not type.
+    """
+    if _call_first(acc, ("get_state_set",)) is None:
+        return None
+    _call_first(acc, ("clear_cache", "clearCache"))
+    if _state_has(acc, "FOCUSED"):
+        return True
+    if _descendant_focused(acc):
+        return True
+    return False
+
+
+def _confirm_focus_on_target(acc) -> bool:
+    """Poll until ``acc`` is focused. True when focus cannot be read at all.
+
+    The first polls are the short wait after the caller's grab_focus. When
+    that wait misses, grab_focus is sent again and the poll continues.
+    Keys are still not sent when focus never arrives.
+    """
+    for attempt in range(_FOCUS_CONFIRM_POLLS):
+        seen = _focus_on_target(acc)
+        if seen is None or seen is True:
+            return True
+        if attempt + 1 == _FOCUS_CONFIRM_REGRAB:
+            grab_focus(acc)
+        if attempt + 1 < _FOCUS_CONFIRM_POLLS:
+            time.sleep(_FOCUS_CONFIRM_PAUSE_S)
+    return False
+
+
+def _type_into_target(acc, text: str) -> None:
+    """Type ``text`` only while ``acc`` is focused. One character is one batch.
+
+    The first batch waits briefly for focus to arrive after a click. Each
+    later batch re-checks immediately and sends nothing when focus has moved.
+    A node that cannot report focus is typed as one batch, which is the
+    older test-double path.
+    """
+    if text == "":
+        return
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _focus_on_target(acc) is None:
+        _type_string(text)
+        return
+    sent = False
+    for ch in text:
+        if _focus_on_target(acc) is False:
+            if sent:
+                raise _focus_lost_error(
+                    "focus left the target; stopped before the next keystroke"
+                )
+            raise _focus_lost_error("focus is not on the target; nothing was typed")
+        _type_string(ch)
+        sent = True
+
+
+def _chord_into_target(acc, chord: str) -> None:
+    """Press ``chord`` only when ``acc`` is focused. One chord is one batch."""
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _focus_on_target(acc) is False:
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord(chord)
 
 
 def _shown_matches(acc, text: str) -> bool:
@@ -2544,18 +7605,32 @@ def chromium_contenteditable_type(acc, text: str) -> bool | None:
 
     ``None`` means this is not the path: ``acc`` is not a Chrome
     contenteditable, or XTEST cannot reach the session. ``True`` means a
-    settled read contains ``text``. ``False`` means the read settled without
-    those characters. That is a mismatch, not a success. NBSP is a space
-    and one trailing newline is the ``<br>``. An input, a textarea, and a
-    GTK field are not this path.
+    settled read is the previous text with an active selection replaced, or
+    the typed text inserted at a collapsed caret. ``False`` means the read
+    settled on something else. That is a mismatch, not a success. NBSP is a
+    space and one trailing newline is the ``<br>``. An input, a textarea,
+    and a GTK field are not this path. ``last_expected`` is the replacement
+    string when a selection was replaced, else None.
     """
+    chromium_contenteditable_type.last_expected = None
     if not _chromium_contenteditable(acc) or not _x11_keys_available():
         return None
-    grab_focus(acc)
     before = _readable_text(acc)
+    selection = _selection_span(acc, before)
+    grab_focus(acc)
     _type_string(text)
-    after = _poll_typed_text(lambda: _readable_text(acc), before, text, chrome=True)
-    return bool(_typed_visible(before, after, text, chrome=True))
+    after = _poll_typed_text(
+        lambda: _readable_text(acc), before, text, chrome=True, selection=selection,
+    )
+    landed = bool(_typed_visible(before, after, text, chrome=True, selection=selection))
+    if landed:
+        chromium_contenteditable_type.last_expected = _matched_replacement(
+            before, after, text, selection, chrome=True,
+        )
+    return landed
+
+
+chromium_contenteditable_type.last_expected = None
 
 
 def focus_and_type_into(acc, text: str) -> bool:
@@ -2607,7 +7682,7 @@ def _focus_and_replace(acc, text: str) -> bool:
         _x11_select_all_and_delete(acc)
         if not _wait_until_gone(acc):
             return False
-    _type_string(text)
+    _type_into_target(acc, text)
     return _confirm_text_landed(acc, text)
 
 
@@ -2637,7 +7712,7 @@ def _replace_with_keys(acc, text: str) -> bool:
             return False
     else:
         grab_focus(acc)
-    _type_string(text)
+    _type_into_target(acc, text)
     if _confirm_text(acc, text):
         return True
     _restore_text(acc, original)
@@ -2663,7 +7738,7 @@ def _restore_text(acc, original: str | None) -> None:
     else:
         grab_focus(acc)
     if not _text_is_blank(original):
-        _type_string(original)
+        _type_into_target(acc, original)
 
 
 def _clear_text(acc, eti, current: str) -> bool:
@@ -2727,7 +7802,7 @@ def _confirm_text(acc, text: str) -> bool:
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
         blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
-        if (blank or _texts_match(shown, text)) and _qt_text_count_matches(acc, text):
+        if (blank or _texts_match(shown, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -2841,13 +7916,11 @@ def _set_chrome_date_segment(acc, value: str) -> bool:
     grab_focus(acc)
     _click_center(acc)
     if value == "":
-        from a11y_computer_use.drivers import _linux_input
-
-        _linux_input.press_chord("ctrl+a")
-        _linux_input.press_chord("backspace")
-        _linux_input.press_chord("delete")
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
     else:
-        _type_string(value)
+        _type_into_target(acc, value)
     for attempt in range(_DATE_SEGMENT_POLLS):
         if _segment_matches(value, _date_segment_text(acc)):
             return True
@@ -2878,8 +7951,29 @@ def _number_input(acc) -> bool:
     )
 
 
-def _value_range(acc) -> tuple[float, float] | None:
-    """(minimum, maximum) from the Value interface, or None when it has none."""
+def _value_interface_present(acc) -> bool:
+    """True when ``acc`` implements Value.
+
+    ``get_value_iface`` is how AT-SPI reports the interface. None means it
+    is missing, and minimum and maximum must not be read: that read returns
+    an uninitialized double (about ``6.93e-310``) after the bridge logs that
+    the object is not a Value. A test double with no ``get_value_iface``
+    method is not that report. Its numbers still come from ``Atspi.Value``.
+    """
+    if acc is None:
+        return False
+    getter = getattr(acc, "get_value_iface", None)
+    if not callable(getter):
+        return True
+    return _safe(lambda: getter()) is not None
+
+
+def _raw_value_bounds(acc) -> tuple[float, float] | None:
+    """Minimum and maximum as read, or None when either is not a finite number.
+
+    This does not decide that the Value interface exists. A missing
+    interface has to be rejected before this read.
+    """
     Atspi = _atspi()
     minimum = _safe(lambda: Atspi.Value.get_minimum_value(acc))
     maximum = _safe(lambda: Atspi.Value.get_maximum_value(acc))
@@ -2891,6 +7985,25 @@ def _value_range(acc) -> tuple[float, float] | None:
     if not math.isfinite(low) or not math.isfinite(high):
         return None
     return low, high
+
+
+def _uninitialized_bounds(low: float, high: float) -> bool:
+    """True when either end is the uninitialized double a missing Value returns."""
+    return _uninitialized_double(low) or _uninitialized_double(high)
+
+
+def _value_range(acc) -> tuple[float, float] | None:
+    """(minimum, maximum) from the Value interface, or None when it has none.
+
+    A missing interface is None and is not read. An uninitialized double is
+    also None: it is not a range a number can be checked against.
+    """
+    if not _value_interface_present(acc):
+        return None
+    span = _raw_value_bounds(acc)
+    if span is None or _uninitialized_bounds(*span):
+        return None
+    return span
 
 
 def _parse_number(value: str) -> float:
@@ -2929,6 +8042,13 @@ _CELL_EDITOR_PANEL = re.compile(r"^Cell\s+([A-Z]{1,3}[1-9][0-9]*)$")
 _SHEET_SCAN_ROWS = 32
 _SHEET_SCAN_COLS = 16
 _SHEET_KEEP = 96
+# On-screen Calc window the snapshot will list. 64×32 covers a tall display
+# at the default row height (a 1280×800 sheet shows about 29 rows). The
+# pruner keeps SHEET_MAX_CHILDREN cells per band and MAX_CHILDREN bands
+# before the dense cap, and 64×32 stays inside that. A million-row sheet
+# is not walked.
+_SHEET_VIEW_MAX_ROWS = 64
+_SHEET_VIEW_MAX_COLS = 32
 _LO_COMMS = frozenset({"soffice", "soffice.bin", "oosplash"})
 
 
@@ -2960,7 +8080,9 @@ def is_sheet_cell(acc) -> bool:
     """True for a Calc cell: address title, or a non-empty Formula attribute.
 
     A GTK tree cell and an HTML table cell are not addresses, so they stay
-    on the path they already had.
+    on the path they already had. A Writer text-table cell is also named
+    like an address. ``writer_text_cell`` tells those apart: its parent is
+    a small table, not a spreadsheet.
     """
     if _role_name(acc) != "table cell":
         return False
@@ -2969,49 +8091,1270 @@ def is_sheet_cell(acc) -> bool:
     return _sheet_formula(acc) is not None
 
 
+def _writer_paragraphs(acc) -> list:
+    """Paragraph and heading children. The cell node itself has no text."""
+    found = []
+    count = _child_count(acc)
+    if count < 0:
+        count = 0
+    for index in range(min(count, 16)):
+        child = _child_at(acc, index)
+        if child is not None and _role_name(child) in {"paragraph", "heading"}:
+            found.append(child)
+    return found
+
+
+def writer_text_cell(acc) -> bool:
+    """A Writer table cell whose text lives in a child paragraph.
+
+    The name is a spreadsheet address, so ``is_sheet_cell`` is true, and
+    typing into the cell inserts a new paragraph in front of the old text.
+    A Calc cell's parent table is a spreadsheet. This is not that cell.
+    """
+    if not is_sheet_cell(acc):
+        return False
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) != "table":
+        return False
+    if _spreadsheet_table(parent):
+        return False
+    return bool(_writer_paragraphs(acc))
+
+
+# How long a Writer cell may take to publish the paragraph that set_text
+# just replaced. The first reads often still show the old line, or the new
+# line plus the old paragraph, while the view rebuilds that child. A stable
+# wrong sample inside this window is not a miss.
+_WRITER_CELL_SETTLE_S = 1.5
+
+
+def writer_cell_text(acc) -> str:
+    """The paragraph text of a Writer table cell, one line per paragraph."""
+    parts = []
+    for child in _writer_paragraphs(acc):
+        text = _full_text(child)
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def is_writer_document(acc) -> bool:
+    """A LibreOffice Writer document. Its text lives in paragraph children.
+
+    A GTK text view and a Mousepad buffer are not this node. Their own text
+    interface is the value.
+    """
+    try:
+        if _role_name(acc) != "document text":
+            return False
+    except Exception:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return False
+    name = str(_call_first(app, ("get_name",), default="") or "")
+    return libreoffice_app(name)
+
+
+def _document_paragraphs(acc) -> list:
+    """Paragraph and heading children of a Writer document, in order.
+
+    Empty paragraphs stay, so two breaks are not read back as one. Bounded
+    so a document is not walked without a limit.
+    """
+    found = []
+    count = _child_count(acc)
+    if count < 0:
+        count = 0
+    for index in range(min(count, 256)):
+        child = _child_at(acc, index)
+        if child is not None and _role_name(child) in {"paragraph", "heading"}:
+            found.append(child)
+    return found
+
+
+def _paragraph_line(text: str) -> str:
+    """One paragraph's text, without the end mark the paragraph itself is.
+
+    The join between paragraphs is the break. A separator at the end of the
+    paragraph text is that same break, so it is not a second one. A break
+    before that end mark stays. U+2028 inside the paragraph is a line break,
+    not the next paragraph, so it is not turned into ``\\n``.
+    """
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    raw = text or ""
+    if raw.endswith("\u2028"):
+        raw = raw[:-1]
+    token = "\ue000"
+    body = normalize_paragraph_breaks(raw.replace("\u2028", token))
+    if body.endswith("\n"):
+        body = body[:-1]
+    return body.replace(token, "\u2028")
+
+
+def writer_document_text(acc) -> str | None:
+    """Paragraph text of a Writer document, one line per paragraph.
+
+    None when ``acc`` is not that document. An empty document is ``""``,
+    not the node's Value interface. The snapshot uses this string, so a
+    done check can see the lines. A separator inside a paragraph is kept.
+    """
+    if not is_writer_document(acc):
+        return None
+    # libatspi answers get_child_at_index from its cache. The first read
+    # after a write can be the empty document or only the first paragraph,
+    # and a later poll would keep that list until the cache is dropped.
+    _call_first(acc, ("clear_cache", "clearCache"))
+    paragraphs = _document_paragraphs(acc)
+    if not paragraphs:
+        return ""
+    return "\n".join(_paragraph_line(_full_text(child) or "") for child in paragraphs)
+
+
+def writer_document_matches(acc, text: str) -> bool:
+    """True when the Writer paragraphs are ``text``, whatever the separator."""
+    shown = writer_document_text(acc)
+    if shown is None:
+        return False
+    return paragraph_breaks_match(shown, text)
+
+
+def _writer_document_type_target(acc):
+    """The Writer document a type into ``acc`` lands in, or None.
+
+    A paragraph of that document counts. A table cell does not: a newline
+    there belongs to the cell, not the document body.
+    """
+    node = acc
+    for _ in range(8):
+        if node is None:
+            return None
+        try:
+            role = _role_name(node)
+        except Exception:
+            return None
+        if role == "table cell":
+            return None
+        if is_writer_document(node):
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def _type_wanted_paragraphs(text: str) -> list[str]:
+    """Paragraphs ``text`` asks for. ``\\n`` is a paragraph. U+2028 is not.
+
+    CR, CRLF, VT, FF, NEL, U+2029, and U+FFFC are paragraph breaks here, the
+    same as ``\\n``. U+2028 stays inside its paragraph: the caller asked for
+    a line break.
+    """
+    import re
+
+    normalized = (text or "").replace("\u00a0", " ").replace("\r\n", "\n")
+    normalized = re.sub(r"[\r\u000b\u000c\u0085\u2029\ufffc]", "\n", normalized)
+    return normalized.split("\n")
+
+
+def _type_paragraph_body(text: str) -> str:
+    """One paragraph as type read it, keeping an internal line break.
+
+    One trailing separator is the paragraph end. U+2028 and ``\\n`` before
+    that end stay, so a line break inside the paragraph is not a new one.
+    """
+    body = (text or "").replace("\u00a0", " ")
+    if body.endswith("\r\n"):
+        return body[:-2]
+    if body and body[-1] in "\n\r\u000b\u000c\u0085\u2029\ufffc\u2028":
+        return body[:-1]
+    return body
+
+
+def _type_shown_paragraphs(acc) -> list[str] | None:
+    """Paragraph bodies of a Writer document. None for any other node.
+
+    U+2028 inside a paragraph stays U+2028. The cache is dropped first.
+    """
+    if not is_writer_document(acc):
+        return None
+    _call_first(acc, ("clear_cache", "clearCache"))
+    return [
+        _type_paragraph_body(_full_text(child) or "")
+        for child in _document_paragraphs(acc)
+    ]
+
+
+def _type_lines_match(shown: list[str], wanted: list[str]) -> bool:
+    """True when ``shown`` is exactly the paragraphs ``wanted`` asked for.
+
+    One empty paragraph the document already had, before or after the typed
+    lines, does not hide a match. A line break inside one paragraph does
+    not count as those paragraphs.
+    """
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    def same(left: list[str], right: list[str]) -> bool:
+        return len(left) == len(right) and all(
+            typed_breaks_match(got, wanted_line) for got, wanted_line in zip(left, right)
+        )
+
+    if same(shown, wanted):
+        return True
+    if wanted and (same(shown, [""] + wanted) or same(shown, wanted + [""])):
+        return True
+    return False
+
+
+def _writer_conflict_lines(shown: list[str], wanted: list[str]) -> bool:
+    """True when the characters match but paragraph and line break do not.
+
+    One paragraph ``a\\u2028b`` is not the two paragraphs ``a`` and ``b``.
+    Two paragraphs are not the line break the caller asked for with U+2028.
+    """
+    import re
+
+    if _type_lines_match(shown, wanted):
+        return False
+    folded_shown = "\n".join(part.replace("\u2028", "\n") for part in shown)
+    folded_wanted = "\n".join(part.replace("\u2028", "\n") for part in wanted)
+    if folded_shown == folded_wanted:
+        return True
+    pieces = []
+    for part in shown:
+        pieces.extend(re.split(r"\u2028|\n", part) if part else [""])
+    return _type_lines_match(pieces, [
+        piece
+        for part in wanted
+        for piece in (re.split(r"\u2028|\n", part) if part else [""])
+    ]) and shown != wanted
+
+
+def writer_type_readback(acc) -> str | None:
+    """Document text with a line break kept distinct from a paragraph join."""
+    shown = _type_shown_paragraphs(acc)
+    if shown is None:
+        return None
+    return "\n".join(part.replace("\n", "\u2028") for part in shown)
+
+
+def writer_type_conflict(acc, text: str) -> bool:
+    """True when ``text`` landed with the wrong paragraph or line-break shape."""
+    shown = _type_shown_paragraphs(acc)
+    if shown is None:
+        return False
+    return _writer_conflict_lines(shown, _type_wanted_paragraphs(text))
+
+
+def _writer_type_landed(document, text: str) -> bool:
+    """Poll until Writer paragraphs match ``text``, or the shape is wrong.
+
+    A later paragraph that is not published yet is not a miss. A stable
+    read that has the characters as line breaks inside one paragraph is a
+    miss: that is not the paragraphs ``\\n`` asked for. U+2028 in ``text``
+    has to stay a line break inside its paragraph.
+    """
+    wanted = _type_wanted_paragraphs(text)
+    deadline = time.monotonic() + _WRITER_DOCUMENT_DEADLINE_S
+    last: object = object()
+    stable_since = None
+    while True:
+        shown = _type_shown_paragraphs(document)
+        now = time.monotonic()
+        if shown != last:
+            last = shown
+            stable_since = now
+        held = (
+            stable_since is not None
+            and (now - stable_since) >= _WRITER_DOCUMENT_STABLE_S
+        )
+        if held and shown is not None and _type_lines_match(shown, wanted):
+            return True
+        if held and shown is not None and _writer_conflict_lines(shown, wanted):
+            return False
+        if (
+            held
+            and shown is not None
+            and len(shown) >= len(wanted)
+            and not _type_lines_match(shown, wanted)
+        ):
+            return False
+        if now >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _insert_writer_piece(acc, eti, piece: str) -> None:
+    """Insert ``piece`` at the caret. ``piece`` has no newline and no U+2028."""
+    if piece == "":
+        return
+    current = _full_text(acc)
+    if current is None:
+        current = ""
+    caret, _start, _end = _caret_and_selection(acc, len(current))
+    insert = None
+    for name in ("insert_text", "insertText"):
+        insert = getattr(eti, name, None)
+        if insert is not None:
+            break
+    length = _insert_length(insert, piece, acc) if insert is not None else len(piece)
+    _call_first(
+        eti, ("insert_text", "insertText"), int(caret), piece, int(length), default=False,
+    )
+
+
+def _press_writer_line_break(acc) -> None:
+    """Shift+Return. That is a line break inside the paragraph, not a new one."""
+    if _focus_on_target(acc) is False:
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord("shift+return")
+
+
+def _insert_writer_segment(acc, eti, segment: str) -> None:
+    """Insert one paragraph. U+2028 in ``segment`` is a line break."""
+    pieces = segment.split("\u2028")
+    for index, piece in enumerate(pieces):
+        if piece:
+            _insert_writer_piece(acc, eti, piece)
+        if index + 1 < len(pieces):
+            if _x11_keys_available():
+                _press_writer_line_break(acc)
+            else:
+                _insert_writer_piece(acc, eti, "\u2028")
+
+
+def _type_writer_paragraphs(acc, text: str, eti) -> int | None:
+    """Type ``text`` so each ``\\n`` is Return, then read the paragraphs back.
+
+    U+2028 stays Shift+Return. ``insertText`` of a newline is not used: in
+    Writer that is a line break inside the current paragraph, and a read-back
+    that treats it as the next paragraph would report success for the wrong
+    document. When the characters landed that way anyway, the error says
+    they were inserted as line breaks. None when the paragraphs are still
+    what they were, so the caller may send keys.
+    """
+    document = _writer_document_type_target(acc)
+    before = writer_document_text(document) if document is not None else None
+    parts = text.split("\n")
+    if len(parts) > 1 and not _x11_keys_available():
+        raise _text_mismatch(
+            "text_mismatch",
+            "a newline in a Writer document needs Return to become a paragraph",
+            expected=text,
+            actual=writer_type_readback(document) if document is not None else None,
+        )
+    for index, part in enumerate(parts):
+        _insert_writer_segment(acc, eti, part)
+        if index + 1 < len(parts):
+            _type_into_target(acc, "\n")
+    if document is not None and _writer_type_landed(document, text):
+        return len(text)
+    actual = writer_type_readback(document) if document is not None else None
+    if document is not None and writer_type_conflict(document, text):
+        raise _text_mismatch(
+            "text_mismatch",
+            "inserted as line breaks",
+            expected=text,
+            actual=actual,
+        )
+    # The paragraphs did not change. The caller may send keys. A different
+    # paragraph text is still a mismatch, and keys are not sent on top of it.
+    if document is not None and (writer_document_text(document) or "") == (before or ""):
+        return None
+    raise _text_mismatch(
+        "text_mismatch",
+        "the field text after type does not match what was inserted",
+        expected=text,
+        actual=actual,
+        inserted_chars=len(text),
+        unchanged=False,
+    )
+
+
+def focused_writer_document(app: str):
+    """The Writer document that has focus, or None."""
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    return _writer_document_type_target(acc)
+
+
+def writer_type_landed(document, text: str) -> bool:
+    """True when ``document`` now holds ``text`` as paragraphs, not line breaks."""
+    if document is None or not is_writer_document(document):
+        return False
+    return _writer_type_landed(document, text)
+
+
+# How long a Writer document may take to publish every paragraph. A 1.5s
+# poll expired on a slow runner while later paragraphs were still absent.
+# The first reads are empty or only the first line. A sample that is still
+# changing is not the read-back.
+_WRITER_DOCUMENT_DEADLINE_S = 6.0
+_WRITER_DOCUMENT_STABLE_S = 0.25
+
+
+def _writer_document_landed(acc, text: str) -> bool:
+    """Poll until the paragraph text is stable, or the deadline passes.
+
+    A Writer document publishes paragraphs one at a time. The first reads
+    are empty or only the first line, and that partial text is not a miss.
+    Success is a read that matches, after separator normalisation, and has
+    then stayed unchanged. A match that arrives at the deadline still has
+    to stay unchanged for the stable window. A stable read that already has
+    every requested break and still differs is a miss. This does not clear
+    the document: selecting it deletes a write whose later paragraphs are
+    not up yet.
+    """
+    if not is_writer_document(acc):
+        return False
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    wanted_breaks = normalize_paragraph_breaks(text).count("\n")
+    deadline = time.monotonic() + _WRITER_DOCUMENT_DEADLINE_S
+    last = object()
+    stable_since = None
+    while True:
+        shown = writer_document_text(acc)
+        now = time.monotonic()
+        if shown != last:
+            last = shown
+            stable_since = now
+        held = (
+            stable_since is not None
+            and (now - stable_since) >= _WRITER_DOCUMENT_STABLE_S
+        )
+        matches = shown is not None and paragraph_breaks_match(shown, text)
+        if held and matches:
+            return True
+        shown_breaks = normalize_paragraph_breaks(shown or "").count("\n")
+        # Fewer breaks than requested means a later paragraph is not
+        # published yet. Keep waiting. A full, stable, different value is
+        # the read-back.
+        if held and shown and shown_breaks >= wanted_breaks and not matches:
+            return False
+        # A partial read waits out the deadline. A match that is still
+        # settling may cross it, for one stable window only.
+        if now >= deadline and not matches:
+            return False
+        if now >= deadline + _WRITER_DOCUMENT_STABLE_S:
+            return False
+        time.sleep(0.05)
+
+
+def _set_writer_document_text(acc, text: str) -> bool:
+    """Write a Writer document, then wait until its paragraphs are stable.
+
+    The document node often has no EditableText, and its text interface can
+    be missing for a moment. The generic key replace treats that as a miss
+    and deletes the field after a few hundredths of a second, which removes
+    paragraphs that are not published yet. A newline is Return. A miss here
+    does not select the document.
+    """
+    eti = _editable_iface(acc)
+    if eti is not None:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+        return _writer_document_landed(acc, text)
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    _type_into_target(acc, text)
+    return _writer_document_landed(acc, text)
+
+
+def writer_document_outcome_text(requested: str, acc) -> str | None:
+    """The requested string when a Writer document's paragraphs now hold it.
+
+    None for any other node, and when a paragraph break is actually missing
+    or extra. A line break inside one paragraph is not that paragraph break:
+    the returned text keeps U+2028, so the outcome is not confirmed. The
+    snapshot value is the same paragraph text.
+    """
+    if not requested or acc is None:
+        return None
+    document = acc if is_writer_document(acc) else _writer_document_type_target(acc)
+    if document is None:
+        return None
+    shown = _type_shown_paragraphs(document)
+    if shown is None:
+        return None
+    wanted = _type_wanted_paragraphs(requested)
+    if _type_lines_match(shown, wanted):
+        return requested
+    if _writer_conflict_lines(shown, wanted):
+        return writer_type_readback(document)
+    if not writer_document_matches(document, requested):
+        return None
+    return requested
+
+
+_WRITER_WALK_ROLES = frozenset({"document text", "paragraph", "heading"})
+
+
+def writer_document_for(acc):
+    """The Writer document ``acc`` is, or the one that contains it.
+
+    None for a GTK field, a Calc cell, and a Mousepad buffer. The walk
+    starts only from a document, paragraph, or heading, so typing into an
+    entry does not climb the tree.
+    """
+    if acc is None:
+        return None
+    try:
+        if _role_name(acc) not in _WRITER_WALK_ROLES:
+            return None
+    except Exception:
+        return None
+    node = acc
+    seen: set[int] = set()
+    for _ in range(16):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        try:
+            if is_writer_document(node):
+                return node
+        except Exception:
+            return None
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        node = parent
+    return None
+
+
+def _writer_typed_visible(before: str | None, shown: str | None, text: str) -> bool:
+    """True when a Writer document's paragraphs show ``text``.
+
+    Paragraph and line separators compare as one break. An empty document
+    that now holds the typed lines matches. A longer document that did not
+    change does not, unless the paragraphs are exactly the request.
+    """
+    if shown is None:
+        return False
+    from a11y_computer_use.outcome import normalize_paragraph_breaks, typed_breaks_match
+
+    if typed_breaks_match(shown, text) or paragraph_breaks_match(shown, text):
+        return True
+    norm_shown = normalize_paragraph_breaks(shown)
+    norm_text = normalize_paragraph_breaks(text or "")
+    norm_before = None if before is None else normalize_paragraph_breaks(before)
+    return _typed_visible(norm_before, norm_shown, norm_text)
+
+
+def poll_writer_document(doc, before: str | None, text: str) -> str | None:
+    """Poll a Writer document until its paragraphs show ``text`` or settle.
+
+    The first reads are empty or only the first line. A partial publish is
+    not a miss. A stable read that already has every requested break and
+    still does not show ``text`` is returned without waiting out the
+    deadline. The return is the paragraph text, which may still lack
+    ``text``. This does not clear the document.
+    """
+    if doc is None:
+        return None
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    wanted_breaks = normalize_paragraph_breaks(text or "").count("\n")
+    deadline = time.monotonic() + _WRITER_DOCUMENT_DEADLINE_S
+    last = object()
+    stable_since = None
+    shown = None
+    while True:
+        shown = writer_document_text(doc)
+        now = time.monotonic()
+        if shown != last:
+            last = shown
+            stable_since = now
+        held = (
+            stable_since is not None
+            and (now - stable_since) >= _WRITER_DOCUMENT_STABLE_S
+        )
+        if held and _writer_typed_visible(before, shown, text):
+            return shown
+        shown_breaks = normalize_paragraph_breaks(shown or "").count("\n")
+        if (
+            held
+            and shown
+            and shown_breaks >= wanted_breaks
+            and not _writer_typed_visible(before, shown, text)
+        ):
+            return shown
+        if now >= deadline and not _writer_typed_visible(before, shown, text):
+            return shown
+        if now >= deadline + _WRITER_DOCUMENT_STABLE_S:
+            return shown
+        time.sleep(0.05)
+
+
+def writer_type_before(app: str) -> str | None:
+    """Paragraph text of the focused Writer document, before a type.
+
+    ``""`` is an empty Writer document. None means focus is not in one, so
+    the caller keeps the ordinary read-back.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    doc = writer_document_for(acc)
+    if doc is None:
+        return None
+    text = writer_document_text(doc)
+    return "" if text is None else text
+
+
+def poll_focused_writer_type(app: str, before: str | None, text: str) -> str | None:
+    """Settled paragraph text of the focused Writer document, or None."""
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    doc = writer_document_for(acc)
+    if doc is None:
+        return None
+    return poll_writer_document(doc, before, text)
+
+
+def writer_cell_outcome_text(requested: str, cell) -> str | None:
+    """The requested string when a Writer cell's paragraph now holds it.
+
+    The cell node's own text stays empty, so the snapshot value cannot
+    confirm the write. None for a Calc cell and when the paragraph does
+    not match.
+    """
+    if not requested or cell is None or not writer_text_cell(cell):
+        return None
+    if writer_cell_text(cell) == requested:
+        return requested
+    return None
+
+
+def replace_writer_cell_text(acc, value: str) -> None:
+    """Replace the paragraph text of a Writer table cell.
+
+    The write is ``set_text_contents`` on a paragraph resolved from the
+    cell on each try. Writer may still return the previous line, an empty
+    child list, or the new line in front of the old paragraph while it
+    rebuilds that child. Those reads are polled for
+    ``_WRITER_CELL_SETTLE_S`` seconds. A paragraph that already holds
+    ``value`` is kept, and a sibling that still holds the old line is
+    cleared. Nothing is selected and no key is sent. When the window ends
+    on some other text, each paragraph is put back and this raises
+    ``text_mismatch``. The error's actual text is the read-back from
+    before that restore.
+    """
+    paragraphs = _writer_paragraphs(acc)
+    if not paragraphs:
+        raise _text_mismatch(
+            "text_mismatch",
+            f"the value read back does not match {value!r}",
+            expected=value,
+            actual="",
+            formula=None,
+        )
+    originals = [(_full_text(child) or "") for child in paragraphs]
+
+    def parts_of(node) -> list[str]:
+        return [text for text in ((_full_text(child) or "") for child in _writer_paragraphs(node)) if text]
+
+    def matches() -> bool:
+        parts = parts_of(acc)
+        if value == "":
+            return parts == []
+        return parts == [value] or parts == value.split("\n")
+
+    if matches():
+        return
+    lines = value.split("\n") if value else []
+
+    def blank_leftovers() -> None:
+        """Drop siblings that are not the requested text.
+
+        A committed edit can show the new paragraph in front of the old one
+        for a moment, or replace the accessible the write was aimed at.
+        The paragraphs are read from the cell again, not from the list
+        captured before the write.
+        """
+        live = _writer_paragraphs(acc)
+        texts = [(_full_text(child) or "") for child in live]
+        nonempty = [text for text in texts if text]
+        if value == "":
+            return
+        if nonempty == [value] or nonempty == lines:
+            return
+        if value not in nonempty and nonempty != lines:
+            return
+        for child, text in zip(live, texts):
+            if text and text != value and text not in lines:
+                set_text(child, "", force=True)
+
+    # A paragraph is blocked in set_text so a Firefox page is not selected.
+    # This cell's paragraph is the value, so the write is forced. The forced
+    # path does not select or type. Another write waits, so a lagging read
+    # of the old line is not a second insert.
+    deadline = time.monotonic() + _WRITER_CELL_SETTLE_S
+    next_write = 0.0
+    while True:
+        if matches():
+            return
+        blank_leftovers()
+        if matches():
+            return
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        if now >= next_write:
+            live = _writer_paragraphs(acc)
+            target = None
+            for child in live:
+                if (_full_text(child) or "") != value:
+                    target = child
+                    break
+            if target is None and live:
+                target = live[0]
+            if target is not None:
+                set_text(target, value, force=True)
+                next_write = time.monotonic() + 0.4
+                if matches():
+                    return
+                blank_leftovers()
+                if matches():
+                    return
+        time.sleep(0.05)
+    # Report the text that failed the check. Restoring first would make the
+    # error show the original paragraph instead of the read-back.
+    failed = writer_cell_text(acc)
+    current = _writer_paragraphs(acc)
+    for child, original in zip(current, originals):
+        if (_full_text(child) or "") != original:
+            set_text(child, original, force=True)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back {failed!r} does not match {value!r}",
+        expected=value,
+        actual=failed,
+        formula=None,
+    )
+
+
+# Impress exposes the slide as ``document presentation``. Draw exposes the
+# page as ``document frame``. The slide sorter is also a document frame; it
+# is not an editable frame. A browser document frame is not LibreOffice.
+_DRAWING_DOCUMENT_ROLES = frozenset({"document presentation", "document frame"})
+_DRAWING_SKIP_ROLES = frozenset({
+    "menu", "menu bar", "menu item", "popup menu", "tool bar", "scroll bar",
+})
+_DRAWING_TYPE_DEADLINE_S = 2.0
+_DRAWING_TYPE_PAUSE_S = 0.05
+
+
+def _libreoffice_node(acc) -> bool:
+    """True when ``acc`` belongs to LibreOffice."""
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return False
+    name = str(_call_first(app, ("get_name",), default="") or "")
+    return libreoffice_app(name)
+
+
+def _is_drawing_document(acc) -> bool:
+    """An Impress slide or a Draw page. The slide sorter is not one."""
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role not in _DRAWING_DOCUMENT_ROLES:
+        return False
+    if role == "document frame" and _node_name(acc) == "Slides View":
+        return False
+    return _libreoffice_node(acc)
+
+
+def _drawing_document_of(acc):
+    """The Impress or Draw document that contains ``acc``, or None."""
+    node = acc
+    seen: set[int] = set()
+    for _ in range(10):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        try:
+            if _is_drawing_document(node):
+                return node
+            role = _role_name(node)
+            # A Writer document, a web page, or the application is not inside
+            # a slide. Stop here so a paragraph does not walk the rest of the app.
+            if role in _WRITER_DOCUMENT_ROLES or role in {
+                "document web", "document email", "application",
+            }:
+                return None
+        except Exception:
+            return None
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        node = parent
+    return None
+
+
+def _frame_paragraphs(frame) -> list:
+    """Editable paragraph children of a text frame, in order."""
+    found = []
+    count = _child_count(frame)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 32)):
+        child = _child_at(frame, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"paragraph", "heading"}:
+            continue
+        found.append(child)
+    return found
+
+
+def _drawing_frame(doc):
+    """The text frame that has the caret, or None when none is focused.
+
+    The focused paragraph's frame wins. Otherwise the focused panel that
+    holds paragraphs. A click focuses that panel before the paragraph
+    itself is focused. A document with no focused frame is not guessed.
+    """
+    focused_paragraph = None
+    focused_panel = None
+    budget = [64]
+
+    def walk(node, depth: int) -> None:
+        nonlocal focused_paragraph, focused_panel
+        if node is None or budget[0] <= 0 or depth > 8:
+            return
+        budget[0] -= 1
+        try:
+            role = _role_name(node)
+        except Exception:
+            return
+        if role in _DRAWING_SKIP_ROLES:
+            return
+        if role == "document frame" and _node_name(node) == "Slides View":
+            return
+        if role in {"paragraph", "heading"} and (
+            _state_has(node, "FOCUSED") or _state_has(node, "ACTIVE")
+        ):
+            focused_paragraph = node
+        if role == "panel" and _state_has(node, "FOCUSED") and _frame_paragraphs(node):
+            focused_panel = node
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 16)):
+            walk(_child_at(node, index), depth + 1)
+
+    walk(doc, 0)
+    if focused_paragraph is not None:
+        parent = _parent_of(focused_paragraph)
+        if parent is not None:
+            return parent
+    return focused_panel
+
+
+def _drawing_edit_paragraph(acc):
+    """The paragraph a type into this Impress or Draw focus should use.
+
+    None when ``acc`` is not inside such a document, or no frame has focus.
+    The focused or active paragraph wins. A frame that was just clicked has
+    one paragraph and a caret there. Several paragraphs use the last one,
+    which is where Return leaves the caret.
+    """
+    doc = _drawing_document_of(acc)
+    if doc is None:
+        return None
+    frame = _drawing_frame(doc)
+    if frame is None:
+        return None
+    paragraphs = [
+        child for child in _frame_paragraphs(frame) if _editable_iface(child) is not None
+    ]
+    if not paragraphs:
+        return None
+    for child in paragraphs:
+        if _state_has(child, "FOCUSED") or _state_has(child, "ACTIVE"):
+            return child
+    if len(paragraphs) == 1:
+        return paragraphs[0]
+    return paragraphs[-1]
+
+
+def drawing_paragraph_shown(acc) -> str | None:
+    """Text of an Impress or Draw paragraph, or None for any other node.
+
+    The snapshot title includes that text, so a replace changes the title
+    and a later snapshot does not match the element that was written. This
+    is ``Text.get_text(0, -1)``, the same read the write already checked.
+    """
+    try:
+        if not is_drawing_text_paragraph(acc):
+            return None
+        shown = _full_text(acc)
+    except Exception:
+        return None
+    if not isinstance(shown, str):
+        return None
+    return shown
+
+
+def is_drawing_text_paragraph(acc) -> bool:
+    """A paragraph inside an Impress slide or a Draw page."""
+    if acc is None:
+        return False
+    try:
+        if _role_name(acc) not in {"paragraph", "heading"}:
+            return False
+    except Exception:
+        return False
+    return _drawing_document_of(acc) is not None
+
+
+def drawing_text_editable(
+    acc,
+    *,
+    role_str: str | None = None,
+    state_editable: bool | None = None,
+) -> bool:
+    """An Impress or Draw paragraph that ``set_value`` and ``type(ref)`` may write.
+
+    Both ``STATE_EDITABLE`` and EditableText are required. A read-only node
+    is not a target. A browser paragraph that reports those is not one: it
+    has to sit in a slide or a Draw page.
+    """
+    if acc is None:
+        return False
+    try:
+        role = role_str if role_str is not None else _role_name(acc)
+    except Exception:
+        return False
+    if role not in {"paragraph", "heading"}:
+        return False
+    if state_editable is None:
+        state_editable = _state_has(acc, "EDITABLE")
+    if not state_editable or _state_has(acc, "READ_ONLY"):
+        return False
+    if _editable_iface(acc) is None:
+        return False
+    return is_drawing_text_paragraph(acc)
+
+
+def _drawing_focus_frame(acc):
+    """The shape that can take focus for this paragraph, or None.
+
+    A shape or text-frame role wins. Draw publishes the shape as a panel
+    named for the shape, and that panel is the paragraph's parent.
+    """
+    frame = _shape_text_frame(acc)
+    if frame is not None and frame is not acc:
+        return frame
+    parent = _parent_of(acc)
+    if parent is None or parent is acc:
+        return None
+    try:
+        role = _role_name(parent)
+    except Exception:
+        return None
+    if role in _SHAPE_FRAME_ROLES or role == "panel":
+        return parent
+    return None
+
+
+def place_drawing_caret_at_end(acc, *, ignore_focus: bool = False) -> None:
+    """Move the caret to the end of a drawing paragraph that is not in text edit.
+
+    Draw reports offset 0 until the shape is editing, so an insert would land
+    in front of the existing words. A paragraph that already has focus keeps
+    its caret and its selection. ``ignore_focus`` is the retry after this
+    caller's own ``grab_focus``: the paragraph was not editing before that
+    grab. A missing text interface is left alone.
+    """
+    if acc is None:
+        return
+    if not ignore_focus and _state_has(acc, "FOCUSED"):
+        return
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return
+    text = _full_text(acc)
+    if not isinstance(text, str):
+        return
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        return
+    _move_caret(Atspi, acc, len(text))
+
+
+def focus_drawing_text(acc) -> bool:
+    """Focus an editable drawing paragraph, or the shape that holds it.
+
+    The paragraph often has no Component. The shape panel does. True when
+    the paragraph or that frame reports focus. False when ``acc`` is not an
+    editable drawing paragraph, or focus never arrives. No key is sent.
+    """
+    if not drawing_text_editable(acc):
+        return False
+    seen = _focus_on_target(acc)
+    if seen is True or seen is None:
+        return True
+    grab_focus(acc)
+    seen = _focus_on_target(acc)
+    if seen is True or seen is None:
+        return True
+    frame = _drawing_focus_frame(acc)
+    if frame is None:
+        return False
+    grab_focus(frame)
+    seen = _focus_on_target(acc)
+    if seen is True or seen is None:
+        return True
+    if _confirm_focus_on_target(frame):
+        return True
+    return _focus_on_target(acc) is True
+
+
+def _drawing_frame_text(doc) -> tuple[str, str | None]:
+    """``(status, text)`` for the focused text frame inside ``doc``.
+
+    ``text`` joins the frame's paragraphs with newlines. ``unreadable``
+    means the frame or its text interface is not there. An empty paragraph
+    is ``text`` and ``""``: that value was read.
+    """
+    _call_first(doc, ("clear_cache", "clearCache"))
+    frame = _drawing_frame(doc)
+    if frame is None:
+        return "unreadable", None
+    _call_first(frame, ("clear_cache", "clearCache"))
+    paragraphs = _frame_paragraphs(frame)
+    if not paragraphs:
+        return "unreadable", None
+    parts: list[str] = []
+    for child in paragraphs:
+        raw = _full_text(child)
+        if raw is None:
+            return "unreadable", None
+        parts.append(_type_paragraph_body(raw))
+    return "text", "\n".join(parts)
+
+
+def drawing_focus_text(app: str) -> tuple[str, str | None]:
+    """``(status, text)`` of the focused Impress or Draw frame.
+
+    ``skip`` when focus is not in one. ``unreadable`` when the frame's
+    paragraphs cannot be read. ``text`` is the paragraphs joined by
+    newlines, and ``""`` is a frame that was read and is empty.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return "skip", None
+    if truncated or acc is None:
+        return "skip", None
+    doc = _drawing_document_of(acc)
+    if doc is None:
+        return "skip", None
+    try:
+        return _drawing_frame_text(doc)
+    except Exception:
+        return "unreadable", None
+
+
+def drawing_typed_visible(before: str | None, shown: str | None, text: str) -> bool:
+    """True when a drawing frame shows ``text``.
+
+    Newline, CRLF, U+2028, U+2029, and a paragraph boundary are the same
+    break. A missing or extra character is not. A frame that already held
+    the text and did not change does not count, unless the frame is exactly
+    that text.
+    """
+    if shown is None:
+        return False
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    if typed_breaks_match(shown, text):
+        return True
+    return _typed_visible(before, shown, text)
+
+
+def poll_drawing_type(app: str, before: str | None, text: str) -> tuple[str, str | None]:
+    """Poll an Impress or Draw frame until ``text`` shows or the read settles.
+
+    The first read can still be the placeholder. A later paragraph that is
+    not published yet is not a miss. A stable read that does not show
+    ``text`` is returned as it is. ``skip`` is not a drawing frame.
+    """
+    deadline = time.monotonic() + _DRAWING_TYPE_DEADLINE_S
+    last: object = object()
+    stable = 0
+    status, shown = "skip", None
+    while True:
+        status, shown = drawing_focus_text(app)
+        if status == "skip":
+            return status, shown
+        if status == "text" and drawing_typed_visible(before, shown, text):
+            return status, shown
+        if status == "text" and shown == last:
+            stable += 1
+            if stable >= 2 and shown not in (None, before):
+                return status, shown
+        else:
+            stable = 0
+        last = shown
+        if time.monotonic() >= deadline:
+            return status, shown
+        time.sleep(_DRAWING_TYPE_PAUSE_S)
+
+
+def drawing_frame_outcome_text(
+    app: str, requested: str, before: str | None = None,
+) -> str | None:
+    """``requested`` when the focused Impress or Draw frame shows it.
+
+    None when focus is not in such a frame, when the paragraphs cannot be
+    read, or when a character is missing or extra. The comparison treats a
+    paragraph break and a newline as the same break.
+    """
+    if not requested or not libreoffice_app(app or ""):
+        return None
+    status, shown = drawing_focus_text(app)
+    if status != "text" or shown is None:
+        return None
+    if drawing_typed_visible(before, shown, requested):
+        return requested
+    return None
+
+
 def libreoffice_app(app: str) -> bool:
     """True when ``app`` names LibreOffice. The comm is often ``soffice.bin``."""
     name = (app or "").lower()
     return "soffice" in name or "libreoffice" in name
 
 
-def libreoffice_process_running() -> bool:
-    """True when a LibreOffice process comm is ``soffice``, ``soffice.bin``, or ``oosplash``.
+def _display_key(value: str) -> str:
+    """``:1`` and ``localhost:1.0`` are the same display. An empty value stays empty."""
+    text = str(value or "").strip()
+    if ":" not in text:
+        return text
+    host, rest = text.rsplit(":", 1)
+    number = rest.split(".", 1)[0]
+    if not number.isdigit():
+        return text
+    if host in {"unix", "localhost"}:
+        host = ""
+    return f"{host}:{number}"
 
-    Reads ``/proc/<pid>/comm``. A command line that merely mentions the name
-    is not a match.
+
+def _atspi_bus(env: dict[str, str]) -> str:
+    return str(env.get("AT_SPI_BUS_ADDRESS") or env.get("AT_SPI_BUS") or "").strip()
+
+
+def process_in_caller_session(environ: dict[str, str]) -> bool:
+    """True when ``environ`` is this process's X display or AT-SPI bus.
+
+    A soffice process on another display is another session, even on the
+    same machine. When this process has no ``DISPLAY``, a process that has
+    one is not treated as local. A shared AT-SPI bus matches only when the
+    displays do not already disagree.
     """
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
+    ours = _display_key(os.environ.get("DISPLAY", ""))
+    theirs = _display_key(environ.get("DISPLAY", ""))
+    if ours and theirs:
+        return ours == theirs
+    if theirs and not ours:
         return False
+    ours_bus = _atspi_bus(dict(os.environ))
+    theirs_bus = _atspi_bus(environ)
+    if ours_bus and theirs_bus:
+        return ours_bus == theirs_bus
+    return False
+
+
+def _proc_root() -> str:
+    return "/proc"
+
+
+def _read_proc_environ(pid: str, root: str) -> dict[str, str] | None:
+    try:
+        with open(os.path.join(root, pid, "environ"), "rb") as fh:
+            raw = fh.read(262144)
+    except OSError:
+        return None
+    found: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        found[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return found
+
+
+def _libreoffice_processes() -> list[tuple[str, str, dict[str, str] | None]]:
+    """``(comm, state, environ)`` for each soffice, soffice.bin, or oosplash.
+
+    ``environ`` is None when ``/proc/<pid>/environ`` cannot be read. A
+    command line that merely mentions the name is not a row.
+    """
+    root = _proc_root()
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return []
+    rows: list[tuple[str, str, dict[str, str] | None]] = []
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
-            with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+            with open(os.path.join(root, entry, "comm"), encoding="utf-8", errors="replace") as fh:
                 comm = fh.read().strip()
-            with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+            with open(os.path.join(root, entry, "stat"), encoding="utf-8", errors="replace") as fh:
                 stat = fh.read()
         except OSError:
             continue
         if comm not in _LO_COMMS:
             continue
-        # A zombie still has the comm until its parent reaps it. It is not
-        # a running LibreOffice.
         end = stat.rfind(")")
         state = stat[end + 2:].split(None, 1)[0] if end >= 0 and end + 2 < len(stat) else ""
+        rows.append((comm, state, _read_proc_environ(entry, root)))
+    return rows
+
+
+def libreoffice_process_running() -> bool:
+    """True when a LibreOffice process in this session is running.
+
+    The comm is ``soffice``, ``soffice.bin``, or ``oosplash``. A process on
+    another ``DISPLAY`` or AT-SPI bus does not count, and a zombie does not
+    count. A command line that merely mentions the name is not a match.
+    """
+    for _comm, state, environ in _libreoffice_processes():
         if state == "Z":
             continue
-        return True
+        if environ is None:
+            continue
+        if process_in_caller_session(environ):
+            return True
     return False
 
 
 def libreoffice_without_bridge(app: str) -> bool:
-    """True when ``app`` is LibreOffice and a soffice process is running.
+    """True when ``app`` is LibreOffice and a soffice process in this session is running.
 
     The caller has already failed to find an AT-SPI root. The gen VCL plugin
-    stays off the bus; gtk3 with libreoffice-gtk3 does not.
+    stays off the bus; gtk3 with libreoffice-gtk3 does not. A soffice process
+    on another display is not this session's bridge.
     """
     return libreoffice_app(app) and libreoffice_process_running()
 
@@ -3034,9 +9377,12 @@ def app_listed(identifier: str) -> bool:
     if not (identifier or "").strip():
         return False
     from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import ComputerUseError
 
     try:
         apps = _linux_system.running_apps()
+    except ComputerUseError:
+        raise
     except Exception:
         apps = []
     for row in apps or []:
@@ -3047,6 +9393,8 @@ def app_listed(identifier: str) -> bool:
             return True
     try:
         rows = _linux_system.windows()
+    except ComputerUseError:
+        raise
     except Exception:
         rows = []
     for row in rows or []:
@@ -3073,8 +9421,9 @@ def should_wait_for_atspi(identifier: str) -> bool:
     """True when snapshot should wait for this app to appear on the AT-SPI bus.
 
     The app is already in the app list or the window list, or a LibreOffice
-    process is running and has not registered yet. A name that is in neither
-    place, and is not that process, is ``app_not_found`` on the first look.
+    process in this session is running and has not registered yet. A name
+    that is in neither place, and is not that process, is ``app_not_found``
+    on the first look. A soffice process on another display does not wait.
     """
     if app_listed(identifier):
         return True
@@ -3114,8 +9463,331 @@ def _spreadsheet_table(node) -> bool:
     return False
 
 
-def _sheet_window_cells(acc) -> list:
-    """Cells from ``Table.get_accessible_at``, on-screen ones first.
+def _sheet_index(address: str) -> tuple[int, int] | None:
+    """``(row, column)`` for ``A1`` or ``AA10``. None when it is not an address."""
+    if not _SHEET_ADDRESS.match(address):
+        return None
+    split = 0
+    while split < len(address) and address[split].isalpha():
+        split += 1
+    col = 0
+    for char in address[:split]:
+        col = col * 26 + (ord(char) - ord("A") + 1)
+    row = int(address[split:]) - 1
+    col -= 1
+    if row < 0 or col < 0:
+        return None
+    return row, col
+
+
+def _sheet_coord_from_node(node, table) -> tuple[int, int] | None:
+    """Address of ``node`` or a close ancestor, as ``(row, column)``."""
+    current = node
+    for _depth in range(6):
+        if current is None or current is table:
+            return None
+        found = _sheet_index(_node_name(current))
+        if found is not None:
+            return found
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return None
+        current = parent
+    return None
+
+
+def _sheet_view_box(acc, screen: tuple[int, int]):
+    """The table's screen rectangle clipped to the display, or None.
+
+    ``(x0, y0, x1, y1)`` with ``x1`` and ``y1`` exclusive. This is the
+    painted grid. Cells outside it are the rest of the million-row sheet.
+    """
+    pos, size = _extents(acc)
+    if not _overlaps_screen(pos, size, screen):
+        return None
+    x0 = max(0.0, float(pos[0]))
+    y0 = max(0.0, float(pos[1]))
+    x1 = min(float(screen[0]), float(pos[0]) + float(size[0]))
+    y1 = min(float(screen[1]), float(pos[1]) + float(size[1]))
+    if x1 - x0 <= 1 or y1 - y0 <= 1:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _cell_box(acc, row: int, col: int):
+    """``(x0, y0, x1, y1)`` of the cell, or None when it has no positive box."""
+    cell = _table_cell_at(acc, row, col)
+    if cell is None:
+        return None
+    pos, size = _extents(cell)
+    if pos is None or size is None:
+        return None
+    width = float(size[0])
+    height = float(size[1])
+    if width <= 0 or height <= 0:
+        return None
+    x = float(pos[0])
+    y = float(pos[1])
+    if x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return None
+    return (x, y, x + width, y + height)
+
+
+def _search_overlapping(count: int, span_at, low: float, high: float) -> tuple[int, int] | None:
+    """Inclusive indexes whose ``(start, end)`` meets ``[low, high)``.
+
+    ``span_at(index)`` returns that pair, or None when the cell has no box.
+    Positions increase with the index. The search is exponential and then
+    binary, a few dozen probes, so a million-row sheet is not walked.
+    """
+    if count <= 0 or not high > low:
+        return None
+    cache: dict[int, tuple[float, float] | None] = {}
+
+    def span(index: int):
+        if index < 0 or index >= count:
+            return None
+        if index not in cache:
+            cache[index] = span_at(index)
+        return cache[index]
+
+    def kind(index: int) -> str:
+        got = span(index)
+        if got is None:
+            return "none"
+        start, end = got
+        if end > low and start < high:
+            return "hit"
+        if end <= low:
+            return "above"
+        return "past"
+
+    if kind(0) == "none":
+        return None
+
+    prev = 0
+    index = 0
+    first = None
+    for _step in range(40):
+        state = kind(index)
+        if state == "above":
+            prev = index
+            nxt = 1 if index == 0 else index * 2
+            if nxt <= index:
+                return None
+            if nxt >= count:
+                if index >= count - 1:
+                    return None
+                index = count - 1
+                continue
+            index = nxt
+            continue
+        lo, hi = prev, index
+        found = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            state = kind(mid)
+            if state == "hit":
+                found = mid
+                hi = mid - 1
+            elif state == "above":
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        first = found
+        break
+    if first is None:
+        return None
+
+    last = first
+    index = first
+    for _step in range(40):
+        nxt = index + 1 if index == first else index * 2
+        if nxt <= index:
+            break
+        if nxt >= count:
+            nxt = count - 1
+        if nxt <= index:
+            break
+        state = kind(nxt)
+        if state == "hit":
+            last = nxt
+            if nxt >= count - 1:
+                break
+            index = nxt
+            continue
+        lo, hi = index, nxt
+        found = index if kind(index) == "hit" else None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if kind(mid) == "hit":
+                found = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if found is None:
+            return None
+        last = found
+        break
+    if last < first or kind(last) != "hit":
+        return None
+    return first, last
+
+
+def _clamp_sheet_span(span: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Keep the visible origin and at most the on-screen maximum."""
+    row0, row1, col0, col1 = span
+    row0 = max(0, int(row0))
+    col0 = max(0, int(col0))
+    row1 = max(row0, int(row1))
+    col1 = max(col0, int(col1))
+    return (
+        row0,
+        min(row1, row0 + _SHEET_VIEW_MAX_ROWS - 1),
+        col0,
+        min(col1, col0 + _SHEET_VIEW_MAX_COLS - 1),
+    )
+
+
+def _span_advances(acc, row0: int, row1: int, col0: int, col1: int) -> bool:
+    """True when the corner cells move down and to the right.
+
+    A toolkit that parks every cell at the same point would otherwise look
+    like the whole sheet overlaps the window.
+    """
+    if row1 > row0:
+        top = _cell_box(acc, row0, col0)
+        bottom = _cell_box(acc, row1, col0)
+        if top is None or bottom is None or bottom[1] <= top[1]:
+            return False
+    if col1 > col0:
+        left = _cell_box(acc, row0, col0)
+        right = _cell_box(acc, row0, col1)
+        if left is None or right is None or right[0] <= left[0]:
+            return False
+    return True
+
+
+def _sheet_span_from_extents(acc, box, n_rows: int, n_cols: int):
+    """Inclusive ``(row0, row1, col0, col1)`` whose boxes meet ``box``.
+
+    None when the cells have no boxes, or the boxes do not advance. The
+    caller then hit-tests the same rectangle.
+    """
+    x0, y0, x1, y1 = box
+
+    def row_span(row: int):
+        got = _cell_box(acc, row, 0)
+        if got is None:
+            return None
+        return (got[1], got[3])
+
+    def col_span(col: int):
+        got = _cell_box(acc, row0, col)
+        if got is None:
+            return None
+        return (got[0], got[2])
+
+    rows = _search_overlapping(n_rows, row_span, y0, y1)
+    if rows is None:
+        return None
+    row0, row1 = rows
+    cols = _search_overlapping(n_cols, col_span, x0, x1)
+    if cols is None:
+        return None
+    col0, col1 = cols
+    if not _span_advances(acc, row0, row1, col0, col1):
+        return None
+    return row0, row1, col0, col1
+
+
+def _sheet_coord_at_point(acc, x: float, y: float) -> tuple[int, int] | None:
+    """``(row, column)`` of the cell under ``(x, y)``, or None."""
+    comp = _component(acc)
+    if comp is None:
+        return None
+    return _sheet_coord_from_node(_hit_at(comp, x, y), acc)
+
+
+def _sheet_walk_hit(acc, x: float, y: float, dx: float, dy: float, limit_x: float, limit_y: float):
+    """First address hit walking from ``(x, y)`` by ``(dx, dy)``.
+
+    Column headers and the row-header gutter answer no address. A short
+    walk steps past them and stays inside the table box.
+    """
+    for _step in range(48):
+        if dx > 0 and x >= limit_x:
+            return None
+        if dx < 0 and x <= limit_x:
+            return None
+        if dy > 0 and y >= limit_y:
+            return None
+        if dy < 0 and y <= limit_y:
+            return None
+        found = _sheet_coord_at_point(acc, x, y)
+        if found is not None:
+            return found
+        x += dx
+        y += dy
+    return None
+
+
+def _sheet_span_from_hits(acc, box):
+    """Inclusive span from ``get_accessible_at_point`` inside ``box``.
+
+    The four edges name the first and last visible row and column. None
+    when no edge hits an address, which is a toolkit with no hit-testing.
+    """
+    x0, y0, x1, y1 = box
+    mid_x = (x0 + x1) / 2.0
+    mid_y = (y0 + y1) / 2.0
+    top = _sheet_walk_hit(acc, mid_x, y0 + 1.0, 0.0, 4.0, x1, y1)
+    bottom = _sheet_walk_hit(acc, mid_x, y1 - 1.0, 0.0, -4.0, x0, y0)
+    left = _sheet_walk_hit(acc, x0 + 1.0, mid_y, 4.0, 0.0, x1, y1)
+    right = _sheet_walk_hit(acc, x1 - 1.0, mid_y, -4.0, 0.0, x0, y0)
+    coords = [item for item in (top, bottom, left, right) if item is not None]
+    if not coords:
+        return None
+    return (
+        min(row for row, _col in coords),
+        max(row for row, _col in coords),
+        min(col for _row, col in coords),
+        max(col for _row, col in coords),
+    )
+
+
+def _rect_meets(pos, size, box) -> bool:
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    x0, y0, x1, y1 = box
+    return x < x1 and y < y1 and x + width > x0 and y + height > y0
+
+
+def _sheet_cells_in_span(acc, span, screen, box, *, trust_missing: bool) -> list:
+    """Cells of ``span`` that meet the on-screen box.
+
+    ``trust_missing`` keeps a cell the toolkit gave no box, which is the
+    hit-tested span. A cell with a box outside the window is still dropped.
+    """
+    row0, row1, col0, col1 = _clamp_sheet_span(span)
+    found = []
+    for row in range(row0, row1 + 1):
+        for col in range(col0, col1 + 1):
+            cell = _table_cell_at(acc, row, col)
+            if cell is None:
+                continue
+            pos, size = _extents(cell)
+            if pos is None or size is None or float(size[0]) <= 0 or float(size[1]) <= 0:
+                if trust_missing:
+                    found.append(cell)
+                continue
+            if _overlaps_screen(pos, size, screen) and _rect_meets(pos, size, box):
+                found.append(cell)
+    return found
+
+
+def _sheet_fallback_cells(acc) -> list:
+    """The first addresses, when the sheet reports no on-screen box.
 
     Scans 32 rows by 16 columns and keeps up to 96 cells that have a
     positive size. That window includes B2 and E1–G1 on a new sheet. When
@@ -3146,20 +9818,188 @@ def _sheet_window_cells(acc) -> list:
     return fallback[:_SHEET_KEEP]
 
 
-def sheet_cell_matches(acc, value: str) -> bool:
-    """True when the cell text is ``value``, or the formula is that request.
+def _sheet_window_cells(acc) -> list:
+    """Cells inside the table's on-screen box, from the Table interface.
 
-    The formula attribute omits a leading ``=``. The computed text (``0``
-    when ``=B1*2`` and B1 is empty) does not have to equal the request when
-    the formula does.
+    A Calc sheet reports about a million rows and ``INT_MAX`` children.
+    ``get_child_at_index`` is row-major, so the first children are row 1
+    and a cap of 96 stops at row 6. The visible rows and columns are the
+    ones whose boxes meet the table's screen rectangle. When those boxes
+    do not advance, ``get_accessible_at_point`` on the same rectangle
+    names the span. A sheet that reports neither a box nor a hit keeps
+    the first 96 addresses.
     """
-    if _full_text(acc) == value:
+    screen = _screen_size()
+    box = _sheet_view_box(acc, screen)
+    if box is not None:
+        rows, cols = _table_dimensions(acc)
+        n_rows = rows if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else 0
+        n_cols = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 0
+        if n_rows and n_cols:
+            span = _sheet_span_from_extents(acc, box, n_rows, n_cols)
+            if span is not None:
+                found = _sheet_cells_in_span(acc, span, screen, box, trust_missing=False)
+                if found:
+                    return found
+            span = _sheet_span_from_hits(acc, box)
+            if span is not None:
+                found = _sheet_cells_in_span(acc, span, screen, box, trust_missing=True)
+                if found:
+                    return found
+    return _sheet_fallback_cells(acc)
+
+
+def _publish_sheet_cells(cells: list) -> list:
+    """Cells the snapshot walk can keep, banded once they pass the sheet cap.
+
+    A flat list is cut at 96 and at 200 walked children, so a 29-row window
+    would still end at row 6. Each band is a table of at most
+    ``SHEET_MAX_CHILDREN`` address cells. A window of 64×32 is 22 bands,
+    which is under the dense cap, so the lower rows stay.
+    """
+    if len(cells) <= SHEET_MAX_CHILDREN:
+        return cells
+    items = []
+    for cell in cells:
+        pos, size = _extents(cell)
+        if pos is None or size is None or float(size[0]) <= 0 or float(size[1]) <= 0:
+            continue
+        items.append((cell, pos, size))
+    if len(items) <= SHEET_MAX_CHILDREN:
+        return [cell for cell, _pos, _size in items] or cells[:SHEET_MAX_CHILDREN]
+    return [
+        _OnScreenBand(items[start:start + SHEET_MAX_CHILDREN], role="table")
+        for start in range(0, len(items), SHEET_MAX_CHILDREN)
+    ]
+
+
+def _unescape_formula(text: str) -> str:
+    """Undo LibreOffice's ``\\:``, ``\\;``, and ``\\\\`` in a Formula attribute."""
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text) and text[index + 1] in {":", ";", "\\"}:
+            out.append(text[index + 1])
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _formula_key(text: str) -> str:
+    """Case-folded formula text with whitespace removed and ``;`` folded to ``,``.
+
+    A leading ``=`` is optional. Whitespace inside quotes stays, so a space
+    in a string is still a difference. A range colon stays a colon. The
+    semicolon is LibreOffice's argument separator.
+    """
+    raw = _unescape_formula(str(text).strip())
+    if raw.startswith("="):
+        raw = raw[1:]
+    out: list[str] = []
+    quote = ""
+    for char in raw:
+        if quote:
+            out.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            out.append(char)
+            continue
+        if char.isspace():
+            continue
+        if char == ";":
+            out.append(",")
+            continue
+        out.append(char.casefold())
+    return "".join(out)
+
+
+def formulas_match(got: str | None, wanted: str | None) -> bool:
+    """True when both strings are the same formula after Calc's rewriting."""
+    if not got or not wanted:
+        return False
+    return _formula_key(got) == _formula_key(wanted)
+
+
+def _formula_needs_editor(formula: str | None, wanted: str) -> bool:
+    """True when the Formula attribute cannot be the whole request.
+
+    LibreOffice escapes a range colon as ``\\:``. AT-SPI then splits the
+    attribute on that colon, so ``=SUM(A1:A3)`` arrives as ``SUM(A1\\``.
+    The open cell editor still has the formula.
+    """
+    if not str(wanted).lstrip().startswith("=") or not formula:
+        return False
+    if formula.endswith("\\"):
+        return True
+    return ":" in wanted and ":" not in formula
+
+
+def _numeric_texts_match(shown: str | None, wanted: str) -> bool:
+    """True when both sides are numbers and Calc's display equals the request."""
+    if shown is None or not str(wanted).strip() or str(wanted).lstrip().startswith("="):
+        return False
+    from a11y_computer_use.outcome import display_numbers_match
+
+    return display_numbers_match(str(shown), wanted)
+
+
+def committed_sheet_formula(acc, app: str = "soffice.bin") -> str | None:
+    """Formula text from the cell editor, then Escape so the cell stays committed.
+
+    Used when the Formula attribute was cut at a range colon. ``None`` when
+    the editor does not open. Escape cancels the edit of an unchanged formula.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    grab_focus(acc)
+    _linux_input.press_chord("f2")
+    names = [app]
+    if app != "soffice.bin":
+        names.append("soffice.bin")
+    if "soffice" not in names:
+        names.append("soffice")
+    text = None
+    try:
+        for _attempt in range(10):
+            time.sleep(0.05)
+            for name in names:
+                text = sheet_editor_text(name)
+                if text:
+                    return text
+        return None
+    finally:
+        try:
+            _linux_input.press_chord("escape")
+        except Exception:
+            pass
+
+
+def sheet_cell_matches(acc, value: str) -> bool:
+    """True when the cell shows ``value``, the same formula, or the same number.
+
+    The formula attribute omits a leading ``=``. Case, whitespace, and
+    LibreOffice's ``;`` argument separator do not make a different formula.
+    ``1.50`` and ``1.5`` are the same number. A formula request is not
+    compared to the number the cell computes. A range formula whose
+    attribute was cut at ``:`` is not a match here; the editor read is
+    separate. Newline, CRLF, U+2028, U+2029, and a paragraph boundary
+    compare as the same break. A missing or extra character does not.
+    """
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    shown = _full_text(acc)
+    if typed_breaks_match(shown, value):
         return True
     formula = _sheet_formula(acc)
-    if not formula:
-        return False
-    wanted = value[1:] if value.startswith("=") else value
-    return formula == value or formula == wanted or ("=" + formula) == value
+    if formula and formulas_match(formula, value):
+        return True
+    return _numeric_texts_match(shown, value)
 
 
 def sheet_outcome_text(app: str, requested: str, cell=None) -> str | None:
@@ -3184,11 +10024,19 @@ def sheet_outcome_text(app: str, requested: str, cell=None) -> str | None:
     shown = _full_text(cell)
     if shown == requested:
         return None
-    if not sheet_cell_matches(cell, requested):
+    if sheet_cell_matches(cell, requested):
+        # A formula, or a number Calc rewrote (``1,200`` shows as ``1200``).
+        # The snapshot value stays the display. The outcome quotes the request.
+        if _sheet_formula(cell) or _numeric_texts_match(shown, requested):
+            return requested
         return None
-    if not _sheet_formula(cell):
+    formula = _sheet_formula(cell)
+    if not _formula_needs_editor(formula, requested):
         return None
-    return requested
+    opened = committed_sheet_formula(cell, app)
+    if opened and formulas_match(opened, requested):
+        return requested
+    return None
 
 
 def _find_cell_editor(node, budget: list[int]):
@@ -3248,6 +10096,639 @@ def sheet_editor_text(app: str) -> str | None:
     return None
 
 
+def _cell_editor_is_secure(app: str) -> bool | None:
+    """Whether the open Calc cell editor is a password field.
+
+    ``None`` when no editor is open, or ``app`` is not LibreOffice. The
+    editor is a panel or group named ``Cell A1`` and a paragraph under it.
+    Neither is a password field. ``True`` only when that panel or its text
+    child really has the password-text role.
+    """
+    if not libreoffice_app(app):
+        return None
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.APP)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    panel = _find_cell_editor(root, [160])
+    if panel is None:
+        return None
+    if is_secure(panel):
+        return True
+    count = min(_child_count(panel), 8)
+    for index in range(count):
+        child = _child_at(panel, index)
+        if child is not None and is_secure(child):
+            return True
+    return False
+
+
+def _selected_sheet_cell(app: str):
+    """The selected Calc cell, or None.
+
+    The selection call can throw. That is None, not an error, and the
+    sheet's cells are not indexed.
+    """
+    if not libreoffice_app(app):
+        return None
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    table = _find_spreadsheet(root, [80])
+    if table is None:
+        return None
+    iface = _call_first(table, ("get_selection_iface", "get_selection"))
+    if iface is None:
+        return None
+    return _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+
+
+def selected_sheet_text(app: str) -> str | None:
+    """Text of the selected Calc cell, or None.
+
+    The cell editor is a sibling of the sheet. After Return the editor
+    closes and this text is the committed value. Empty text and a selection
+    that throws are None.
+    """
+    cell = _selected_sheet_cell(app)
+    if cell is None:
+        return None
+    text = _full_text(cell)
+    if text:
+        return text
+    return None
+
+
+def _find_spreadsheet(node, budget: list[int]):
+    """The Calc grid, without indexing its cells."""
+    if budget[0] <= 0 or node is None:
+        return None
+    if _spreadsheet_table(node):
+        return node
+    role = _role_name(node)
+    if role in {"table", "menu", "menu bar", "popup menu"}:
+        return None
+    budget[0] -= 1
+    count = min(_child_count(node), 40)
+    for index in range(count):
+        found = _find_spreadsheet(_child_at(node, index), budget)
+        if found is not None:
+            return found
+    return None
+
+
+def spreadsheet_open(app: str) -> bool:
+    """True when ``app`` is LibreOffice and a Calc grid is in the window."""
+    if not libreoffice_app(app):
+        return False
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return False
+    if root is None:
+        return False
+    return _find_spreadsheet(root, [80]) is not None
+
+
+def poll_sheet_type(
+    read_editor,
+    read_cell,
+    read_focused,
+    before: str | None,
+    text: str,
+    *,
+    sheet: bool,
+) -> str | None:
+    """Poll until ``text`` shows in the cell editor, the cell, or focus.
+
+    The editor opens after the first key, so an early empty read is not the
+    answer. A prefix is not returned into the settle check: ``4`` would
+    otherwise end the poll before ``42`` publishes. On a sheet the cell is
+    read once after the editor misses, because that value updates when the
+    editor is not what holds the characters. The last editor or cell string
+    is what a mismatch shows. A Writer paragraph has no sheet, so each read
+    is the focused text and the ordinary settle applies.
+    """
+    latest: str | None = None
+
+    def read():
+        nonlocal latest
+        editor = read_editor()
+        if editor and _typed_visible(before, editor, text):
+            return editor
+        if editor:
+            latest = editor
+        if not sheet:
+            focused = read_focused()
+            if focused:
+                latest = focused
+            return focused
+        return None
+
+    found = _poll_typed_text(read, before, text)
+    if _typed_visible(before, found, text):
+        return found
+    if sheet:
+        cell = read_cell()
+        if cell and _typed_visible(before, cell, text):
+            return cell
+        if cell:
+            latest = cell
+    return latest if latest is not None else found
+
+
+def sheet_type_grid(text: str) -> list[list[str]] | None:
+    """Rows and cells a Calc type walks, or None for a single cell.
+
+    ``\\t`` moves right and ``\\n`` moves down. A trailing newline only
+    leaves the last row; it is not an extra empty row of cells. A blank
+    between tabs is a cell that was cleared.
+    """
+    if "\t" not in text and "\n" not in text:
+        return None
+    body = text.replace("\r\n", "\n")
+    if body.endswith("\n"):
+        body = body[:-1]
+    if body == "":
+        return None
+    return [row.split("\t") for row in body.split("\n")]
+
+
+def _column_index(letters: str) -> int:
+    column = 0
+    for char in letters:
+        column = column * 26 + (ord(char) - 64)
+    return column - 1
+
+
+def _column_letters(index: int) -> str:
+    number = index + 1
+    letters = ""
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def shift_sheet_address(origin: str, columns: int, rows: int) -> str | None:
+    """``origin`` moved ``columns`` right and ``rows`` down. None when it is not an address."""
+    match = _SHEET_ADDRESS.match(origin or "")
+    if match is None:
+        return None
+    letters = "".join(char for char in origin if char.isalpha())
+    row_number = int("".join(char for char in origin if char.isdigit()))
+    column = _column_index(letters) + columns
+    row = row_number - 1 + rows
+    if column < 0 or row < 0:
+        return None
+    return f"{_column_letters(column)}{row + 1}"
+
+
+def _classify_sheet_cell(cell, wanted: str) -> tuple[str, str | None]:
+    """``match``, ``editor``, ``waiting``, or ``differ``, plus the text to show.
+
+    A truncated range formula is ``editor``: the Formula attribute is not
+    the whole request, and F2 is the caller's job, outside any poll. A
+    formula request is not the number the cell displays. An empty cell
+    that should hold text is ``waiting``, because the value can still be
+    on its way. A missing cell is the same wait: LibreOffice omits it
+    until the edit commits. A cell that already shows different text is
+    ``differ``. Missing or extra characters are not a match.
+    """
+    if cell is None:
+        return "waiting", None
+    shown = _full_text(cell) or ""
+    formula = _sheet_formula(cell)
+    if wanted == "":
+        if shown.strip() == "" and not formula:
+            return "match", shown
+        return "differ", _sheet_formula_text(cell) or shown
+    if sheet_cell_matches(cell, wanted):
+        return "match", shown
+    if _formula_needs_editor(formula, wanted):
+        return "editor", _sheet_formula_text(cell) or shown
+    if shown.strip() == "" and not formula:
+        return "waiting", shown
+    return "differ", _sheet_formula_text(cell) or shown
+
+
+def _sheet_table(app: str):
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    return _find_spreadsheet(root, [80])
+
+
+def _cell_for_address(app: str, address: str):
+    parts = shift_sheet_address(address, 0, 0)
+    if parts is None:
+        return None
+    table = _sheet_table(app)
+    if table is None:
+        return None
+    letters = "".join(char for char in address if char.isalpha())
+    row = int("".join(char for char in address if char.isdigit())) - 1
+    column = _column_index(letters)
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    return _safe(lambda: Atspi.Table.get_accessible_at(table, row, column))
+
+
+def _scan_sheet_grid(app: str, origin: str, grid: list[list[str]]):
+    """The first unresolved cell, or the formula cells that still need F2.
+
+    ``("match", None)`` when every cell matches without the editor.
+    ``("editor", [(address, wanted, cell), ...])`` when the only gaps are
+    range formulas cut at the colon. An earlier cut formula is unresolved,
+    so a later hard difference stays behind it until F2 runs. ``("waiting",
+    ...)`` is an empty cell that may still be publishing. ``("differ",
+    address, wanted, actual)`` is the first cell that already disagrees.
+    """
+    editors = []
+    for row_offset, row in enumerate(grid):
+        for column_offset, wanted in enumerate(row):
+            address = shift_sheet_address(origin, column_offset, row_offset)
+            cell = _cell_for_address(app, address) if address else None
+            kind, actual = _classify_sheet_cell(cell, wanted)
+            if kind == "match":
+                continue
+            if kind == "editor":
+                editors.append((address, wanted, cell))
+                continue
+            if editors:
+                return ("editor", editors, kind, address, wanted, actual)
+            if kind == "waiting":
+                return ("waiting", address, wanted, actual)
+            return ("differ", address, wanted, actual)
+    if editors:
+        return ("editor", editors)
+    return ("match", None)
+
+
+_SHEET_GRID_WAIT_S = 3.0
+_SHEET_GRID_PAUSE_S = 0.05
+_SHEET_GRID_COMMIT_PAUSE_S = 0.25
+
+
+def _commit_open_sheet_editor(app: str) -> bool:
+    """Return once when a cell editor is open. True when that key was sent.
+
+    LibreOffice leaves the text interface of every other cell empty while
+    the editor is open, and F2 would read this editor instead of the cell
+    it was aimed at. Return commits the editor. The caret then moves the
+    way Enter does in Calc. A grid that already ended on Enter has no
+    editor, so nothing is sent.
+    """
+    if not sheet_editor_text(app):
+        return False
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord("return")
+    return True
+
+
+def sheet_grid_landing(origin: str, rows: int) -> str | None:
+    """The cell Enter selects after ``rows`` rows of a grid from ``origin``.
+
+    Tab moves right. Enter commits the cell and returns to the column where
+    that row of the grid started, one row down. After the last typed row,
+    that is the cell after the last typed cell in the grid's flow. A 5-row
+    grid from A1 lands on A6. A 2-row grid from C3 lands on C5.
+    """
+    if rows < 0:
+        return None
+    return shift_sheet_address(origin, 0, rows)
+
+
+def _last_typed_sheet_address(origin: str, grid: list[list[str]]) -> str | None:
+    if not grid or not grid[-1]:
+        return None
+    return shift_sheet_address(origin, len(grid[-1]) - 1, len(grid) - 1)
+
+
+def _sheet_caret_address(app: str) -> str | None:
+    """The active Calc cell, from focus, then from the selection."""
+    focused = None
+    try:
+        focused = _focused_sheet_address(app)
+    except Exception:
+        focused = None
+    if sheet_address(focused):
+        return focused
+    try:
+        selected = selected_sheet_address(app)
+    except Exception:
+        selected = None
+    return sheet_address(selected)
+
+
+def _grid_caret_landing(app: str, origin: str, grid: list[list[str]]) -> str | None:
+    """Where the caret goes after the grid is verified.
+
+    LibreOffice's Enter move wins when it has already left the last typed
+    cell. Otherwise the landing is the origin column on the next row. The
+    formula read focuses the cell it opens; the caller puts the caret back
+    here so the next type does not replace that cell.
+    """
+    computed = sheet_grid_landing(origin, len(grid))
+    last = _last_typed_sheet_address(origin, grid)
+    try:
+        seen = _sheet_caret_address(app)
+    except Exception:
+        seen = None
+    if seen and seen != last:
+        return seen
+    return computed
+
+
+def _place_sheet_caret(app: str, address: str | None) -> bool:
+    """Select ``address`` without opening its editor.
+
+    False when ``address`` is missing. Already sitting on that cell is
+    success and does not grab focus again. This is not a write.
+    """
+    if not address:
+        return False
+    try:
+        current = _sheet_caret_address(app)
+    except Exception:
+        current = None
+    if current == address:
+        return True
+    cell = _cell_for_address(app, address)
+    if cell is None:
+        return False
+    return grab_focus(cell)
+
+
+def sheet_grid_check(app: str, origin: str, text: str):
+    """None when every typed cell matches. Otherwise ``(address, wanted, actual)``.
+
+    The rectangle starts at ``origin``, the cell that was active before the
+    keys. Comparison is per cell: formula text, or Calc's numeric display.
+    A formula is not accepted as the number it computes, and a Formula
+    attribute cut at ``:`` is not a prefix match. A missing cell, or a cell
+    that is still empty, is read again until the committed value is
+    published or the wait ends. A cell that shows different text is a
+    mismatch. Missing or extra characters are not ignored. An editor left
+    open on the last cell is committed once, with Return, before those
+    reads. F2 runs once, after that wait, and only for formulas the
+    attribute cut at ``:``. After that read the caret is put back on the
+    cell Enter moves to: the cell after the last typed cell in the grid's
+    flow. The next type does not replace a cell the grid just filled.
+    """
+    grid = sheet_type_grid(text)
+    if grid is None or not origin:
+        return (origin or "", text, None)
+    editors: list = []
+    waiting = None
+    pending = None
+    committed = False
+    deadline = time.monotonic() + _SHEET_GRID_WAIT_S
+    while True:
+        scanned = _scan_sheet_grid(app, origin, grid)
+        kind = scanned[0]
+        if kind == "match":
+            return None
+        # A blank or missing cell is not final while the editor from the
+        # type is open. One Return publishes the others and moves the caret
+        # the way Enter does. A disagreement is judged after that commit.
+        if not committed and _commit_open_sheet_editor(app):
+            committed = True
+            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
+            continue
+        if kind == "differ":
+            _status, address, wanted, actual = scanned
+            return (address, wanted, actual)
+        if kind == "editor" and len(scanned) == 2:
+            editors = scanned[1]
+            waiting = None
+            pending = None
+            break
+        if kind == "editor":
+            # Cut formulas come first. Keep polling while a later cell is
+            # still empty; do not open the editor inside this loop.
+            _status, editors, later, address, wanted, actual = scanned
+            if later == "waiting":
+                waiting = (address, wanted, actual)
+                pending = None
+            else:
+                waiting = None
+                pending = (address, wanted, actual)
+                break
+        else:
+            _status, address, wanted, actual = scanned
+            waiting = (address, wanted, actual)
+            editors = []
+            pending = None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_SHEET_GRID_PAUSE_S)
+    landing = _grid_caret_landing(app, origin, grid)
+    try:
+        for address, wanted, cell in editors:
+            opened = committed_sheet_formula(cell, app) if cell is not None else None
+            if opened and formulas_match(opened, wanted):
+                continue
+            return (address, wanted, opened)
+        if pending is not None:
+            return pending
+        if waiting is not None:
+            return waiting
+        return None
+    finally:
+        if editors:
+            _place_sheet_caret(app, landing)
+
+
+def sheet_address(title: str | None) -> str | None:
+    """A Calc address such as ``B4``, or None when ``title`` is not one."""
+    text = (title or "").strip()
+    if _SHEET_ADDRESS.match(text):
+        return text
+    return None
+
+
+def _focused_sheet_address(app: str) -> str | None:
+    """Address of the focused or selected visible Calc cell, or None.
+
+    LibreOffice 24 leaves ``Selection`` empty while the active cell is the
+    focused table cell. That address is the one the Name Box shows.
+    """
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    table = _find_spreadsheet(root, [80])
+    if table is None:
+        return None
+    focused = None
+    selected = None
+    for cell in _sheet_window_cells(table):
+        name = sheet_address(_node_name(cell))
+        if name is None:
+            continue
+        _enabled, is_focused, _checked, is_selected, *_rest = _state_flags(cell)
+        if is_focused and focused is None:
+            focused = name
+        if is_selected and selected is None:
+            selected = name
+    return focused or selected
+
+
+def sheet_click_verdict(app: str, address: str) -> tuple[str, str] | None:
+    """``(outcome, evidence)`` for a click aimed at a Calc cell, or None.
+
+    Confirmed only when the active cell's address is ``address``. The
+    address is the selection, or the focused visible cell when the
+    selection interface is empty. That is the Name Box. A click that
+    leaves a different cell active is partial, not confirmed. A window
+    that is not a Calc sheet is None, so other clicks keep their own check.
+    """
+    wanted = sheet_address(address)
+    if wanted is None or not libreoffice_app(app):
+        return None
+    try:
+        sheet = spreadsheet_open(app)
+    except Exception:
+        return None
+    if not sheet:
+        return None
+    latest: str | None = None
+    for attempt in range(6):
+        try:
+            selected = selected_sheet_address(app)
+        except Exception:
+            selected = None
+        if selected == wanted:
+            return "confirmed", f"the selected cell is {wanted}"
+        if sheet_address(selected):
+            # A published address that is not the target is the answer.
+            # A focused cell must not confirm over it.
+            latest = selected
+        elif attempt in (1, 4):
+            try:
+                focused = _focused_sheet_address(app)
+            except Exception:
+                focused = None
+            if focused == wanted:
+                return "confirmed", f"the selected cell is {wanted}"
+            if sheet_address(focused):
+                latest = focused
+        if attempt + 1 < 6:
+            time.sleep(0.05)
+    if latest and latest != wanted:
+        return "partial", f"the selected cell is {latest}, not {wanted}"
+    return "partial", f"the selected cell is not {wanted}"
+
+
+def selected_sheet_address(app: str) -> str | None:
+    """The selected Calc cell's address, or None.
+
+    ``Selection.get_selected_child`` is one round-trip. The cell does not
+    have to be the focused accessible: while the grid holds focus, Down
+    still moves this address.
+    """
+    cell = _selected_sheet_cell(app)
+    if cell is None:
+        return None
+    name = _node_name(cell)
+    if _SHEET_ADDRESS.match(name):
+        return name
+    return None
+
+
+def focused_type_selection(app: str) -> tuple:
+    """``(readable text, selection span)`` for the focused node.
+
+    The span is in that readable text. A contenteditable word selection is
+    the word, not the paragraph object that contains it. A collapsed caret
+    is ``(text, None)``.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return (None, None)
+    if truncated or acc is None:
+        return (None, None)
+    try:
+        text = _readable_text(acc)
+    except Exception:
+        text = None
+    try:
+        span = _selection_span(acc, text)
+    except Exception:
+        span = None
+    return (text, span)
+
+
+def focused_key_evidence(app: str) -> tuple:
+    """``(text, caret, selection start, selection end, cell address)``.
+
+    Text is the focused node's text. An open Calc cell editor replaces it,
+    because the grid's own text stays empty while the digits are in the
+    editor. The cell address is the selected sheet cell. Missing pieces
+    are None. This is not a password check.
+    """
+    text = None
+    caret = start = end = None
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        acc, truncated = None, True
+    if acc is not None and not truncated:
+        try:
+            text = _readable_text(acc)
+        except Exception:
+            text = None
+        try:
+            Atspi = _atspi()
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                nchars = count
+            else:
+                nchars = len(text or "")
+            caret, start, end = _caret_and_selection(acc, nchars)
+        except Exception:
+            caret = start = end = None
+    if libreoffice_app(app):
+        try:
+            editor = sheet_editor_text(app)
+        except Exception:
+            editor = None
+        if editor:
+            text = editor
+    cell = None
+    if libreoffice_app(app):
+        try:
+            cell = selected_sheet_address(app)
+        except Exception:
+            cell = None
+    return (text, caret, start, end, cell)
+
+
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
 
@@ -3289,19 +10770,25 @@ def control_kind(acc) -> str | None:
         # typing, not by Value.set_current_value. Checked before
         # ``_value_range``, which imports gi.
         return None
+    # A Draw shape panel has no Value interface. The bridge still answers
+    # minimum and maximum with an uninitialized double. That is not a range.
     if _value_range(acc) is not None:
         return "value"
     return None
 
 
 def _collect_options(acc) -> list[tuple[str, object, object, int]]:
-    """(label, node, parent, index) for each choice under ``acc``."""
+    """(label, node, parent, index) for each choice under ``acc``.
+
+    Enumerate every child: GTK font menus routinely have hundreds of items,
+    and the flattened order is also the combo's Selection model index.
+    """
     found: list[tuple[str, object, object, int]] = []
 
     def walk(node, depth: int) -> None:
         if depth > 5:
             return
-        count = min(_child_count(node), 64)
+        count = _child_count(node)
         for index in range(count):
             child = _child_at(node, index)
             if child is None:
@@ -3338,12 +10825,103 @@ def _combo_entry(acc):
     return None
 
 
+def _label_texts(acc) -> set[str]:
+    """Folded LABELLED_BY strings, with and without a trailing colon."""
+    raw = _labelled_by_name(acc).strip()
+    if not raw:
+        return set()
+    names = {raw.casefold()}
+    stripped = _strip_label_colon(raw)
+    if stripped:
+        names.add(stripped.casefold())
+    return names
+
+
+def _sibling_entry_text(acc) -> str | None:
+    """Text of an entry that sits beside the combo, not inside it.
+
+    LibreOffice's GTK combo hides the stock combo and shows a button. The
+    editable text, when there is one, is a sibling entry. A label sibling is
+    the caption, not the value.
+    """
+    parent = _parent_of(acc)
+    if parent is None:
+        return None
+    captions = _label_texts(acc)
+    count = min(_child_count(parent), 8)
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None or child is acc:
+            continue
+        if _role_name(child) not in {"entry", "text"}:
+            continue
+        label = _option_label(child).strip()
+        if label and label.casefold() not in captions:
+            return label
+    return None
+
+
+def _descendant_combo_value(acc) -> str | None:
+    """A selected descendant, or the one text the combo itself displays.
+
+    The active menu item is already ``_selected_option_text``. This is the
+    rest: a selected table cell (LibreOffice's popup is a tree, not a menu),
+    or a single label/entry under the combo when nothing is selected. Menu
+    rows that are only listed are not the value. Several different texts are
+    not one value.
+    """
+    captions = _label_texts(acc)
+    selected: list[str] = []
+    plain: list[str] = []
+
+    def take(child, into: list[str]) -> None:
+        label = _option_label(child).strip()
+        if not label or label.casefold() in captions or label in into:
+            return
+        into.append(label)
+
+    def walk(node, depth: int) -> None:
+        if depth > 4 or selected:
+            return
+        count = min(_child_count(node), 32)
+        for index in range(count):
+            child = _child_at(node, index)
+            if child is None:
+                continue
+            role = _role_name(child)
+            if role in {"menu", "popup menu"}:
+                continue
+            if _state_has(child, "SELECTED"):
+                take(child, selected)
+                if selected:
+                    return
+            elif role in {"entry", "text", "label", "static"}:
+                take(child, plain)
+                continue
+            if role in _OPTION_CONTAINER_NAMES or role in {
+                "table", "tree table", "tree", "viewport", "filler", "panel",
+                "scroll pane", "box",
+            }:
+                walk(child, depth + 1)
+                if selected:
+                    return
+
+    walk(acc, 0)
+    if selected:
+        return selected[0]
+    if len(plain) == 1:
+        return plain[0]
+    return None
+
+
 def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
     """(handled, value) for a combo or list.
 
     An editable combo's value is its own entry's text, including when that
-    text is empty. A non-editable combo uses the active option. Neither falls
-    through to the Value interface.
+    text is empty. A non-editable combo uses the active option, then its own
+    text, then a sibling entry or a displayed descendant. Neither falls
+    through to the Value interface. The label relation is the title, not the
+    value.
     """
     if role not in _CHOICE_ROLES and role_name not in _CHOICE_ROLE_NAMES:
         return False, None
@@ -3360,7 +10938,19 @@ def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
         current = _node_name(acc)
         if current:
             return True, current
-    return True, _selected_option_text(acc)
+    selected = _selected_option_text(acc)
+    if selected:
+        return True, selected
+    if role_name != "combo box" and role != "AXComboBox":
+        return True, None
+    shown = _direct_text(acc)
+    cleaned = _strip_objects(shown).strip()
+    if cleaned and cleaned.casefold() not in _label_texts(acc):
+        return True, cleaned
+    sibling = _sibling_entry_text(acc)
+    if sibling:
+        return True, sibling
+    return True, _descendant_combo_value(acc)
 
 
 def _set_entry_contents(entry, value: str) -> bool:
@@ -3494,6 +11084,114 @@ def _close_combo_popup(acc) -> None:
         if not _popup_open(acc):
             return
         time.sleep(0.04)
+
+
+def _chrome_select_owner(acc):
+    """The Chromium ``<select>`` that owns this menu item, or None.
+
+    The option is a menu item under that combo box. An application menu
+    item, a Firefox select, and a GTK combo are not this control, so a
+    later Escape cannot land on them.
+    """
+    if acc is None:
+        return None
+    if _role_name(acc) not in {"menu item", "check menu item", "radio menu item"}:
+        return None
+    if not _chromium_control(acc):
+        return None
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        role = _role_name(parent)
+        if role == "combo box":
+            return parent
+        if role in {
+            "application", "frame", "window", "dialog",
+            "document web", "document frame", "menu bar",
+        }:
+            return None
+        node = parent
+    return None
+
+
+def finish_chrome_select_option_click(acc) -> None:
+    """Close the select popup after its option action succeeded.
+
+    ``set_value`` closes with the combo's collapse action, then Escape
+    while that popup is still open. The same close runs here, and only on
+    the select that owns this option. A popup that is already collapsed is
+    left alone, so Escape is not sent. A popup that stays expanded is
+    ``popup_open``.
+    """
+    combo = _chrome_select_owner(acc)
+    if combo is None:
+        return
+    _close_combo_popup(combo)
+    if _state_has(combo, "EXPANDED"):
+        label = _option_label(acc) or "the option"
+        raise _text_mismatch(
+            "popup_open",
+            f"the combo popup is still open after clicking {label!r}",
+            expected=label,
+        )
+
+
+def _gtk_combo_option_owner(acc):
+    """The GTK combo that owns this menu item, or None.
+
+    The option's parent menu belongs to the combo. An application menu
+    item, a Chromium select, and a Firefox or Qt combo are not this
+    control, so a later Escape cannot land on them.
+    """
+    if acc is None:
+        return None
+    if _role_name(acc) not in {"menu item", "check menu item", "radio menu item"}:
+        return None
+    try:
+        if _chromium_control(acc) or _gecko_app(acc) or _qt_app(acc):
+            return None
+    except Exception:
+        return None
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        role = _role_name(parent)
+        if role == "combo box":
+            return parent if _gtk_combo(parent) else None
+        if role in {
+            "application", "frame", "dialog", "menu bar",
+            "document web", "document frame",
+        }:
+            return None
+        node = parent
+    return None
+
+
+def finish_gtk_combo_option_click(acc) -> None:
+    """Close a GTK combo popup after its option action succeeded.
+
+    The option's click usually closes the menu. A popup that stays open is
+    closed the way ``set_value`` closes one. A popup that is still open
+    after that is ``popup_open``. An application menu item has no combo
+    owner, so Escape is not sent.
+    """
+    combo = _gtk_combo_option_owner(acc)
+    if combo is None:
+        return
+    if not _popup_open(combo):
+        return
+    _close_combo_popup(combo)
+    if _popup_open(combo):
+        label = _option_label(acc) or "the option"
+        raise _text_mismatch(
+            "popup_open",
+            f"the combo popup is still open after clicking {label!r}",
+            expected=label,
+        )
 
 
 def _combo_active_label(acc) -> str | None:
@@ -3688,15 +11386,22 @@ def _activate_web_option(combo, label: str, node, index: int) -> None:
     _choice_shows(combo, label)
 
 
+def _gecko_selected(combo) -> str | None:
+    """Firefox's selected option, after a cache drop when the listener is up."""
+    _refresh_event_cache(combo)
+    return _selected_option_text(combo)
+
+
 def _gecko_choice_shows(combo, label: str, *, wait: bool = True) -> bool:
     """Whether Firefox's selected option text is ``label``.
 
     The selected menu item can update a beat after the key. The wait is
-    bounded and stops on the first match.
+    bounded and stops on the first match. Each read drops the event cache
+    first: ``event_main`` would otherwise keep the previous SELECTED state.
     """
     attempts = 6 if wait else 1
     for attempt in range(attempts):
-        if _selected_option_text(combo) == label:
+        if _gecko_selected(combo) == label:
             return True
         if attempt + 1 < attempts:
             time.sleep(0.05)
@@ -3712,7 +11417,7 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
     does, and the selected option is read back. The popup is not opened:
     opening it and then sending Escape puts the previous value back.
     """
-    if _selected_option_text(combo) == label:
+    if _gecko_selected(combo) == label:
         return
     target = _option_named(combo, label) or node
     _do_action_named(target, frozenset({"select", "click", "press", "activate"}))
@@ -3722,19 +11427,17 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
         return
     grab_focus(combo)
     labels = [item[0] for item in options if item[0]]
-    current = _selected_option_text(combo)
+    current = _gecko_selected(combo)
     if current in labels and label in labels and current != label:
-        from a11y_computer_use.drivers import _linux_input
-
         delta = labels.index(label) - labels.index(current)
         chord = "Down" if delta > 0 else "Up"
         for _ in range(abs(delta)):
-            _linux_input.press_chord(chord)
-            if _selected_option_text(combo) == label:
+            _chord_into_target(combo, chord)
+            if _gecko_selected(combo) == label:
                 return
-    if _selected_option_text(combo) == label:
+    if _gecko_selected(combo) == label:
         return
-    _type_string(label)
+    _type_into_target(combo, label)
 
 
 def _activate_combo_option(combo, options, match) -> None:
@@ -3780,6 +11483,8 @@ def set_combo_value(acc, value: str) -> None:
     A popup this call opened is closed. The call raises when the read-back is
     not ``value``. A highlighted popup row is not a successful read-back.
     """
+    if _gecko_app(acc):
+        _refresh_event_cache(acc)
     entry = _combo_entry(acc)
     options = _collect_options(acc)
     if entry is None and not options:
@@ -3798,7 +11503,22 @@ def set_combo_value(acc, value: str) -> None:
             match = next((item for item in options if item[0] == value), None)
             if match is None:
                 labels = [label for label, *_rest in options if label]
-                listed = ", ".join(labels)
+                # Bound the diagnostic, independently of the choices searched.
+                shown: list[str] = []
+                size = 0
+                for label in labels[:64]:
+                    added = len(label) + (2 if shown else 0)
+                    if size + added > 2048:
+                        break
+                    shown.append(label)
+                    size += added
+                listed = ", ".join(shown)
+                if len(shown) < len(labels):
+                    raise ValueError(
+                        f"value {value!r} is not an available option; "
+                        f"showing first {len(shown)} of {len(labels)} options "
+                        f"(list truncated): {listed}"
+                    )
                 raise ValueError(f"value {value!r} is not one of: {listed}")
             _activate_combo_option(acc, options, match)
     finally:
@@ -3902,7 +11622,7 @@ def _fill_empty_number(acc, value: str) -> bool:
     _click_center(acc)
     if not _x11_keys_available():
         return False
-    _type_string(value)
+    _type_into_target(acc, value)
     return _number_text_matches(acc, value)
 
 
@@ -3933,14 +11653,13 @@ def _clear_number_input(acc) -> bool:
             return True
     if not _x11_keys_available():
         return False
-    from a11y_computer_use.drivers import _linux_input
 
     for _attempt in range(_NUMBER_CLEAR_TRIES):
         grab_focus(acc)
         _click_center(acc)
-        _linux_input.press_chord("ctrl+a")
-        _linux_input.press_chord("backspace")
-        _linux_input.press_chord("delete")
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
         deadline = time.monotonic() + _NUMBER_CLEAR_WAIT_S
         while True:
             if _number_text(acc) == "":
@@ -3951,13 +11670,329 @@ def _clear_number_input(acc) -> bool:
     return False
 
 
+_TRACKED_FIELD_ROLES = frozenset({
+    "entry", "password text", "combo box", "spin button",
+})
+
+
+def _is_tracked_field(acc) -> bool:
+    """An editable control whose text a leaked keystroke would change."""
+    role = _role_name(acc)
+    if role in _TRACKED_FIELD_ROLES:
+        return True
+    if role in {"text", "section", "paragraph"} and (
+        _state_has(acc, "EDITABLE") or _state_has(acc, "FOCUSABLE")
+    ):
+        return True
+    if _number_input(acc):
+        return True
+    tag = str(_get_attributes(acc).get("tag") or "").lower()
+    return tag in {"input", "textarea"}
+
+
+def _under_target(node, target) -> bool:
+    """True when ``node`` is ``target`` or sits inside it."""
+    current = node
+    target_sid = _stable_id(target) or ""
+    target_role = _role_name(target)
+    for _ in range(10):
+        if current is None:
+            return False
+        if current is target:
+            return True
+        sid = _stable_id(current) or ""
+        if target_sid and sid == target_sid and _role_name(current) == target_role:
+            return True
+        current = _parent_of(current)
+    return False
+
+
+def _field_walk_root(acc):
+    """The document or frame that holds ``acc`` and its sibling fields."""
+    node = acc
+    document = None
+    frame = acc
+    for _ in range(24):
+        parent = _parent_of(node)
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role == "application":
+            break
+        if role in {"document web", "document frame"}:
+            document = parent
+        if role in {"frame", "window", "dialog"}:
+            frame = parent
+        node = parent
+    return document or frame
+
+
+def _collect_peer_fields(acc) -> dict[str, str]:
+    """Text of editable fields in the same document, excluding ``acc``.
+
+    The walk is bounded. Keys are role, name, and id in tree order so a
+    later read of the same tree lines up. The target and its descendants
+    are not peers: a partial write there is not another field changing.
+    """
+    root = _field_walk_root(acc)
+    counts: dict[str, int] = {}
+    found: dict[str, str] = {}
+    queue = [root]
+    seen: set[int] = set()
+    examined = 0
+    while queue and examined < 250:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        examined += 1
+        if not _under_target(node, acc) and _is_tracked_field(node):
+            base = f"{_role_name(node)}|{_node_name(node)}|{_stable_id(node) or ''}"
+            index = counts.get(base, 0)
+            counts[base] = index + 1
+            text = _full_text(node)
+            if text is not None:
+                found[f"{base}#{index}"] = text
+        count = _child_count(node)
+        if count <= 0 or count > 5000:
+            continue
+        for index in range(min(count, 40)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    return found
+
+
+def peer_field_texts(acc) -> dict[str, str]:
+    """Peer field text before a set_value. Empty when the tree cannot be read."""
+    try:
+        return _collect_peer_fields(acc)
+    except Exception:
+        return {}
+
+
+def changed_peer_fields(acc, before: dict) -> list[str]:
+    """Peers whose text differs from ``before``. A failed reread is not a leak."""
+    if not before:
+        return []
+    try:
+        after = _collect_peer_fields(acc)
+    except Exception:
+        return []
+    if not after:
+        return []
+    changed: list[str] = []
+    for key, old in before.items():
+        if key not in after or after[key] == old:
+            continue
+        new = after[key]
+        changed.append(f"{key}: {old!r} -> {new!r}"[:180])
+    return changed
+
+
+# ``88%`` or ``50 %``. A bare ``50`` is not a percent literal. A narrow
+# no-break space is the same gap as a normal space.
+_PERCENT_LITERAL = re.compile(
+    r"^(?P<number>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*%$"
+)
+# Inkscape draws an integer percent. The log2 of that percent can be a
+# fraction of a percent away from the rounded text.
+_PERCENT_DISPLAY_TOLERANCE = 0.51
+
+
+def _percent_literal(value: str) -> float | None:
+    """The number in ``50%`` or ``50 %``. None when the text has no percent sign."""
+    text = str(value).replace("\u00a0", " ").replace("\u202f", " ").strip()
+    match = _PERCENT_LITERAL.match(text)
+    if match is None:
+        return None
+    try:
+        number = float(match.group("number"))
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _finite_current_value(acc) -> float | None:
+    """The Value interface's current value, or None when it is not a finite number."""
+    got = _safe(lambda: _atspi().Value.get_current_value(acc))
+    if isinstance(got, bool) or not isinstance(got, (int, float)):
+        return None
+    number = float(got)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _pow2_percent(log_value: float) -> float | None:
+    """``100 * 2**log_value``, or None when that power is not finite."""
+    try:
+        percent = math.pow(2.0, float(log_value)) * 100.0
+    except OverflowError:
+        return None
+    if not math.isfinite(percent):
+        return None
+    return percent
+
+
+def _percent_value_unit(acc) -> tuple[str, float] | None:
+    """How a percent label relates to the current Value, plus that value.
+
+    ``log2`` means the text is the percent and the Value is ``log2`` of
+    that percent as a fraction (Inkscape's zoom spin: ``88%`` is about
+    ``-0.184``). ``percent`` means the Value is already that percent.
+    ``unmatched`` means the text is a percent and neither relationship
+    holds, so a percent literal must not be converted by guesswork.
+    None means the text is not a percent, or the current value could not
+    be read.
+    """
+    shown = _number_text(acc)
+    if not shown:
+        return None
+    percent = _percent_literal(shown)
+    if percent is None:
+        return None
+    current = _finite_current_value(acc)
+    if current is None:
+        return None
+    displayed = _pow2_percent(current)
+    if displayed is not None and abs(displayed - percent) <= _PERCENT_DISPLAY_TOLERANCE:
+        return "log2", current
+    if abs(percent - current) <= _PERCENT_DISPLAY_TOLERANCE:
+        return "percent", current
+    return "unmatched", current
+
+
+def _clamp_near_bounds(number: float, low: float, high: float, *, open_upper: bool) -> float:
+    """Pull a conversion that landed an ulp outside the published bounds back in."""
+    if number < low and low - number <= 1e-6:
+        return low
+    if not open_upper and number > high and number - high <= 1e-6:
+        return high
+    return number
+
+
+def _log_percent_range_message(value: str, low: float, high: float, *, open_upper: bool) -> str:
+    """The percent a log2 control can show, and the Value scale underneath it."""
+    low_pct = _pow2_percent(low)
+    low_text = "?" if low_pct is None else f"{_format_bound(low_pct)}%"
+    if open_upper:
+        return (
+            f"value {value!r} is below {low_text} "
+            f"(value scale minimum {_format_bound(low)})"
+        )
+    high_pct = _pow2_percent(high)
+    high_text = "?" if high_pct is None else f"{_format_bound(high_pct)}%"
+    return (
+        f"value {value!r} is outside {low_text}..{high_text} "
+        f"(value scale {_format_bound(low)}..{_format_bound(high)})"
+    )
+
+
+def _unmatched_percent_message(
+    acc, value: str, low: float, high: float, *, open_upper: bool,
+) -> str:
+    """A percent was asked of a control whose text and Value do not agree."""
+    shown = _number_text(acc) or ""
+    current = _finite_current_value(acc)
+    current_text = "unreadable" if current is None else _format_bound(current)
+    if open_upper:
+        span = f"minimum {_format_bound(low)}"
+    else:
+        span = f"{_format_bound(low)}..{_format_bound(high)}"
+    return (
+        f"value {value!r} is a percent; the control shows {shown.strip()!r} "
+        f"which does not match its value {current_text}; valid range is {span}"
+    )
+
+
+def _format_held_percent(percent: float) -> str:
+    """The percent a log2 control holds after the toolkit rounds the write."""
+    if abs(percent - round(percent)) <= 0.05:
+        return f"{int(round(percent))}%"
+    return f"{_format_bound(percent)}%"
+
+
+def _write_log_percent(acc, value: str, written: float, before: float) -> bool | str:
+    """Write a log2 zoom and read it back. No step snap and no keystrokes.
+
+    An exact landing returns True, so the caller reports the requested
+    percent. A toolkit that moved the value by at most one step returns
+    the percent that landing represents. A value that did not move is a
+    mismatch, including when the old value was already within one step.
+    """
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, written), False)
+    got = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _safe(lambda: Atspi.Value.get_current_value(acc))
+        if (
+            isinstance(got, (int, float))
+            and not isinstance(got, bool)
+            and _numbers_match(float(got), written)
+        ):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    if isinstance(got, (int, float)) and not isinstance(got, bool):
+        step = _minimum_increment(acc)
+        moved = not _numbers_match(float(got), before)
+        if step is not None and moved and abs(float(got) - written) <= step:
+            held = _pow2_percent(float(got))
+            if held is not None:
+                return _format_held_percent(held)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back {got!r} does not match {value!r}",
+        expected=value,
+        actual=got,
+    )
+
+
+def _apply_log_percent(acc, value: str, low: float, high: float, before: float, *, open_upper: bool):
+    """Convert a percent onto a log2 Value. None lets the bare number through.
+
+    A percent literal (``50%``, ``50 %``) is ``log2(percent / 100)``. A bare
+    number inside the Value range is not a percent: the caller writes it
+    unchanged, including the spin step. A bare number outside that range is
+    a percent when the conversion fits, and the same percent bounds when it
+    does not. The conversion is not snapped to the step. Snapping ``50%``
+    onto Inkscape's tenth would land near ``48.5%``.
+    """
+    literal = _percent_literal(value)
+    if literal is None:
+        try:
+            number = _parse_number(value)
+        except ValueError:
+            return None
+        if not _outside_range(number, low, high, open_upper=open_upper):
+            return None
+        percent = number
+    else:
+        percent = literal
+    if not math.isfinite(percent) or percent <= 0:
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper))
+    try:
+        written = math.log(percent / 100.0) / math.log(2.0)
+    except ValueError:
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper)) from None
+    written = _clamp_near_bounds(written, low, high, open_upper=open_upper)
+    if _outside_range(written, low, high, open_upper=open_upper):
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper))
+    return _write_log_percent(acc, value, written, before)
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
     A non-number or a number outside minimum..maximum raises ValueError before
     the write. The message includes the minimum and maximum. The current value
-    is read back and must match. False means ``value`` is a finite number and
-    this control has no Value interface, so the caller may use ``set_text``.
+    is read back and must match. False means this control has no Value
+    interface, or the bounds are an uninitialized double. The text is not
+    parsed in that case, so a word is not rejected as a number and the
+    garbage minimum is not reported. The caller may use ``set_text``.
     An empty string on an ``<input type=number>`` clears the field. When the
     control has EditableText, ``set_text`` clears it. Chrome's number input
     has no EditableText: a click places the caret, then ctrl+a, BackSpace,
@@ -3966,6 +12001,15 @@ def set_numeric_value(acc, value: str) -> bool | str:
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
+    A control whose text is a percent and whose Value is ``log2`` of that
+    percent (Inkscape's status zoom) accepts ``50%`` and a bare number that
+    falls outside the Value range as that percent, converted with
+    ``log2(percent / 100)`` and not snapped to the step. A bare number inside
+    the Value range is still that scale. A percent the control cannot
+    represent names the percent range and the Value scale. When the text is
+    a percent but it matches neither the Value nor ``log2`` of the Value, a
+    percent literal is refused and the Value range is named. No keystrokes
+    are sent for any of these.
     """
     if value == "" and _number_input(acc):
         if _clear_number_input(acc):
@@ -3975,7 +12019,14 @@ def set_numeric_value(acc, value: str) -> bool | str:
             "the number field could not be cleared",
             expected="",
         )
-    span = _value_range(acc)
+    # A missing interface returns before any number check. Reading minimum
+    # on that node is the uninitialized double, and parsing the text would
+    # report that double as the minimum.
+    if not _value_interface_present(acc):
+        return False
+    span = _raw_value_bounds(acc)
+    if span is not None and _uninitialized_bounds(*span):
+        return False
     low = high = None
     open_upper = False
     if span is not None:
@@ -3983,6 +12034,53 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        # Some sliders (Xournal++ zoom) expose the percent only as their
+        # name. That label does not establish a conversion for the raw scale.
+        # Explain the mismatch before parsing, but preserve in-range raw input.
+        if _role_name(acc) == "slider":
+            shown = _node_name(acc)
+            percent = _percent_literal(shown)
+            if percent is not None and _outside_range(percent, low, high, open_upper=open_upper):
+                literal = _percent_literal(value)
+                try:
+                    requested = _parse_number(value) if literal is None else literal
+                except ValueError:
+                    requested = None
+                if literal is not None or (
+                    requested is not None
+                    and _outside_range(requested, low, high, open_upper=open_upper)
+                ):
+                    span_text = (
+                        f"minimum {_format_bound(low)}" if open_upper
+                        else f"{_format_bound(low)}..{_format_bound(high)}"
+                    )
+                    raise ValueError(
+                        f"value {value!r} cannot be interpreted as a percent; "
+                        f"the slider shows {shown!r} but uses a non-percent scale "
+                        f"with raw range {span_text}. The percent conversion is unknown; "
+                        "supply a raw value within that range"
+                    )
+        unit = _percent_value_unit(acc)
+        if unit is not None:
+            kind, before = unit
+            if kind == "log2":
+                # None means the text is an in-range bare number. That write
+                # stays on the Value scale, step snap included.
+                handled = _apply_log_percent(
+                    acc, value, low, high, before, open_upper=open_upper,
+                )
+                if handled is not None:
+                    return handled
+            elif kind == "percent":
+                literal = _percent_literal(value)
+                if literal is not None:
+                    value = _format_bound(literal)
+            elif kind == "unmatched" and _percent_literal(value) is not None:
+                raise ValueError(
+                    _unmatched_percent_message(
+                        acc, value, low, high, open_upper=open_upper,
+                    )
+                )
     try:
         number = _parse_number(value)
     except ValueError:
@@ -4121,6 +12219,399 @@ def _row_selected(node) -> bool:
     return _state_has(node, "SELECTED")
 
 
+def _xml_roles(acc) -> set[str]:
+    """``xml-roles`` tokens. Empty when the node has no attributes."""
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        return set()
+    return {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+
+
+def _choice_text(value: str | None) -> str:
+    """Option text with NBSP folded to space and the edges stripped."""
+    if value is None:
+        return ""
+    return (_norm_nbsp(str(value)) or "").strip()
+
+
+def _is_combobox_node(acc) -> bool:
+    """True for a combo box, including an input whose ARIA role is combobox."""
+    if acc is None:
+        return False
+    try:
+        if accessible_gone(acc):
+            return False
+    except Exception:
+        return False
+    if _role_name(acc) in {"combo box", "combo-box"}:
+        return True
+    return "combobox" in _xml_roles(acc)
+
+
+def _listbox_option(acc) -> bool:
+    """True for an option in a list or list box, not a menu item.
+
+    A GTK tree cell is not one. A menu item inside a combo popup is not one
+    either: that click is an activation, and this check is only for the row
+    selection read-back.
+    """
+    role = _role_name(acc)
+    xml = _xml_roles(acc)
+    if role not in {"list item", "list box item"} and "option" not in xml:
+        return False
+    parent, _index, _target = _selection_parent(acc)
+    if parent is not None:
+        parent_role = _role_name(parent)
+        return parent_role in {"list", "list box"} or "listbox" in _xml_roles(parent)
+    if role in {"menu item", "check menu item", "radio menu item"}:
+        return False
+    node = acc
+    for _ in range(6):
+        node = _parent_of(node)
+        if node is None:
+            return False
+        parent_role = _role_name(node)
+        if parent_role in {"menu", "popup menu", "menu bar"}:
+            return False
+        if parent_role in {"list", "list box"} or "listbox" in _xml_roles(node):
+            return True
+    return False
+
+
+def _relation_combobox(acc):
+    """A combobox related to ``acc``, or None.
+
+    ``aria-controls`` is CONTROLLED_BY on the listbox and CONTROLLER_FOR on
+    the combobox. ``aria-owns`` is the node-parent pair. Either direction
+    counts.
+    """
+    if acc is None:
+        return None
+    for kind in (
+        "controlled_by", "controller_for", "node_child_of", "node_parent_of",
+        "embedded_by", "embeds",
+    ):
+        try:
+            targets = _relation_targets(acc, kind)
+        except Exception:
+            continue
+        for target in targets:
+            if _is_combobox_node(target):
+                return target
+    return None
+
+
+def _combobox_under(node, depth: int):
+    """A combobox at ``node`` or within ``depth`` levels of children."""
+    if node is None or depth < 0:
+        return None
+    if _is_combobox_node(node):
+        return node
+    if depth == 0:
+        return None
+    count = min(_child_count(node), 8)
+    for index in range(count):
+        found = _combobox_under(_child_at(node, index), depth - 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _nearby_combobox(listbox):
+    """A combobox that shares ``listbox``'s parent, preferring an open one.
+
+    The input and the list are often siblings, or the input sits one or two
+    groups under that parent (a label around the input). Several comboboxes
+    on the page resolve to the expanded one.
+    """
+    if listbox is None:
+        return None
+    parent = _parent_of(listbox)
+    if parent is None:
+        return None
+    linked = _relation_combobox(parent)
+    if linked is not None:
+        return linked
+    candidates = []
+    count = min(_child_count(parent), 24)
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None:
+            continue
+        found = _combobox_under(child, 3)
+        if found is not None and all(found is not item for item in candidates):
+            candidates.append(found)
+    expanded = [item for item in candidates if _popup_open(item)]
+    if len(expanded) == 1:
+        return expanded[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if expanded:
+        return expanded[0]
+    return None
+
+
+def _focused_combobox(acc):
+    """The focused combobox in ``acc``'s application, when Collection can say.
+
+    A listbox option click often leaves focus on the input. None when the
+    application has no Collection interface, which is also the hermetic fake.
+    """
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return None
+    try:
+        Atspi = _atspi()
+        focused_state = getattr(getattr(Atspi, "StateType", None), "FOCUSED", None)
+    except Exception:
+        return None
+    if focused_state is None:
+        return None
+    try:
+        found, node = _focused_via_collection(app, Atspi, focused_state)
+    except Exception:
+        return None
+    if not found or node is None:
+        return None
+    if _is_combobox_node(node):
+        return node
+    current = node
+    for _ in range(6):
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            break
+        if _is_combobox_node(parent):
+            return parent
+        current = parent
+    return None
+
+
+def _combobox_owner(acc):
+    """The combobox this option belongs to, or None.
+
+    An ancestor combo, a controls/owns relation, a sibling input, then the
+    focused combobox. A plain listbox has none of these.
+    """
+    node = acc
+    seen: set[int] = set()
+    listbox = None
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if node is not acc and _is_combobox_node(node):
+            return node
+        linked = _relation_combobox(node)
+        if linked is not None:
+            return linked
+        role = _role_name(node)
+        if (
+            listbox is None
+            and node is not acc
+            and (role in {"list", "list box"} or "listbox" in _xml_roles(node))
+        ):
+            listbox = node
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    nearby = _nearby_combobox(listbox)
+    if nearby is not None:
+        return nearby
+    return _focused_combobox(acc)
+
+
+def _combobox_text(acc) -> str | None:
+    """The value a snapshot shows for this combobox.
+
+    The input's own text wins, and an empty input is ``""``, not a missing
+    read. U+FFFC is Chromium's placeholder for each option, so a string that
+    is only those characters falls through to the entry or the selected
+    option. None means the read failed.
+    """
+    if acc is None:
+        return None
+    try:
+        if accessible_gone(acc):
+            return None
+    except Exception:
+        return None
+    text = _full_text(acc)
+    if isinstance(text, str) and _OBJECT_REPLACEMENT not in text:
+        return _choice_text(text)
+    if isinstance(text, str):
+        cleaned = _choice_text(_strip_objects(text))
+        if cleaned:
+            return cleaned
+    entry = _combo_entry(acc)
+    if entry is not None and entry is not acc:
+        entry_text = _full_text(entry)
+        if isinstance(entry_text, str) and _OBJECT_REPLACEMENT not in entry_text:
+            return _choice_text(entry_text)
+        if isinstance(entry_text, str):
+            cleaned = _choice_text(_strip_objects(entry_text))
+            if cleaned:
+                return cleaned
+    selected = _selected_option_text(acc)
+    if selected:
+        return _choice_text(selected)
+    return None
+
+
+def _option_marked_selected(acc) -> bool:
+    """True when the option is SELECTED or ``aria-selected`` is true.
+
+    A destroyed option is not selected. The attribute covers a tree that
+    publishes aria-selected without the AT-SPI state.
+    """
+    if acc is None:
+        return False
+    try:
+        if accessible_gone(acc):
+            return False
+    except Exception:
+        return False
+    if _row_selected(acc):
+        return True
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        return False
+    for key in ("aria-selected", "selected"):
+        if str(attrs.get(key) or "").strip().lower() == "true":
+            return True
+    return False
+
+
+def _aria_list_option(acc) -> bool:
+    """A web listbox option, not a GTK list row.
+
+    Chromium and Firefox list items count. So does an option whose list
+    publishes ``xml-roles`` of listbox or option. A GTK tree or list does
+    not, so a row click there still has to move SELECTED.
+    """
+    if acc is None or not _listbox_option(acc):
+        return False
+    if "option" in _xml_roles(acc):
+        return True
+    node = acc
+    for _ in range(6):
+        try:
+            if _chromium_app(node) or _gecko_app(node):
+                return True
+        except Exception:
+            pass
+        roles = _xml_roles(node)
+        if "listbox" in roles or "combobox" in roles or "option" in roles:
+            return True
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return False
+        if _role_name(parent) in {"frame", "window", "application", "menu", "popup menu", "menu bar"}:
+            return False
+        node = parent
+    return False
+
+
+def combobox_option_context(acc) -> dict | None:
+    """Before-click reading of the combobox that owns this option, or None.
+
+    None when this is not a web listbox option or no combobox owns it. The
+    reading is taken before the click. An ARIA option's row disappears when
+    the list closes, and the comparison still has the old value.
+    """
+    try:
+        if not _aria_list_option(acc):
+            return None
+        combo = _combobox_owner(acc)
+        if combo is None:
+            return None
+        _call_first(combo, ("clear_cache", "clearCache"))
+        return {
+            "combo": combo,
+            "label": _choice_text(_option_label(acc)),
+            "text": _combobox_text(combo),
+            "name": _choice_text(_node_name(combo)),
+            "expanded": bool(_popup_open(combo)),
+            "selected": _choice_text(_selected_option_text(combo)),
+            "marked": _option_marked_selected(acc),
+        }
+    except Exception:
+        return None
+
+
+def _combobox_commit_signals(ctx: dict, option) -> bool:
+    """True when the combobox now shows this option, or the option became selected.
+
+    A value or name that changed to the option counts. So does aria-selected
+    arriving on the option. A popup that was open and is now closed counts
+    when the collapsed combobox's text or name is the option, including when
+    that text was already the option and the click only closed the list.
+    """
+    label = _choice_text(ctx.get("label"))
+    if not label:
+        return False
+    if option is not None and _option_marked_selected(option) and not ctx.get("marked"):
+        return True
+    combo = ctx.get("combo")
+    if combo is None:
+        return False
+    try:
+        if accessible_gone(combo):
+            return False
+    except Exception:
+        return False
+    _call_first(combo, ("clear_cache", "clearCache"))
+    shown = _combobox_text(combo)
+    name = _choice_text(_node_name(combo))
+    before_text = _choice_text(ctx.get("text"))
+    before_name = _choice_text(ctx.get("name"))
+    before_selected = _choice_text(ctx.get("selected"))
+    if shown is not None and _choice_text(shown) == label and before_text != label:
+        return True
+    if name == label and before_name != label:
+        return True
+    selected = _choice_text(_selected_option_text(combo))
+    if selected == label and before_selected != label:
+        return True
+    if ctx.get("expanded") and not _popup_open(combo) and (
+        _choice_text(shown) == label or name == label
+    ):
+        return True
+    return False
+
+
+def combobox_option_committed(ctx, option) -> bool:
+    """True when the click committed this option and the reading stays put.
+
+    A one-read flicker is not a commit. A combobox that still shows its old
+    value, with the popup still open and the option not selected, is not a
+    commit. None ``ctx`` is not a listbox option and is not a commit.
+    """
+    if not ctx or not _choice_text(ctx.get("label")):
+        return False
+    for attempt in range(8):
+        try:
+            landed = _combobox_commit_signals(ctx, option)
+        except Exception:
+            landed = False
+        if landed:
+            time.sleep(0.04)
+            try:
+                if _combobox_commit_signals(ctx, option):
+                    return True
+            except Exception:
+                pass
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def chromium_list_row(acc) -> bool:
     """True when ``acc`` is an option in a Chromium list or list box.
 
@@ -4227,29 +12718,549 @@ def _row_settled(node) -> bool:
     return _row_selected(node)
 
 
+def _qt_grid(acc):
+    """The Qt ``table`` that contains ``acc``, or None for a tree item.
+
+    A ``QTableWidget`` cell's parent is ``table``. A ``QTreeWidget`` item is
+    also a ``table cell``, and its parent is ``tree``. The tree item stays
+    on Toggle: that selects the row and does not expand it.
+    """
+    if not _qt_app(acc):
+        return None
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None:
+            return None
+        role = _role_name(parent)
+        if role in {"tree", "tree table"}:
+            return None
+        if role == "table":
+            return parent
+        node = parent
+    return None
+
+
+def qt_table_cell(acc) -> bool:
+    """True for a cell in a Qt grid, not a tree item and not a GTK cell."""
+    try:
+        return _role_name(acc) == "table cell" and _qt_grid(acc) is not None
+    except Exception:
+        return False
+
+
+def _same_cell(left, right) -> bool:
+    if left is right or left == right:
+        return True
+    name = _node_name(left)
+    return bool(name) and name == _node_name(right)
+
+
+def _qt_cell_exclusive(table, acc) -> bool:
+    """True when ``acc`` is the only selected cell and it is focused.
+
+    On Qt 6.4 a pointer click sets ``SELECTED`` and ``FOCUSED`` on that
+    cell and clears the others. ``FOCUSED`` is the current cell:
+    ``currentItem`` is not its own AT-SPI state. ``Toggle`` sets
+    ``SELECTED`` without ``FOCUSED`` and leaves the other cells selected.
+    """
+    if not _state_has(acc, "SELECTED") or not _state_has(acc, "FOCUSED"):
+        return False
+    count = min(_child_count(table), 500)
+    saw = False
+    for index in range(count):
+        child = _child_at(table, index)
+        if child is None or _role_name(child) != "table cell":
+            continue
+        if not _state_has(child, "SELECTED"):
+            continue
+        if _same_cell(child, acc):
+            saw = True
+            continue
+        return False
+    return saw
+
+
+def activate_qt_table_cell(acc) -> bool:
+    """Select only this Qt grid cell and make it the current cell.
+
+    ``Toggle`` and ``Selection.select_child`` add the cell and leave the
+    current cell unchanged. A click at the cell's center is the mouse
+    click. True only when this cell is selected and focused and no other
+    cell in the table is selected. A miss is false, so the caller does not
+    report the click as confirmed.
+    """
+    table = _qt_grid(acc)
+    if table is None:
+        return False
+    if _qt_cell_exclusive(table, acc):
+        return True
+    if not _x11_keys_available():
+        return False
+    _click_center(acc)
+    for attempt in range(8):
+        if _qt_cell_exclusive(table, acc):
+            return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def _aria_bool(acc, key: str) -> bool | None:
+    """``true`` or ``false`` from an object attribute, else None."""
+    raw = str(_get_attributes(acc).get(key) or "").strip().lower()
+    if raw in {"true", "false"}:
+        return raw == "true"
+    return None
+
+
+def _row_toggle_state(acc) -> tuple[bool | None, bool | None]:
+    """``(expanded, checked)`` for a row that can toggle, else None per side.
+
+    An ARIA treeitem publishes ``EXPANDABLE`` while collapsed and ``EXPANDED``
+    after it opens. ``aria-expanded`` is that bit when the state set has not
+    been filled in. A checkable row uses ``CHECKED`` the same way. A row that
+    is neither is ``(None, None)`` and is not a toggle.
+    """
+    expanded: bool | None = None
+    if _state_has(acc, "EXPANDABLE") or _state_has(acc, "EXPANDED"):
+        expanded = _state_has(acc, "EXPANDED")
+    else:
+        flag = _aria_bool(acc, "aria-expanded")
+        if flag is not None:
+            expanded = flag
+    checked: bool | None = None
+    if _state_has(acc, "CHECKABLE") or _state_has(acc, "CHECKED"):
+        checked = _state_has(acc, "CHECKED")
+    else:
+        flag = _aria_bool(acc, "aria-checked")
+        if flag is not None:
+            checked = flag
+    return expanded, checked
+
+
+def _row_can_toggle(state: tuple[bool | None, bool | None]) -> bool:
+    return state[0] is not None or state[1] is not None
+
+
+def _row_toggle_committed(before: tuple[bool | None, bool | None], acc) -> bool:
+    """True when expanded or checked flipped and the new state stayed.
+
+    Chrome's ``doAction("click")`` returns before ``EXPANDED`` updates. The
+    read in the same turn still sees the collapsed treeitem, and a second
+    click then flips ``aria-expanded`` back. This waits through that beat.
+    The new state has to survive one more read. A row that cannot toggle is
+    false with no wait. Hermetic fakes patch ``time.sleep``.
+    """
+    if not _row_can_toggle(before):
+        return False
+    for attempt in range(8):
+        if _row_toggle_state(acc) != before:
+            time.sleep(0.04)
+            if _row_toggle_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def row_toggle_state(acc) -> tuple[bool | None, bool | None]:
+    """Expanded and checked bits to compare after ``select_contained_row``.
+
+    Read this before that call. The click action inside it returns before
+    Chrome publishes the new ``EXPANDED`` state.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    if target is None:
+        return None, None
+    return _row_toggle_state(target)
+
+
+def row_toggle_blocks_pointer(acc) -> bool:
+    """True when a center click would activate a toggle row a second time.
+
+    ``select_contained_row`` already performed the click or toggle action
+    when this is true. A pointer click is another activation. An ARIA
+    treeitem's handler flips ``aria-expanded``, so the second click
+    collapses the node the first click opened, and ``SELECTED`` never
+    appears when the item has no ``aria-selected``. A list option that is
+    not expandable or checkable still uses the pointer fallback. A GTK
+    cell whose action is expand or activate is not this case: that action
+    is not performed here.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    if target is None or not _row_can_toggle(_row_toggle_state(target)):
+        return False
+    return _first_press_action(acc) in _SELECTING_ACTION_NAMES
+
+
+def row_toggle_committed(before: tuple[bool | None, bool | None], acc) -> bool:
+    """True when the row's expanded or checked state flipped and stayed.
+
+    ``before`` is ``row_toggle_state`` from before the click action. Chrome
+    publishes the new state a beat after ``doAction`` returns.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    if target is None:
+        return False
+    return _row_toggle_committed(before, target)
+
+
+_FOLDER_VIEW_ROLES = frozenset({"page tab", "page tab list"})
+_PATH_ENTRY_ROLES = frozenset({"entry", "text", "editable text", "combo box", "combo-box"})
+_PATH_BUTTON_ROLES = frozenset({"push button", "toggle button"})
+_PATH_COMMANDS = frozenset({
+    "back", "forward", "home", "open parent", "up", "reload", "search",
+    "search for files...", "recent", "menubar", "undo", "redo",
+    "zoom out", "zoom in", "normal size", "icon view", "list view",
+    "compact view", "split view", "open terminal here",
+})
+_FOLDER_LOCATION_WAIT_S = 1.2
+
+
+def _raw_action_names(acc) -> list[str]:
+    """AT-SPI action names, lowercased, in the order the toolkit lists them."""
+    action = _action_iface(acc)
+    if action is None:
+        return []
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    names = []
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw:
+            names.append(raw)
+    return names
+
+
+def do_named_action(acc, name: str) -> bool:
+    """Perform the action named ``name``. False when the row has no such action.
+
+    This does not perform an earlier expand or edit action. ``do_press``
+    would, and that is not this row's activation.
+    """
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    wanted = (name or "").lower()
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw == wanted:
+            return bool(_call_first(action, ("do_action", "doAction"), index, default=False))
+    return False
+
+
+def _pathish(text: str) -> bool:
+    value = (text or "").strip()
+    return value.startswith("/") or value.startswith("~") or value.startswith("file://")
+
+
+def _hold_new(node, visited: list) -> bool:
+    """True when ``node`` is new. The list keeps that accessible alive.
+
+    An ``id()`` set does not. AT-SPI drops a wrapper once nothing references
+    it, and the next child can be born at that same address. The walk then
+    treats the new child as already seen and never reads it. Thunar's
+    location entry is several panels under a toolbar of empty panels, so it
+    is one of those later children.
+    """
+    if node is None or any(node is item for item in visited):
+        return False
+    visited.append(node)
+    return True
+
+
+def _toolbars_under(frame) -> list:
+    """Toolbars under ``frame``, without walking the folder's table.
+
+    The menu bar's toolbar is not always the one that holds the location.
+    """
+    found = []
+    queue = [frame]
+    seen = 0
+    visited: list = []
+    while queue and seen < 80 and len(found) < 4:
+        node = queue.pop(0)
+        if not _hold_new(node, visited):
+            continue
+        seen += 1
+        role = _role_name(node)
+        if role == "tool bar" and node is not frame:
+            found.append(node)
+            continue
+        if role in _LIST_ROLES and node is not frame:
+            continue
+        count = _raw_child_count(node)
+        for index in range(min(max(count, 0), 32)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    return found
+
+
+def _place_in_toolbar(toolbar) -> tuple[str, str] | None:
+    """``(text, kind)`` from one toolbar, or None when it has no location.
+
+    The location entry sits several panels under the toolbar. A path-bar
+    crumb is a checked button that is not Back, Home, or a view switch.
+    """
+    entry = None
+    crumbs: list[str] = []
+    queue = [toolbar]
+    seen = 0
+    visited: list = []
+    while queue and seen < 80 and entry is None:
+        node = queue.pop(0)
+        if not _hold_new(node, visited):
+            continue
+        seen += 1
+        role = "" if node is toolbar else _role_name(node)
+        if node is not toolbar:
+            if role in _PATH_ENTRY_ROLES:
+                text = (_node_plain_text(node) or "").strip()
+                if _pathish(text):
+                    entry = text
+                    break
+            if role in _PATH_BUTTON_ROLES:
+                name = _node_name(node).strip()
+                if name and name.casefold() not in _PATH_COMMANDS and _state_has(node, "CHECKED"):
+                    crumbs.append(name)
+            if role in _LIST_ROLES:
+                continue
+        count = _raw_child_count(node)
+        for index in range(min(max(count, 0), 32)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    if entry:
+        return entry, "location"
+    if crumbs:
+        return " / ".join(crumbs), "path bar"
+    return None
+
+
+def folder_place(acc) -> tuple[str, str] | None:
+    """``(text, kind)`` for the location entry or the path bar.
+
+    ``kind`` is ``location`` or ``path bar``. A path entry wins over path
+    buttons. Back, Home, and the view switches are not crumbs. None when
+    the window has neither.
+    """
+    frame = _frame_ancestor(acc)
+    if frame is None:
+        return None
+    path = None
+    for bar in _toolbars_under(frame):
+        reading = _place_in_toolbar(bar)
+        if reading is None:
+            continue
+        if reading[1] == "location":
+            return reading
+        if path is None:
+            path = reading
+    return path
+
+
+def folder_location(acc) -> str | None:
+    """Text of the location entry or path bar, or None."""
+    place = folder_place(acc)
+    if place is None:
+        return None
+    return place[0]
+
+
+def _inside_folder_view(acc) -> bool:
+    """True when ``acc`` sits in the folder view's tab, not the side pane."""
+    node = acc
+    for _ in range(16):
+        if node is None:
+            return False
+        role = _role_name(node)
+        if role in _FOLDER_VIEW_ROLES:
+            return True
+        if role in {"split pane", "frame", "application"}:
+            return False
+        node = _parent_of(node)
+    return False
+
+
+def _in_side_pane(acc) -> bool:
+    """True when a split pane contains ``acc`` above the folder view's tab."""
+    node = acc
+    for _ in range(16):
+        if node is None:
+            return False
+        role = _role_name(node)
+        if role in _FOLDER_VIEW_ROLES:
+            return False
+        if role == "split pane":
+            return True
+        if role in {"frame", "application"}:
+            return False
+        node = _parent_of(node)
+    return False
+
+
+def navigating_folder_row(acc) -> bool:
+    """A side-pane row, or a tree or list row, that opens a folder.
+
+    The folder view sits in a tab. A single click there selects the file.
+    The side pane is the table, tree, or list in the split pane outside
+    that tab, and the window has a location entry or a path bar. A tree or
+    list outside the tab is the same kind of row when that bar is present.
+    A table with no location bar is not one of these rows: selecting it is
+    the click.
+    """
+    parent, _index, target = _selection_parent(acc)
+    if parent is None or target is None or _inside_folder_view(acc):
+        return False
+    parent_role = _role_name(parent)
+    if _in_side_pane(acc):
+        if parent_role not in _LIST_ROLES:
+            return False
+    elif parent_role not in {"tree", "tree table", "list", "list box"}:
+        return False
+    return folder_location(acc) is not None
+
+
+def _gtk_outline_parent(acc):
+    """The tree or tree table that holds ``acc``.
+
+    A plain table is not an outline. The child's index is not read here.
+    That read walks every sibling, and a spreadsheet table has hundreds of
+    them. A snapshot of those cells must not pay for that walk.
+    """
+    node = acc
+    try:
+        for _ in range(8):
+            parent = _parent_of(node)
+            if parent is None:
+                return None
+            role = _role_name(parent)
+            if role in {"menu", "popup menu", "menu bar"}:
+                return None
+            if role in {"tree", "tree table"} and _selection_iface(parent) is not None:
+                return parent
+            if role == "table" and _selection_iface(parent) is not None:
+                return None
+            node = parent
+    except Exception:
+        return None
+    return None
+
+
+def outline_double_click_note(acc) -> str:
+    """``activates on double-click`` when a single click only selects the row.
+
+    A GTK tree or tree-table cell with no action interface, or with an
+    ``activate`` action that the single-click path does not run. A folder
+    row keeps its own navigation. Empty for every other node. This does not
+    perform the double-click or the activate action.
+    """
+    if acc is None:
+        return ""
+    try:
+        if _qt_app(acc) or "gtk" not in _toolkit_name(acc):
+            return ""
+        if _chromium_app(acc) or _gecko_app(acc):
+            return ""
+    except Exception:
+        return ""
+    parent = _gtk_outline_parent(acc)
+    if parent is None:
+        return ""
+    try:
+        if navigating_folder_row(acc):
+            return ""
+    except Exception:
+        return ""
+    names = _raw_action_names(acc)
+    if not names:
+        return "activates on double-click"
+    if "activate" not in names:
+        return ""
+    # select_contained_row performs a click or press action. expand, edit,
+    # and a later activate are not that click: the row is only selected.
+    if _first_press_action(acc) in _SELECTING_ACTION_NAMES:
+        return ""
+    return "activates on double-click"
+
+
+def navigation_gesture(acc) -> str | None:
+    """How this row opens a folder, or None when a click only selects.
+
+    ``pointer`` is a real click at the row. A GTK shortcut cell lists
+    expand, edit, then activate; that activate action reports success and
+    leaves the folder where it was, and Return on the selected row does
+    too, so neither is the row's activation. ``activate`` is a tree or list
+    row whose own action is activate, with no expand or edit ahead of it.
+    ``return`` is a row that has no box and no activate action, where
+    Return on the selected row is the activation.
+    """
+    if not navigating_folder_row(acc):
+        return None
+    names = _raw_action_names(acc)
+    if "expand or contract" in names or "edit" in names:
+        return "pointer"
+    if "activate" in names:
+        return "activate"
+    try:
+        origin, size = _extents(acc)
+    except Exception:
+        origin, size = None, None
+    if origin is None or size is None or size[0] <= 0 or size[1] <= 0:
+        return "return"
+    return "pointer"
+
+
+def folder_navigation_verdict(acc, before: str) -> tuple[str, str]:
+    """Confirm a folder row only when the location or path bar changes.
+
+    ``before`` is ``folder_location`` from before the click. A row that
+    only becomes selected keeps the previous folder, and that click is
+    partial.
+    """
+    deadline = time.monotonic() + _FOLDER_LOCATION_WAIT_S
+    while True:
+        place = folder_place(acc)
+        if place is not None and place[0] != before:
+            kind = "path bar" if place[1] == "path bar" else "location"
+            return "confirmed", f"the {kind} changed"
+        if time.monotonic() >= deadline:
+            return "partial", "the row was selected but the location did not change"
+        time.sleep(0.05)
+
+
 def select_contained_row(acc) -> bool | None:
     """Select a row or cell inside a Selection container.
 
     None means this node is not such a row, so the caller uses ``do_press``.
-    True means the row is selected and stayed selected. False means it is a
+    True means the row is selected and stayed selected, or an ARIA combobox
+    option committed its value and the list closed. False means it is a
     selection row and it is still not selected: the caller clicks the
     on-screen center, then checks again. A GTK cell's expand/edit/activate
     action is not used. A Chrome option's click is, and the selection is
     checked afterwards. A click action that returns without leaving the row
-    selected is not success.
+    selected is not success, unless the combobox that owns the option now
+    shows it.
     """
     parent, index, target = _selection_parent(acc)
     if parent is None or target is None:
         return None
+    choice = combobox_option_context(acc)
     action = _first_press_action(acc)
     if action in _SELECTING_ACTION_NAMES:
         do_press(acc)
         if _row_settled(target):
             return True
+        if combobox_option_committed(choice, target):
+            return True
     iface = _selection_iface(parent)
     if iface is not None and index is not None:
         _call_first(iface, ("select_child", "selectChild"), index, default=False)
         if _row_settled(target):
+            return True
+        if combobox_option_committed(choice, target):
             return True
     return False
 
@@ -4305,14 +13316,13 @@ def _clear_contenteditable(acc) -> bool:
         return True
     if not _x11_keys_available():
         return False
-    from a11y_computer_use.drivers import _linux_input
 
     original = _full_text(acc)
     for _attempt in range(_CONTENT_CLEAR_TRIES):
         grab_focus(acc)
-        _linux_input.press_chord("ctrl+a")
-        _linux_input.press_chord("backspace")
-        _linux_input.press_chord("delete")
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
         for poll in range(_CONTENT_CLEAR_POLLS):
             if _content_is_blank(acc):
                 return True
@@ -4323,7 +13333,214 @@ def _clear_contenteditable(acc) -> bool:
     return False
 
 
-def set_text(acc, text: str) -> bool:
+def _set_contenteditable_by_keys(acc, text: str) -> bool:
+    """Replace a Chrome contenteditable that has no EditableText.
+
+    The clear is the same one ``set_value("")`` uses: focus, select-all,
+    BackSpace, and Delete, then a poll. A newline from ``<br>`` counts as
+    empty. The new string is typed only after that clear. True only when
+    the readable text matches, including one trailing newline. A failed
+    type puts the original text back. An input, a textarea, and a GTK
+    field do not use this path.
+    """
+    if text == "":
+        return _clear_contenteditable(acc)
+    if _shown_matches(acc, text):
+        return True
+    original = _full_text(acc)
+    if not _clear_contenteditable(acc):
+        return False
+    _type_into_target(acc, text)
+    if _confirm_text_landed(acc, text):
+        return True
+    _restore_text(acc, original)
+    return False
+
+
+def _shown_is(acc, text: str) -> bool:
+    """True when a fresh snapshot read equals ``text``.
+
+    ``None`` is a failed read, not an empty field. An empty request still
+    accepts the blank contenteditable newline.
+    """
+    shown = _full_text(acc)
+    if not isinstance(shown, str):
+        return False
+    if text == "":
+        return _text_is_blank(shown)
+    return (shown == text or _texts_match(shown, text)) and _qt_text_count_matches(acc, text)
+
+
+def _replace_editable_text(acc, text: str) -> bool:
+    """Replace ``acc`` through EditableText. No key and no selection.
+
+    One ``set_text_contents``. The caller polls the cell: Writer can
+    rebuild the paragraph, so a delete or ctrl+a aimed at this object
+    would hit the document or the line that was just written.
+    """
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    _call_first(eti, ("set_text_contents",), text, default=False)
+    return _shown_is(acc, text)
+
+
+def _replace_drawing_paragraph(acc, text: str) -> bool:
+    """Replace an Impress or Draw paragraph. No selection and no keys.
+
+    One ``set_text_contents``. Success is ``Text.get_text(0, -1)`` equaling
+    ``text``, the same read a snapshot uses, polled the way other
+    EditableText replaces are. A miss is false and the caller raises
+    ``text_mismatch``. Selecting the paragraph is not the fallback: that
+    select is what a browser paragraph must not do.
+    """
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    _call_first(eti, ("set_text_contents",), text, default=False)
+    return _confirm_text(acc, text)
+
+
+def _attribute_multiline(attrs: dict | None) -> bool:
+    """True when ``multiline`` or ``aria-multiline`` is true.
+
+    A false or absent attribute is not multi-line. One true key is enough
+    when the other key is false. ``STATE_MULTI_LINE`` is checked by the caller.
+    """
+    for key in ("multiline", "aria-multiline"):
+        flag = (attrs or {}).get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _has_text_interface(acc) -> bool:
+    """True when ``acc`` exposes AT-SPI Text or EditableText."""
+    if acc is None:
+        return False
+    if _editable_iface(acc) is not None:
+        return True
+    count = _safe(lambda: _atspi().Text.get_character_count(acc))
+    return isinstance(count, int) and not isinstance(count, bool)
+
+
+def _gecko_contenteditable(acc) -> bool:
+    """True for a Firefox contenteditable that is not an entry.
+
+    Gecko exposes ``<div contenteditable>`` as a section with
+    ``STATE_EDITABLE`` and a text interface. An input, a textarea, a
+    paragraph, and a select are not this node. Chromium's roleless
+    contenteditable stays on its own path.
+    """
+    if acc is None or not _gecko_app(acc):
+        return False
+    if _role_name(acc) != "section":
+        return False
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return False
+    if tag not in _CONTENTEDITABLE_TAGS and "textbox" not in xml:
+        return False
+    if _state_has(acc, "READ_ONLY") or not _state_has(acc, "EDITABLE"):
+        return False
+    return _has_text_interface(acc)
+
+
+def _gecko_contenteditable_role(node, role: str, role_str: str, attrs: dict, state_editable: bool) -> str:
+    """Text role for an editable Gecko contenteditable, else ``role``.
+
+    ``STATE_EDITABLE`` plus a text interface is the editor. ``MULTI_LINE``,
+    or a multiline attribute, is a textarea. A single-line editor is a text
+    field. A section that is not editable, or that has no text interface,
+    stays ``role``. Chromium is unchanged.
+    """
+    if role_str != "section" or not state_editable or node is None:
+        return role
+    if not _gecko_app(node):
+        return role
+    tag = str((attrs or {}).get("tag") or "").lower()
+    xml = set(str((attrs or {}).get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return role
+    if tag not in _CONTENTEDITABLE_TAGS and "textbox" not in xml:
+        return role
+    if _state_has(node, "READ_ONLY") or not _has_text_interface(node):
+        return role
+    if _state_has(node, "MULTI_LINE") or _attribute_multiline(attrs):
+        return "AXTextArea"
+    return "AXTextField"
+
+
+def _wait_until_content_blank(acc) -> bool:
+    """Poll until the readable contenteditable text is blank."""
+    for attempt in range(16):
+        if _content_is_blank(acc):
+            return True
+        if attempt + 1 < 16:
+            time.sleep(0.05)
+    return False
+
+
+def _replace_gecko_contenteditable_by_keys(acc, text: str, original: str | None) -> bool:
+    """Replace a Firefox contenteditable with the focused typing path.
+
+    ``grab_focus`` runs first. A later read has to show keyboard focus on
+    this node or a descendant before any chord or character is sent. A miss
+    raises ``focus_lost`` and types nothing. The new string is typed only
+    after the field is blank, through the same ``_type_into_target`` path
+    ``type(ref)`` uses. Success is the readable text, where one trailing
+    newline is the empty ``<br>``. A failed type puts ``original`` back.
+    """
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _shown_matches(acc, text):
+        return True
+    if not _content_is_blank(acc):
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
+        if not _wait_until_content_blank(acc):
+            _restore_text(acc, original)
+            return False
+    if text == "":
+        return _content_is_blank(acc) or _shown_matches(acc, "")
+    _type_into_target(acc, text)
+    if _confirm_text_landed(acc, text):
+        return True
+    _restore_text(acc, original)
+    return False
+
+
+def _set_gecko_contenteditable(acc, text: str) -> bool:
+    """Replace a Firefox contenteditable and require the read-back.
+
+    EditableText is tried first and is not trusted: Firefox can return
+    success and leave the DOM unchanged. The read-back is the readable
+    text, including one trailing newline. When that read is not ``text``,
+    the fallback is ``_replace_gecko_contenteditable_by_keys``. No Text
+    selection is made: selecting a section can select the page.
+    """
+    if _shown_matches(acc, text):
+        return True
+    original = _readable_text(acc)
+    eti = _editable_iface(acc)
+    if eti is not None:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+        if _confirm_text_landed(acc, text):
+            return True
+    return _replace_gecko_contenteditable_by_keys(acc, text, original)
+
+
+def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
     GTK's ``set_text_contents`` replaces, and the snapshot read then equals
@@ -4336,32 +13553,63 @@ def set_text(acc, text: str) -> bool:
     True only when the snapshot read equals ``text``. A toolkit whose text
     cannot be read at all is trusted when ``set_text_contents`` returned
     true, so a replace is not refused just because ``Text.get_text`` failed.
+    When that call returned false and the snapshot read is NULL (Chromium's
+    empty entry), the field is typed on X11 and this returns true only when
+    a later snapshot read equals ``text``. A number input is not typed: focusing
+    it can make the empty field read back as 0. Focus that never arrives
+    raises ``focus_lost`` and does not report a write.
     A field with no EditableText is cleared and typed on X11; that also
     returns True only when the snapshot read equals ``text``. On Qt the
     character count has to equal that string too: ``GetText`` stops at an
     embedded NUL, so the text alone can match while the widget is longer.
     On Firefox, when EditableText returns success and the snapshot read is
     still not ``text``, the field is focused and the value is typed, and
-    success is still that read-back. Chromium and GTK keep the previous
+    success is still that read-back. A Firefox contenteditable section is
+    not cleared through Text selection. EditableText is tried, then the
+    readable text has to match, including one trailing newline. Otherwise
+    focus is confirmed and the same key path ``type(ref)`` uses replaces
+    the text. Unconfirmed focus types nothing. Chromium and GTK keep the previous
     tail: keys are sent only when the snapshot read is already empty,
     because focusing a Chrome number input can make an empty field read
     back as 0. When the snapshot read is left blank and the new text cannot
     be verified, the text from before the call is put back, so a
     contenteditable is not left empty. A Chromium field that still reads a
     value (an empty number input reads 0) is not focused in order to restore
-    it. An empty string on a Chrome contenteditable is focus, select-all,
+    it.     An empty string on a Chrome contenteditable is focus, select-all,
     BackSpace, and Delete, then a poll. A newline left by ``<br>`` is empty.
     Words that remain are ``text_mismatch``, and the previous text stays.
     An input, a textarea, and a GTK field do not use that clear.
+    A Chrome contenteditable with no EditableText, including a section that
+    has no textbox role, uses that same clear and then types the new string.
+    Success is the readable text, where one trailing newline is the ``<br>``.
     A Chrome date, time, or month segment is typed and checked against
     ``valuetext``. The Value interface is not that check.
+    A browser paragraph, a panel, a document, or a combo is not replaced.
+    Firefox exposes EditableText on those nodes, and selecting one selects
+    the page. This returns false before any selection or key. An Impress
+    or Draw paragraph with ``STATE_EDITABLE`` and EditableText is replaced
+    with ``set_text_contents`` and no selection. ``force`` is the Writer
+    table-cell path: one EditableText replace, with no selection and no
+    keys. The cell writer polls until the new paragraph is the value.
     """
+    if drawing_text_editable(acc):
+        return _replace_drawing_paragraph(acc, text)
+    if not force and _blocks_text_replace(acc):
+        return False
+    if force:
+        return _replace_editable_text(acc, text)
+    if is_writer_document(acc):
+        return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
         return _clear_contenteditable(acc)
+    if _gecko_contenteditable(acc):
+        return _set_gecko_contenteditable(acc, text)
     eti = _editable_iface(acc)
     if eti is None:
+        if _chromium_contenteditable(acc):
+            return _set_contenteditable_by_keys(acc, text)
         return _replace_with_keys(acc, text)
     original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
@@ -4369,7 +13617,22 @@ def set_text(acc, text: str) -> bool:
     if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
-        return wrote
+        if wrote:
+            return True
+        # Chromium's empty entry: set_text_contents returns false and
+        # get_text(0, -1) is NULL. Type only when the field still reads
+        # blank, and only accept the write when that read comes back as
+        # ``text``. A number input is left alone.
+        if (
+            not _number_input(acc)
+            and _text_is_gone(acc)
+            and _x11_keys_available()
+        ):
+            grab_focus(acc)
+            _type_into_target(acc, text)
+            if _confirm_text(acc, text):
+                return True
+        return False
     if not _clear_text(acc, eti, current):
         return False
     if not _call_first(eti, ("set_text_contents",), text, default=False):
@@ -4381,7 +13644,7 @@ def set_text(acc, text: str) -> bool:
         length = _insert_length(insert, text, acc) if insert is not None else len(text)
         if not _call_first(eti, ("insert_text", "insertText"), 0, text, length, default=False):
             if _text_is_gone(acc) and _x11_keys_available():
-                _type_string(text)
+                _type_into_target(acc, text)
             else:
                 return False
     if _confirm_text(acc, text):
@@ -4397,12 +13660,18 @@ def set_text(acc, text: str) -> bool:
         _restore_text(acc, original)
         return False
     if _text_is_gone(acc) and _x11_keys_available():
-        _type_string(text)
+        _type_into_target(acc, text)
         if _confirm_text(acc, text):
             return True
     # Only a blank read is restored. A Chromium number input that reads 0
     # after a failed clear is not blank, and focusing it to put the old
     # digits back is what makes the empty field read 0.
+    if (
+        _chromium_contenteditable(acc)
+        and _role_name(acc) in _CONTAINER_TEXT_ROLES
+        and _set_contenteditable_by_keys(acc, text)
+    ):
+        return True
     if _text_is_gone(acc):
         _restore_text(acc, original)
     return False
@@ -4490,6 +13759,293 @@ def _a11y_bus_address() -> str | None:
     except Exception:
         return None
     return address or None
+
+
+# Leaf menu actions that open Gtk.Dialog.run() must not be sent on the
+# connection later reads use. The first such action wedges libatspi's private
+# socket; revive switches reads onto the shared accessibility bus, and that
+# snapshot still shows the dialog. The next leaf DoAction on that shared bus
+# holds its dispatch lock for the whole modal loop, so the following snapshot
+# waits out the reply and comes back as one opaque region. The leaf is sent
+# on the private socket instead, with a short timeout, and reads stay on the
+# bus that was already in place.
+_MENU_LEAF_TIMEOUT_MS = 400
+_MENU_DIALOG_WAIT_S = 2.0
+_DIALOG_ROLES = frozenset({
+    "dialog", "file chooser", "alert", "color chooser", "font chooser",
+})
+_private_socket_address_cache: dict[str, str] = {}
+_private_action_bus: dict[str, int] = {}
+
+
+def _application_view(acc):
+    """The ``AtspiApplication`` struct for ``acc``, or None for a test double."""
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    class _GObject(ctypes.Structure):
+        _fields_ = [
+            ("g_class", ctypes.c_void_p),
+            ("ref_count", ctypes.c_uint),
+            ("pad", ctypes.c_uint),
+            ("qdata", ctypes.c_void_p),
+        ]
+
+    class _AtspiObject(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("app", ctypes.c_void_p),
+            ("path", ctypes.c_char_p),
+        ]
+
+    class _AtspiApplication(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("hash", ctypes.c_void_p),
+            ("bus_name", ctypes.c_char_p),
+            ("bus", ctypes.c_void_p),
+        ]
+
+    try:
+        obj = _AtspiObject.from_address(pointer)
+        if not obj.app:
+            return None
+        app = _AtspiApplication.from_address(obj.app)
+        bus_name = app.bus_name or b""
+        if not bus_name.startswith(b":"):
+            return None
+        return app
+    except Exception:
+        return None
+
+
+def _open_registered_connection(address: str) -> int | None:
+    """A private dbus connection registered on ``address``, or None."""
+    if not address:
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    class _DBusError(ctypes.Structure):
+        _fields_ = [
+            ("name", ctypes.c_char_p),
+            ("message", ctypes.c_char_p),
+            ("dummy", ctypes.c_uint),
+            ("padding", ctypes.c_void_p),
+        ]
+
+    try:
+        lib = ctypes.CDLL("libdbus-1.so.3")
+        lib.dbus_error_init.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_error_is_set.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_error_is_set.restype = ctypes.c_int
+        lib.dbus_error_free.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_connection_open_private.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DBusError)]
+        lib.dbus_connection_open_private.restype = ctypes.c_void_p
+        lib.dbus_bus_register.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DBusError)]
+        lib.dbus_bus_register.restype = ctypes.c_int
+        err = _DBusError()
+        lib.dbus_error_init(ctypes.byref(err))
+        conn = lib.dbus_connection_open_private(address.encode(), ctypes.byref(err))
+        if not conn or lib.dbus_error_is_set(ctypes.byref(err)):
+            if lib.dbus_error_is_set(ctypes.byref(err)):
+                lib.dbus_error_free(ctypes.byref(err))
+            return None
+        lib.dbus_error_init(ctypes.byref(err))
+        if not lib.dbus_bus_register(conn, ctypes.byref(err)):
+            if lib.dbus_error_is_set(ctypes.byref(err)):
+                lib.dbus_error_free(ctypes.byref(err))
+            return None
+        return int(conn)
+    except Exception:
+        return None
+
+
+def _private_socket_address(bus_name: str) -> str | None:
+    """The app's private AT-SPI socket, from ``GetApplicationBusAddress``."""
+    cached = _private_socket_address_cache.get(bus_name)
+    if cached:
+        return cached
+    a11y = _a11y_bus_address()
+    if not a11y:
+        return None
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Gio, GLib
+
+        conn = Gio.DBusConnection.new_for_address_sync(
+            a11y,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None,
+        )
+        reply = conn.call_sync(
+            bus_name, "/org/a11y/atspi/accessible/root",
+            "org.a11y.atspi.Application", "GetApplicationBusAddress",
+            None, GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 1000, None,
+        )
+        address = reply.get_child_value(0).get_string()
+    except Exception:
+        return None
+    if not address:
+        return None
+    _private_socket_address_cache[bus_name] = address
+    return address
+
+
+def _private_action_connection(bus_name: str) -> int | None:
+    """A connection to the app's private socket, reused until a leaf times out."""
+    cached = _private_action_bus.get(bus_name)
+    if cached:
+        return cached
+    address = _private_socket_address(bus_name)
+    if not address:
+        return None
+    conn = _open_registered_connection(address)
+    if conn:
+        _private_action_bus[bus_name] = conn
+    return conn
+
+
+@contextmanager
+def _leaf_action_bus(acc):
+    """Point ``acc``'s app at its private socket for one action, then restore.
+
+    The connection that was already installed stays the one later reads use.
+    When the private socket cannot be opened, the action uses the current bus.
+    """
+    app = _application_view(acc)
+    if app is None:
+        yield
+        return
+    saved = app.bus
+    bus_name = (app.bus_name or b"").decode("utf-8", "replace")
+    private = _private_action_connection(bus_name)
+    swapped = bool(private) and private != saved
+    if swapped:
+        app.bus = private
+    try:
+        yield
+    finally:
+        if swapped:
+            app.bus = saved
+
+
+def _drop_private_action_bus(acc) -> None:
+    app = _application_view(acc)
+    if app is None:
+        return
+    bus_name = (app.bus_name or b"").decode("utf-8", "replace")
+    _private_action_bus.pop(bus_name, None)
+
+
+def dispatch_menu_leaf(node) -> str:
+    """Press a menu leaf without waiting out a modal dialog's D-Bus reply.
+
+    Returns ``ok``, ``dispatched``, or ``refused``. A real accessible is
+    invoked on the app's private socket with a 400ms reply budget. A fake
+    tree used in tests has no D-Bus connection and is pressed directly.
+    """
+    from a11y_computer_use.drivers import _linux_menus
+
+    if _gobject_pointer(node) is None:
+        start = time.monotonic()
+        failed = False
+        try:
+            result = _linux_menus._invoke_press(node)
+        except Exception:
+            failed = True
+            result = False
+        return _linux_menus.classify_leaf_press(
+            result is True, failed=failed, elapsed=time.monotonic() - start,
+        )
+
+    Atspi = None
+    try:
+        Atspi = _atspi()
+        Atspi.set_timeout(_MENU_LEAF_TIMEOUT_MS, 0)
+    except Exception:
+        Atspi = None
+    start = time.monotonic()
+    failed = False
+    result = False
+    try:
+        with _leaf_action_bus(node):
+            try:
+                result = _linux_menus._invoke_press(node)
+            except Exception:
+                failed = True
+                result = False
+    finally:
+        if Atspi is not None:
+            try:
+                Atspi.set_timeout(300, 0)
+            except Exception:
+                pass
+    elapsed = time.monotonic() - start
+    outcome = _linux_menus.classify_leaf_press(
+        result is True, failed=failed, elapsed=elapsed,
+    )
+    if outcome == "dispatched":
+        _drop_private_action_bus(node)
+    return outcome
+
+
+def _is_dialog_role(role: str) -> bool:
+    return role in _DIALOG_ROLES or role.endswith(" dialog")
+
+
+def _menu_dialog_open(acc) -> bool:
+    """True when a dialog is the app itself, a child, or one level under that."""
+    count = _raw_child_count(acc)
+    if count <= 0 or call_went_unanswered():
+        return False
+    for index in range(min(int(count), 24)):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        if _is_dialog_role(_role_name(child)):
+            return True
+        nested = _raw_child_count(child)
+        if nested <= 0 or call_went_unanswered():
+            continue
+        for sub_index in range(min(int(nested), 16)):
+            sub = _child_at(child, sub_index)
+            if sub is not None and _is_dialog_role(_role_name(sub)):
+                return True
+    return False
+
+
+def await_menu_dialog(acc, *, dispatched: bool = False) -> None:
+    """Wait until a dialog opened by the leaf is readable, or the budget ends.
+
+    A healthy app with no dialog (Save, Undo) returns after one look. A
+    wedged child count replaces the app bus once, then polls for the window.
+    ``dispatched`` is a leaf whose reply timed out; that poll runs even when
+    the first read still answers, because the dialog may still be mapping.
+    """
+    if _gobject_pointer(acc) is None:
+        return
+    deadline = time.monotonic() + (_MENU_DIALOG_WAIT_S if dispatched else 0.0)
+    while True:
+        count = _raw_child_count(acc)
+        wedged = count < 0 or call_went_unanswered()
+        if wedged and _revive_application(acc):
+            deadline = max(deadline, time.monotonic() + _MENU_DIALOG_WAIT_S)
+        if _menu_dialog_open(acc):
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.05)
 
 
 def _revive_application(acc) -> bool:
@@ -4594,6 +14150,7 @@ def _revive_application(acc) -> bool:
 
 
 def _raw_child_count(acc) -> int:
+    _drop_cached_properties(acc)
     try:
         return int(_call_first(acc, ("get_child_count", "get_childCount"), default=0) or 0)
     except (TypeError, ValueError):
@@ -4619,6 +14176,1142 @@ def _child_count(acc) -> int:
     return count
 
 
+# A GTK tree of a few hundred rows is not a Calc grid. Calc's sheet is a
+# million rows, or it sits under a spreadsheet document. Past this size the
+# index walk and the sheet sampler stay in charge.
+_GTK_TABLE_MAX_ROWS = 100_000
+_GTK_TABLE_MAX_COLS = 256
+# ``find`` looks up a name through Table.get_accessible_at. The window is
+# enough for a scrolled tree of a few hundred rows and stays short of a
+# sheet-sized scan.
+_GTK_SEEK_MAX_ROWS = 4096
+_GTK_SEEK_MAX_COLS = 8
+_OFFSCREEN_SENTINEL = -2_000_000_000
+
+
+def _plain_table_size(node) -> tuple[int | None, int | None]:
+    """``(rows, columns)`` from the accessible, then the Table interface."""
+
+    def _as_int(value) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return int(value)
+
+    rows = _as_int(_call_first(node, ("get_n_rows",)))
+    cols = _as_int(_call_first(node, ("get_n_columns", "get_n_cols")))
+    if rows is not None and cols is not None:
+        return rows, cols
+    return _table_dimensions(node)
+
+
+def _table_cell_at(node, row: int, col: int):
+    """The cell at ``(row, col)``, from the accessible or the Table interface."""
+    cell = _call_first(node, ("get_accessible_at",), row, col)
+    if cell is not None:
+        return cell
+    try:
+        table = getattr(_atspi(), "Table", None)
+    except ImportError:
+        return None
+    if table is None:
+        return None
+    return _safe(lambda: table.get_accessible_at(node, row, col))
+
+
+def _row_at_child_index(node, index: int) -> int | None:
+    """Table row for a child index. None for a header (row -1) or a miss."""
+    row = _call_first(node, ("get_row_at_index",), index)
+    if row is None:
+        try:
+            table = getattr(_atspi(), "Table", None)
+        except ImportError:
+            table = None
+        if table is not None:
+            row = _safe(lambda: table.get_row_at_index(node, index))
+    if isinstance(row, bool) or not isinstance(row, int) or row < 0:
+        return None
+    return int(row)
+
+
+def _gtk_row_table(node) -> bool:
+    """True for a GTK-sized data table whose cells do not fit the child cap.
+
+    A short tree stays on the index walk. Qt, Chromium, Firefox, and a Calc
+    sheet stay on the walks they already had. A few hundred GTK rows would
+    otherwise be read as a spreadsheet (the first rows only) or from child 0.
+    """
+    if _role_name(node) not in {"table", "tree table"}:
+        return False
+    if _qt_app(node) or _chromium_app(node) or _gecko_app(node):
+        return False
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and "spreadsheet" in _role_name(parent):
+        return False
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None or rows <= 0 or cols <= 0:
+        return False
+    if rows >= _GTK_TABLE_MAX_ROWS or cols >= _GTK_TABLE_MAX_COLS:
+        return False
+    return rows * cols > MAX_CHILDREN
+
+
+def _overlaps_screen(pos, size, screen: tuple[int, int]) -> bool:
+    """True when the rect meets the screen and is not the GTK off-screen sentinel."""
+    if pos is None or size is None:
+        return False
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    if width <= 0 or height <= 0 or x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return False
+    screen_w, screen_h = screen
+    if screen_w <= 0 or screen_h <= 0:
+        return False
+    return x < screen_w and y < screen_h and x + width > 0 and y + height > 0
+
+
+def _on_screen_item(acc, screen: tuple[int, int]):
+    """``(accessible, position, size)`` when ``acc`` overlaps the screen."""
+    pos, size = _extents(acc)
+    if not _overlaps_screen(pos, size, screen):
+        return None
+    return (acc, pos, size)
+
+
+def _hit_at(comp, x: float, y: float):
+    try:
+        coord = getattr(getattr(_atspi(), "CoordType", None), "SCREEN", 0)
+    except ImportError:
+        coord = 0
+    return _call_first(
+        comp, ("get_accessible_at_point", "getAccessibleAtPoint"), int(x), int(y), coord,
+    )
+
+
+def _row_for_hit(table, hit) -> int | None:
+    """Table row of a hit-test result. None when the hit is a header or a miss.
+
+    The row index is the child index of the node whose parent is the table.
+    A text child inside a cell is not that node: its own index is not a row.
+    """
+    node = hit
+    for _depth in range(4):
+        if node is None:
+            return None
+        parent = _parent_of(node)
+        if parent is table:
+            index = _call_first(node, ("get_index_in_parent", "getIndexInParent"))
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                return None
+            return _row_at_child_index(table, int(index))
+        node = parent
+    return None
+
+
+def _row_from_edge(table, comp, x: float, start: float, stop: float, step: float) -> int | None:
+    """First table row hit walking from ``start`` toward ``stop``.
+
+    Column headers occupy the top of the box and answer no row. A short
+    walk covers that band and the empty padding under the last painted row.
+    """
+    yy = float(start)
+    limit = float(stop)
+    for _step in range(48):
+        if step > 0 and yy >= limit:
+            return None
+        if step < 0 and yy <= limit:
+            return None
+        row = _row_for_hit(table, _hit_at(comp, x, yy))
+        if row is not None:
+            return row
+        yy += step
+    return None
+
+
+def _box_overlaps(pos, size, origin, span) -> bool:
+    """True when the two rectangles meet and neither is the off-screen sentinel."""
+    if pos is None or size is None or origin is None or span is None:
+        return False
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    ox, oy = float(origin[0]), float(origin[1])
+    ow, oh = float(span[0]), float(span[1])
+    if width <= 0 or height <= 0 or ow <= 0 or oh <= 0:
+        return False
+    if x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return False
+    if ox <= _OFFSCREEN_SENTINEL or oy <= _OFFSCREEN_SENTINEL:
+        return False
+    return x < ox + ow and x + width > ox and y < oy + oh and y + height > oy
+
+
+def _intersect_box(pos, size, origin, span):
+    """The overlapping rectangle, or None when the overlap is not a real box."""
+    if not _box_overlaps(pos, size, origin, span):
+        return None
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    ox, oy = float(origin[0]), float(origin[1])
+    ow, oh = float(span[0]), float(span[1])
+    left = max(x, ox)
+    top = max(y, oy)
+    right = min(x + width, ox + ow)
+    bottom = min(y + height, oy + oh)
+    if right - left <= 1 or bottom - top <= 1:
+        return None
+    return (left, top), (right - left, bottom - top)
+
+
+def _viewport_box(node):
+    """Nearest scroll pane or viewport ancestor that has a real box.
+
+    None when the table is not inside one. A GTK tree whose scroll pane is
+    the table's own box is that box, so the span does not move.
+    """
+    current = _parent_of(node)
+    for _depth in range(8):
+        if current is None:
+            return None
+        if _role_name(current) in {"scroll pane", "viewport"}:
+            pos, size = _extents(current)
+            if (
+                pos is not None
+                and size is not None
+                and float(size[0]) > 1
+                and float(size[1]) > 1
+            ):
+                return pos, size
+        current = _parent_of(current)
+    return None
+
+
+def _reported_showing(acc) -> bool | None:
+    """SHOWING when a state set was reported. None when that is not evidence.
+
+    An empty set is not evidence: a GTK fake leaves ``states`` empty, and a
+    missing bit there is not a hidden cell. A set that names other states
+    and omits SHOWING is not painted.
+    """
+    try:
+        names = _state_names(acc)
+    except Exception:
+        return None
+    if not names:
+        return None
+    return "SHOWING" in names
+
+
+def _painted_table_item(acc, screen: tuple[int, int]):
+    """``(accessible, position, size)`` when ``acc`` is painted in the viewport.
+
+    Overlapping the screen is not enough. A Swing row below the scroll pane
+    still has screen coordinates. A reported state set without SHOWING is
+    the same row. An empty state set is not that evidence.
+    """
+    item = _on_screen_item(acc, screen)
+    if item is None:
+        return None
+    if _reported_showing(acc) is False:
+        return None
+    view = _viewport_box(acc)
+    if view is not None and not _box_overlaps(item[1], item[2], view[0], view[1]):
+        return None
+    return item
+
+
+def _gtk_visible_span(table, pos, size, rows: int) -> tuple[int, int] | None:
+    """Inclusive row range whose cells overlap the viewport, then the screen.
+
+    The table's own box can be the whole body. Rows under that box and still
+    on the display are not painted when a scroll pane clips them.
+    """
+    comp = _component(table)
+    if comp is None or pos is None or size is None:
+        return None
+    view = _viewport_box(table)
+    if view is not None:
+        clipped = _intersect_box(pos, size, view[0], view[1])
+        if clipped is None:
+            return None
+        pos, size = clipped
+    screen = _screen_size()
+    clipped = _intersect_box(pos, size, (0.0, 0.0), (float(screen[0]), float(screen[1])))
+    if clipped is None:
+        return None
+    pos, size = clipped
+    x = float(pos[0])
+    y = float(pos[1])
+    width = float(size[0])
+    height = float(size[1])
+    if width <= 1 or height <= 1:
+        return None
+    inset = min(40.0, max(8.0, width / 4.0))
+    if width > 48:
+        inset = min(inset, width - 20.0)
+    sample_x = x + max(1.0, inset)
+    first = _row_from_edge(table, comp, sample_x, y + 1, y + height, 4)
+    if first is None:
+        return None
+    last = _row_from_edge(table, comp, sample_x, y + height - 2, y, -4)
+    if last is None:
+        last = first
+    if last < first:
+        first, last = last, first
+    return first, min(last, rows - 1)
+
+
+class _HeaderRect:
+    """Screen box captured before the next column header is requested."""
+
+    def __init__(self, x: float, y: float, width: float, height: float) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+
+class _FrozenColumnHeader:
+    """A column header whose name and screen box are fixed at read time.
+
+    Java ATK's ``Table.get_column_header`` objects share one native header.
+    Asking for the next column rewrites the name on every object already
+    returned. The snapshot reads names later, so each column would show the
+    last name. The box is captured in the same moment: a later read can
+    move too. Role, states, and actions still come from the live object.
+    """
+
+    def __init__(self, header, name: str, rect: _HeaderRect | None) -> None:
+        self._header = header
+        self._name = name
+        self._rect = rect
+
+    def get_name(self):
+        return self._name
+
+    def getName(self):
+        return self._name
+
+    def get_component_iface(self):
+        if self._rect is None:
+            return _call_first(self._header, ("get_component_iface", "get_component"))
+        return self
+
+    def get_component(self):
+        return self.get_component_iface()
+
+    def get_extents(self, _coord=None):
+        if self._rect is not None:
+            return self._rect
+        comp = _call_first(self._header, ("get_component_iface", "get_component"))
+        if comp is None:
+            return None
+        return _call_first(comp, ("get_extents", "getExtents"), _coord)
+
+    def __getattr__(self, item):
+        return getattr(self._header, item)
+
+
+def _freeze_column_header(header):
+    """Copy the header name and screen box before another column is requested."""
+    got = _call_first(header, ("get_name", "getName"), default="")
+    name = "" if got is None else str(got)
+    rect = None
+    try:
+        pos, size = _extents(header)
+    except Exception:
+        pos, size = None, None
+    if pos is not None and size is not None:
+        rect = _HeaderRect(float(pos[0]), float(pos[1]), float(size[0]), float(size[1]))
+    return _FrozenColumnHeader(header, name, rect)
+
+
+def _gtk_column_headers(table, cols: int) -> list:
+    """Column headers, from the Table interface or the leading header children.
+
+    Each Table-interface header is frozen as soon as it is returned. Java
+    ATK reuses the native header state, so the next ``get_column_header``
+    would otherwise rename the columns already collected.
+    """
+    found = []
+    seen: set[int] = set()
+    for col in range(max(0, cols)):
+        header = _call_first(table, ("get_column_header",), col)
+        if header is None or id(header) in seen:
+            continue
+        seen.add(id(header))
+        found.append(_freeze_column_header(header))
+    if found:
+        return found
+    for index in range(min(_raw_child_count(table), max(cols, 0) + 2)):
+        child = _child_at(table, index)
+        if child is None or id(child) in seen:
+            continue
+        if "header" not in _role_name(child):
+            break
+        seen.add(id(child))
+        found.append(child)
+    return found
+
+
+def _matches_seek(acc, needle: str) -> bool:
+    """Case-insensitive substring of the accessible name, as ``find`` matches a title."""
+    name = str(_call_first(acc, ("get_name",), default="") or "")
+    if not name.strip():
+        name = str(_call_first(acc, ("get_description",), default="") or "")
+    haystack = name.replace("\u00a0", " ").casefold()
+    return needle.replace("\u00a0", " ").casefold() in haystack
+
+
+def _child_label(node) -> str:
+    """The row's own name, or the first named descendant one level down.
+
+    A Chromium table row is unnamed. The cell under it carries ``Row 001``.
+    """
+    if node is None:
+        return ""
+    name = _node_name(node)
+    if name:
+        return name
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return ""
+    for index in range(min(int(count), 3)):
+        child = _child_at(node, index)
+        label = _node_name(child) if child is not None else ""
+        if label:
+            return label
+    return ""
+
+
+def child_labels(node, limit: int | None = None) -> list[str]:
+    """Document-order labels of ``node``'s children, capped at the seek window."""
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return []
+    cap = _GTK_SEEK_MAX_ROWS if limit is None else int(limit)
+    labels = []
+    for index in range(min(int(count), cap)):
+        labels.append(_child_label(_child_at(node, index)))
+    return labels
+
+
+def _seek_hit(node, needle: str):
+    """``node`` or one direct child whose name contains ``needle``.
+
+    A named miss is not opened past that one level. The cell name is the
+    row text; the button inside a named cell is that one child.
+    """
+    if node is None:
+        return None
+    if _matches_seek(node, needle):
+        return node
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    for index in range(min(int(count), 4)):
+        child = _child_at(node, index)
+        if child is not None and _matches_seek(child, needle):
+            return child
+    return None
+
+
+def _contains_needle(node, needle: str, depth: int = 0) -> bool:
+    """True when ``node`` or a close descendant is named ``needle``.
+
+    Used only to decide that a painted row is already on screen, so ``find``
+    does not scan the rest of a long table.
+    """
+    if node is None or depth > 3:
+        return False
+    if _matches_seek(node, needle):
+        return True
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    for index in range(min(int(count), 6)):
+        if _contains_needle(_child_at(node, index), needle, depth + 1):
+            return True
+    return False
+
+
+def _visible_tree_matches(rows, needle: str) -> bool:
+    """True when a painted row or a cell under it already contains ``needle``."""
+    if _gtk_rows_match(rows, needle):
+        return True
+    for acc, _pos, _size in rows:
+        if _contains_needle(acc, needle):
+            return True
+    return False
+
+
+def _table_seek_cell(node, needle: str):
+    """``(cell, row, rows)`` for the first cell whose name contains ``needle``.
+
+    ``Table.get_accessible_at`` addresses a row the snapshot never walks.
+    None when no cell in the seek window matches. A long HTML table is not
+    a spreadsheet: 300 rows still scan. Calc never reaches this from the
+    Chromium document walk.
+    """
+    rows, cols = _plain_table_size(node)
+    if rows is None or rows <= 0:
+        counted = _child_count(node)
+        rows = int(counted) if isinstance(counted, int) and not isinstance(counted, bool) else 0
+        cols = 1
+    if rows <= 0:
+        return None
+    cols = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 1
+    total = max(rows, 1)
+    for row in range(min(rows, _GTK_SEEK_MAX_ROWS)):
+        for col in range(min(cols, _GTK_SEEK_MAX_COLS)):
+            cell = _table_cell_at(node, row, col)
+            if cell is None and col == 0:
+                cell = _child_at(node, row)
+            found = _seek_hit(cell, needle)
+            if found is not None:
+                return found, row, total
+    return None
+
+
+_SEEK_SKIP_ROLES = frozenset({
+    "document web", "document frame", "application", "frame", "window",
+    "panel", "filler", "section", "grouping", "scroll pane", "viewport",
+    "desktop frame", "dialog",
+})
+_SEEK_NODE_BUDGET = 8000
+_SEEK_CHILD_CAP = 400
+
+
+def _content_documents(root, limit: int = 4) -> list:
+    """Up to ``limit`` document nodes under ``root``, chrome only until then."""
+    found: list = []
+    queue = [root]
+    seen: set[object] = set()
+    examined = 0
+    while queue and len(found) < limit and examined < 300:
+        node = queue.pop(0)
+        if node is None:
+            continue
+        key = _frame_cache_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        examined += 1
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            found.append(node)
+            continue
+        count = _child_count(node)
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            continue
+        for index in range(min(int(count), 30)):
+            queue.append(_child_at(node, index))
+    return found
+
+
+def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object]):
+    """The first match in document order, or None.
+
+    A table is scanned through the Table interface and not by walking every
+    row as a child, so a 300-row table below the fold is still reached.
+    Other nodes are searched children-first, so a cell wins over the
+    container whose value is the whole table. Identity is the AT-SPI object
+    path: ``id()`` is reused when a proxy is freed, and that collision
+    skipped the table at the end of a long document.
+    """
+    if node is None or budget[0] <= 0:
+        return None
+    key = _frame_cache_key(node)
+    if key in seen:
+        return None
+    seen.add(key)
+    budget[0] -= 1
+    role = _role_name(node)
+    if role in {"table", "tree table"}:
+        return _table_seek_cell(node, needle)
+    count = _child_count(node)
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        for index in range(min(int(count), _SEEK_CHILD_CAP)):
+            if budget[0] <= 0:
+                return None
+            found = _seek_document_tree(_child_at(node, index), needle, budget, seen)
+            if found is not None:
+                return found
+    if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
+        return node, 0, 1
+    return None
+
+
+def reveal_text_in_document(root, needle: str) -> bool:
+    """Scroll a document-order match for ``needle`` onto the screen.
+
+    The walk includes nodes the pruner will drop, so a table that starts
+    below the viewport is still searched. A match that is already on screen
+    is left where it is. False when nothing in the seek window matches.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or root is None:
+        return False
+    budget = [_SEEK_NODE_BUDGET]
+    seen: set[object] = set()
+    hit = None
+    documents = _content_documents(root)
+    for doc in documents:
+        hit = _seek_document_tree(doc, text, budget, seen)
+        if hit is not None:
+            break
+    if hit is None:
+        hit = _seek_document_tree(root, text, budget, seen)
+    if hit is None:
+        return False
+    cell, row, rows = hit
+    screen = _screen_size()
+    if _on_screen_item(cell, screen) is not None:
+        return True
+    _bring_cell_on_screen(cell, screen, row, rows)
+    _invalidate_tree_cache(root)
+    return True
+
+
+def _reveal_chromium_table_match(node, needle: str) -> bool:
+    """Scroll a Chromium table cell named ``needle`` into view.
+
+    The snapshot lists the on-screen band only, so a row below that band
+    is missing with nothing for ``find`` to match. ``Table.get_accessible_at``
+    still addresses it. False when no cell in the seek window matches.
+    """
+    found = _table_seek_cell(node, needle)
+    if found is None:
+        return False
+    cell, row, rows = found
+    _bring_cell_on_screen(cell, _screen_size(), row, rows)
+    _invalidate_tree_cache(node)
+    return True
+
+
+def _gtk_rows_match(rows, needle: str) -> bool:
+    return any(_matches_seek(acc, needle) for acc, _pos, _size in rows)
+
+
+def _scroll_vertical_bar_to_row(cell, row: int, rows: int) -> bool:
+    """Move an ancestor's vertical bar so ``row`` is in the scrolled window.
+
+    GTK tree cells report ``scroll_to`` as unsupported, including cells that
+    are already on screen. The scroll pane's bar is a Value in pixels. A
+    fraction of that range puts the row in the window. A bar with no range
+    is left alone.
+    """
+    if rows <= 1:
+        return False
+    fraction = max(0.0, min(1.0, float(row) / float(rows - 1)))
+    for bar in _collect_scrollbars(cell):
+        if _bar_axis(bar) != "vertical":
+            continue
+        minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), 0.0)
+        maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), 0.0)
+        if maximum <= minimum:
+            continue
+        _write_value(bar, minimum + (maximum - minimum) * fraction)
+        return True
+    return False
+
+
+def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) -> bool:
+    """Scroll ``cell`` into view. True when its box then overlaps the screen."""
+    scroll_to(cell)
+    if _on_screen_item(cell, screen) is not None:
+        return True
+    scroll_to_edge(cell, "TOP_EDGE")
+    if _on_screen_item(cell, screen) is not None:
+        return True
+    _scroll_vertical_bar_to_row(cell, row, rows)
+    for _attempt in range(8):
+        if _on_screen_item(cell, screen) is not None:
+            return True
+        time.sleep(0.05)
+    return _on_screen_item(cell, screen) is not None
+
+
+def _cell_matches_needle(cell, needle: str) -> bool:
+    """True when the cell, or an unnamed cell's child, is named ``needle``.
+
+    A GTK cell carries the row text on itself. Opening every child of a
+    miss is what made a 10k TreeView find exceed the event-thread budget.
+    Swing leaves the cell unnamed and puts the text on a child. That is
+    the only miss that looks one level down.
+    """
+    if cell is None:
+        return False
+    name = str(_call_first(cell, ("get_name", "getName"), default="") or "")
+    folded = needle.replace("\u00a0", " ").casefold()
+    haystack = name.replace("\u00a0", " ").casefold()
+    if name.strip():
+        return folded in haystack
+    return _seek_hit(cell, needle) is not None
+
+
+def _bring_gtk_cell_into_view(cell, screen: tuple[int, int], row: int, rows: int) -> bool:
+    """Scroll ``cell`` into the viewport. True when it is then painted.
+
+    On screen but below the scroll pane is not painted. ``scroll_to`` and
+    the vertical bar are the same calls a GTK tree already uses. A cell
+    that stays outside the viewport is not given a coordinate.
+    """
+    scroll_to(cell)
+    if _painted_table_item(cell, screen) is not None:
+        return True
+    scroll_to_edge(cell, "TOP_EDGE")
+    if _painted_table_item(cell, screen) is not None:
+        return True
+    _scroll_vertical_bar_to_row(cell, row, rows)
+    for _attempt in range(8):
+        if _painted_table_item(cell, screen) is not None:
+            return True
+        time.sleep(0.05)
+    return _painted_table_item(cell, screen) is not None
+
+
+def _reveal_named_cell(cell, screen: tuple[int, int], row: int, rows: int):
+    """Scroll ``cell`` on screen when AT-SPI can. The same cell either way.
+
+    A cell that stays off screen is still the match. Its extents are left
+    alone, including the GTK off-screen sentinel.
+    """
+    if cell is None:
+        return None
+    if _on_screen_item(cell, screen) is None and rows > 0:
+        _bring_cell_on_screen(cell, screen, row, rows)
+    return cell
+
+
+def _seek_unshown_children(node, needle: str, screen: tuple[int, int]):
+    """A non-showing child whose name contains ``needle``.
+
+    Used when the Table interface exposes no cell. GTK still lists those
+    cells as children and parks them at the off-screen sentinel. On-screen
+    children are already in the painted span.
+    """
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    rows, cols = _plain_table_size(node)
+    if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
+        col_span = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 1
+        cap = min(count, rows * min(col_span, _GTK_SEEK_MAX_COLS) + 64)
+    else:
+        cap = min(count, _GTK_TABLE_MAX_ROWS)
+    total = rows if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else cap
+    for index in range(cap):
+        child = _child_at(node, index)
+        if child is None or _on_screen_item(child, screen) is not None:
+            continue
+        found = _seek_hit(child, needle)
+        if found is None:
+            continue
+        row = _row_at_child_index(node, index)
+        if row is None:
+            row = min(index, max(total - 1, 0))
+        return _reveal_named_cell(found, screen, row, total)
+    return None
+
+
+def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
+    """The Table cell named ``needle``. None when no cell matches.
+
+    The scan uses ``Table.get_accessible_at``, which addresses a row the
+    on-screen walk never visits. The row cap is the table's own size, not
+    the short seek window used for a document table. When that interface
+    exposes no cell, non-showing children are searched instead. A match is
+    scrolled on screen when AT-SPI can do it. A cell that stays off screen
+    is still returned, with whatever extents the toolkit reported.
+    """
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None or rows <= 0:
+        return _seek_unshown_children(node, needle, screen)
+    col_limit = min(cols, _GTK_SEEK_MAX_COLS)
+    saw_cell = False
+    for row in range(min(rows, _GTK_TABLE_MAX_ROWS)):
+        for col in range(col_limit):
+            cell = _table_cell_at(node, row, col)
+            if cell is None:
+                continue
+            saw_cell = True
+            if not _cell_matches_needle(cell, needle):
+                continue
+            if _painted_table_item(cell, screen) is None:
+                _bring_gtk_cell_into_view(cell, screen, row, rows)
+                refreshed = _table_cell_at(node, row, col)
+                if refreshed is not None:
+                    cell = refreshed
+            return cell
+    if saw_cell:
+        return None
+    return _seek_unshown_children(node, needle, screen)
+
+
+def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
+    """On-screen headers and body cells, or None when the span cannot be read.
+
+    None keeps the index walk, which is how a header-only file chooser still
+    gains its body through ``_with_table_body``.
+    """
+    pos, size = _extents(node)
+    if not _overlaps_screen(pos, size, screen):
+        return None
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None:
+        return None
+    span = _gtk_visible_span(node, pos, size, rows)
+    if span is None:
+        return None
+    first, last = span
+    out = []
+    view = _viewport_box(node)
+    for header in _gtk_column_headers(node, cols):
+        item = _on_screen_item(header, screen)
+        if item is None:
+            continue
+        if view is not None and not _box_overlaps(item[1], item[2], view[0], view[1]):
+            continue
+        out.append(item)
+    for row in range(first, last + 1):
+        for col in range(cols):
+            cell = _table_cell_at(node, row, col)
+            if cell is None:
+                continue
+            item = _painted_table_item(cell, screen)
+            if item is not None:
+                out.append(item)
+    return out or None
+
+
+def _gtk_table_rows_for_snapshot(
+    node, seek: str | None, offscreen: list | None = None,
+) -> list | None:
+    """On-screen cells of a large GTK table, or None to keep the index walk.
+
+    ``seek`` is the ``find`` text. When no painted cell contains it, the
+    matching Table cell is scrolled into view and the span is read again.
+    A cell that stays off screen is appended to ``offscreen`` as
+    ``(cell, table)``. Its bounds are not replaced. A snapshot with no
+    seek does not move the tree and does not record those cells.
+    """
+    if not _gtk_row_table(node):
+        return None
+    screen = _screen_size()
+    painted = _visible_gtk_table_cells(node, screen)
+    if not painted:
+        return None
+    needle = seek.strip() if isinstance(seek, str) else ""
+    if needle and not _visible_tree_matches(painted, needle):
+        match = _reveal_gtk_table_match(node, needle, screen)
+        if match is not None:
+            refreshed = _visible_gtk_table_cells(node, screen)
+            if refreshed:
+                painted = refreshed
+            if not _visible_tree_matches(painted, needle):
+                item = _painted_table_item(match, screen)
+                if item is not None:
+                    painted = [*painted, item]
+                elif offscreen is not None:
+                    offscreen.append((match, node))
+    return painted
+
+
+def _first_large_gtk_table(root):
+    """The first large GTK row table under ``root``.
+
+    The walk stops at a table: a 10k TreeView exposes every cell as a child,
+    and those cells are not another table. None when the application is not
+    GTK or no table of that size is within the walk.
+    """
+    if root is None or "gtk" not in _toolkit_name(root):
+        return None
+    queue = [root]
+    seen: set[int] = set()
+    examined = 0
+    while queue and examined < 300:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        examined += 1
+        role = _role_name(node)
+        if role in {"table", "tree table"}:
+            if _gtk_row_table(node):
+                return node
+            continue
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            continue
+        for index in range(min(int(count), 40)):
+            queue.append(_child_at(node, index))
+    return None
+
+
+def _large_gtk_table_from(acc):
+    """The large GTK table ``acc`` is, or the one under it, or an ancestor."""
+    if acc is None or "gtk" not in _toolkit_name(acc):
+        return None
+    node = acc
+    seen: set[int] = set()
+    for _depth in range(8):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if _role_name(node) in {"table", "tree table"} and _gtk_row_table(node):
+            return node
+        node = _parent_of(node)
+    return _first_large_gtk_table(acc)
+
+
+def reveal_gtk_named_cell(root, needle: str):
+    """``(moved, on_screen)`` for a named cell in a large GTK table.
+
+    None when the application is not GTK or no cell in the table model
+    contains ``needle``. The scan uses ``Table.get_accessible_at`` up to the
+    GTK table cap, past the shorter document seek window. A cell already in
+    the painted span is left where it is: ``moved`` is false. An off-screen
+    cell is scrolled with AT-SPI ``scroll_to`` or the vertical bar's row
+    index. ``moved`` is true only when that scroll puts the cell on screen.
+    Extents are the cell's own; a cell that stays off screen is
+    ``(False, False)``.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or root is None or "gtk" not in _toolkit_name(root):
+        return None
+    table = _first_large_gtk_table(root)
+    if table is None:
+        return None
+    rows, cols = _plain_table_size(table)
+    if rows is None or cols is None or rows <= 0 or cols <= 0:
+        return None
+    cols = min(int(cols), _GTK_SEEK_MAX_COLS)
+    screen = _screen_size()
+    pos, size = _extents(table)
+    span = _gtk_visible_span(table, pos, size, rows)
+    if span is not None:
+        first, last = span
+        for row in range(first, last + 1):
+            for col in range(cols):
+                cell = _table_cell_at(table, row, col)
+                if cell is not None and _matches_seek(cell, text):
+                    return False, _on_screen_item(cell, screen) is not None
+    limit = min(int(rows), _GTK_TABLE_MAX_ROWS)
+    for row in range(limit):
+        for col in range(cols):
+            cell = _table_cell_at(table, row, col)
+            if cell is None or not _matches_seek(cell, text):
+                continue
+            if _on_screen_item(cell, screen) is not None:
+                return False, True
+            brought = _bring_cell_on_screen(cell, screen, row, rows)
+            if brought:
+                _invalidate_tree_cache(table)
+                return True, True
+            return False, False
+    return None
+
+
+def scroll_gtk_viewport_page(acc, direction: int) -> bool:
+    """Move a large GTK table's vertical bar by one painted viewport.
+
+    False unless the accessible belongs to GTK and a large row table can be
+    found. ``direction`` is positive to go down. The step is the painted
+    body-row count as a fraction of ``rows - 1``, applied to the bar's
+    range. A line scroll does not come through here. False when the span
+    or the bar cannot be read, or the value does not change.
+    """
+    if acc is None or isinstance(direction, bool) or not isinstance(direction, int) or direction == 0:
+        return False
+    table = _large_gtk_table_from(acc)
+    if table is None:
+        return False
+    rows, _cols = _plain_table_size(table)
+    if rows is None or rows <= 1:
+        return False
+    pos, size = _extents(table)
+    span = _gtk_visible_span(table, pos, size, rows)
+    if span is None:
+        return False
+    visible = max(1, span[1] - span[0] + 1)
+    sign = 1.0 if direction > 0 else -1.0
+    fraction = float(visible) / float(rows - 1)
+    for bar in _collect_scrollbars(table):
+        if _bar_axis(bar) != "vertical":
+            continue
+        minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), 0.0)
+        maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), 0.0)
+        if maximum <= minimum:
+            continue
+        current = _read_value(bar)
+        if current is None:
+            continue
+        target = min(max(current + (maximum - minimum) * fraction * sign, minimum), maximum)
+        if abs(target - current) < 1e-6:
+            continue
+        _write_value(bar, target)
+        updated = _read_value(bar)
+        if updated is not None and abs(updated - current) > 1e-3:
+            _invalidate_tree_cache(table)
+            return True
+    return False
+
+
+def _owning_large_table(node):
+    """``(cell, table)`` when ``node`` is inside a cell of a large table.
+
+    A short table, a spreadsheet, and a node that is not in a cell are
+    ``(None, None)``. The published click point stays in those cases.
+    """
+    current = node
+    for _depth in range(6):
+        if current is None:
+            return None, None
+        role = _role_name(current)
+        if role in {"table cell", "tree cell"} or role.endswith(" cell"):
+            parent = _parent_of(current)
+            for _up in range(4):
+                if parent is None:
+                    return None, None
+                parent_role = _role_name(parent)
+                if parent_role in {"table", "tree table"}:
+                    try:
+                        large = _gtk_row_table(parent)
+                    except Exception:
+                        large = False
+                    if not large:
+                        return None, None
+                    return current, parent
+                parent = _parent_of(parent)
+            return None, None
+        current = _parent_of(current)
+    return None, None
+
+
+def _row_index_of_cell(table, cell) -> int | None:
+    index = _call_first(cell, ("get_index_in_parent", "getIndexInParent"))
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        return None
+    return _row_at_child_index(table, int(index))
+
+
+def reveal_unpainted_table_click(node):
+    """Live center of a table cell that was not painted, after scrolling it.
+
+    None when ``node`` is not an unpainted cell of a large table: the
+    caller keeps the published point. A cell that stays outside the
+    viewport raises ``not_visible``. No coordinate is invented.
+    """
+    if node is None:
+        return None
+    try:
+        cell, table = _owning_large_table(node)
+    except Exception:
+        return None
+    if cell is None or table is None:
+        return None
+    screen = _screen_size()
+    if (
+        _painted_table_item(node, screen) is not None
+        or _painted_table_item(cell, screen) is not None
+    ):
+        return None
+    rows, _cols = _plain_table_size(table)
+    total = int(rows) if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else 1
+    row = _row_index_of_cell(table, cell)
+    if row is None:
+        row = 0
+    _bring_gtk_cell_into_view(cell, screen, row, total)
+    painted = _painted_table_item(node, screen) or _painted_table_item(cell, screen)
+    if painted is None:
+        raise ComputerUseError(
+            ErrorCode.NOT_VISIBLE,
+            "the table cell is not visible and could not be scrolled into view; the click was not sent",
+            detail={
+                "reason": "not_visible",
+                "outcome": "refused",
+                "next": ["ref"],
+                "evidence": "the cell is outside the viewport and scrolling did not paint it",
+            },
+        )
+    _acc, pos, size = painted
+    return (
+        int(round(float(pos[0]) + float(size[0]) / 2.0)),
+        int(round(float(pos[1]) + float(size[1]) / 2.0)),
+    )
+
+
+_TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
+
+
+def _window_lacks_showing_and_visible(node) -> bool:
+    """True when ``node`` reported states and none of them are on screen.
+
+    An empty or missing state set is false: a node that never reported
+    states is not treated as hidden.
+    """
+    sset = _call_first(node, ("get_state_set",))
+    if sset is None:
+        return False
+    names = getattr(sset, "names", None)
+    if isinstance(names, (set, frozenset, list, tuple)):
+        folded = {str(item).upper() for item in names}
+        if not folded:
+            return False
+        return "SHOWING" not in folded and "VISIBLE" not in folded
+    return not _state_has(node, "SHOWING") and not _state_has(node, "VISIBLE")
+
+
+def _wraps_showing_browser_document(node, depth: int = 0) -> bool:
+    """True when a frame still holds the page the user can see.
+
+    Firefox parents the showing ``document web`` under a frame whose own
+    state set is only ENABLED. That frame is the page. A hidden dialog
+    whose children are ordinary controls is not. The walk is bounded and
+    uses the raw child list, so it does not call back into the filter.
+    """
+    if node is None or depth > 5:
+        return False
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return False
+    for index in range(min(count, 12)):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if (
+            role in {"document web", "internal frame", "document frame"}
+            and _state_has(child, "SHOWING")
+        ):
+            return True
+        if _wraps_showing_browser_document(child, depth + 1):
+            return True
+    return False
+
+
+def _hidden_window(node) -> bool:
+    """True for a frame, window, or dialog that is not on screen.
+
+    FeatherPad keeps its Replace dialog in the tree as a frame named
+    Replacement. The state set is only ENABLED, and the box is a strip at
+    the parent origin, so bounds alone would keep it. A window that is
+    SHOWING or VISIBLE stays. An empty or missing state set stays too: a
+    node that never reported states is not treated as hidden. Other roles
+    are not this case. A frame that still wraps a SHOWING browser document
+    stays, because that document is the page.
+    """
+    if node is None or _role_name(node) not in _TOP_LEVEL_WINDOW_ROLES:
+        return False
+    if not _window_lacks_showing_and_visible(node):
+        return False
+    return not _wraps_showing_browser_document(node)
+
+
+def _without_hidden_windows(kids: list) -> list:
+    """Drop nested frames and windows that are not showing and not visible."""
+    return [child for child in kids if not _hidden_window(child)]
+
+
 def _with_table_body(node, kids: list) -> list:
     """Append a GTK table's body cells when the children are only headers.
 
@@ -4626,7 +15319,13 @@ def _with_table_body(node, kids: list) -> list:
     column headers. ``Table.get_n_rows`` is the file rows. Cells already
     present as children are not added again. A table that already exposes
     row children is unchanged, and a table with no rows stays header-only.
+
+    Every ordinary snapshot walk returns through here, so a hidden frame
+    (FeatherPad's Replace dialog) is removed before the table check. A
+    showing or visible window is kept. A control that is not a window is
+    kept even when it is not showing.
     """
+    kids = _without_hidden_windows(kids)
     if _role_name(node) not in {"table", "tree table"}:
         return kids
     rows = _call_first(node, ("get_n_rows",), default=None)
@@ -4649,7 +15348,25 @@ def _child_at(acc, index: int):
     return _call_first(acc, ("get_child_at_index", "getChildAtIndex"), index)
 
 
+def terminal_ancestor(acc) -> bool:
+    """Whether an accessible is inside a terminal, before AX role mapping.
+
+    VTE's terminal role maps to AXTextArea. Inspect the native role so an
+    ordinary multiline editor is never mistaken for a command prompt.
+    """
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) == "terminal":
+            return True
+        acc = _parent_of(acc)
+    return False
+
+
 def _parent_of(acc):
+    _drop_cached_properties(acc)
     return _call_first(acc, ("get_parent", "getParent"))
 
 
@@ -4658,7 +15375,34 @@ def _is_scroll_bar(acc) -> bool:
 
 
 def _node_name(acc) -> str:
+    _drop_cached_properties(acc)
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
+
+
+def top_window_title(acc) -> str:
+    """Name of the outermost frame, window, or dialog above ``acc``.
+
+    Chrome's window title is that name. The page title is a prefix of it.
+    An empty string means no frame name was readable.
+    """
+    if acc is None:
+        return ""
+    node = acc
+    seen: set[int] = set()
+    title = ""
+    for _ in range(24):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if _role_name(node) in {"frame", "window", "dialog"}:
+            name = _node_name(node)
+            if name:
+                title = name
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    return title
 
 
 def _is_list_marker(name: str) -> bool:
@@ -4766,6 +15510,39 @@ def _chromium_app(acc) -> bool:
     return "chrom" in name
 
 
+def _reports_multiline(node, attrs: dict) -> bool:
+    """True when ``node`` publishes multi-line text.
+
+    ``STATE_MULTI_LINE`` is the AT-SPI fact. ``multiline`` and
+    ``aria-multiline`` are the same fact when a bridge publishes them as
+    attributes. A false or absent attribute is not multi-line. A true
+    attribute is, even when the other key is false.
+    """
+    if _state_has(node, "MULTI_LINE"):
+        return True
+    for key in ("multiline", "aria-multiline"):
+        flag = (attrs or {}).get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _gecko_multiline_entry(node, attrs: dict) -> bool:
+    """True for a Firefox ``entry`` that is a ``<textarea>``.
+
+    Gecko exposes ``<input>`` and ``<textarea>`` as AT-SPI role ``entry``.
+    The textarea carries ``STATE_MULTI_LINE`` or a multiline attribute.
+    A single-line input does not. Chromium and GTK are not this check.
+    """
+    if not _reports_multiline(node, attrs):
+        return False
+    return _gecko_app(node)
+
+
 def _gecko_app(acc) -> bool:
     """True when ``acc`` belongs to Firefox. Chromium and GTK are not."""
     if acc is None:
@@ -4806,22 +15583,17 @@ def _frame_hierarchy_showing(node) -> bool:
 
 
 def _selected_tab_name(node) -> str | None:
-    """The selected page tab in ``node``'s top-level frame, or None."""
-    current = node
+    """The selected page tab in ``node``'s top-level frame, or None.
+
+    The parent walk uses `_ancestor_chain`. ``id()`` of a short-lived
+    parent wrapper is not the identity of the next ancestor.
+    """
     frame = None
-    seen: set[int] = set()
-    for _ in range(16):
-        if current is None or id(current) in seen:
-            break
-        seen.add(id(current))
+    for current in _ancestor_chain(node, 16):
         role = _role_name(current)
         if role in {"frame", "window"}:
             frame = current
             break
-        parent = _parent_of(current)
-        if parent is None or parent is current:
-            break
-        current = parent
     if frame is None:
         return None
     return _selected_tab_under(frame, 0)
@@ -4968,15 +15740,135 @@ def accessible_gone(acc) -> bool:
     return not bool(role)
 
 
+# A disposed JOptionPane button stays in the tree without SHOWING. A table
+# cell that is merely scrolled off is the same missing bit and is not gone.
+_JAVA_DIALOG_CONTROL_ROLES = frozenset({
+    "push button", "toggle button", "check box", "radio button",
+})
+
+
+def target_vanished(acc) -> bool:
+    """True when a click or type must not claim the accessible is still there.
+
+    DEFUNCT is gone on every toolkit. A handle that never reported a role
+    is not this case. Java ATK keeps a disposed dialog button in the tree
+    without SHOWING; a button whose state set was reported and does not
+    include SHOWING is that control. A table cell without SHOWING is still
+    in the table. GTK and a fake with no toolkit are not refused for a
+    missing SHOWING bit. An empty state set is not evidence.
+    """
+    if acc is None:
+        return False
+    try:
+        java = _java_app(acc)
+    except Exception:
+        java = False
+    try:
+        # Java needs a fresh DEFUNCT bit. Every other toolkit keeps the
+        # cached state: dropping it here clears a Chrome editor's text.
+        if _state_flag(acc, "DEFUNCT", drop_cache=java):
+            return True
+    except Exception:
+        return True
+    if not java:
+        return False
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role not in _JAVA_DIALOG_CONTROL_ROLES:
+        return False
+    names = _state_names(acc)
+    if not names:
+        return False
+    return "SHOWING" not in names
+
+
+def _misses_primary_screen(pos, size) -> bool:
+    """True when a SCREEN box has no overlap with the primary display.
+
+    The pruner drops that box, so a scrolled-off control leaves the snapshot
+    while its accessible is still alive. A partial overlap stays.
+    """
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    if width <= 0 or height <= 0:
+        return True
+    screen_w, screen_h = _screen_size()
+    right = min(x + width, float(screen_w))
+    bottom = min(y + height, float(screen_h))
+    return right <= max(x, 0.0) or bottom <= max(y, 0.0)
+
+
+def offscreen_extents(acc):
+    """SCREEN box of an alive accessible that misses the display.
+
+    ``None`` when the node is gone, sits in a hidden Firefox document, or
+    its box still intersects the primary screen. A scrolled-off button is
+    this case: not DEFUNCT, and the pruner dropped it because the box misses
+    every display. A control that is still on screen is not, even when its
+    title no longer matches. A node with no box is off-screen only when it
+    is also not SHOWING; a SHOWING node whose component failed to answer
+    stays ``None`` so a real stale ref is not reported as off-screen.
+    """
+    if accessible_gone(acc) or hidden_web_target(acc):
+        return None
+    pos, size = _extents(acc)
+    if pos is None or size is None:
+        if _state_has(acc, "SHOWING"):
+            return None
+        return (0.0, 0.0), (0.0, 0.0)
+    if not _misses_primary_screen(pos, size):
+        return None
+    return pos, size
+
+
+def _chromium_document_hidden(acc) -> bool:
+    """True when ``acc`` sits in a Chromium document that is not the selected tab.
+
+    The active tab's document is SHOWING and its title is the selected page
+    tab. Chrome also drops a background tab's document out of the frame and
+    leaves STATE_SHOWING set on that orphan, so a missing frame ancestor is
+    the same case. The tab strip sits outside the document, so a click on the
+    tab itself is not this case. An element scrolled out of the showing
+    document is not this case either: that document is still the selected tab.
+
+    Parents are visited through `_ancestor_chain`. A seen-set of ``id()``
+    stops early when a later panel is allocated at the address of a wrapper
+    the walk has already dropped, which is the Electron tree between the
+    document and the frame.
+    """
+    document = None
+    reached_frame = False
+    for node in _ancestor_chain(acc, 32):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            document = node
+            if not _state_has(node, "SHOWING"):
+                return True
+        if role in {"frame", "window", "application"}:
+            reached_frame = True
+            break
+    if document is None:
+        return False
+    if not reached_frame:
+        return True
+    tab = _selected_tab_name(document)
+    title = _node_name(document)
+    if tab and title and not _names_match_tab(title, tab):
+        return True
+    return False
+
+
 def hidden_named_target(root, ax_role: str, title: str) -> bool:
     """True when a live node of ``ax_role`` and ``title`` sits in a hidden document.
 
     The snapshot prunes that document, so a ref into it fails to rematch and
     would otherwise be reported as stale. A match that is showing is not this
     case: the element really left the tree the ref was issued against. A
-    DEFUNCT node is skipped. GTK and Chromium trees are not walked.
+    DEFUNCT node is skipped. GTK trees are not walked. Firefox and Chromium are.
     """
-    if root is None or not ax_role or not title or not _gecko_app(root):
+    if root is None or not ax_role or not title or not (_gecko_app(root) or _chromium_app(root)):
         return False
     hidden = False
     showing = False
@@ -5006,13 +15898,18 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
 
 
 def hidden_web_target(acc) -> bool:
-    """True when ``acc`` sits in a Firefox document that is not showing.
+    """True when ``acc`` sits in a browser document that is not showing.
 
-    False for GTK, Chromium, and Firefox chrome (the tab strip, the toolbar).
+    False for GTK, and for browser chrome (the tab strip, the toolbar).
     A click on a link in a background tab is this case: the link's document
-    is not the selected, showing one.
+    is not the selected, showing one. Firefox and Chromium both keep that
+    document alive.
     """
-    if acc is None or not _gecko_app(acc):
+    if acc is None:
+        return False
+    if _chromium_app(acc) and not _gecko_app(acc):
+        return _chromium_document_hidden(acc)
+    if not _gecko_app(acc):
         return False
     node = acc
     seen: set[int] = set()
@@ -5173,6 +16070,128 @@ def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | N
         if overlap < min(width, list_width) * 0.5:
             continue
         return left, top, right, bottom
+    return None
+
+
+def list_scrolls_with_document(container) -> bool:
+    """True when a Chromium list is body content and the document scrolls.
+
+    A short table can be a little taller than an 800px screen and still
+    be body content. Its box is not a scrollport. After the document
+    moves, the top sits above the page or the bottom still runs past it.
+    The list bar does not move that table, and a wheel judged as a
+    scrollport then reports the page unchanged and the search turns
+    around before the last row. A list more than twice the screen is a
+    virtualized viewport and keeps the list wheel. A fixed-height
+    overflow list sits inside the document. No document edges means the
+    caller keeps the list's own bar.
+    """
+    if container is None or _role_name(container) not in _LIST_ROLES:
+        return False
+    if not _chromium_app(container):
+        return False
+    if _overflow_ancestor_edges(container) is not None:
+        return False
+    pos, size = _extents(container)
+    if pos is None or size is None or float(size[1]) < 4:
+        return False
+    page = _page_edges(container)
+    if page is None:
+        return False
+    top = float(pos[1])
+    bottom = top + float(size[1])
+    if bottom <= page[3] + 8 and top >= page[1] - 8:
+        return False
+    _sw, sh = _screen_size()
+    if sh > 0 and float(size[1]) > sh * 2:
+        return False
+    return True
+
+
+def _page_node(container):
+    """The document accessible that contains ``container``, or None."""
+    node = _parent_of(container)
+    seen: set[int] = set()
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        if _role_name(node) in _PAGE_ANCESTOR_ROLES:
+            pos, size = _extents(node)
+            if pos is None or size is None or size[1] < 4 or size[0] < 1:
+                return None
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def scroll_container_kind(container) -> str:
+    """How ``container`` scrolls: ``document``, ``overflow``, or ``viewport``.
+
+    ``document`` is body content: a document ancestor is the scroll
+    container, not the list. ``overflow`` is a shorter wrapper around the
+    list. ``viewport`` is a list that is its own scrollport. The document
+    is not assumed for every table.
+    """
+    if container is None:
+        return "viewport"
+    if _overflow_ancestor_edges(container) is not None:
+        return "overflow"
+    if list_scrolls_with_document(container):
+        return "document"
+    return "viewport"
+
+
+def scroll_container(acc):
+    """The scrollable ancestor of ``acc``.
+
+    Returns ``(node, kind)``. ``kind`` is ``document``, ``overflow``, or
+    ``viewport``. The node is the document when the target is body content,
+    and the list when an overflow wrapper or the list itself scrolls.
+    ``(None, None)`` when ``acc`` is not inside a Chromium list or document.
+    """
+    if acc is None:
+        return None, None
+    if _role_name(acc) in _PAGE_ANCESTOR_ROLES and _chromium_app(acc):
+        return acc, "document"
+    container = list_container(acc)
+    if container is None:
+        container = list_with_overflow_ancestor(acc)
+    if container is None:
+        return None, None
+    kind = scroll_container_kind(container)
+    if kind == "document":
+        page = _page_node(container)
+        return (page if page is not None else container), kind
+    return container, kind
+
+
+def scroll_offset(acc) -> float | None:
+    """Vertical scroll offset of the container that scrolls ``acc``.
+
+    The current value of that container's vertical bar. None when no bar
+    can be read, so a caller cannot claim the page was unchanged.
+    """
+    if acc is None:
+        return None
+    node, _kind = scroll_container(acc)
+    if node is None:
+        node = acc
+    seen: set[int] = set()
+    current = node
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            return None
+        seen.add(id(current))
+        bar = _viewport_vertical_bar(current)
+        if bar is not None:
+            found = _bar_range(bar)
+            if found is not None:
+                return float(found[0])
+        role = _role_name(current)
+        if role in ("frame", "window", "application"):
+            return None
+        current = _parent_of(current)
     return None
 
 
@@ -5447,6 +16466,21 @@ def _settle_hit(comp, x: int, y: int, coord):
     return None
 
 
+def _expandable_tree_item(acc) -> bool:
+    """A treeitem row, including one whose box is as tall as the tree.
+
+    Chrome sizes an expanded ``role=treeitem`` to the tree once its children
+    are showing. The visible-row walk treats a box that tall as a wrapper and
+    records the inner static text instead, so the row leaves the snapshot and
+    nothing remains that can collapse it. The treeitem stays the row.
+    """
+    if acc is None or _role_name(acc) != "tree item":
+        return False
+    if _state_has(acc, "EXPANDABLE") or _state_has(acc, "EXPANDED"):
+        return True
+    return "treeitem" in _xml_roles(acc)
+
+
 def _in_view_named_rows(container) -> list[tuple]:
     """Named rows under ``container`` that are on screen in the list.
 
@@ -5471,6 +16505,11 @@ def _in_view_named_rows(container) -> list[tuple]:
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
+    # libatspi answers the child walk from the cache filled before the
+    # scroll. An upward step then still lists the lower rows, the head
+    # looks unchanged, and the line step is undone in favour of a track
+    # click that jumps over the row being sought.
+    _invalidate_tree_cache(container)
     pos, size = _extents(container)
     edges = _viewport_edges(container)
     if pos is None or size is None or edges is None:
@@ -5504,7 +16543,8 @@ def _in_view_named_rows(container) -> list[tuple]:
         if bottom < box_y - 1 or top > box_b or left + width < box_x or left > box_r:
             return
         role = _role_name(node)
-        spans = height > full_h * 0.9
+        # An expanded treeitem fills the tree. It is still the row.
+        spans = height > full_h * 0.9 and not _expandable_tree_item(node)
         in_view = _on_screen_row(top, bottom, box_y, box_b, sliver)
         name = _node_name(node)
         if name and _is_list_marker(name):
@@ -5571,10 +16611,14 @@ def _named_rows_in_order(container) -> list:
     A list longer than ``_ROW_SEQUENCE_CAP`` is not read from child 0.
     The sequence starts a few rows above the viewport, so a line step
     can still see the previous head, and it still stops at that cap.
+    The child cache is cleared first. A line step that compares the old
+    head with the new one otherwise still sees the rows from before the
+    scroll, and an upward step looks like it never left that head.
     """
     _pos, size = _extents(container)
     if size is None:
         return []
+    _invalidate_tree_cache(container)
     full_h = float(size[1])
     found: list = []
 
@@ -6196,6 +17240,36 @@ _LIST_DEPTH = 4
 _LIST_ANCESTORS = 5
 
 
+def _drop_cached_properties(acc) -> None:
+    """Forget one node's cached properties while the event listener is up.
+
+    ``event_main`` answers name, state, parent, and child reads from the
+    client cache. A combo's current item, a SELECTED or CHECKED flag, and a
+    document's parent change on the bus without replacing the accessible, so
+    the next getter would still see the previous value. ``clear_cache_single``
+    clears only this object. The recursive ``clear_cache`` walks every
+    descendant and stays on the snapshot-root and Firefox combo paths. A node
+    without ``clear_cache_single`` is a test double and is left alone. With
+    the listener off the cache is not trusted and this does nothing.
+    """
+    if acc is None:
+        return
+    method = getattr(acc, "clear_cache_single", None)
+    if method is None or getattr(_reply_local, "dropping_properties", False):
+        return
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.listening():
+        return
+    _reply_local.dropping_properties = True
+    try:
+        method()
+    except Exception:
+        return
+    finally:
+        _reply_local.dropping_properties = False
+
+
 def _invalidate_tree_cache(acc) -> None:
     """Drop the AT-SPI child cache on ``acc`` and its ancestors.
 
@@ -6212,6 +17286,47 @@ def _invalidate_tree_cache(acc) -> None:
         seen.add(id(node))
         _call_first(node, ("clear_cache", "clearCache"))
         node = _parent_of(node)
+
+
+# Firefox's select is a combo, a menu, and menu items. Two levels reaches
+# the item whose SELECTED state the read-back uses. A wider walk would clear
+# a whole document on every option check.
+_EVENT_CACHE_DEPTH = 2
+_EVENT_CACHE_CHILD_CAP = 64
+
+
+def _clear_cached_descendants(acc, depth: int) -> None:
+    """``clear_cache`` on descendants, ``depth`` levels down."""
+    if acc is None or isinstance(depth, bool) or not isinstance(depth, int) or depth <= 0:
+        return
+    count = _child_count(acc)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return
+    children: list[object] = []
+    for index in range(min(count, _EVENT_CACHE_CHILD_CAP)):
+        child = _child_at(acc, index)
+        if child is not None:
+            children.append(child)
+    for child in children:
+        _clear_cached_descendants(child, depth - 1)
+        _call_first(child, ("clear_cache", "clearCache"))
+
+
+def _refresh_event_cache(acc) -> None:
+    """Drop cached children and states while the event listener is up.
+
+    ``event_main`` answers child and state reads from the cache. Firefox's
+    selected option updates on the bus and not in that cache, so a combo
+    read-back would still show the previous option. Clearing the combo alone
+    leaves the menu item's SELECTED flag cached. With the listener off the
+    cache is not trusted and this does nothing.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    if acc is None or not _atspi_events.listening():
+        return
+    _clear_cached_descendants(acc, _EVENT_CACHE_DEPTH)
+    _invalidate_tree_cache(acc)
 
 
 def _descendant_names(acc) -> tuple[str, ...]:
@@ -6354,6 +17469,8 @@ def _value_call(names: tuple[str, ...], acc, *args):
     for name in names:
         method = getattr(value_iface, name, None)
         if method is not None:
+            if name.startswith("set"):
+                _drop_read_cache()
             return _safe(lambda m=method: m(acc, *args))
     return None
 

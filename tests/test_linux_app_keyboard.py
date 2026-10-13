@@ -270,6 +270,48 @@ def test_a_specific_name_does_not_take_every_window_of_a_shared_comm() -> None:
     assert server.linux_windows_for_app(rows, "cuakeytarget", "python3", set()) == []
 
 
+def test_type_and_key_with_app_carry_an_outcome(tmp_path, no_bus) -> None:
+    """``app=`` used to return a bare sentence and skip the typed outcome."""
+    from a11y_computer_use.schema import Bounds, Display, Element
+
+    driver = _LinuxKeys(_rows(), active_id=2)
+    driver.value = ""
+
+    def snapshot(scope, app):
+        field = Element(
+            "e1", "AXTextField", "Name", driver.value,
+            Bounds(0, 10, 10, 80, 24), "snap", editable=True, focused=True,
+        )
+        return Snapshot(
+            snapshot_id="snap", scope=scope, app=app, pid=22, created_at=0.0,
+            displays=(Display(0, 800, 600, 1.0, True),), elements=(field,),
+        )
+
+    def type_text(text, **_kwargs):
+        driver.typed.append(text)
+        driver.value += text
+        return len(text)
+
+    def key_chord(chord, **_kwargs):
+        driver.chords.append(chord)
+        if chord.lower() == "backspace" and driver.value:
+            driver.value = driver.value[:-1]
+
+    driver.snapshot = snapshot
+    driver.type_text = type_text
+    driver.key_chord = key_chord
+    rt = _runtime(tmp_path, driver, "chrome")
+    typed = rt.type_text("xy", app="chrome")
+    assert typed == "typed 2 characters into chrome"
+    assert typed.outcome == "confirmed"
+    assert "xy" in typed.evidence
+    assert typed.next == ()
+    pressed = rt.key("BackSpace", app="chrome")
+    assert pressed == "pressed BackSpace in chrome"
+    assert pressed.outcome == "confirmed"
+    assert pressed.evidence
+
+
 def test_omitted_app_still_types_into_the_frontmost_window(tmp_path, no_bus, monkeypatch) -> None:
     driver = _LinuxKeys(_rows(), active_id=1)
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "other")

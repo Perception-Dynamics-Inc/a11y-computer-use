@@ -24,7 +24,9 @@ structured content. The agent loop reads the attributes.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -139,6 +141,9 @@ def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
         return ("ref", "coordinates", "keyboard")
     if code == "focus_changed" or reason in {"focus_changed", "not_frontmost"}:
         return ("foreground", "ref")
+    if code == "focus_lost" or reason == "focus_lost":
+        # Do not offer keyboard: that types into whatever is focused now.
+        return ("ref", "cdp")
     if code == "element_disabled" or reason == "disabled":
         return ("ref", "keyboard")
     if reason == "text_mismatch":
@@ -163,11 +168,23 @@ def refused_result(*, text: str, code: str, message: str, detail: dict | None) -
     )
 
 
+_WINDOW_ROLES = frozenset({"AXWindow", "AXDialog", "AXSheet", "AXDrawer"})
+# A titled group, web area, or scroll area above the target is the page.
+# The window is the page when the control has no narrower titled ancestor.
+_PAGE_ROLES = frozenset({"AXGroup", "AXWebArea", "AXScrollArea"})
+# Browser chrome. Its focus, selection, and status text move on their own.
+_CHROME_UI_ROLES = frozenset({
+    "AXToolbar", "AXTabGroup", "AXMenuBar", "AXMenu", "AXScrollBar",
+})
+
+
 def state_fingerprint(snap: object) -> str:
     """Digest of roles, names, values, and states. Refs and bounds are ignored.
 
     A fresh snapshot renumbers refs. A scroll moves bounds without editing a
     control. Neither of those, on its own, is evidence a click landed.
+    Action judgment uses `relevant_state_changed` instead: this digest also
+    moves when Chrome churns a toolbar or status node the click did not touch.
     """
     rows: list[str] = []
     for el in getattr(snap, "elements", ()) or ():
@@ -183,6 +200,393 @@ def state_fingerprint(snap: object) -> str:
         )))
     raw = "\n".join(rows)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _snap_elements(snap: object) -> tuple:
+    return tuple(getattr(snap, "elements", ()) or ())
+
+
+def _match_control(element: object, snap: object) -> object | None:
+    """The same control in ``snap``. Refs are not stable across reads."""
+    elements = _snap_elements(snap)
+    role = getattr(element, "role", "")
+    title = getattr(element, "title", "")
+    path = tuple(getattr(element, "path", ()) or ())
+    same_path = [
+        el for el in elements
+        if el.role == role and el.title == title and tuple(el.path or ()) == path
+    ]
+    if len(same_path) == 1:
+        return same_path[0]
+    same_name = [el for el in elements if el.role == role and el.title == title]
+    if len(same_name) == 1:
+        return same_name[0]
+    stable = getattr(element, "stable_id", None)
+    if stable:
+        for el in elements:
+            if el.stable_id == stable:
+                return el
+    if same_path:
+        return same_path[0]
+    return same_name[0] if same_name else None
+
+
+def _relevant_target_state(element: object) -> tuple:
+    """Focus, value, checked, and expanded. The rest of the target is not proof."""
+    return (
+        bool(getattr(element, "focused", False)),
+        getattr(element, "value", None),
+        getattr(element, "checked", None),
+        getattr(element, "expanded", None),
+    )
+
+
+def _by_ref(snap: object) -> dict:
+    return {
+        el.ref: el for el in _snap_elements(snap) if getattr(el, "ref", None)
+    }
+
+
+def _page_root(snap: object, target: object | None) -> object | None:
+    """The document that holds ``target``, or its window when it has none."""
+    if target is None:
+        return None
+    by_ref = _by_ref(snap)
+    current = by_ref.get(getattr(target, "parent", None))
+    titled = None
+    window = None
+    seen: set[str] = set()
+    while current is not None:
+        ref = getattr(current, "ref", "")
+        if ref in seen:
+            break
+        seen.add(ref)
+        role = getattr(current, "role", "")
+        if role in _WINDOW_ROLES:
+            window = current
+            break
+        if titled is None and getattr(current, "title", "") and role in _PAGE_ROLES:
+            titled = current
+        parent = getattr(current, "parent", None)
+        current = by_ref.get(parent) if parent else None
+    return titled or window
+
+
+def _subtree(snap: object, root: object) -> list:
+    children: dict[str, list] = {}
+    for el in _snap_elements(snap):
+        parent = getattr(el, "parent", None)
+        if parent:
+            children.setdefault(parent, []).append(el)
+    out = [root]
+    stack = list(children.get(getattr(root, "ref", None), []))
+    seen = {getattr(root, "ref", None)}
+    while stack:
+        el = stack.pop()
+        ref = getattr(el, "ref", None)
+        if ref in seen:
+            continue
+        seen.add(ref)
+        out.append(el)
+        stack.extend(children.get(ref, []))
+    return out
+
+
+def _chrome_ui(element: object) -> bool:
+    return any(part in _CHROME_UI_ROLES for part in (getattr(element, "path", ()) or ()))
+
+
+def _page_row(element: object) -> tuple:
+    """Content that means the page changed. Focus and enabled are not included."""
+    return (
+        getattr(element, "role", ""),
+        getattr(element, "title", ""),
+        getattr(element, "value", None),
+        getattr(element, "checked", None),
+        getattr(element, "expanded", None),
+        tuple(getattr(element, "path", ()) or ()),
+    )
+
+
+def _sort_key(row: tuple) -> tuple:
+    """A key ``sorted`` can compare. Values mix None, bools, and strings."""
+    key = []
+    for part in row:
+        if part is None:
+            key.append((0, ""))
+        elif isinstance(part, bool):
+            key.append((1, part))
+        elif isinstance(part, tuple):
+            key.append((3, part))
+        else:
+            key.append((2, str(part)))
+    return tuple(key)
+
+
+def _page_rows(snap: object, target: object | None) -> tuple:
+    root = _page_root(snap, target)
+    if root is None:
+        elements = [el for el in _snap_elements(snap) if not _chrome_ui(el)]
+    else:
+        elements = _subtree(snap, root)
+    return tuple(sorted((_page_row(el) for el in elements), key=_sort_key))
+
+
+def _window_rows(snap: object) -> tuple:
+    rows = [
+        (el.role, el.title)
+        for el in _snap_elements(snap)
+        if getattr(el, "role", "") in _WINDOW_ROLES
+    ]
+    return tuple(sorted(rows))
+
+
+def relevant_state_changed(before: object, after: object, target: object | None = None) -> bool:
+    """Whether ``target`` or its window or page changed between two snapshots.
+
+    The target's focus, value, checked, and expanded count. So does a window
+    title (or a window appearing) and the page that holds the target: its
+    titles, values, checked state, and expanded state. Focus, selection, and
+    enabled bits elsewhere do not, and neither does Chrome's toolbar, tab
+    strip, or status text when the click was inside the page.
+    """
+    if target is not None:
+        before_target = _match_control(target, before)
+        after_target = _match_control(target, after)
+        if before_target is None or after_target is None:
+            return True
+        if _relevant_target_state(before_target) != _relevant_target_state(after_target):
+            return True
+    else:
+        before_target = None
+        after_target = None
+    if _window_rows(before) != _window_rows(after):
+        return True
+    return _page_rows(before, before_target) != _page_rows(after, after_target)
+
+
+# A dialog, sheet, menu, or second window that can sit over a control.
+# The target's own ancestor window is not one of these.
+_OCCLUDER_ROLES = frozenset({
+    "AXWindow", "AXDialog", "AXSheet", "AXDrawer", "AXPopover", "AXMenu",
+})
+
+
+def _center_of(element: object):
+    bounds = getattr(element, "bounds", None)
+    if bounds is None:
+        return None
+    width = getattr(bounds, "width", 0)
+    height = getattr(bounds, "height", 0)
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    if isinstance(width, bool) or isinstance(height, bool) or width <= 0 or height <= 0:
+        return None
+    center = getattr(bounds, "center", None)
+    return center
+
+
+def _contains_center(bounds: object, center: object) -> bool:
+    """True when ``center`` lies in ``bounds``. A missing box does not cover it."""
+    if bounds is None or center is None:
+        return False
+    if getattr(bounds, "display_id", None) != getattr(center, "display_id", None):
+        return False
+    width = getattr(bounds, "width", 0)
+    height = getattr(bounds, "height", 0)
+    if isinstance(width, bool) or isinstance(height, bool):
+        return False
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        return False
+    x = getattr(bounds, "x", None)
+    y = getattr(bounds, "y", None)
+    if not isinstance(x, int) or not isinstance(y, int) or isinstance(x, bool) or isinstance(y, bool):
+        return False
+    return x <= center.x < x + width and y <= center.y < y + height
+
+
+def _ancestor_refs(snap: object, target: object) -> set:
+    by_ref = _by_ref(snap)
+    found: set = set()
+    parent = getattr(target, "parent", None)
+    current = by_ref.get(parent) if parent else None
+    while current is not None:
+        ref = getattr(current, "ref", None)
+        if not ref or ref in found:
+            break
+        found.add(ref)
+        parent = getattr(current, "parent", None)
+        current = by_ref.get(parent) if parent else None
+    return found
+
+
+def _covering_box(snap: object, node: object, center: object):
+    """Smallest real box in ``node``'s subtree that contains ``center``, or None."""
+    best = None
+    best_area = None
+    for el in _subtree(snap, node):
+        bounds = getattr(el, "bounds", None)
+        if not _contains_center(bounds, center):
+            continue
+        area = bounds.width * bounds.height
+        if best_area is None or area < best_area:
+            best = bounds
+            best_area = area
+    return best
+
+
+def _cover_label(element: object) -> str:
+    title = str(getattr(element, "title", "") or "").strip()
+    if title:
+        return repr(title)
+    role = str(getattr(element, "role", "") or "window")
+    if role.startswith("AX"):
+        role = role[2:]
+    return role.lower() or "window"
+
+
+class _ElementView:
+    """Snapshot-shaped object whose ``elements`` are a subset of another read."""
+
+    __slots__ = ("elements",)
+
+    def __init__(self, elements) -> None:
+        self.elements = tuple(elements)
+
+
+def _without_refs(snap: object, refs: set) -> _ElementView:
+    return _ElementView(
+        el for el in _snap_elements(snap) if getattr(el, "ref", None) not in refs
+    )
+
+
+def _cover_rows(snap: object, cover: object) -> tuple:
+    return tuple(sorted((_page_row(el) for el in _subtree(snap, cover)), key=_sort_key))
+
+
+def occluded_click_effect(before: object, after: object, target: object) -> str | None:
+    """Evidence when a click changed a cover and left the target alone.
+
+    None when the target disappeared, its own state changed, or anything
+    outside the cover changed. A window that appears only after the click
+    is not a cover. The point is the target's center. A cover is a dialog,
+    sheet, drawer, popover, menu, or other window that is not an ancestor
+    of the target, and one of its published boxes contains that center.
+    The smallest such box is the cover on top. This does not move the click.
+    """
+    center = _center_of(target)
+    if center is None:
+        return None
+    before_target = _match_control(target, before)
+    after_target = _match_control(target, after)
+    if before_target is None or after_target is None:
+        return None
+    if _relevant_target_state(before_target) != _relevant_target_state(after_target):
+        return None
+    ancestors = _ancestor_refs(before, before_target)
+    candidates = []
+    for el in _snap_elements(before):
+        if getattr(el, "role", "") not in _OCCLUDER_ROLES:
+            continue
+        ref = getattr(el, "ref", None)
+        if not ref or ref in ancestors or ref == getattr(before_target, "ref", None):
+            continue
+        box = _covering_box(before, el, center)
+        if box is None:
+            continue
+        candidates.append((box.width * box.height, str(ref), el))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    cover = candidates[0][2]
+    after_cover = _match_control(cover, after)
+    if after_cover is not None and _cover_rows(before, cover) == _cover_rows(after, after_cover):
+        return None
+    hidden = {getattr(el, "ref", None) for el in _subtree(before, cover)}
+    if after_cover is not None:
+        hidden.update(getattr(el, "ref", None) for el in _subtree(after, after_cover))
+    hidden.discard(None)
+    if relevant_state_changed(_without_refs(before, hidden), _without_refs(after, hidden), target):
+        return None
+    return f"covered by {_cover_label(cover)}"
+
+
+# Text the user is editing, plus a spreadsheet cell. A tab strip or toolbar
+# around that text is not part of this record: Mousepad's document lives
+# under a tab group, which the page fingerprint skips.
+_KEY_TEXT_ROLES = frozenset({
+    "AXTextArea", "AXTextField", "AXSearchField", "AXComboBox", "AXCell",
+})
+_KEY_SELECTION_ROLES = frozenset({"AXCell", "AXRow", "AXOutlineRow"})
+
+
+def key_focus_rows(snap: object) -> tuple:
+    """Focused text and the selected cell or row.
+
+    The page fingerprint omits tab groups and toolbars, and it does not
+    include which cell is selected. A key is confirmed from this record
+    when that fingerprint stays still.
+    """
+    rows = []
+    for el in _snap_elements(snap):
+        role = getattr(el, "role", "")
+        title = getattr(el, "title", "") or ""
+        value = getattr(el, "value", None)
+        if bool(getattr(el, "focused", False)) and role in _KEY_TEXT_ROLES:
+            rows.append(("text", role, title, value))
+        if bool(getattr(el, "selected", False)) and role in _KEY_SELECTION_ROLES:
+            rows.append(("selection", role, title, value))
+    return tuple(sorted(rows, key=_sort_key))
+
+
+def _key_text_rows(rows: tuple) -> tuple:
+    return tuple(row for row in rows if row[0] == "text" and row[1] != "AXCell")
+
+
+def _key_cell_rows(rows: tuple) -> tuple:
+    return tuple(row for row in rows if row[1] == "AXCell" or row[0] == "selection")
+
+
+def key_focus_evidence(
+    before_live: tuple | None,
+    after_live: tuple | None,
+    before_rows: tuple,
+    after_rows: tuple,
+) -> str | None:
+    """Why a key changed the focused text, caret, selection, or cell.
+
+    ``None`` when those records match. A live record is ``(text, caret,
+    selection start, selection end, cell address)``. An unread live record
+    is not a change.
+    """
+    if before_rows != after_rows:
+        if _key_text_rows(before_rows) != _key_text_rows(after_rows):
+            return "the focused text changed"
+        if _key_cell_rows(before_rows) != _key_cell_rows(after_rows):
+            return "the focused cell changed"
+        return "the focused text changed"
+    if not _live_known(before_live) or not _live_known(after_live) or before_live == after_live:
+        return None
+    assert before_live is not None and after_live is not None
+    b_text, b_caret, b_start, b_end, b_cell = before_live
+    a_text, a_caret, a_start, a_end, a_cell = after_live
+    if b_text != a_text:
+        return "the focused text changed"
+    if b_cell != a_cell:
+        return "the focused cell changed"
+    if (b_start, b_end) != (a_start, a_end):
+        # A caret move keeps an empty selection on the caret. A range that
+        # grows, shrinks, or collapses is the selection itself.
+        if b_start == b_end and a_start == a_end:
+            return "the caret moved"
+        return "the selection changed"
+    if b_caret != a_caret:
+        return "the caret moved"
+    return None
+
+
+def _live_known(record: tuple | None) -> bool:
+    return record is not None and any(part is not None for part in record)
 
 
 def bounds_fingerprint(snap: object) -> str:
@@ -208,6 +612,154 @@ def values_match(requested: str, actual: str) -> bool:
         return False
 
 
+def display_numbers_match(shown: str, wanted: str) -> bool:
+    """True when both sides are the same number after Calc's display rewrite.
+
+    ``14.60`` matches ``14.6``, ``1e3`` matches ``1000``, and ``1,200`` matches
+    ``1200``. A formula is not a number, so ``=E2+31`` does not match ``42``.
+    A formula cut at a colon does not match the rest of the formula.
+    """
+    if shown is None or wanted is None:
+        return False
+    try:
+        return _numbers_close(_parse_display_number(shown), _parse_display_number(wanted))
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_display_number(value: str) -> float:
+    """``1.50``, ``1e3``, ``1,200``, and ``1,5``. A formula is not a number."""
+    text = str(value).strip().replace("\u00a0", "").replace("\u202f", "")
+    if not text or text.startswith("="):
+        raise ValueError(text)
+    if any(char.isalpha() and char not in "eE" for char in text):
+        raise ValueError(text)
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        pieces = text.split(",")
+        head = pieces[0].lstrip("+-")
+        if head.isdigit() and all(len(piece) == 3 and piece.isdigit() for piece in pieces[1:]):
+            text = "".join(pieces)
+        elif len(pieces) == 2 and pieces[1].isdigit() and len(pieces[1]) != 3:
+            text = pieces[0] + "." + pieces[1]
+        else:
+            raise ValueError(text)
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(text)
+    return number
+
+
+def _numbers_close(got: float, wanted: float) -> bool:
+    return abs(float(got) - float(wanted)) <= 1e-6 * max(1.0, abs(wanted))
+
+
+# Line and paragraph separators. ``\r\n`` is one break. A repeated break
+# stays repeated, and a space is not a break. U+000B VT, U+000C FF,
+# U+0085 NEL, U+2028, U+2029, and U+FFFC are the same break as ``\n``.
+_PARAGRAPH_BREAK = re.compile(r"\r\n|[\n\r\u000b\u000c\u0085\u2028\u2029\ufffc]")
+
+
+def normalize_paragraph_breaks(text: str) -> str:
+    """Map every paragraph or line separator onto ``\\n``, one break each."""
+    return _PARAGRAPH_BREAK.sub("\n", str(text).replace("\u00a0", " "))
+
+
+def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which paragraph separator was used.
+
+    Newline, CR, CRLF, VT, FF, NEL, U+2028, U+2029, and U+FFFC are the same
+    break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
+    ``a b`` is not ``a\\nb``, and ``ab`` is not ``a\\nb``.
+    """
+    if got is None or wanted is None:
+        return False
+    return normalize_paragraph_breaks(got) == normalize_paragraph_breaks(wanted)
+
+
+# Typed read-back. ``\r\n`` is one break. U+2028 and U+2029 are the same
+# break as ``\n``. A paragraph or block boundary is that break too: the
+# reader inserts ``\n`` between those nodes. Breaks are not removed.
+_TYPED_BREAK = re.compile(r"\r\n|[\n\r\u2028\u2029]")
+
+
+def normalize_typed_breaks(text: str) -> str:
+    """Map newline, CRLF, U+2028, U+2029, and a paragraph or block boundary onto ``\\n``.
+
+    A boundary between paragraphs or blocks is ``\\n`` in the read-back.
+    NBSP is a space. Characters around a break stay, so ``ab`` is not
+    ``a\\nb`` and ``a\\n\\nb`` is not ``a\\nb``.
+    """
+    return _TYPED_BREAK.sub("\n", str(text).replace("\u00a0", " "))
+
+
+def typed_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which line or paragraph break was used.
+
+    Newline, CRLF, U+2028, U+2029, and a paragraph or block boundary are the
+    same break. Missing or extra text is not the same string. ``a b`` is not
+    ``a\\nb``. ``ab`` is not ``a\\nb``. ``a\\n\\nb`` is not ``a\\nb``.
+    """
+    if got is None or wanted is None:
+        return False
+    return normalize_typed_breaks(got) == normalize_typed_breaks(wanted)
+
+
+def _type_field_text(value: str) -> str:
+    """Field text compared after a type.
+
+    NBSP is a space. One trailing newline is the empty contenteditable
+    ``<br>`` and is not part of the value.
+    """
+    text = value.replace("\u00a0", " ").replace("\r\n", "\n")
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text
+
+
+def replaced_text(before: str, typed: str, start: int, end: int) -> str | None:
+    """``before`` with the selected ``[start, end)`` replaced by ``typed``.
+
+    None when the span is empty, reversed, or outside ``before``. A collapsed
+    caret is not a replacement: the caller keeps the append check.
+    """
+    if (
+        isinstance(start, bool) or isinstance(end, bool)
+        or not isinstance(start, int) or not isinstance(end, int)
+    ):
+        return None
+    if end <= start or start < 0 or end > len(before):
+        return None
+    return before[:start] + typed + before[end:]
+
+
+def _selection_confirmed(
+    before_value: str,
+    readback: str,
+    requested: str,
+    selection: tuple[int, int] | None,
+) -> bool:
+    """True when ``readback`` is ``before_value`` with the selection replaced."""
+    if selection is None or len(selection) != 2:
+        return False
+    start, end = selection
+    read_n = _type_field_text(readback)
+    for base in (before_value, _type_field_text(before_value)):
+        expected = replaced_text(base, requested, start, end)
+        if expected is not None and _type_field_text(expected) == read_n:
+            return True
+        trimmed = requested.rstrip(" ")
+        if trimmed and trimmed != requested:
+            expected = replaced_text(base, trimmed, start, end)
+            if expected is not None and _type_field_text(expected) == read_n:
+                return True
+    return False
+
+
 def judge(
     *,
     changed: bool | None,
@@ -216,13 +768,17 @@ def judge(
     before_value: str | None = None,
     process_died: bool = False,
     readable: bool = True,
+    selection: tuple[int, int] | None = None,
+    expected: str | None = None,
 ) -> tuple[str, str]:
     """``(outcome, evidence)`` from a real observation.
 
     ``process_died`` wins: a click that kills the target is not confirmed.
-    A read-back that equals the request is confirmed. A read-back that moved
-    but does not equal the request is partial. An unchanged readable tree is
-    ``suspected_noop``.
+    A read-back that equals the request is confirmed. A read-back that is
+    the previous text with the active selection replaced by the request is
+    confirmed. A read-back that only grew by appending the request is
+    confirmed. A read-back that moved some other way is partial. An
+    unchanged readable tree is ``suspected_noop``.
     """
     if process_died:
         return "partial", "the target process exited after the action"
@@ -230,6 +786,13 @@ def judge(
         if readback is None or not readable:
             return "unverifiable", "the value could not be read back"
         if values_match(requested, readback):
+            return "confirmed", f"read back {readback!r}"
+        if isinstance(expected, str) and _type_field_text(readback) == _type_field_text(expected):
+            return "confirmed", f"read back {readback!r}"
+        if (
+            isinstance(before_value, str)
+            and _selection_confirmed(before_value, readback, requested, selection)
+        ):
             return "confirmed", f"read back {readback!r}"
         moved = before_value is not None and readback != before_value
         appended = (
@@ -344,6 +907,233 @@ def _windows_pid_alive(pid: int) -> bool:
         return code.value == still_active
     finally:
         kernel32.CloseHandle(handle)
+
+
+# A 1px layout jitter must not look like a reorder. Row moves in a file
+# list are many times this. The order bucket matches the drag step.
+_DRAG_MOVE_PX = 4
+_DRAG_ORDER_BUCKET_PX = 8
+
+
+def _drag_label(element: object) -> str:
+    title = str(getattr(element, "title", "") or "").strip()
+    if title:
+        return title
+    value = getattr(element, "value", None)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _drag_center(element: object) -> tuple[int, int] | None:
+    bounds = getattr(element, "bounds", None)
+    if bounds is None:
+        return None
+    try:
+        return (
+            int(bounds.x) + int(bounds.width) // 2,
+            int(bounds.y) + int(bounds.height) // 2,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _drag_order_key(element: object) -> tuple:
+    center = _drag_center(element)
+    label = _drag_label(element)
+    if center is None:
+        return (0, 0, label)
+    return (
+        center[1] // _DRAG_ORDER_BUCKET_PX,
+        center[0] // _DRAG_ORDER_BUCKET_PX,
+        label,
+    )
+
+
+def _order_subject(elements: Sequence[object], element: object) -> object | None:
+    """The node whose same-parent siblings are the list being reordered.
+
+    A table cell's own siblings are the rows. A cell that is alone under its
+    parent uses the parent row and that row's siblings instead.
+    """
+    by_ref = {getattr(el, "ref", None): el for el in elements}
+    current: object | None = element
+    for _ in range(4):
+        if current is None:
+            return None
+        role = getattr(current, "role", "")
+        parent = getattr(current, "parent", None)
+        siblings = [
+            el for el in elements
+            if getattr(el, "role", "") == role
+            and getattr(el, "parent", None) == parent
+            and _drag_label(el)
+        ]
+        if len(siblings) >= 2:
+            return current
+        current = by_ref.get(parent)
+    return None
+
+
+def _title_order(elements: Sequence[object], subject: object) -> tuple[str, ...] | None:
+    role = getattr(subject, "role", "")
+    parent = getattr(subject, "parent", None)
+    siblings = [
+        el for el in elements
+        if getattr(el, "role", "") == role and getattr(el, "parent", None) == parent
+    ]
+    labels = [_drag_label(el) for el in sorted(siblings, key=_drag_order_key)]
+    labels = [label for label in labels if label]
+    if len(labels) < 2:
+        return None
+    return tuple(labels)
+
+
+def _order_changed(before: Sequence[object], after: Sequence[object], subject: object) -> bool:
+    previous = _title_order(before, subject)
+    if previous is None:
+        return False
+    wanted = sorted(previous)
+    role = getattr(subject, "role", "")
+    parents = {
+        getattr(el, "parent", None) for el in after if getattr(el, "role", "") == role
+    }
+    for parent in parents:
+        stand = next(
+            (el for el in after if getattr(el, "role", "") == role and getattr(el, "parent", None) == parent),
+            None,
+        )
+        if stand is None:
+            continue
+        current = _title_order(after, stand)
+        if current is not None and sorted(current) == wanted and current != previous:
+            return True
+    return False
+
+
+def _match_named(elements: Sequence[object], element: object) -> object | None:
+    """The same named control in a later tree. Selection is not identity."""
+    role = getattr(element, "role", "")
+    stable = getattr(element, "stable_id", None)
+    if stable:
+        for other in elements:
+            if getattr(other, "stable_id", None) == stable and getattr(other, "role", "") == role:
+                return other
+    label = _drag_label(element)
+    if not label:
+        return None
+    matches = [
+        other for other in elements
+        if getattr(other, "role", "") == role and _drag_label(other) == label
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _relative_bounds_moved(
+    before: Sequence[object], after: Sequence[object], start: object, end: object | None,
+) -> bool:
+    """True when the item moved relative to the target, not with a scroll."""
+    if end is None:
+        return False
+    after_start = _match_named(after, start)
+    after_end = _match_named(after, end)
+    if after_start is None or after_end is None:
+        return False
+    before_start_at = _drag_center(start)
+    before_end_at = _drag_center(end)
+    after_start_at = _drag_center(after_start)
+    after_end_at = _drag_center(after_end)
+    if None in (before_start_at, before_end_at, after_start_at, after_end_at):
+        return False
+    assert before_start_at is not None and before_end_at is not None
+    assert after_start_at is not None and after_end_at is not None
+    before_vec = (before_end_at[0] - before_start_at[0], before_end_at[1] - before_start_at[1])
+    after_vec = (after_end_at[0] - after_start_at[0], after_end_at[1] - after_start_at[1])
+    return (
+        abs(after_vec[0] - before_vec[0]) > _DRAG_MOVE_PX
+        or abs(after_vec[1] - before_vec[1]) > _DRAG_MOVE_PX
+    )
+
+
+def drag_item_moved(before: object | None, after: object | None, start: object | None,
+                    end: object | None = None) -> bool:
+    """True when ``start`` changed order among its siblings, or moved relative to ``end``.
+
+    A selection change is not a move. A uniform scroll is not a move: the
+    vector from the item to the target stays put. An item that disappears
+    is not, by itself, a move.
+    """
+    if before is None or after is None or start is None:
+        return False
+    before_els = _snap_elements(before)
+    after_els = _snap_elements(after)
+    subject = _order_subject(before_els, start)
+    if subject is not None and _order_changed(before_els, after_els, subject):
+        return True
+    return _relative_bounds_moved(before_els, after_els, start, end)
+
+
+def drag_drop_verdict(
+    before: object | None,
+    after: object | None,
+    start: object | None,
+    end: object | None = None,
+    *,
+    file_landed: bool | None = None,
+) -> tuple[str, str]:
+    """``(outcome, evidence)`` for a drag.
+
+    Confirmed when the item moved, or the source file is newly in the target
+    folder (``file_landed``). A tree that can be compared and did not change
+    is ``suspected_noop``. Nothing to compare is ``unverifiable``. Both of
+    those say the drop was not confirmed. Selection alone is not a drop.
+    """
+    if file_landed is True:
+        return "confirmed", "the file is now in the target folder"
+    if drag_item_moved(before, after, start, end):
+        return "confirmed", "the item moved"
+    comparable = (
+        file_landed is False
+        or (before is not None and after is not None and start is not None)
+    )
+    if comparable:
+        return "suspected_noop", "the drop was not confirmed"
+    return "unverifiable", "the drop was not confirmed"
+
+
+def element_at_point(snap: object | None, point: object | None) -> object | None:
+    """The smallest titled element whose box contains ``point``, or None."""
+    if snap is None or point is None:
+        return None
+    px = getattr(point, "x", None)
+    py = getattr(point, "y", None)
+    if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
+        return None
+    display_id = getattr(point, "display_id", None)
+    hits = []
+    for el in _snap_elements(snap):
+        bounds = getattr(el, "bounds", None)
+        if bounds is None:
+            continue
+        try:
+            width, height = int(bounds.width), int(bounds.height)
+            left, top = int(bounds.x), int(bounds.y)
+        except (TypeError, ValueError):
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        if display_id is not None and getattr(bounds, "display_id", display_id) != display_id:
+            continue
+        if left <= px < left + width and top <= py < top + height:
+            hits.append(el)
+    if not hits:
+        return None
+    titled = [el for el in hits if _drag_label(el)]
+    pool = titled or hits
+    pool.sort(key=lambda el: int(el.bounds.width) * int(el.bounds.height))
+    return pool[0]
 
 
 def wait_until_dead(pid: int, wait_s: float) -> bool:

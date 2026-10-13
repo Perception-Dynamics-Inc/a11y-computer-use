@@ -32,35 +32,62 @@ def build_agent_mcp(store: RunStore | None = None):
         goal: str,
         model: str,
         display: str | None = None,
-        max_steps: int = 50,
-        max_time_s: float = 900,
+        max_steps: int | None = None,
+        max_time_s: float | None = None,
         model_timeout_s: float = 120,
+        stuck_steps: int = 6,
+        stuck_time_s: float = 120,
+        task_class: str | None = None,
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         allow_exec: bool = False,
         allow_payments: bool = False,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> dict:
         """Start one goal. Returns ``{"id": ...}``. 409 when that display is busy.
 
+        ``stuck_steps`` and ``stuck_time_s`` bound one tactic of the current
+        subgoal. The loop then switches keyboard, vision, and re-plan, and
+        stops with status ``stuck`` when those are used up.
+
+        ``task_class`` selects that class's step and time caps. ``auto``
+        reads the goal. Omit ``max_steps`` and ``max_time_s`` to use the
+        class. Passing either one overrides the class. With no class, the
+        caps stay 50 steps and 900 seconds.
+
         ``allow_payments`` lets a payment click wait for ``approve`` instead of
         stopping as ``needs_human``. It is off by default.
+
+        ``temperature`` and ``seed`` override the sampling defaults (0 and 0)
+        where the model provider can send them. Omit either to keep that default.
         """
         body = {
             "goal": goal,
             "model": model,
             "display": display,
             "limits": {
-                "max_steps": max_steps,
-                "max_time_s": max_time_s,
                 "model_timeout_s": model_timeout_s,
+                "stuck_steps": stuck_steps,
+                "stuck_time_s": stuck_time_s,
             },
             "allow_exec": allow_exec,
             "allow_payments": allow_payments,
         }
+        if max_steps is not None:
+            body["limits"]["max_steps"] = max_steps
+        if max_time_s is not None:
+            body["limits"]["max_time_s"] = max_time_s
+        if task_class is not None:
+            body["limits"]["task_class"] = task_class
         if allowed_domains is not None:
             body["allowed_domains"] = allowed_domains
         if blocked_domains is not None:
             body["blocked_domains"] = blocked_domains
+        if temperature is not None:
+            body["temperature"] = temperature
+        if seed is not None:
+            body["seed"] = seed
         try:
             record = shared.start(body)
         except DisplayBusy as exc:
@@ -81,7 +108,7 @@ def build_agent_mcp(store: RunStore | None = None):
 
     @server.tool()
     def cancel_run(run_id: str) -> dict:
-        """Ask a run to stop. The run ends with reason cancelled."""
+        """Ask a run to stop. The finished run has status cancelled and reason cancelled."""
         record = shared.cancel(run_id)
         if record is None:
             raise ToolError(f"404 run not found: {run_id}")
@@ -103,6 +130,9 @@ def build_agent_mcp(store: RunStore | None = None):
             raise ToolError(f"409 approval already answered: {approval_id}")
         return {"approval_id": approval_id, "approve": approve}
 
+    from a11y_computer_use.server import seal_mcp_tools
+
+    seal_mcp_tools(server)
     return server
 
 

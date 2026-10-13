@@ -111,7 +111,19 @@ def test_shortcut_binding_renders_gtk_tags() -> None:
     assert _linux_menus.shortcut_from_binding("0;0;0") is None
     # Mousepad New: mnemonic path, then the Primary accelerator. Not alt+f:n.
     assert _linux_menus.shortcut_from_binding("n;<Alt>f:n;<Primary>n") == "ctrl+n"
-    assert _linux_menus.shortcut_from_binding("s;<Control>s;s") == "ctrl+s"
+    assert _linux_menus.shortcut_from_binding("s;<Alt>e:s;<Control>s") == "ctrl+s"
+    # The accelerator field is empty or only the mnemonic letter. Not alt+f, not f, not s.
+    assert _linux_menus.shortcut_from_binding("f;<Alt>f;") is None
+    assert _linux_menus.shortcut_from_binding("_F;;") is None
+    assert _linux_menus.shortcut_from_binding("a;<Alt>v:a;") is None
+    assert _linux_menus.shortcut_from_binding("<Alt>f;<Alt>f;") is None
+    assert _linux_menus.shortcut_from_binding("s;<Control>s;s") is None
+    assert _linux_menus.mnemonic_from_binding("f;<Alt>f;") == "f"
+    assert _linux_menus.mnemonic_from_binding("_F;;") == "f"
+    assert _linux_menus.mnemonic_from_binding("a;<Alt>v:a;") == "a"
+    assert _linux_menus.mnemonic_from_binding("<Alt>f;<Alt>f;") == "f"
+    assert _linux_menus.mnemonic_from_binding("n;<Alt>f:n;<Primary>n") == "n"
+    assert _linux_menus.mnemonic_from_binding("<Primary>n") is None
     # Bare named accelerators beat the leading mnemonic letter. Not f, c, or d.
     assert _linux_menus.shortcut_from_binding("f;<Alt>v:f;F11") == "f11"
     assert _linux_menus.shortcut_from_binding("c;<Alt>h:c;F1") == "f1"
@@ -134,6 +146,29 @@ def test_list_uses_a_bare_named_accelerator_not_the_mnemonic_letter() -> None:
     assert listed("View", "Fullscreen") == "f11"
     assert listed("Help", "Contents") == "f1"
     assert listed("Edit", "Delete Selection") == "delete"
+    status = _item("Statusbar", role="check menu item", key="a;<Alt>v:a;")
+    view.children.append(status)
+    rows = _linux_menus.menu_items(app, "View")
+    bar_entry = next(row for row in rows if row["title"] == "Statusbar")
+    assert bar_entry["shortcut"] is None
+    assert bar_entry["mnemonic"] == "a"
+
+
+def test_mnemonic_binding_is_not_listed_as_a_shortcut() -> None:
+    """``f;<Alt>f;`` and ``_F;;`` are the underlined letter, not a shortcut."""
+    file_menu = _menu("File", _item("New", key="n;<Alt>f:n;<Primary>n"))
+    file_menu.key = "f;<Alt>f;"
+    label = _menu("Format", _item("Bold", key="_B;;"))
+    label.key = "_F;;"
+    bar = Acc("menu bar", "", [file_menu, label])
+    app = Acc("application", "mousepad", [Acc("frame", "Mousepad", [bar], states={"active"})])
+    rows = {row["title"]: row for row in _linux_menus.menu_items(app, None)}
+    assert rows["File"]["shortcut"] is None and rows["File"]["mnemonic"] == "f"
+    assert rows["Format"]["shortcut"] is None and rows["Format"]["mnemonic"] == "f"
+    new = _linux_menus.menu_items(app, "File")[0]
+    assert new["shortcut"] == "ctrl+n" and new["mnemonic"] == "n"
+    bold = _linux_menus.menu_items(app, "Format")[0]
+    assert bold["shortcut"] is None and bold["mnemonic"] == "b"
 
 
 def test_list_reads_a_gtk_menu_without_pressing_it() -> None:
@@ -151,6 +186,45 @@ def test_list_reads_a_gtk_menu_without_pressing_it() -> None:
     assert [row["title"] for row in recent] == ["notes.txt"]
     checked = _linux_menus.menu_items(app, "View")[0]
     assert checked["title"] == "Toolbar" and checked["checked"] is True
+
+
+def test_menu_state_drops_the_event_cache_before_the_read(monkeypatch) -> None:
+    """A check bit served from the event cache is read again.
+
+    Qt's checkable item has no ``.states`` set. ``get_state_set`` would
+    otherwise keep CHECKED from before the action. The drop is one node,
+    and only while the listener is up.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    class Item:
+        def __init__(self) -> None:
+            self.drops = 0
+            self.on = False
+
+        def get_role_name(self) -> str:
+            return "menu item"
+
+        def clear_cache_single(self) -> None:
+            self.drops += 1
+            self.on = True
+
+        def get_state_set(self):
+            on = self.on
+
+            class States:
+                def contains(self, _member: object) -> bool:
+                    return on
+
+            return States()
+
+    item = Item()
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    assert _linux_menus._checked(item) is None
+    assert item.drops == 0
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    assert _linux_menus._checked(item) is True
+    assert item.drops == 2
 
 
 def test_qt_checkable_menu_item_reports_checked_true_or_false() -> None:
@@ -195,6 +269,141 @@ def test_press_opens_each_level_then_the_leaf() -> None:
     title = _linux_menus.menu_press(app, "File > Recent > notes.txt", settle=lambda _s: None)
     assert title == "notes.txt"
     assert file_menu.pressed == ["click"]
+
+
+def libreoffice():
+    """Impress and Writer bar entries: role menu, one action named ''.
+
+    Leaves publish ``click``. Nested menus (Writer's Text under Format) use
+    the same unnamed action. Fake tree, not a live soffice process.
+    """
+    outline = _item("Outline", role="radio menu item")
+    normal = _item("Normal", role="radio menu item")
+    view = Acc("menu", "View", [normal, outline], states=("sensitive", "enabled"), actions=("",))
+    new_slide = _item("New Slide")
+    slide = Acc("menu", "Slide", [new_slide], states=("sensitive", "enabled"), actions=("",))
+    uppercase = _item("UPPERCASE")
+    text = Acc("menu", "Text", [uppercase], states=("sensitive", "enabled"), actions=("",))
+    # A sibling item keeps Text from being read as Format's sole popup.
+    bold = _item("Bold")
+    fmt = Acc("menu", "Format", [bold, text], states=("sensitive", "enabled"), actions=("",))
+    bar = Acc("menu bar", "", [view, slide, fmt])
+    frame = Acc("frame", "Untitled 1 - LibreOffice Impress", [bar], states={"active"})
+    app = Acc("application", "soffice", [frame])
+    return app, view, slide, text, fmt, outline, new_slide, uppercase
+
+
+def test_libreoffice_menu_bar_presses_its_single_unnamed_action() -> None:
+    """do_action(0) opens a menu whose only AT-SPI action is unnamed.
+
+    Listing still does not press. A path through those menus presses the
+    empty action on each menu role and ``click`` on the leaf.
+    """
+    app, view, slide, text, fmt, outline, new_slide, uppercase = libreoffice()
+    assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["View", "Slide", "Format"]
+    assert [row["title"] for row in _linux_menus.menu_items(app, "View")] == ["Normal", "Outline"]
+    assert view.pressed == [] and slide.pressed == [] and fmt.pressed == []
+
+    assert _linux_menus.menu_press(app, "View", settle=lambda _s: None) == "View"
+    assert view.pressed == [""]
+
+    assert _linux_menus.menu_press(app, "View > Outline", settle=lambda _s: None) == "Outline"
+    assert view.pressed == ["", ""]
+    assert outline.pressed == ["click"]
+
+    assert _linux_menus.menu_press(app, "Slide > New Slide", settle=lambda _s: None) == "New Slide"
+    assert slide.pressed == [""]
+    assert new_slide.pressed == ["click"]
+
+    assert _linux_menus.menu_press(app, "Format > Text > UPPERCASE", settle=lambda _s: None) == "UPPERCASE"
+    assert fmt.pressed == [""]
+    assert text.pressed == [""]
+    assert uppercase.pressed == ["click"]
+
+
+def test_unnamed_action_is_not_pressed_outside_a_single_menu() -> None:
+    """The empty-action fallback is role menu and exactly one action."""
+    leaf = Acc("menu item", "Outline", states=("sensitive", "enabled"), actions=("",))
+    view = _menu("View", leaf)
+    bar = Acc("menu bar", "", [view])
+    leaf_app = Acc("application", "soffice", [Acc("frame", "Impress", [bar], states={"active"})])
+    with pytest.raises(ComputerUseError) as leaf_exc:
+        _linux_menus.menu_press(
+            leaf_app, "View > Outline", settle=lambda _s: None, dismiss=lambda: None,
+        )
+    assert leaf_exc.value.detail["reason"] == "press_failed"
+    assert leaf_exc.value.detail["level"] == 1
+    assert leaf.pressed == []
+    assert view.pressed == ["click"]
+
+    ambiguous = Acc(
+        "menu", "View", [_item("Outline")],
+        states=("sensitive", "enabled"), actions=("", "expand"),
+    )
+    ambiguous_bar = Acc("menu bar", "", [ambiguous])
+    ambiguous_app = Acc(
+        "application", "soffice",
+        [Acc("frame", "Impress", [ambiguous_bar], states={"active"})],
+    )
+    with pytest.raises(ComputerUseError) as menu_exc:
+        _linux_menus.menu_press(ambiguous_app, "View", settle=lambda _s: None)
+    assert menu_exc.value.detail["reason"] == "press_failed"
+    assert menu_exc.value.detail["level"] == 0
+    assert ambiguous.pressed == []
+
+    named = Acc(
+        "menu", "Format", [_item("Bold")],
+        states=("sensitive", "enabled"), actions=("", "click"),
+    )
+    named_bar = Acc("menu bar", "", [named])
+    named_app = Acc(
+        "application", "soffice",
+        [Acc("frame", "Writer", [named_bar], states={"active"})],
+    )
+    assert _linux_menus.menu_press(named_app, "Format", settle=lambda _s: None) == "Format"
+    assert named.pressed == ["click"]
+
+
+def test_classify_leaf_press_treats_a_timeout_as_dispatched() -> None:
+    assert _linux_menus.classify_leaf_press(True, failed=False, elapsed=0.05) == "ok"
+    assert _linux_menus.classify_leaf_press(False, failed=True, elapsed=0.40) == "dispatched"
+    assert _linux_menus.classify_leaf_press(False, failed=False, elapsed=0.40) == "dispatched"
+    assert _linux_menus.classify_leaf_press(False, failed=False, elapsed=0.05) == "refused"
+    assert _linux_menus.classify_leaf_press(False, failed=True, elapsed=0.05) == "refused"
+
+
+def test_leaf_timeout_waits_for_the_dialog_and_a_quick_refusal_still_fails() -> None:
+    """A slow leaf is not 'the app refused'. A quick false still is."""
+    app, file_menu = mousepad()
+    seen: dict[str, object] = {}
+
+    def dispatch(node):
+        seen["node"] = node.name
+        return "dispatched"
+
+    def await_dialog(root, *, dispatched: bool) -> None:
+        seen["dispatched"] = dispatched
+        seen["root"] = root
+
+    title = _linux_menus.menu_press(
+        app, "File > New", settle=lambda _s: None,
+        dispatch=dispatch, await_dialog=await_dialog,
+    )
+    assert title == "New"
+    assert seen == {"node": "New", "dispatched": True, "root": app}
+    assert file_menu.pressed == ["click"]
+    new = next(child for child in file_menu.children if child.name == "New")
+    assert new.pressed == []
+
+    def refuse(_node):
+        return "refused"
+
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "File > Open…", settle=lambda _s: None, dismiss=lambda: None, dispatch=refuse,
+        )
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "press_failed"
 
 
 def test_press_of_a_disabled_item_does_not_activate_it() -> None:
@@ -264,6 +473,180 @@ def test_active_frame_menu_bar_wins() -> None:
     idle = Acc("frame", "other", [Acc("menu bar", "", [_menu("Help")])], states=set())
     current = Acc("frame", "Mousepad", [Acc("menu bar", "", [_menu("File", _item("New"))])], states={"active"})
     app = Acc("application", "mousepad", [idle, current])
+    assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["File"]
+
+
+class _Fresh:
+    """A new proxy on every ``get_child_at_index``, as PyGObject does.
+
+    The previous wrapper is collected when the walk drops it. On CPython the
+    next proxy can be allocated at that same ``id()``.
+    """
+
+    __slots__ = ("role", "name", "states", "spec", "actions", "key", "pressed", "log")
+
+    def __init__(self, role, name, spec=(), states=(), log=None):
+        self.role = role
+        self.name = name
+        self.spec = tuple(spec)
+        self.states = set(states)
+        self.actions = ["click"]
+        self.key = ""
+        self.pressed = []
+        self.log = [] if log is None else log
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_child_count(self):
+        return len(self.spec)
+
+    def get_child_at_index(self, index):
+        role, name, spec, states = self.spec[index]
+        return _Fresh(role, name, spec, states, self.log)
+
+    def get_action_iface(self):
+        return self
+
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, index):
+        return "click"
+
+    def get_key_binding(self, index):
+        return ""
+
+    def do_action(self, index):
+        self.log.append(self.name)
+        return True
+
+
+def _spec(role, name, children=(), states=()):
+    return (role, name, tuple(children), tuple(states))
+
+
+def _writer_app():
+    """Writer's bar sits under panels, beside a toolbar that allocates leaves.
+
+    An idle frame publishes a different bar first. The search has to keep
+    going and then prefer the ACTIVE frame.
+    """
+    upper = _spec("menu item", "UPPERCASE", states=("sensitive", "enabled"))
+    text = _spec("menu", "Text", (upper,), ("sensitive", "enabled"))
+    bold = _spec("menu item", "Bold", states=("sensitive", "enabled"))
+    fmt = _spec("menu", "Format", (bold, text), ("sensitive", "enabled"))
+    new = _spec("menu item", "New", states=("sensitive", "enabled"))
+    file_menu = _spec("menu", "File", (new,), ("sensitive", "enabled"))
+    bar = _spec("menu bar", "", (file_menu, fmt))
+    root_pane = _spec("root pane", "", (bar,))
+    panel_b = _spec("panel", "", (root_pane,))
+    panel_a = _spec("panel", "", (panel_b,))
+    leaves = tuple(_spec("push button", f"b{i}", states=("sensitive",)) for i in range(40))
+    toolbar = _spec("panel", "toolbar", leaves)
+    writer = _spec("frame", "Untitled 1 - LibreOffice Writer", (toolbar, panel_a), ("active",))
+    about = _spec("menu item", "About", states=("sensitive", "enabled"))
+    help_menu = _spec("menu", "Help", (about,), ("sensitive", "enabled"))
+    idle_bar = _spec("menu bar", "", (help_menu,))
+    idle = _spec("frame", "other", (idle_bar,))
+    log: list[str] = []
+    return _Fresh("application", "soffice", (idle, writer), log=log), log
+
+
+def test_recycled_proxy_ids_still_operate_the_writer_menu_bar() -> None:
+    """LibreOffice Writer's menu bar is below a toolbar of leaf buttons.
+
+    Each ``get_child_at_index`` builds a new proxy. After a leaf is
+    processed nothing else references it, so it is collected and its
+    ``id()`` is reused for the root pane that owns the menu bar. A seen-set
+    of those ids skips the root pane and reports that Writer has no menu
+    bar, even though an idle frame's bar was found. ``menu`` has to list
+    File and Format and press Format > Text > UPPERCASE.
+    """
+    for _ in range(20):
+        app, log = _writer_app()
+        assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["File", "Format"]
+        assert _linux_menus.menu_press(app, "Format > Text > UPPERCASE", settle=lambda _s: None) == "UPPERCASE"
+        assert log == ["Format", "Text", "UPPERCASE"]
+
+
+def test_same_bus_path_is_not_a_new_node(monkeypatch) -> None:
+    """Two live wrappers of one accessible share a bus name and object path.
+
+    Their ``id()`` values differ, because both wrappers are still alive.
+    A panel that reports eighty copies of itself would otherwise fill the
+    400-node cap before the menu bar further down the frame is reached.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: node.atspi_key)
+
+    class Node:
+        __slots__ = ("kind", "role", "name", "states", "atspi_key", "actions", "key")
+
+        def __init__(self, kind, role, name, atspi_key, states=()):
+            self.kind = kind
+            self.role = role
+            self.name = name
+            self.atspi_key = atspi_key
+            self.states = set(states)
+            self.actions = ["click"]
+            self.key = ""
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_child_count(self):
+            if self.kind == "cycle":
+                return 80
+            if self.kind in {"app", "down", "bar", "menu"}:
+                return 1
+            if self.kind == "frame":
+                return 2
+            return 0
+
+        def get_child_at_index(self, index):
+            if self.kind == "cycle":
+                return Node("cycle", "panel", "cycle", (":1.9", "/cycle"))
+            if self.kind == "app":
+                return Node("frame", "frame", "Writer", (":1.9", "/frame"), ("active",))
+            if self.kind == "frame":
+                if index == 0:
+                    return Node("cycle", "panel", "cycle", (":1.9", "/cycle"))
+                return Node("down", "panel", "down", (":1.9", "/d0"))
+            if self.kind == "down":
+                depth = int(self.atspi_key[1][2:])
+                if depth >= 8:
+                    return Node("bar", "menu bar", "", (":1.9", "/bar"))
+                return Node("down", "panel", "down", (":1.9", f"/d{depth + 1}"))
+            if self.kind == "bar":
+                return Node("menu", "menu", "File", (":1.9", "/file"), ("sensitive", "enabled"))
+            if self.kind == "menu":
+                return Node("item", "menu item", "New", (":1.9", "/new"), ("sensitive", "enabled"))
+            raise IndexError(index)
+
+        def get_action_iface(self):
+            return self
+
+        def get_n_actions(self):
+            return 1
+
+        def get_action_name(self, _index):
+            return "click"
+
+        def get_key_binding(self, _index):
+            return ""
+
+        def do_action(self, _index):
+            return True
+
+    app = Node("app", "application", "soffice", (":1.9", "/app"))
     assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["File"]
 
 
@@ -448,7 +831,314 @@ def test_menu_state_without_a_bus_does_not_raise(monkeypatch) -> None:
     assert driver.menu_close("mousepad") == []
     with pytest.raises(ComputerUseError) as exc:
         driver.menu_items("mousepad", None)
-    assert exc.value.code is ErrorCode.PERMISSION_DENIED_ACCESSIBILITY
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "missing_dependency"
+    assert "System Settings" not in exc.value.detail["hint"]
+    assert "python3-gi" in exc.value.detail["hint"]
+
+
+class _ENode(Acc):
+    """Chromium menu node. ``get_parent`` is the menu bar for a bar button."""
+
+    def __init__(self, role, name="", children=(), states=None, log=None, on_press=None):
+        super().__init__(role, name, children, states)
+        self.parent = None
+        self.log = [] if log is None else log
+        self.on_press = on_press
+        for child in self.children:
+            if hasattr(child, "parent"):
+                child.parent = self
+
+    def get_parent(self):
+        return self.parent
+
+    def get_action_iface(self):
+        return self
+
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, _index):
+        return "click"
+
+    def get_key_binding(self, _index):
+        return self.key
+
+    def do_action(self, _index):
+        self.log.append(self.name)
+        self.pressed.append("click")
+        if self.on_press is not None:
+            self.on_press(self)
+        return True
+
+
+def _electron(menus: dict[str, list[str]]) -> tuple[Acc, list[str]]:
+    """Application menu bar of push buttons. Each press opens a separate window.
+
+    The popup is ``window > menu bar > menu > menu item``, which is the
+    Chromium shape. Item names keep their accelerator text.
+    """
+    log: list[str] = []
+    app = _ENode("application", "electron", log=log)
+    buttons = []
+    for title, items in menus.items():
+        def open_menu(_node, title=title, items=items):
+            if any(child.name == title for child in app.children):
+                return
+            rows = [
+                _ENode("menu item", name, states={"sensitive", "enabled", "showing"}, log=log)
+                for name in items
+            ]
+            menu = _ENode("menu", "", rows, states={"showing"})
+            popup_bar = _ENode("menu bar", "", [menu], states={"showing"})
+            window = _ENode("window", title, [popup_bar], states={"showing"})
+            app.children.append(window)
+            window.parent = app
+
+        buttons.append(_ENode(
+            "push button", title,
+            states={"sensitive", "enabled", "showing"},
+            log=log, on_press=open_menu,
+        ))
+    bar = _ENode("menu bar", "", buttons, states={"showing"})
+    frame = _ENode("frame", "Notes", [bar], states={"active", "showing"})
+    app.children = [frame]
+    frame.parent = app
+    return app, log
+
+
+def test_electron_menu_bar_buttons_open_a_separate_popup() -> None:
+    """Synthetic Chromium menu. Not a live Electron.
+
+    Top-level entries are push buttons, so they used to list ``submenu``
+    false and ``File > New Note`` failed with ``'File' has no submenu``.
+    The item's accessible name includes the accelerator. ``New Note`` matches
+    ``New Note Ctrl+N``, and the full string still matches too.
+    """
+    menus = {
+        "File": ["New Note Ctrl+N", "Show Dialog Ctrl+D", "Quit"],
+        "Edit": ["Select All Ctrl+A"],
+        "View": ["Toggle Panel", "Fullscreen F11"],
+    }
+    app, log = _electron(menus)
+    listed = _linux_menus.menu_items(app, None)
+    assert [(row["title"], row["submenu"]) for row in listed] == [
+        ("File", True), ("Edit", True), ("View", True),
+    ]
+    assert log == []
+    rows = _linux_menus.menu_items(app, "File", settle=lambda _s: None)
+    assert [row["title"] for row in rows] == ["New Note Ctrl+N", "Show Dialog Ctrl+D", "Quit"]
+    assert all(row["submenu"] is False for row in rows)
+
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "File > New Note", settle=lambda _s: None) == "New Note Ctrl+N"
+    assert log == ["File", "New Note Ctrl+N"]
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "File > New Note Ctrl+N", settle=lambda _s: None) == "New Note Ctrl+N"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "Edit > Select All", settle=lambda _s: None) == "Select All Ctrl+A"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "View > Fullscreen", settle=lambda _s: None) == "Fullscreen F11"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "View > Toggle Panel", settle=lambda _s: None) == "Toggle Panel"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "File > show", settle=lambda _s: None) == "Show Dialog Ctrl+D"
+    app, _log = _electron(menus)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "File > Missing", settle=lambda _s: None, dismiss=lambda: None,
+        )
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "New Note Ctrl+N" in exc.value.detail["available"]
+
+
+def test_exact_menu_title_wins_over_a_shared_accelerator_stem() -> None:
+    """``New Note`` is the item with that title, not ``New Note Ctrl+Shift+N``.
+
+    ``Save`` matches ``Save Ctrl+S`` and does not also match
+    ``Save As Ctrl+Shift+S``. Two items that both strip to the same title
+    stay ambiguous. Synthetic menu, not a live Electron.
+    """
+    app, log = _electron({"File": ["New Note", "New Note Ctrl+Shift+N"]})
+    assert _linux_menus.menu_press(app, "File > New Note", settle=lambda _s: None) == "New Note"
+    assert log == ["File", "New Note"]
+    app, log = _electron({"File": ["New Note", "New Note Ctrl+Shift+N"]})
+    assert _linux_menus.menu_press(
+        app, "File > New Note Ctrl+Shift+N", settle=lambda _s: None,
+    ) == "New Note Ctrl+Shift+N"
+
+    app, log = _electron({"File": ["Save Ctrl+S", "Save As Ctrl+Shift+S"]})
+    assert _linux_menus.menu_press(app, "File > Save", settle=lambda _s: None) == "Save Ctrl+S"
+    app, log = _electron({"File": ["Save Ctrl+S", "Save As Ctrl+Shift+S"]})
+    assert _linux_menus.menu_press(app, "File > Save As", settle=lambda _s: None) == "Save As Ctrl+Shift+S"
+
+    app, _log = _electron({"File": ["New Note Ctrl+N", "New Note Ctrl+Shift+N"]})
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(app, "File > New Note", settle=lambda _s: None, dismiss=lambda: None)
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "New Note Ctrl+N" in str(exc.value)
+
+
+def test_electron_menu_item_submenu_opens_the_next_popup() -> None:
+    """A menu item with HAS_POPUP opens another window. Not a live Electron."""
+    log: list[str] = []
+    app = _ENode("application", "electron", log=log)
+    notes = _ENode("menu item", "notes.txt", states={"sensitive", "enabled", "showing"}, log=log)
+
+    def open_recent(_node):
+        if any(child.name == "recent-popup" for child in app.children):
+            return
+        menu = _ENode("menu", "", [notes], states={"showing"})
+        popup_bar = _ENode("menu bar", "", [menu], states={"showing"})
+        window = _ENode("window", "recent-popup", [popup_bar], states={"showing"})
+        app.children.append(window)
+        window.parent = app
+
+    recent = _ENode(
+        "menu item", "Recent",
+        states={"sensitive", "enabled", "showing", "has_popup"},
+        log=log, on_press=open_recent,
+    )
+
+    def open_file(_node):
+        if any(child.name == "file-popup" for child in app.children):
+            return
+        menu = _ENode("menu", "", [recent], states={"showing"})
+        popup_bar = _ENode("menu bar", "", [menu], states={"showing"})
+        window = _ENode("window", "file-popup", [popup_bar], states={"showing"})
+        app.children.append(window)
+        window.parent = app
+
+    file_btn = _ENode(
+        "push button", "File",
+        states={"sensitive", "enabled", "showing"},
+        log=log, on_press=open_file,
+    )
+    bar = _ENode("menu bar", "", [file_btn], states={"showing"})
+    frame = _ENode("frame", "Notes", [bar], states={"active", "showing"})
+    app.children = [frame]
+    frame.parent = app
+    assert _linux_menus.menu_press(app, "File > Recent > notes.txt", settle=lambda _s: None) == "notes.txt"
+    assert log == ["File", "Recent", "notes.txt"]
+
+
+def _bind_java(app, *nodes):
+    """Mark ``app`` as the Java ATK wrapper and point ``nodes`` at it."""
+    app.get_toolkit_name = lambda: "JAVA"
+
+    def application():
+        return app
+
+    app.get_application = application
+    for node in nodes:
+        node.get_application = application
+    return app
+
+
+def _swing_edit(*, item_showing: bool):
+    """Edit > Clear Notes. The bar entry stays SELECTED, as Java ATK does."""
+    item_states = {"sensitive", "enabled"}
+    if item_showing:
+        item_states.add("showing")
+    clear = _item("Clear Notes", states=item_states)
+    edit = _menu("Edit", clear, states={"sensitive", "enabled", "showing", "selected"})
+    bar = Acc("menu bar", "", [edit])
+    frame = Acc("frame", "Probe", [bar], states={"active", "showing"})
+    app = Acc("application", "java", [frame])
+    _bind_java(app, clear, edit, bar, frame)
+    return app, edit, clear, frame
+
+
+def test_java_selected_without_a_showing_item_is_not_an_open_menu() -> None:
+    """A leftover SELECTED on a Java menu-bar entry is not an open menu.
+
+    The entry counts only when a popup or an item is SHOWING. GTK still
+    treats SELECTED alone as open; that case is the disabled-Save test.
+    """
+    app, edit, clear, _frame = _swing_edit(item_showing=False)
+    assert "selected" in edit.states
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+    clear.states.add("showing")
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["Edit"]}
+
+
+def test_java_menu_press_closes_the_popup_and_ignores_leftover_selected() -> None:
+    """The leaf runs, then Escape closes the popup. SELECTED may remain."""
+    app, edit, clear, _frame = _swing_edit(item_showing=False)
+    edit.states.discard("selected")
+
+    class _Open(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            edit.states.add("selected")
+            clear.states.add("showing")
+            return True
+
+    edit.get_action_iface = lambda: _Open(edit)  # type: ignore[method-assign]
+    sent: list[str] = []
+
+    def dismiss() -> None:
+        sent.append("escape")
+        clear.states.discard("showing")
+
+    title = _linux_menus.menu_press(
+        app, "Edit > Clear Notes", settle=lambda _s: None, dismiss=dismiss,
+    )
+    assert title == "Clear Notes"
+    assert clear.pressed == ["click"]
+    assert sent == ["escape"]
+    assert "selected" in edit.states
+    assert "showing" not in clear.states
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+
+
+def test_java_menu_press_does_not_escape_into_a_showing_dialog() -> None:
+    """A dialog opened by the leaf is not cancelled to close the popup."""
+    app, edit, clear, frame = _swing_edit(item_showing=False)
+    dialog = Acc("dialog", "Confirm", states={"showing", "visible", "active"})
+    frame.children.append(dialog)
+    _bind_java(app, dialog)
+
+    class _Keep(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            edit.states.add("selected")
+            clear.states.add("showing")
+            return True
+
+    edit.get_action_iface = lambda: _Keep(edit)  # type: ignore[method-assign]
+    clear.get_action_iface = lambda: _Keep(clear)  # type: ignore[method-assign]
+    sent: list[str] = []
+    title = _linux_menus.menu_press(
+        app, "Edit > Clear Notes", settle=lambda _s: None,
+        dismiss=lambda: sent.append("escape"),
+    )
+    assert title == "Clear Notes"
+    assert clear.pressed == ["click"]
+    assert sent == []
+    assert _linux_menus.menu_state(app)["open"] is True
+    assert _linux_menus.escape_reaches_menu(app) is False
+
+
+def test_java_press_of_the_menu_itself_leaves_the_popup_open() -> None:
+    """``menu(path='Edit')`` opens the menu. It is not closed again."""
+    app, edit, clear, _frame = _swing_edit(item_showing=False)
+    edit.states.discard("selected")
+
+    class _Open(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            edit.states.add("selected")
+            clear.states.add("showing")
+            return True
+
+    edit.get_action_iface = lambda: _Open(edit)  # type: ignore[method-assign]
+    sent: list[str] = []
+    assert _linux_menus.menu_press(
+        app, "Edit", settle=lambda _s: None, dismiss=lambda: sent.append("escape"),
+    ) == "Edit"
+    assert sent == []
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["Edit"]}
 
 
 def test_file_dialog_names_the_linux_limit() -> None:

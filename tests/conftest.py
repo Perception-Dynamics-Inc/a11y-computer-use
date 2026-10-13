@@ -191,6 +191,29 @@ if sys.platform == "win32":
 
 
 @pytest.fixture(autouse=True)
+def _xlib_missing_is_an_empty_probe(monkeypatch):
+    """Keep synthetic Linux tests on the empty-probe path when Xlib is absent.
+
+    ``python-xlib`` is a Linux dependency. macOS and Windows runners do not
+    install it, and neither does a Linux venv with that package removed.
+    ``_display`` then raises ``missing_dependency`` before a stubbed AT-SPI
+    tree can answer ``app_not_found`` or ``no_accessibility_bridge``.
+
+    This turns the check off only when ``import Xlib`` fails. A test that
+    patches ``_linux_system._display`` never reaches the import. The real
+    import path still raises, and
+    ``test_missing_xlib_is_not_an_empty_confirmed_list`` turns the check
+    back on after hiding the module.
+    """
+    try:
+        import Xlib.display  # noqa: F401
+    except ImportError:
+        from a11y_computer_use.drivers import _linux_system
+
+        monkeypatch.setattr(_linux_system, "xlib_required", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _no_os_permission_dialogs(monkeypatch):
     """Permission errors fire the macOS grant dialog once per process; never during tests."""
     monkeypatch.setenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", "1")
