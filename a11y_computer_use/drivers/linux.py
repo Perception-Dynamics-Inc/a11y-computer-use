@@ -1999,6 +1999,22 @@ class LinuxDriver:
                 "and make it current",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # Qt's Toggle flips a button/item's state without clicked/triggered/
+        # itemClicked, so the application's handlers never run. Send one
+        # real click at the visible center, after raising the owning window
+        # above. With no usable screen box (or no X11 pointer input), keep
+        # the accessible action. Never Toggle after sending a pointer click.
+        if self._run(lambda: _atspi.qt_toggle_only_control(handle)):
+            bounds = element.bounds
+            if bounds is not None and bounds.width > 0 and bounds.height > 0 and not _on_wayland():
+                width, height = _screen_span()
+                left, top = max(0, bounds.x), max(0, bounds.y)
+                right = min(width, bounds.x + bounds.width)
+                bottom = min(height, bounds.y + bounds.height)
+                if right > left and bottom > top:
+                    self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+                    return True
+            return self._run(lambda: _atspi.do_press(handle))
         # A GTK tree cell's activate/expand action reports success and leaves
         # the selection where it was. Select through the parent's Selection
         # interface, or click the row's on-screen center, and require the
@@ -2365,13 +2381,25 @@ class LinuxDriver:
             x, y = int(revealed[0]), int(revealed[1])
         else:
             x, y = _point_of(target)
-        if isinstance(target, Element) and self._gtk4_point_untrusted(target, handle):
+        header_box_untrusted = handle is not None and self._run(
+            lambda: _atspi.gtk4_window_origin_untrusted(handle)
+        )
+        if isinstance(target, Element) and (
+            header_box_untrusted or self._gtk4_point_untrusted(target, handle)
+        ):
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
-            if plain and self._run(lambda: _atspi.do_press(handle)):
+            # Header-bar controls expose click/press. Do not substitute an
+            # unrelated action, or fall back to their known unreliable point.
+            activated = plain and self._run(
+                lambda: _atspi._do_action_named(handle, frozenset({"click", "press"}))
+                if header_box_untrusted else _atspi.do_press(handle)
+            )
+            if activated:
                 return None
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
-                f"{target.ref} ({target.role}) has no usable screen bounds, so the click was not sent",
+                f"{target.ref} ({target.role}) has no reliable screen bounds or successful activation action, "
+                "so the pointer click was not sent",
                 detail={
                     "ref": target.ref,
                     "role": target.role,
