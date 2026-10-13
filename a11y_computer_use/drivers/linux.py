@@ -4244,13 +4244,47 @@ class LinuxDriver:
 
         return _linux_system.app_at_point_id(point.x, point.y)
 
+    def same_app_window_cover(self, element: Element, app: str | None) -> str | None:
+        """Return a covering same-app sibling toplevel for a ref click.
+
+        Resolve the target's owning toplevel so controls in the front dialog
+        remain clickable. Missing X11/AT-SPI evidence preserves normal clicks.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        bounds = element.bounds
+        if bounds is None:
+            return None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None or self._gtk4_point_untrusted(element, handle):
+                return None
+            toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            if toplevel is None:
+                return None
+            _active, title, pid, extents = toplevel
+            cx = float(bounds.x) + float(bounds.width) / 2.0
+            cy = float(bounds.y) + float(bounds.height) / 2.0
+            owner_pid = _linux_system.pid_at_point(cx, cy)
+            if not pid or not owner_pid or int(owner_pid) != int(pid):
+                return None
+            target_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+            front = _linux_system.window_at_point(cx, cy)
+            if target_id is not None and front is not None and front["window_id"] != target_id:
+                return front["title"] or "another window"
+        except Exception:  # no reliable toplevel hit-test
+            pass
+        return None
+
     def occlusion(self, element: Element, app: str | None) -> str | None:
-        """None when the element's center is not covered by another window.
+        """None when the element's center belongs to ``app``.
 
         A GTK process launched from Python has comm ``python3`` and an AT-SPI
         name from ``GLib.set_prgname``. Comparing those strings would call the
-        app's own window a cover. Same-pid sibling windows are checked against
-        the handle's owning toplevel. A different
+        app's own window a cover. The same pid is the same app. A different
         pid is that window's comm (``covered by <comm>``). An unknown pid is
         not a cover: a missing hit-test must not refuse the crop.
         """
@@ -4286,19 +4320,6 @@ class LinuxDriver:
             except Exception:  # noqa: BLE001 - the bus may be down in a unit test
                 app_pid = None
         if app_pid is not None and int(owner_pid) == int(app_pid):
-            if handle is not None:
-                try:
-                    toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
-                    if toplevel is not None:
-                        _active, title, pid, extents = toplevel
-                        target_id = _linux_system.window_id_for_toplevel(
-                            title=title, pid=pid, extents=extents,
-                        )
-                        front = _linux_system.window_at_point(cx, cy)
-                        if target_id is not None and front is not None and front["window_id"] != target_id:
-                            return front["title"] or "another window"
-                except Exception:  # no reliable toplevel hit-test
-                    pass
             return None
         try:
             owner = _linux_system._comm_for_pid(int(owner_pid))

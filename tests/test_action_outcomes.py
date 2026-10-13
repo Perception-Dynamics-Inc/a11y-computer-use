@@ -273,12 +273,14 @@ def _runtime(tmp_path, driver: TreeDriver):
     return runtime
 
 
-@pytest.mark.parametrize("ref,front_id,covered", [
-    ("editor", 2, True),
-    ("preferences-control", 2, False),
-    ("editor", 1, False),
+@pytest.mark.parametrize("ref,front_id,owner_pid,covered", [
+    ("editor", 2, 4242, True),
+    ("preferences-control", 2, 4242, False),
+    ("editor", 1, 4242, False),
+    ("editor", 2, 9000, False),  # Another app preserves the existing AX click path.
+    ("editor", 2, None, False),  # An unknown owner is not evidence of a cover.
 ])
-def test_linux_same_app_window_cover_before_ax_click(tmp_path, monkeypatch, ref, front_id, covered):
+def test_linux_same_app_window_cover_before_ax_click(tmp_path, monkeypatch, ref, front_id, owner_pid, covered):
     from a11y_computer_use import observe
     from a11y_computer_use.drivers import _atspi, _linux_system
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -296,7 +298,7 @@ def test_linux_same_app_window_cover_before_ax_click(tmp_path, monkeypatch, ref,
     monkeypatch.setattr(linux, "_run", lambda fn: fn())
     monkeypatch.setattr(linux, "_gtk4_point_untrusted", lambda element, handle: False)
     monkeypatch.setattr(observe, "ax_handle_for", lambda snap, target: target)
-    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 4242)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: owner_pid)
     monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
     monkeypatch.setattr(_atspi, "pid_of", lambda root: 4242)
     monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
@@ -307,7 +309,7 @@ def test_linux_same_app_window_cover_before_ax_click(tmp_path, monkeypatch, ref,
     monkeypatch.setattr(_linux_system, "window_at_point", lambda x, y: {
         "window_id": front_id, "title": "Preferences" if front_id == 2 else "Geany",
     })
-    driver.occlusion = linux.occlusion
+    driver.same_app_window_cover = linux.same_app_window_cover
 
     def press(element):
         driver.calls.append(("press", element.ref))

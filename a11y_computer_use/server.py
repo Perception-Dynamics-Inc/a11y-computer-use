@@ -4696,8 +4696,9 @@ class Runtime:
             menu_note.append(self._dismiss_open_menu(app))
             if isinstance(act, Element):
                 self._refuse_vanished_target(act)
-                cover = self._cover_owner(act, app)
-                if cover and cover != "off_screen":
+                sibling_cover = getattr(self.driver, "same_app_window_cover", None)
+                cover = sibling_cover(act, app) if sibling_cover is not None else None
+                if cover:
                     raise ComputerUseError(
                         ErrorCode.UNSUPPORTED,
                         f"{act.ref} is covered by {cover}",
@@ -4747,8 +4748,8 @@ class Runtime:
                     },
                 )
             # Synthesized mouse events land on whatever window is under the
-            # point, so the app hit-test runs right before them. Ref targets
-            # also check window coverage before AX activation above.
+            # point, so the hit-test runs right before them; an AXPress above
+            # addressed the element itself and needs no such guard (#11).
             # A text ref uses the control's box, not the line-wide text box.
             self._recheck_target(app, act)
             self._guard_user(app)
