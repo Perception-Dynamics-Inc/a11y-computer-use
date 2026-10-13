@@ -4209,7 +4209,9 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds."""
+        that stays off screen is reported with no bounds. When a cell,
+        row, or other control has the exact name, that control is the
+        match. A label counts only when its own title is the text."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -4238,8 +4240,11 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
-            matches = observe.find_elements(
-                snap, text=text, role=role, editable=editable, clickable=clickable
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
             )
             return observe.render_matches(snap, matches, text=text)
 
@@ -6123,13 +6128,18 @@ class Runtime:
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
+        When a cell, row, or other control has the exact name, that control
+        is the match. A label counts only when its own title is the text,
+        so a label that merely mentions the name does not stop the search.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
         body-scroll page, not the window's tab strip.
         An opaque container without readable contents returns
         ``container_not_readable`` before input; the target's presence
-        cannot be determined from that accessibility tree.
+        cannot be determined from that accessibility tree. An unscoped text
+        search with only statusbar hits and an opaque content surface refuses
+        with ``statusbar_only_match`` rather than returning a content ref.
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
@@ -6262,9 +6272,38 @@ class Runtime:
             center_y = bounds.y + bounds.height / 2
             return left <= center_x < right and top <= center_y < bottom
 
+        def search_matches(snap: Snapshot) -> tuple[Element, ...]:
+            matches = observe.find_elements(snap, text=text, role=role)
+            if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
+                return observe.prefer_exact_targets(matches, text)
+            by_ref = {el.ref: el for el in snap.elements}
+
+            def in_statusbar(el: Element) -> bool:
+                seen: set[str] = set()
+                while el.ref not in seen:
+                    seen.add(el.ref)
+                    if el.role == "AXStatusBar":
+                        return True
+                    if el.parent not in by_ref:
+                        break
+                    el = by_ref[el.parent]
+                return False
+
+            if all(in_statusbar(el) for el in matches) and any(
+                el.role == observe.OPAQUE_ROLE for el in snap.elements
+            ):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "only the statusbar matches; the content surface remains opaque, "
+                    "so accessibility search cannot verify a content target or return "
+                    "an actionable content ref",
+                    detail={"reason": "statusbar_only_match", "content_readable": False},
+                )
+            return observe.prefer_exact_targets(matches, text)
+
         def visible_matches(snap: Snapshot) -> list[Element]:
             return [
-                el for el in observe.find_elements(snap, text=text, role=role)
+                el for el in search_matches(snap)
                 if on_screen(el, snap)
             ]
 
@@ -6276,7 +6315,7 @@ class Runtime:
             no match in this snapshot. A document table keeps rows that have
             already left the viewport, so a name in the tree is not a hit.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = search_matches(snap)
             located = [el for el in found if el.bounds is not None]
             if not located:
                 return "missing"
@@ -6335,7 +6374,7 @@ class Runtime:
             many viewports below never arrives one line at a time, so
             the search keeps the five-line burst until the row is close.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = search_matches(snap)
             box = viewport_box(snap)
             if not found or box is None:
                 return False
@@ -6797,7 +6836,7 @@ class Runtime:
                     else:
                         same_rows = 0
                     previous_rows = seen
-                matches = observe.find_elements(snap, text=text, role=role)
+                matches = search_matches(snap)
                 if not matches and container_not_readable(snap, anchor_now):
                     return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if matches:
@@ -7649,7 +7688,9 @@ class Runtime:
                 launch_argv = None
             else:
                 launch_name, gate_key, launch_argv = self._prepare_launch(name)
-                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
+                self._reject_terminal(
+                    AppOp(verb=verb, app=launch_name), launch_name, input_target=launch_argv,
+                )
 
             def launch() -> str | None:
                 before: list = []
@@ -8831,7 +8872,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches). A
+        (text past the 200 characters kept on the element still matches). When
+        a cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. A
         terminal's shown value is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
@@ -9272,11 +9315,15 @@ def build_server(
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
         Give text (substring of title or the field's full value, including
-        text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
+        text past the 200 characters a snapshot keeps) and/or role. When a
+        cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. An opaque container with no
         readable contents returns container_not_readable before sending input;
-        this does not establish that the target is absent. budget_s is how long the
+        this does not establish that the target is absent. An unscoped text search
+        with only statusbar hits and an opaque content surface returns an
+        unsupported statusbar_only_match error. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
         A step that changes either one starts that clock again. The search
