@@ -1238,9 +1238,10 @@ class LinuxDriver:
         self._expand_cursors: dict[object, int] = {}
 
     def _run(self, fn):
-        """Run an AT-SPI (libatspi) op inline, or — when the event cache is opted
-        in (A11Y_COMPUTER_USE_ATSPI_EVENTS=1) — on the shared a11y thread so libatspi's
-        read cache is trusted (~1.8x faster snapshots) and stays single-threaded.
+        """Run an AT-SPI (libatspi) op inline, or on the shared a11y thread when
+        the event cache is on (Linux default if the typelib imports;
+        ``A11Y_COMPUTER_USE_ATSPI_EVENTS=0`` forces inline) so libatspi's
+        read cache is trusted and stays single-threaded.
         Only libatspi ops go through here; XTEST input uses a separate X
         connection and is unaffected.
 
@@ -2343,7 +2344,21 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
-        x, y = _point_of(target)
+        revealed = None
+        if isinstance(target, Element) and handle is not None:
+            # An off-view table cell is scrolled, then clicked at its new
+            # center. A point target keeps the pixels it was given. A cell
+            # that stays outside the viewport is not clicked.
+            try:
+                revealed = self._run(lambda: _atspi.reveal_unpainted_table_click(handle))
+            except ComputerUseError:
+                raise
+            except Exception:
+                revealed = None
+        if revealed is not None:
+            x, y = int(revealed[0]), int(revealed[1])
+        else:
+            x, y = _point_of(target)
         if isinstance(target, Element) and self._gtk4_point_untrusted(target, handle):
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
             if plain and self._run(lambda: _atspi.do_press(handle)):

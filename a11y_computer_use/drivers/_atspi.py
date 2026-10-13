@@ -966,6 +966,69 @@ def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
     return split
 
 
+# Inkscape toolbox rows put the short name on the first line and the tooltip
+# plus a parenthetical shortcut on the last: ``Text Tool\nCreate and edit
+# text objects (T)``. The chord is a key, not a sentence in parentheses.
+_TOOL_SHORTCUT = re.compile(
+    r"(?i)^(?:(?:ctrl|control|shift|alt|super|meta|primary|cmd|command|option)\+)*"
+    r"(?:f\d{1,2}|[a-z]|[0-9]|plus|minus|esc|escape|del|delete|tab|space|"
+    r"return|enter|backspace|up|down|left|right|home|end|insert|"
+    r"pageup|pagedown|page\s*up|page\s*down)$"
+)
+_TOOLTIP_SHORTCUT_LINE = re.compile(r"^(?P<hint>.+?) \((?P<shortcut>[^)]+)\)$")
+
+
+def _tooltip_shortcut_body(text: str) -> tuple[str, str, str] | None:
+    """``(label, hint, shortcut)`` for a name plus a tooltip ending in a chord.
+
+    None when the text is one line, a line is blank, or the last line does
+    not end in a parenthetical key. A sentence without that chord stays
+    whole, and so does a GIMP modifier line.
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in raw:
+        return None
+    lines = [line.strip() for line in raw.split("\n")]
+    if not lines or any(not line for line in lines):
+        return None
+    label = lines[0]
+    if _generic_region_name(label):
+        return None
+    match = _TOOLTIP_SHORTCUT_LINE.match(lines[-1])
+    if match is None:
+        return None
+    shortcut = match.group("shortcut").strip()
+    if _TOOL_SHORTCUT.match(shortcut) is None:
+        return None
+    hint_bits = lines[1:-1] + [match.group("hint").strip()]
+    hint = "\n".join(bit for bit in hint_bits if bit)
+    if not hint:
+        return None
+    return label, hint, shortcut
+
+
+def _split_tooltip_fields(name: str, description: str) -> tuple[str, str, str, str]:
+    """``(name, description, hint, shortcut)`` for an Inkscape tool row.
+
+    The visible name is the first line. The tooltip sentence is the hint
+    and the parenthetical chord is the shortcut. A description that already
+    has text is kept. A name that is not this pattern is unchanged, so the
+    GIMP modifier split that ran first still owns those lines.
+    """
+    split = _tooltip_shortcut_body(name)
+    if split is not None:
+        label, hint, shortcut = split
+        kept = description if str(description).strip() else hint
+        return label, kept, hint, shortcut
+    if str(name).strip():
+        return name, description, "", ""
+    split = _tooltip_shortcut_body(description)
+    if split is None:
+        return name, description, "", ""
+    label, hint, shortcut = split
+    return label, hint, hint, shortcut
+
+
 # A GIMP image window's canvas is a focusable childless panel. Its name is
 # not on that panel. The image title is a label elsewhere in the frame, and
 # the frame name is the window title. This search is local to that one
@@ -1069,6 +1132,53 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     if len(labels) == 1:
         return labels[0]
     return title
+
+
+def _direct_label_names(acc) -> list[str]:
+    """Non-generic names of ``acc``'s immediate label children.
+
+    Stops once two names are found. The caller treats that as ambiguous.
+    """
+    count = _child_count(acc)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    found: list[str] = []
+    for index in range(min(int(count), 48)):
+        child = _child_at(acc, index)
+        if child is None or _role_name(child) != "label":
+            continue
+        name = _node_name(child)
+        if name and not _generic_region_name(name):
+            found.append(name)
+        if len(found) > 1:
+            return found
+    return found
+
+
+def _selected_icon_name(acc) -> str:
+    """The one label beside a selected icon, or empty.
+
+    GIMP brush-grid icons expose no name, description, text, or tooltip.
+    The dock's selected brush is a label on the filler that also holds the
+    scroll pane. Unselected icons have nothing to read, so this returns
+    empty for them only because the caller skips them. An ancestor with
+    two labels is ambiguous. The walk stops at a page tab or a window so
+    a label from another dock is not borrowed.
+    """
+    node = acc
+    for _ in range(6):
+        node = _parent_of(node)
+        if node is None:
+            return ""
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog", "page tab", "page tab list"}:
+            return ""
+        labels = _direct_label_names(node)
+        if len(labels) == 1:
+            return labels[0]
+        if len(labels) > 1:
+            return ""
+    return ""
 
 
 def _hidden_page_tab(node) -> bool:
@@ -2659,6 +2769,7 @@ def _state_flags(acc):
     is ``STATE_EDITABLE``. A fake state set that lists names and has no
     ``StateType`` member matches the name string."""
     Atspi = _atspi()
+    _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return True, False, None, False, None, False, False
@@ -3090,9 +3201,19 @@ class ATSPIAccessor:
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
+        name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         if role_str == "panel" and not str(name).strip() and not str(description).strip():
             surface_name = _panel_surface_name(node, size, focusable)
+        if (
+            role_str == "icon"
+            and selected
+            and not str(name).strip()
+            and not str(description).strip()
+        ):
+            label = _selected_icon_name(node)
+            if label:
+                name = label
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
@@ -3122,6 +3243,9 @@ class ATSPIAccessor:
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
             surface_name=surface_name,
+            hint=hint,
+            shortcut=shortcut,
+            note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else "",
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -6819,6 +6943,7 @@ def _state_has(acc, name: str) -> bool:
     A fake state set matches the name string. The GI binding matches
     ``Atspi.StateType``. Missing gi, or a node with no state set, is false.
     """
+    _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return False
@@ -11501,6 +11626,200 @@ def changed_peer_fields(acc, before: dict) -> list[str]:
     return changed
 
 
+# ``88%`` or ``50 %``. A bare ``50`` is not a percent literal. A narrow
+# no-break space is the same gap as a normal space.
+_PERCENT_LITERAL = re.compile(
+    r"^(?P<number>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*%$"
+)
+# Inkscape draws an integer percent. The log2 of that percent can be a
+# fraction of a percent away from the rounded text.
+_PERCENT_DISPLAY_TOLERANCE = 0.51
+
+
+def _percent_literal(value: str) -> float | None:
+    """The number in ``50%`` or ``50 %``. None when the text has no percent sign."""
+    text = str(value).replace("\u00a0", " ").replace("\u202f", " ").strip()
+    match = _PERCENT_LITERAL.match(text)
+    if match is None:
+        return None
+    try:
+        number = float(match.group("number"))
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _finite_current_value(acc) -> float | None:
+    """The Value interface's current value, or None when it is not a finite number."""
+    got = _safe(lambda: _atspi().Value.get_current_value(acc))
+    if isinstance(got, bool) or not isinstance(got, (int, float)):
+        return None
+    number = float(got)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _pow2_percent(log_value: float) -> float | None:
+    """``100 * 2**log_value``, or None when that power is not finite."""
+    try:
+        percent = math.pow(2.0, float(log_value)) * 100.0
+    except OverflowError:
+        return None
+    if not math.isfinite(percent):
+        return None
+    return percent
+
+
+def _percent_value_unit(acc) -> tuple[str, float] | None:
+    """How a percent label relates to the current Value, plus that value.
+
+    ``log2`` means the text is the percent and the Value is ``log2`` of
+    that percent as a fraction (Inkscape's zoom spin: ``88%`` is about
+    ``-0.184``). ``percent`` means the Value is already that percent.
+    ``unmatched`` means the text is a percent and neither relationship
+    holds, so a percent literal must not be converted by guesswork.
+    None means the text is not a percent, or the current value could not
+    be read.
+    """
+    shown = _number_text(acc)
+    if not shown:
+        return None
+    percent = _percent_literal(shown)
+    if percent is None:
+        return None
+    current = _finite_current_value(acc)
+    if current is None:
+        return None
+    displayed = _pow2_percent(current)
+    if displayed is not None and abs(displayed - percent) <= _PERCENT_DISPLAY_TOLERANCE:
+        return "log2", current
+    if abs(percent - current) <= _PERCENT_DISPLAY_TOLERANCE:
+        return "percent", current
+    return "unmatched", current
+
+
+def _clamp_near_bounds(number: float, low: float, high: float, *, open_upper: bool) -> float:
+    """Pull a conversion that landed an ulp outside the published bounds back in."""
+    if number < low and low - number <= 1e-6:
+        return low
+    if not open_upper and number > high and number - high <= 1e-6:
+        return high
+    return number
+
+
+def _log_percent_range_message(value: str, low: float, high: float, *, open_upper: bool) -> str:
+    """The percent a log2 control can show, and the Value scale underneath it."""
+    low_pct = _pow2_percent(low)
+    low_text = "?" if low_pct is None else f"{_format_bound(low_pct)}%"
+    if open_upper:
+        return (
+            f"value {value!r} is below {low_text} "
+            f"(value scale minimum {_format_bound(low)})"
+        )
+    high_pct = _pow2_percent(high)
+    high_text = "?" if high_pct is None else f"{_format_bound(high_pct)}%"
+    return (
+        f"value {value!r} is outside {low_text}..{high_text} "
+        f"(value scale {_format_bound(low)}..{_format_bound(high)})"
+    )
+
+
+def _unmatched_percent_message(
+    acc, value: str, low: float, high: float, *, open_upper: bool,
+) -> str:
+    """A percent was asked of a control whose text and Value do not agree."""
+    shown = _number_text(acc) or ""
+    current = _finite_current_value(acc)
+    current_text = "unreadable" if current is None else _format_bound(current)
+    if open_upper:
+        span = f"minimum {_format_bound(low)}"
+    else:
+        span = f"{_format_bound(low)}..{_format_bound(high)}"
+    return (
+        f"value {value!r} is a percent; the control shows {shown.strip()!r} "
+        f"which does not match its value {current_text}; valid range is {span}"
+    )
+
+
+def _format_held_percent(percent: float) -> str:
+    """The percent a log2 control holds after the toolkit rounds the write."""
+    if abs(percent - round(percent)) <= 0.05:
+        return f"{int(round(percent))}%"
+    return f"{_format_bound(percent)}%"
+
+
+def _write_log_percent(acc, value: str, written: float, before: float) -> bool | str:
+    """Write a log2 zoom and read it back. No step snap and no keystrokes.
+
+    An exact landing returns True, so the caller reports the requested
+    percent. A toolkit that moved the value by at most one step returns
+    the percent that landing represents. A value that did not move is a
+    mismatch, including when the old value was already within one step.
+    """
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, written), False)
+    got = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _safe(lambda: Atspi.Value.get_current_value(acc))
+        if (
+            isinstance(got, (int, float))
+            and not isinstance(got, bool)
+            and _numbers_match(float(got), written)
+        ):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    if isinstance(got, (int, float)) and not isinstance(got, bool):
+        step = _minimum_increment(acc)
+        moved = not _numbers_match(float(got), before)
+        if step is not None and moved and abs(float(got) - written) <= step:
+            held = _pow2_percent(float(got))
+            if held is not None:
+                return _format_held_percent(held)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back {got!r} does not match {value!r}",
+        expected=value,
+        actual=got,
+    )
+
+
+def _apply_log_percent(acc, value: str, low: float, high: float, before: float, *, open_upper: bool):
+    """Convert a percent onto a log2 Value. None lets the bare number through.
+
+    A percent literal (``50%``, ``50 %``) is ``log2(percent / 100)``. A bare
+    number inside the Value range is not a percent: the caller writes it
+    unchanged, including the spin step. A bare number outside that range is
+    a percent when the conversion fits, and the same percent bounds when it
+    does not. The conversion is not snapped to the step. Snapping ``50%``
+    onto Inkscape's tenth would land near ``48.5%``.
+    """
+    literal = _percent_literal(value)
+    if literal is None:
+        try:
+            number = _parse_number(value)
+        except ValueError:
+            return None
+        if not _outside_range(number, low, high, open_upper=open_upper):
+            return None
+        percent = number
+    else:
+        percent = literal
+    if not math.isfinite(percent) or percent <= 0:
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper))
+    try:
+        written = math.log(percent / 100.0) / math.log(2.0)
+    except ValueError:
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper)) from None
+    written = _clamp_near_bounds(written, low, high, open_upper=open_upper)
+    if _outside_range(written, low, high, open_upper=open_upper):
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper))
+    return _write_log_percent(acc, value, written, before)
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -11518,6 +11837,15 @@ def set_numeric_value(acc, value: str) -> bool | str:
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
+    A control whose text is a percent and whose Value is ``log2`` of that
+    percent (Inkscape's status zoom) accepts ``50%`` and a bare number that
+    falls outside the Value range as that percent, converted with
+    ``log2(percent / 100)`` and not snapped to the step. A bare number inside
+    the Value range is still that scale. A percent the control cannot
+    represent names the percent range and the Value scale. When the text is
+    a percent but it matches neither the Value nor ``log2`` of the Value, a
+    percent literal is refused and the Value range is named. No keystrokes
+    are sent for any of these.
     """
     if value == "" and _number_input(acc):
         if _clear_number_input(acc):
@@ -11542,6 +11870,27 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        unit = _percent_value_unit(acc)
+        if unit is not None:
+            kind, before = unit
+            if kind == "log2":
+                # None means the text is an in-range bare number. That write
+                # stays on the Value scale, step snap included.
+                handled = _apply_log_percent(
+                    acc, value, low, high, before, open_upper=open_upper,
+                )
+                if handled is not None:
+                    return handled
+            elif kind == "percent":
+                literal = _percent_literal(value)
+                if literal is not None:
+                    value = _format_bound(literal)
+            elif kind == "unmatched" and _percent_literal(value) is not None:
+                raise ValueError(
+                    _unmatched_percent_message(
+                        acc, value, low, high, open_upper=open_upper,
+                    )
+                )
     try:
         number = _parse_number(value)
     except ValueError:
@@ -12584,6 +12933,69 @@ def navigating_folder_row(acc) -> bool:
     return folder_location(acc) is not None
 
 
+def _gtk_outline_parent(acc):
+    """The tree or tree table that holds ``acc``.
+
+    A plain table is not an outline. The child's index is not read here.
+    That read walks every sibling, and a spreadsheet table has hundreds of
+    them. A snapshot of those cells must not pay for that walk.
+    """
+    node = acc
+    try:
+        for _ in range(8):
+            parent = _parent_of(node)
+            if parent is None:
+                return None
+            role = _role_name(parent)
+            if role in {"menu", "popup menu", "menu bar"}:
+                return None
+            if role in {"tree", "tree table"} and _selection_iface(parent) is not None:
+                return parent
+            if role == "table" and _selection_iface(parent) is not None:
+                return None
+            node = parent
+    except Exception:
+        return None
+    return None
+
+
+def outline_double_click_note(acc) -> str:
+    """``activates on double-click`` when a single click only selects the row.
+
+    A GTK tree or tree-table cell with no action interface, or with an
+    ``activate`` action that the single-click path does not run. A folder
+    row keeps its own navigation. Empty for every other node. This does not
+    perform the double-click or the activate action.
+    """
+    if acc is None:
+        return ""
+    try:
+        if _qt_app(acc) or "gtk" not in _toolkit_name(acc):
+            return ""
+        if _chromium_app(acc) or _gecko_app(acc):
+            return ""
+    except Exception:
+        return ""
+    parent = _gtk_outline_parent(acc)
+    if parent is None:
+        return ""
+    try:
+        if navigating_folder_row(acc):
+            return ""
+    except Exception:
+        return ""
+    names = _raw_action_names(acc)
+    if not names:
+        return "activates on double-click"
+    if "activate" not in names:
+        return ""
+    # select_contained_row performs a click or press action. expand, edit,
+    # and a later activate are not that click: the row is only selected.
+    if _first_press_action(acc) in _SELECTING_ACTION_NAMES:
+        return ""
+    return "activates on double-click"
+
+
 def navigation_gesture(acc) -> str | None:
     """How this row opens a folder, or None when a click only selects.
 
@@ -13548,6 +13960,7 @@ def _revive_application(acc) -> bool:
 
 
 def _raw_child_count(acc) -> int:
+    _drop_cached_properties(acc)
     try:
         return int(_call_first(acc, ("get_child_count", "get_childCount"), default=0) or 0)
     except (TypeError, ValueError):
@@ -13724,11 +14137,117 @@ def _row_from_edge(table, comp, x: float, start: float, stop: float, step: float
     return None
 
 
+def _box_overlaps(pos, size, origin, span) -> bool:
+    """True when the two rectangles meet and neither is the off-screen sentinel."""
+    if pos is None or size is None or origin is None or span is None:
+        return False
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    ox, oy = float(origin[0]), float(origin[1])
+    ow, oh = float(span[0]), float(span[1])
+    if width <= 0 or height <= 0 or ow <= 0 or oh <= 0:
+        return False
+    if x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return False
+    if ox <= _OFFSCREEN_SENTINEL or oy <= _OFFSCREEN_SENTINEL:
+        return False
+    return x < ox + ow and x + width > ox and y < oy + oh and y + height > oy
+
+
+def _intersect_box(pos, size, origin, span):
+    """The overlapping rectangle, or None when the overlap is not a real box."""
+    if not _box_overlaps(pos, size, origin, span):
+        return None
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    ox, oy = float(origin[0]), float(origin[1])
+    ow, oh = float(span[0]), float(span[1])
+    left = max(x, ox)
+    top = max(y, oy)
+    right = min(x + width, ox + ow)
+    bottom = min(y + height, oy + oh)
+    if right - left <= 1 or bottom - top <= 1:
+        return None
+    return (left, top), (right - left, bottom - top)
+
+
+def _viewport_box(node):
+    """Nearest scroll pane or viewport ancestor that has a real box.
+
+    None when the table is not inside one. A GTK tree whose scroll pane is
+    the table's own box is that box, so the span does not move.
+    """
+    current = _parent_of(node)
+    for _depth in range(8):
+        if current is None:
+            return None
+        if _role_name(current) in {"scroll pane", "viewport"}:
+            pos, size = _extents(current)
+            if (
+                pos is not None
+                and size is not None
+                and float(size[0]) > 1
+                and float(size[1]) > 1
+            ):
+                return pos, size
+        current = _parent_of(current)
+    return None
+
+
+def _reported_showing(acc) -> bool | None:
+    """SHOWING when a state set was reported. None when that is not evidence.
+
+    An empty set is not evidence: a GTK fake leaves ``states`` empty, and a
+    missing bit there is not a hidden cell. A set that names other states
+    and omits SHOWING is not painted.
+    """
+    try:
+        names = _state_names(acc)
+    except Exception:
+        return None
+    if not names:
+        return None
+    return "SHOWING" in names
+
+
+def _painted_table_item(acc, screen: tuple[int, int]):
+    """``(accessible, position, size)`` when ``acc`` is painted in the viewport.
+
+    Overlapping the screen is not enough. A Swing row below the scroll pane
+    still has screen coordinates. A reported state set without SHOWING is
+    the same row. An empty state set is not that evidence.
+    """
+    item = _on_screen_item(acc, screen)
+    if item is None:
+        return None
+    if _reported_showing(acc) is False:
+        return None
+    view = _viewport_box(acc)
+    if view is not None and not _box_overlaps(item[1], item[2], view[0], view[1]):
+        return None
+    return item
+
+
 def _gtk_visible_span(table, pos, size, rows: int) -> tuple[int, int] | None:
-    """Inclusive row range whose cells overlap the table's on-screen box."""
+    """Inclusive row range whose cells overlap the viewport, then the screen.
+
+    The table's own box can be the whole body. Rows under that box and still
+    on the display are not painted when a scroll pane clips them.
+    """
     comp = _component(table)
     if comp is None or pos is None or size is None:
         return None
+    view = _viewport_box(table)
+    if view is not None:
+        clipped = _intersect_box(pos, size, view[0], view[1])
+        if clipped is None:
+            return None
+        pos, size = clipped
+    screen = _screen_size()
+    clipped = _intersect_box(pos, size, (0.0, 0.0), (float(screen[0]), float(screen[1])))
+    if clipped is None:
+        return None
+    pos, size = clipped
     x = float(pos[0])
     y = float(pos[1])
     width = float(size[0])
@@ -14121,6 +14640,45 @@ def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) ->
     return _on_screen_item(cell, screen) is not None
 
 
+def _cell_matches_needle(cell, needle: str) -> bool:
+    """True when the cell, or an unnamed cell's child, is named ``needle``.
+
+    A GTK cell carries the row text on itself. Opening every child of a
+    miss is what made a 10k TreeView find exceed the event-thread budget.
+    Swing leaves the cell unnamed and puts the text on a child. That is
+    the only miss that looks one level down.
+    """
+    if cell is None:
+        return False
+    name = str(_call_first(cell, ("get_name", "getName"), default="") or "")
+    folded = needle.replace("\u00a0", " ").casefold()
+    haystack = name.replace("\u00a0", " ").casefold()
+    if name.strip():
+        return folded in haystack
+    return _seek_hit(cell, needle) is not None
+
+
+def _bring_gtk_cell_into_view(cell, screen: tuple[int, int], row: int, rows: int) -> bool:
+    """Scroll ``cell`` into the viewport. True when it is then painted.
+
+    On screen but below the scroll pane is not painted. ``scroll_to`` and
+    the vertical bar are the same calls a GTK tree already uses. A cell
+    that stays outside the viewport is not given a coordinate.
+    """
+    scroll_to(cell)
+    if _painted_table_item(cell, screen) is not None:
+        return True
+    scroll_to_edge(cell, "TOP_EDGE")
+    if _painted_table_item(cell, screen) is not None:
+        return True
+    _scroll_vertical_bar_to_row(cell, row, rows)
+    for _attempt in range(8):
+        if _painted_table_item(cell, screen) is not None:
+            return True
+        time.sleep(0.05)
+    return _painted_table_item(cell, screen) is not None
+
+
 def _reveal_named_cell(cell, screen: tuple[int, int], row: int, rows: int):
     """Scroll ``cell`` on screen when AT-SPI can. The same cell either way.
 
@@ -14186,10 +14744,10 @@ def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
             if cell is None:
                 continue
             saw_cell = True
-            if not _matches_seek(cell, needle):
+            if not _cell_matches_needle(cell, needle):
                 continue
-            if _on_screen_item(cell, screen) is None:
-                _bring_cell_on_screen(cell, screen, row, rows)
+            if _painted_table_item(cell, screen) is None:
+                _bring_gtk_cell_into_view(cell, screen, row, rows)
                 refreshed = _table_cell_at(node, row, col)
                 if refreshed is not None:
                     cell = refreshed
@@ -14216,16 +14774,20 @@ def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
         return None
     first, last = span
     out = []
+    view = _viewport_box(node)
     for header in _gtk_column_headers(node, cols):
         item = _on_screen_item(header, screen)
-        if item is not None:
-            out.append(item)
+        if item is None:
+            continue
+        if view is not None and not _box_overlaps(item[1], item[2], view[0], view[1]):
+            continue
+        out.append(item)
     for row in range(first, last + 1):
         for col in range(cols):
             cell = _table_cell_at(node, row, col)
             if cell is None:
                 continue
-            item = _on_screen_item(cell, screen)
+            item = _painted_table_item(cell, screen)
             if item is not None:
                 out.append(item)
     return out or None
@@ -14249,14 +14811,14 @@ def _gtk_table_rows_for_snapshot(
     if not painted:
         return None
     needle = seek.strip() if isinstance(seek, str) else ""
-    if needle and not _gtk_rows_match(painted, needle):
+    if needle and not _visible_tree_matches(painted, needle):
         match = _reveal_gtk_table_match(node, needle, screen)
         if match is not None:
             refreshed = _visible_gtk_table_cells(node, screen)
             if refreshed:
                 painted = refreshed
-            if not _gtk_rows_match(painted, needle):
-                item = _on_screen_item(match, screen)
+            if not _visible_tree_matches(painted, needle):
+                item = _painted_table_item(match, screen)
                 if item is not None:
                     painted = [*painted, item]
                 elif offscreen is not None:
@@ -14404,6 +14966,90 @@ def scroll_gtk_viewport_page(acc, direction: int) -> bool:
     return False
 
 
+def _owning_large_table(node):
+    """``(cell, table)`` when ``node`` is inside a cell of a large table.
+
+    A short table, a spreadsheet, and a node that is not in a cell are
+    ``(None, None)``. The published click point stays in those cases.
+    """
+    current = node
+    for _depth in range(6):
+        if current is None:
+            return None, None
+        role = _role_name(current)
+        if role in {"table cell", "tree cell"} or role.endswith(" cell"):
+            parent = _parent_of(current)
+            for _up in range(4):
+                if parent is None:
+                    return None, None
+                parent_role = _role_name(parent)
+                if parent_role in {"table", "tree table"}:
+                    try:
+                        large = _gtk_row_table(parent)
+                    except Exception:
+                        large = False
+                    if not large:
+                        return None, None
+                    return current, parent
+                parent = _parent_of(parent)
+            return None, None
+        current = _parent_of(current)
+    return None, None
+
+
+def _row_index_of_cell(table, cell) -> int | None:
+    index = _call_first(cell, ("get_index_in_parent", "getIndexInParent"))
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        return None
+    return _row_at_child_index(table, int(index))
+
+
+def reveal_unpainted_table_click(node):
+    """Live center of a table cell that was not painted, after scrolling it.
+
+    None when ``node`` is not an unpainted cell of a large table: the
+    caller keeps the published point. A cell that stays outside the
+    viewport raises ``not_visible``. No coordinate is invented.
+    """
+    if node is None:
+        return None
+    try:
+        cell, table = _owning_large_table(node)
+    except Exception:
+        return None
+    if cell is None or table is None:
+        return None
+    screen = _screen_size()
+    if (
+        _painted_table_item(node, screen) is not None
+        or _painted_table_item(cell, screen) is not None
+    ):
+        return None
+    rows, _cols = _plain_table_size(table)
+    total = int(rows) if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else 1
+    row = _row_index_of_cell(table, cell)
+    if row is None:
+        row = 0
+    _bring_gtk_cell_into_view(cell, screen, row, total)
+    painted = _painted_table_item(node, screen) or _painted_table_item(cell, screen)
+    if painted is None:
+        raise ComputerUseError(
+            ErrorCode.NOT_VISIBLE,
+            "the table cell is not visible and could not be scrolled into view; the click was not sent",
+            detail={
+                "reason": "not_visible",
+                "outcome": "refused",
+                "next": ["ref"],
+                "evidence": "the cell is outside the viewport and scrolling did not paint it",
+            },
+        )
+    _acc, pos, size = painted
+    return (
+        int(round(float(pos[0]) + float(size[0]) / 2.0)),
+        int(round(float(pos[1]) + float(size[1]) / 2.0)),
+    )
+
+
 _TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
 
 
@@ -14513,6 +15159,7 @@ def _child_at(acc, index: int):
 
 
 def _parent_of(acc):
+    _drop_cached_properties(acc)
     return _call_first(acc, ("get_parent", "getParent"))
 
 
@@ -14521,6 +15168,7 @@ def _is_scroll_bar(acc) -> bool:
 
 
 def _node_name(acc) -> str:
+    _drop_cached_properties(acc)
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
 
 
@@ -16339,6 +16987,36 @@ def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
 _LIST_NAME_LIMIT = 48
 _LIST_DEPTH = 4
 _LIST_ANCESTORS = 5
+
+
+def _drop_cached_properties(acc) -> None:
+    """Forget one node's cached properties while the event listener is up.
+
+    ``event_main`` answers name, state, parent, and child reads from the
+    client cache. A combo's current item, a SELECTED or CHECKED flag, and a
+    document's parent change on the bus without replacing the accessible, so
+    the next getter would still see the previous value. ``clear_cache_single``
+    clears only this object. The recursive ``clear_cache`` walks every
+    descendant and stays on the snapshot-root and Firefox combo paths. A node
+    without ``clear_cache_single`` is a test double and is left alone. With
+    the listener off the cache is not trusted and this does nothing.
+    """
+    if acc is None:
+        return
+    method = getattr(acc, "clear_cache_single", None)
+    if method is None or getattr(_reply_local, "dropping_properties", False):
+        return
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.listening():
+        return
+    _reply_local.dropping_properties = True
+    try:
+        method()
+    except Exception:
+        return
+    finally:
+        _reply_local.dropping_properties = False
 
 
 def _invalidate_tree_cache(acc) -> None:

@@ -86,9 +86,19 @@ def _role(node: object) -> str:
     return str(_call(node, "get_role_name", default="") or "").lower()
 
 
+def _drop_event_cache(node: object) -> None:
+    """Drop one item's event-thread property cache before a name or state read."""
+    if getattr(node, "clear_cache_single", None) is None:
+        return
+    from a11y_computer_use.drivers._atspi import _drop_cached_properties
+
+    _drop_cached_properties(node)
+
+
 def _name(node: object) -> str:
     if _role(node) == "separator":
         return ""
+    _drop_event_cache(node)
     return str(_call(node, "get_name", default="") or "")
 
 
@@ -120,9 +130,11 @@ def _has_state(node: object, *names: str) -> bool:
     direct = _states(node)
     if direct is not None:
         return any(name.lower() in direct for name in names)
+    _drop_event_cache(node)
     state_set = _call(node, "get_state_set")
     if state_set is None or not hasattr(state_set, "contains"):
         return False
+    enum = None
     try:
         import gi
 
@@ -131,9 +143,12 @@ def _has_state(node: object, *names: str) -> bool:
 
         enum = Atspi.StateType
     except Exception:
-        return False
+        enum = None
+    # macOS and Windows CI import this module without the Atspi typelib.
+    # A fake state set still answers contains(); the name is the token.
+    # Linux uses the StateType member the real set expects.
     for name in names:
-        member = getattr(enum, name.upper(), None)
+        member = getattr(enum, name.upper(), None) if enum is not None else name
         if member is not None and bool(_call(state_set, "contains", member, default=False)):
             return True
     return False
