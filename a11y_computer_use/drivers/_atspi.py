@@ -966,6 +966,69 @@ def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
     return split
 
 
+# Inkscape toolbox rows put the short name on the first line and the tooltip
+# plus a parenthetical shortcut on the last: ``Text Tool\nCreate and edit
+# text objects (T)``. The chord is a key, not a sentence in parentheses.
+_TOOL_SHORTCUT = re.compile(
+    r"(?i)^(?:(?:ctrl|control|shift|alt|super|meta|primary|cmd|command|option)\+)*"
+    r"(?:f\d{1,2}|[a-z]|[0-9]|plus|minus|esc|escape|del|delete|tab|space|"
+    r"return|enter|backspace|up|down|left|right|home|end|insert|"
+    r"pageup|pagedown|page\s*up|page\s*down)$"
+)
+_TOOLTIP_SHORTCUT_LINE = re.compile(r"^(?P<hint>.+?) \((?P<shortcut>[^)]+)\)$")
+
+
+def _tooltip_shortcut_body(text: str) -> tuple[str, str, str] | None:
+    """``(label, hint, shortcut)`` for a name plus a tooltip ending in a chord.
+
+    None when the text is one line, a line is blank, or the last line does
+    not end in a parenthetical key. A sentence without that chord stays
+    whole, and so does a GIMP modifier line.
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in raw:
+        return None
+    lines = [line.strip() for line in raw.split("\n")]
+    if not lines or any(not line for line in lines):
+        return None
+    label = lines[0]
+    if _generic_region_name(label):
+        return None
+    match = _TOOLTIP_SHORTCUT_LINE.match(lines[-1])
+    if match is None:
+        return None
+    shortcut = match.group("shortcut").strip()
+    if _TOOL_SHORTCUT.match(shortcut) is None:
+        return None
+    hint_bits = lines[1:-1] + [match.group("hint").strip()]
+    hint = "\n".join(bit for bit in hint_bits if bit)
+    if not hint:
+        return None
+    return label, hint, shortcut
+
+
+def _split_tooltip_fields(name: str, description: str) -> tuple[str, str, str, str]:
+    """``(name, description, hint, shortcut)`` for an Inkscape tool row.
+
+    The visible name is the first line. The tooltip sentence is the hint
+    and the parenthetical chord is the shortcut. A description that already
+    has text is kept. A name that is not this pattern is unchanged, so the
+    GIMP modifier split that ran first still owns those lines.
+    """
+    split = _tooltip_shortcut_body(name)
+    if split is not None:
+        label, hint, shortcut = split
+        kept = description if str(description).strip() else hint
+        return label, kept, hint, shortcut
+    if str(name).strip():
+        return name, description, "", ""
+    split = _tooltip_shortcut_body(description)
+    if split is None:
+        return name, description, "", ""
+    label, hint, shortcut = split
+    return label, hint, hint, shortcut
+
+
 # A GIMP image window's canvas is a focusable childless panel. Its name is
 # not on that panel. The image title is a label elsewhere in the frame, and
 # the frame name is the window title. This search is local to that one
@@ -3146,6 +3209,7 @@ class ATSPIAccessor:
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
+        name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         if role_str == "panel" and not str(name).strip() and not str(description).strip():
             surface_name = _panel_surface_name(node, size, focusable)
@@ -3187,6 +3251,8 @@ class ATSPIAccessor:
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
             surface_name=surface_name,
+            hint=hint,
+            shortcut=shortcut,
             note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else "",
         )
 
