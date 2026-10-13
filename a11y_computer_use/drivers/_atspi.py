@@ -2126,6 +2126,14 @@ def _qt_app(acc) -> bool:
     return "qt" in _toolkit_name(acc)
 
 
+def _java_app(acc) -> bool:
+    """True when this node belongs to the Java ATK wrapper.
+
+    The toolkit name is ``JAVA``. GTK, Qt, and a fake with no toolkit are not.
+    """
+    return "java" in _toolkit_name(acc)
+
+
 def _gtk_combo(acc) -> bool:
     """A GTK combo box. Chromium, Firefox, Qt, and a fake with no toolkit are not.
 
@@ -6096,11 +6104,11 @@ def file_chooser_controls(pid: int | None, title: str):
     folded = _folded_title(title)
     apps = _desktop_apps(desktop)
     owned = [app for app in apps if pid and pid_of(app) == pid]
-    found = _chooser_in_apps(owned, folded, title, title_only=False)
+    found = _chooser_in_apps(owned, folded, title)
     if found is not None:
         return found
     rest = [app for app in apps if app not in owned]
-    return _chooser_in_apps(rest, folded, title, title_only=True)
+    return _chooser_in_apps(rest, folded, title)
 
 
 def chooser_controls_under(root, title: str):
@@ -6162,7 +6170,7 @@ def _desktop_apps(desktop) -> list:
     return apps
 
 
-def _chooser_in_apps(apps, folded: str, title: str, *, title_only: bool):
+def _chooser_in_apps(apps, folded: str, title: str):
     for app in apps:
         frames = _direct_children(app)
         named = [
@@ -6172,10 +6180,9 @@ def _chooser_in_apps(apps, folded: str, title: str, *, title_only: bool):
         ]
         if named:
             targets = named
-        elif title_only:
-            continue
         else:
-            targets = [app]
+            # Buttons elsewhere in the app are not an active chooser frame.
+            continue
         for target in targets:
             found = chooser_controls_under(target, title)
             if found is not None:
@@ -6942,8 +6949,21 @@ def _state_has(acc, name: str) -> bool:
 
     A fake state set matches the name string. The GI binding matches
     ``Atspi.StateType``. Missing gi, or a node with no state set, is false.
+    The event-thread property cache is dropped first so a SELECTED or
+    SHOWING bit is the bus value.
     """
-    _drop_cached_properties(acc)
+    return _state_flag(acc, name, drop_cache=True)
+
+
+def _state_flag(acc, name: str, *, drop_cache: bool) -> bool:
+    """Whether the state set contains ``name``.
+
+    ``drop_cache`` is false when the caller is about to read text on this
+    same node. ``clear_cache_single`` on a Chromium contenteditable makes
+    the following ``get_text`` return NULL.
+    """
+    if drop_cache:
+        _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return False
@@ -15531,6 +15551,50 @@ def accessible_gone(acc) -> bool:
     except Exception:
         return True
     return not bool(role)
+
+
+# A disposed JOptionPane button stays in the tree without SHOWING. A table
+# cell that is merely scrolled off is the same missing bit and is not gone.
+_JAVA_DIALOG_CONTROL_ROLES = frozenset({
+    "push button", "toggle button", "check box", "radio button",
+})
+
+
+def target_vanished(acc) -> bool:
+    """True when a click or type must not claim the accessible is still there.
+
+    DEFUNCT is gone on every toolkit. A handle that never reported a role
+    is not this case. Java ATK keeps a disposed dialog button in the tree
+    without SHOWING; a button whose state set was reported and does not
+    include SHOWING is that control. A table cell without SHOWING is still
+    in the table. GTK and a fake with no toolkit are not refused for a
+    missing SHOWING bit. An empty state set is not evidence.
+    """
+    if acc is None:
+        return False
+    try:
+        java = _java_app(acc)
+    except Exception:
+        java = False
+    try:
+        # Java needs a fresh DEFUNCT bit. Every other toolkit keeps the
+        # cached state: dropping it here clears a Chrome editor's text.
+        if _state_flag(acc, "DEFUNCT", drop_cache=java):
+            return True
+    except Exception:
+        return True
+    if not java:
+        return False
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role not in _JAVA_DIALOG_CONTROL_ROLES:
+        return False
+    names = _state_names(acc)
+    if not names:
+        return False
+    return "SHOWING" not in names
 
 
 def _misses_primary_screen(pos, size) -> bool:
