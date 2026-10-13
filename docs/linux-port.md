@@ -235,3 +235,18 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+
+## gucharmap Character Table
+
+The reported GTK 3 Character Table exposes an unnamed drawing area with no
+AT-SPI children. The Linux driver labels it `gucharmap Character Table` and
+explains that its ref identifies the whole opaque table. It does not publish
+character cells, names, codepoints, or inferred glyph positions. `find` and
+`scroll_to_find` cannot target the painted characters; scrolling may change
+selection. A click on the table cannot confirm a requested character.
+
+Use `Search > Find` or the `Go` menu only as separate requested operations,
+then verify the selected codepoint and name in the statusbar or Character
+Details. A statusbar match describes the current selection, not a clickable
+character cell. Native drawing-area names, descriptions, and children take
+precedence over this fallback label.

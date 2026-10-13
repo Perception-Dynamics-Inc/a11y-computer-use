@@ -1170,6 +1170,43 @@ def _audacity_track_area(container) -> bool:
 
     return walk(container, 0)
 
+
+def _gucharmap_character_surface(node) -> tuple[str, str]:
+    """Identify the empty painted Character Table without inventing glyph cells."""
+    if _child_count(node) != 0:
+        return "", ""
+    parent = _parent_of(node)
+    if not parent or _role_name(parent) != "scroll pane":
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "gucharmap":
+        return "", ""
+    character_table = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if not character_table:
+                break
+            return (
+                "gucharmap Character Table",
+                "Individual characters are not exposed by AT-SPI. This ref identifies "
+                "the whole painted table, not a character; find and scroll_to_find cannot "
+                "target its glyphs by codepoint or name, and clicking it cannot confirm "
+                "a requested character. Scrolling may change the selection. Use Search > "
+                "Find or the Go menu as separate requested operations; verify the selected "
+                "character in the statusbar or Character Details.",
+            )
+        character_table = character_table or (
+            role == "page tab" and _node_name(parent).casefold() == "character table"
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
+
 def _okular_thumbnail_surface(node) -> tuple[str, str]:
     """Label an empty thumbnail strip from its native sidebar context.
 
@@ -3401,6 +3438,11 @@ class ATSPIAccessor:
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         panel_note = ""
+        if (
+            role_str == "drawing area"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _gucharmap_character_surface(node)
         if (
             role_str == "filler" and role == "AXGroup"
             and not str(name).strip() and not str(description).strip()
