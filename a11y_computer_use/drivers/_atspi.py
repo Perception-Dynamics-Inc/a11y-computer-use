@@ -12890,6 +12890,44 @@ def _qt_grid(acc):
     return None
 
 
+def gtk_icon_view_item(acc) -> bool:
+    """GTK icon-view images expose activate, which means open, not click."""
+    parent = _parent_of(acc)
+    return (
+        "gtk" in _toolkit_name(acc)
+        and _role_name(acc) == "image"
+        and parent is not None
+        and _role_name(parent) == "layered pane"
+    )
+
+
+def click_gtk_icon_view_item(acc) -> bool:
+    """Send one pointer click and confirm exclusive icon selection."""
+    parent = _parent_of(acc)
+    count = _child_count(parent)
+    pos, size = _extents(acc)
+    if (
+        not _x11_keys_available() or pos is None or size is None
+        or size[0] <= 0 or size[1] <= 0 or not 0 < count <= 500
+    ):
+        return False
+    try:
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.click(int(pos[0] + size[0] / 2), int(pos[1] + size[1] / 2))
+    except Exception:
+        return False
+    for attempt in range(8):
+        selected = [_child_at(parent, index) for index in range(count)]
+        if all(child is not None for child in selected):
+            selected = [child for child in selected if _state_has(child, "SELECTED")]
+            if len(selected) == 1 and selected[0] == acc:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def qt_table_cell(acc) -> bool:
     """True for a cell in a Qt grid, not a tree item and not a GTK cell."""
     try:
