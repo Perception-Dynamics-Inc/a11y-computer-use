@@ -24,3 +24,4 @@
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
 
 - 2026-10-14 (#478): Kate’s painted gutter has no accessible line labels. Scope its contextual name to native editor siblings and retain the opaque-region limitation; never infer line targets from the strip’s bounds. When merging surface-label branches, keep each application’s recognition condition independent.
+- 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.

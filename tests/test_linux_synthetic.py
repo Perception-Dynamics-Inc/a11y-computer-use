@@ -2916,6 +2916,7 @@ def _adopt(parent: _Acc, *children: _Acc) -> _Acc:
 @pytest.mark.parametrize("case", ["gutter", "other_app", "dialog", "right", "missing_box", "children", "single_line", "named", "ambiguous"])
 def test_kate_gutter_label_uses_native_editor_context(monkeypatch, case):
     """Only the unnamed Kate gutter gains a label; no line targets are invented."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
     monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
     monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
     app = _Acc("application", name="kate" if case != "other_app" else "other")
