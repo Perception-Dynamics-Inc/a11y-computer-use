@@ -11,3 +11,8 @@
 
 - 2026-10-13 (#467): Geany live fixtures must launch with `--new-instance`; otherwise a launch can delegate to an existing editor, so terminating the returned process leaves windows behind and contaminates later symbol/caret assertions. Verify the Scintilla and symbol-click fixtures together under AT-SPI.
 - 2026-10-13 (#467): Refresh AT-SPI status-bar properties before reading geometry. GTK can cache the bar's unallocated startup rectangle; refreshing later in `_state_flags` leaves that snapshot with stale zero-size geometry and drops caret/status evidence. Cover the allocation transition hermetically and verify Geany symbol clicks and Scintilla find together live.
+
+
+- 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
+
+- 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.

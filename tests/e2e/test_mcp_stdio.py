@@ -51,6 +51,7 @@ EXPECTED_TOOLS = {
     "clipboard",
     "menu",
     "file_dialog",
+    "files",
     "notes",
     "wait_until",
     "request_permission",

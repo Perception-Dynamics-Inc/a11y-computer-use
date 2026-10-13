@@ -164,6 +164,50 @@ def test_on_screen_page_text_is_in_the_snapshot_and_find_matches_it(fake_atspi) 
     assert observe.find_elements(snap, text="MARKER-P3-UNIQUE") == ()
 
 
+@pytest.mark.parametrize("visible_index", [1, 2, 3])
+def test_evince_page_visibility_uses_showing_not_drifting_extents(
+    fake_atspi, visible_index,
+) -> None:
+    app = _Node("application", None, name="evince")
+    pages = [
+        _Node("page", f"PAGE-{index} TOKEN-{index}",
+              box=((689.0, 21.0 if index == visible_index - 1 else 2292.0), (562.0, 727.0)))
+        for index in range(4)
+    ]
+    for index, page in enumerate(pages):
+        page.get_application = lambda: app
+        page.get_state_set = lambda index=index: type(
+            "States", (), {"names": {"SHOWING"} if index == visible_index else {"VISIBLE"}},
+        )()
+    document = _Node("document frame", None, name="Document View")
+    document.get_child_count = lambda: len(pages)
+    document.get_child_at_index = lambda index: pages[index]
+    accessor = _atspi.ATSPIAccessor()
+    children = accessor.children(document)
+    assert children == [pages[visible_index]]
+    raw = accessor.read(children[0])
+    assert raw.position is None and raw.size is None
+    snap = _snap(raw)
+    assert f"TOKEN-{visible_index}" in observe.render_text(snap)
+    matches = observe.find_elements(snap, text=f"TOKEN-{visible_index}")
+    assert len(matches) == 1
+    assert matches[0].bounds is None
+    for index in range(4):
+        if index != visible_index:
+            assert observe.find_elements(snap, text=f"TOKEN-{index}") == ()
+
+
+def test_other_app_page_keeps_native_bounds(fake_atspi) -> None:
+    app = _Node("application", None, name="other-viewer")
+    page = _Node("page", _PAGE)
+    page.get_application = lambda: app
+    raw = _read(page)
+    assert raw.position == page.box[0]
+    assert raw.size == page.box[1]
+    assert raw.unallocated is False
+    assert observe.find_elements(_snap(raw), text="MARKER-P1-UNIQUE")[0].bounds is not None
+
+
 def test_find_matches_page_text_past_the_shown_value(fake_atspi) -> None:
     """Find searches the page past the value the model reads.
 
