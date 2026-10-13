@@ -2306,6 +2306,19 @@ def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
     return (nx, ny), (float(window[2]), float(window[3]))
 
 
+def gtk4_window_origin_untrusted(acc) -> bool:
+    """GTK 4 header-bar boxes can lie outside the frame's content origin.
+
+    Adding the recovered content origin fixes body widgets, but does not
+    make these negative WINDOW coordinates reliable pointer targets (#502).
+    Use the control's activation action rather than guessing another offset.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    window = _raw_rect(acc, "WINDOW")
+    return window is not None and (window[0] < 0 or window[1] < 0)
+
+
 def published_origin_untrusted(acc) -> bool:
     """True when a box published at screen (0, 0) is not that pixel.
 

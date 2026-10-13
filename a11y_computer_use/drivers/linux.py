@@ -2359,13 +2359,25 @@ class LinuxDriver:
             x, y = int(revealed[0]), int(revealed[1])
         else:
             x, y = _point_of(target)
-        if isinstance(target, Element) and self._gtk4_point_untrusted(target, handle):
+        header_box_untrusted = handle is not None and self._run(
+            lambda: _atspi.gtk4_window_origin_untrusted(handle)
+        )
+        if isinstance(target, Element) and (
+            header_box_untrusted or self._gtk4_point_untrusted(target, handle)
+        ):
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
-            if plain and self._run(lambda: _atspi.do_press(handle)):
+            # Header-bar controls expose click/press. Do not substitute an
+            # unrelated action, or fall back to their known unreliable point.
+            activated = plain and self._run(
+                lambda: _atspi._do_action_named(handle, frozenset({"click", "press"}))
+                if header_box_untrusted else _atspi.do_press(handle)
+            )
+            if activated:
                 return None
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
-                f"{target.ref} ({target.role}) has no usable screen bounds, so the click was not sent",
+                f"{target.ref} ({target.role}) has no reliable screen bounds or successful activation action, "
+                "so the pointer click was not sent",
                 detail={
                     "ref": target.ref,
                     "role": target.role,
