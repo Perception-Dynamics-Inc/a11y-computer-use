@@ -1166,7 +1166,7 @@ def test_txt_goal_prompt_names_a_plain_text_editor(tmp_path, monkeypatch):
         "and can change line endings."
     )
     model = ScriptedModel([
-        turn(done("saved", [{"file_exists": str(path), "contains": "68.3755"}])),
+        _write_then_done(path, "68.3755"),
     ])
     agent = Agent(model, runtime=FakeRuntime(window()), trace_dir=tmp_path / "txt-trace")
     result = agent.run("Save the average to answer.txt")
@@ -1211,7 +1211,7 @@ def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkey
     goal = "Save the notes to report.txt containing quarterly numbers"
     weak = ScriptedModel([
         turn(done("saved", [{"window_title_contains": "Demo"}])),
-        turn(done("saved", [{"file_exists": str(path), "contains": "quarterly numbers"}])),
+        _write_then_done(path, "quarterly numbers"),
     ])
     runtime = FakeRuntime(elements)
     events: list = []
@@ -1226,13 +1226,100 @@ def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkey
     assert result.step_log[1].verified is True
 
 
+@pytest.mark.parametrize("action", ["click", "key"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_web_form_save_does_not_prove_a_file_write(tmp_path, monkeypatch, action, existing):
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "report.txt"
+    if existing:
+        path.write_text("old report")
+        os.utime(path, (1, 1))
+    elements = window(
+        el("e2", "AXWebArea", "Report form", parent="e1"),
+        el("e3", "AXButton", "Save", parent="e2", clickable=True, focused=True),
+    )
+    runtime = FakeRuntime(elements)
+    def submit(name, params, desktop):
+        replace_ref(desktop, "e3", title="Saved")
+    runtime.on_call = submit
+    agent = Agent(ScriptedModel([
+        turn(ToolCall(action, {"chord": "Return"} if action == "key" else {"ref": "e3"})),
+        turn(done("saved", [{"element": {"role": "AXButton", "name": "Saved"}}])),
+        turn(done("saved", [{"file_exists": str(path)}])),
+        turn(), turn(),
+    ]), runtime=runtime, trace_dir=tmp_path / "trace")
+    result = agent.run(f"Save the report to {path}")
+    assert result.status == "failed"
+    assert runtime.calls
+    assert result.step_log[0].error is None
+    assert "file_exists" in result.step_log[1].result
+    assert not result.conditions[0]["ok"]
+    if existing:
+        assert "not modified after task start" in result.conditions[0]["detail"]
+
+
+@pytest.mark.parametrize("action", ["click", "dialog", "key"])
+def test_native_file_save_with_fresh_mtime_satisfies_done(tmp_path, monkeypatch, action):
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "report.txt"
+    path.write_text("old report")
+    os.utime(path, (1, 1))
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    if action == "dialog":
+        elements = window(
+            el("e3", "AXDialog", "Save As", parent="e1"),
+            el("e2", "AXButton", "Save", parent="e3", clickable=True),
+        )
+    runtime = FakeRuntime(elements)
+    def save(name, params, desktop):
+        path.write_text("new report")
+        _fresh_mtime(path)
+        replace_ref(desktop, "e2", title="Saved")
+    runtime.on_call = save
+    args = {"chord": "ctrl+s"} if action == "key" else {"ref": "e2"}
+    agent = Agent(ScriptedModel([
+        turn(ToolCall("click" if action == "dialog" else action, args)),
+        turn(done("saved", [{"file_exists": str(path), "contains": "new report"}])),
+    ]), runtime=runtime, trace_dir=tmp_path / "trace")
+    result = agent.run(f"Save the report to {path}")
+    assert result.status == "success", result
+    assert result.conditions[0]["ok"]
+
+
+def _fresh_mtime(path):
+    # Explicit timestamp avoids the test filesystem's coarse write clock.
+    stamp = time.time() + 1
+    os.utime(path, (stamp, stamp))
+
+
+@pytest.mark.parametrize("mtime, expected", [(99, False), (100, False), (101, True)])
+def test_file_save_requires_mtime_strictly_after_start(tmp_path, monkeypatch, mtime, expected):
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "report.txt"
+    path.write_text("report")
+    os.utime(path, (mtime, mtime))
+    checked = check_conditions(
+        [{"file_exists": str(path)}], None, "Save report.txt", written_after=100,
+    )
+    assert checked[0]["ok"] is expected
+
+
+def _write_then_done(path, contains):
+    """Rewrite the fixture during the model turn, after task start."""
+    def respond(messages):
+        path.write_bytes(path.read_bytes())
+        _fresh_mtime(path)
+        condition = {"file_exists": str(path)}
+        if contains is not None:
+            condition["contains"] = contains
+        return turn(done("saved", [condition]))
+    return respond
+
+
 def _saved(goal: str, path, contains: str | None, trace):
-    condition: dict = {"file_exists": str(path)}
-    if contains is not None:
-        condition["contains"] = contains
     agent = Agent(
         ScriptedModel([
-            turn(done("saved", [condition])),
+            _write_then_done(path, contains),
             turn(),
             turn(),
         ]),
