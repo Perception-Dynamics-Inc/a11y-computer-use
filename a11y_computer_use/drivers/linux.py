@@ -4289,6 +4289,41 @@ class LinuxDriver:
 
         return _linux_system.running_apps()
 
+    def terminal_target(self, app: str, target=None, *, launch: bool = False) -> bool:
+        """Recognize terminal apps and native terminal accessibles for the exec gate."""
+        from pathlib import Path
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def known(name: str) -> bool:
+            name = Path(name).name.casefold().removesuffix(".desktop")
+            return name in {
+                "xfce4-terminal", "gnome-terminal", "gnome-terminal-server",
+                "gnome-terminal-", "xterm", "uxterm", "konsole", "tilix",
+                "mate-terminal", "qterminal", "lxterminal", "alacritty",
+                "kitty", "foot", "footclient", "wezterm", "wezterm-gui",
+                "terminator", "terminology", "kgx", "ptyxis",
+                "x-terminal-emulator", "sakura", "guake", "yakuake",
+                "org.gnome.terminal", "org.gnome.console", "org.gnome.ptyxis",
+                "org.kde.konsole", "com.gexperts.tilix",
+            }
+
+        if known(app):
+            return True
+        if launch:
+            # Resolve executable symlinks such as x-terminal-emulator.
+            import shutil
+
+            executable = shutil.which(app)
+            return bool(executable and known(str(Path(executable).resolve())))
+        if known(_resolved_app(app)):
+            return True
+        handle = observe.ax_handle_for(target.snapshot_id, target.ref) if isinstance(target, Element) else None
+        if handle is not None and self._run(lambda: _atspi.terminal_ancestor(handle)):
+            return True
+        focused, _truncated = self._run(lambda: _atspi._focused_node(app))
+        return self._run(lambda: _atspi.terminal_ancestor(focused))
+
     def launch_app(self, identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
         from a11y_computer_use.drivers import _linux_system
 

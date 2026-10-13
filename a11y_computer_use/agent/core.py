@@ -698,6 +698,8 @@ class Agent:
             elif isinstance(existing, DomainPolicy):
                 self.domain_policy = existing
         self._require_linux_bindings()
+        # The Runtime gate covers GUI execution through terminal emulators.
+        self.runtime.allow_exec = self.allow_exec
         # The wait loop polls these so a signal during time.sleep stops this
         # step instead of running the next turn. Missing attributes on a test
         # double are ignored.

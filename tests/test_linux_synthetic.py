@@ -11989,3 +11989,133 @@ def test_click_on_an_outline_row_stays_a_single_click(
     presses = [event for event in events if event[0] == _X_BPRESS]
     assert len(presses) == 2, events
     assert named == []
+
+
+@pytest.mark.parametrize("name", [
+    "xfce4-terminal", "gnome-terminal", "gnome-terminal-", "xterm", "konsole",
+    "/usr/bin/xfce4-terminal", "org.gnome.Terminal.desktop", "x-terminal-emulator",
+])
+def test_terminal_launch_exec_disabled_is_audited(monkeypatch, tmp_path, name) -> None:
+    """A FULL app grant cannot authorize shell execution through a terminal."""
+    import json
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "launch_app", lambda *_args, **_kwargs: pytest.fail("launched"))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(name, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", name)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["action"] == "appop" and row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+@pytest.mark.parametrize("operation", ["type", "set_value", "key", "click"])
+def test_embedded_terminal_input_is_refused_and_redacted(
+    fake_atspi, monkeypatch, tmp_path, operation,
+) -> None:
+    """Native terminal ancestry survives AXTextArea mapping in an ordinary app."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import Click, KeyChord, TypeText
+
+    terminal = _Acc("terminal")
+    text = _Acc("text")
+    _adopt(_Acc("frame"), _adopt(terminal, text))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    focused = _Acc("text") if operation == "set_value" else text
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (focused, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    element = Element(
+        ref="e2", role="AXTextArea", title="", value=None, bounds=None,
+        snapshot_id="terminal-shot",
+    )
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
+    actions = {
+        "type": TypeText(text="touch /tmp/forbidden\n"),
+        "set_value": TypeText(text="touch /tmp/forbidden\n"),
+        "key": KeyChord(chord="Return"),
+        "click": Click(target=element),
+    }
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    action = actions[operation]
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(
+            action, "editor", lambda: pytest.fail("injected input"),
+            input_target=element if operation == "set_value" else None,
+        )
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert "forbidden" not in json.dumps(row)
+    # Explicit opt-in permits this path; a normal text area never needs it.
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, "editor", lambda: "allowed") == "allowed"
+    runtime.allow_exec = False
+    terminal.role = "text"
+    assert runtime._run_gated(action, "editor", lambda: "editor input") == "editor input"
+
+
+def test_terminal_focus_change_before_input_is_audited(fake_atspi, monkeypatch, tmp_path) -> None:
+    """A terminal appearing during the recheck cannot receive keyboard input."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import TypeText
+
+    field = _Acc("text")
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (field, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(
+            TypeText(text="command\n"), "editor", lambda: pytest.fail("injected input"),
+            recheck=lambda app: setattr(field, "role", "terminal"),
+        )
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_terminal_launch_alias_is_checked_after_resolution(monkeypatch, tmp_path) -> None:
+    """A launcher label is checked against the executable it would start."""
+    import json
+    from a11y_computer_use import safety, server
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda name: ("xterm", "Terminal", None))
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "Terminal")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["app"] == "xterm" and row["result"] == "exec_disabled"
+
+
+def test_terminal_observation_remains_available(monkeypatch, tmp_path) -> None:
+    """Execution permission does not gate read-only terminal observations."""
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import AppOp, AppVerb
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xterm", safety.Tier.READ)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "terminal_target", lambda *_args, **_kwargs: pytest.fail("read gate"))
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    assert runtime._run_gated(AppOp(verb=AppVerb.LIST), "xterm", lambda: "observed") == "observed"
