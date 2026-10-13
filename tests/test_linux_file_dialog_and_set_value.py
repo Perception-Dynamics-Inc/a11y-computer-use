@@ -236,6 +236,8 @@ def test_linux_file_dialog_without_an_app_stays_unsupported(tmp_path, monkeypatc
 def test_linux_key_still_rechecks_frontmost(tmp_path, monkeypatch) -> None:
     """The file_dialog skip does not drop the guard on other Linux actions."""
     calls = {"n": 0}
+    # The synthetic editor has no native terminal; do not query a real bus.
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (None, False))
 
     def frontmost() -> str:
         calls["n"] += 1
