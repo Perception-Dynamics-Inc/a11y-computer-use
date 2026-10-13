@@ -12972,3 +12972,46 @@ def test_sheet_root_refreshes_the_desktop_application_cache(fake_atspi, monkeypa
     with _atspi.read_cache():
         assert _atspi._child_count(desktop) == 0
         assert _atspi._fresh_sheet_root("soffice", Scope.APP) is app
+
+
+def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, monkeypatch):
+    """Editor-removal events run between the commit and grid read operations."""
+    from a11y_computer_use.drivers import linux
+
+    driver = LinuxDriver()
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    driver._refuse_xtest_password_focus = lambda: None
+    driver._typed_readback = lambda app: ""
+    state = {"in_operation": False, "events_processed": False}
+
+    def run(fn):
+        state["in_operation"] = True
+        try:
+            return fn()
+        finally:
+            state["in_operation"] = False
+
+    def pause(seconds):
+        assert not state["in_operation"]
+        state["events_processed"] = True
+
+    def check(app, origin, text):
+        assert state["in_operation"]
+        assert state["events_processed"]
+        assert origin == "A1"
+        return None
+
+    driver._run = run
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "drawing_focus_text", lambda app: ("skip", None))
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: "A1")
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", lambda app: True)
+    monkeypatch.setattr(_atspi, "sheet_grid_check", check)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    monkeypatch.setattr(linux.time, "sleep", pause)
+    assert driver.type_text("Item\tQ1") == len("Item\tQ1")
