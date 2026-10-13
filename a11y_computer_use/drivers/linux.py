@@ -1221,6 +1221,7 @@ class LinuxDriver:
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
+        self._sheet_type_readback: tuple[str, str] | None = None
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
@@ -3286,6 +3287,7 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._sheet_type_readback = None
         self._type_expected = None
         self._sheet_type_origin = None
         self._drawing_type_before = None
@@ -3540,6 +3542,12 @@ class LinuxDriver:
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)
+        if (
+            app_id and _atspi.libreoffice_app(app_id)
+            and _atspi._typed_visible(before, after, text)
+            and self._run(lambda: _atspi.spreadsheet_open(app_id))
+        ):
+            self._sheet_type_readback = (app_id, after)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
         # first read can be a truncated URL. Calc is the same lag: the cell
@@ -3562,6 +3570,10 @@ class LinuxDriver:
                 sheet=sheet,
             )
             if _atspi._typed_visible(before, after, text):
+                if sheet:
+                    # Preserve the actual settled read: a subsequent snapshot
+                    # can lose the transient editor in libatspi's child cache.
+                    self._sheet_type_readback = (app_id, after)
                 return len(text)
             if sheet:
                 raise _atspi._text_mismatch(

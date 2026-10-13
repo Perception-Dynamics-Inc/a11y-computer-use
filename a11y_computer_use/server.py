@@ -1683,6 +1683,11 @@ def _linux_point_matches_snapshot_pid(runtime, target: Target) -> bool:
         from a11y_computer_use.drivers import _linux_system
 
         found = _linux_system.pid_at_point(point.x, point.y)
+        # Shared portal backends can own choosers for different granted apps.
+        # Their PID alone proves nothing; use the parent-derived app hit-test.
+        identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+        if identity in _linux_system._PORTAL_BACKENDS:
+            return False
     except Exception:
         return False
     return bool(found) and int(found) == int(pid)
@@ -2889,6 +2894,14 @@ class Runtime:
                         better = _atspi.drawing_paragraph_shown(handle)
                     if better is not None:
                         readback = better
+                    settled = getattr(self.driver, "_sheet_type_readback", None)
+                    self.driver._sheet_type_readback = None
+                    if (
+                        isinstance(settled, tuple) and len(settled) == 2
+                        and settled[0] == app and isinstance(settled[1], str)
+                        and _atspi._typed_visible(previous, settled[1], requested)
+                    ):
+                        readback = settled[1]
             if readback is None:
                 readable = False
         # Chrome's contenteditable often publishes the new characters after

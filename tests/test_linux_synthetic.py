@@ -9728,6 +9728,15 @@ def test_outcome_confirms_a_calc_formula_the_cell_displays_as_a_number(
     assert typed == "confirmed", typed_evidence
     assert "Résumé ✓" in typed_evidence
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    typed, typed_evidence = runtime._judge_mutation(
+        "soffice.bin", before, None, "42", previous="",
+    )
+    assert typed == "confirmed", typed_evidence
+    assert "42" in typed_evidence
+    assert runtime.driver._sheet_type_readback is None
+    # A read from another app cannot confirm this mutation.
+    runtime.driver._sheet_type_readback = ("other", "=Z9")
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
     untouched, untouched_evidence = runtime._judge_mutation(
         "soffice.bin", before, before_el, "=Z9", previous="",
@@ -10078,6 +10087,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
     assert driver.type_text("42") == 2
+    assert driver._sheet_type_readback == ("soffice.bin", "42")
 
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: "42")
@@ -10089,6 +10099,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     assert exc.value.code is ErrorCode.UNSUPPORTED
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] in {None, ""}
+    assert driver._sheet_type_readback is None
 
 
 def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
@@ -12730,6 +12741,56 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     assert LinuxDriver().terminal_target("console-alias", launch=True)
 
 
+@pytest.mark.parametrize("owner_name,role,contents,omitted", [
+    ("Kate", "text", "TOP\nBOTTOM_MARKER_520", True),
+    ("kate", "text", "TOP\nBOTTOM_MARKER_520", True),
+    ("Kate", "text", "BOTTOM_MARKER_520", True),
+    ("Other editor", "text", "TOP\nBOTTOM_MARKER_520", False),
+    ("Kate", "entry", "BOTTOM_MARKER_520", False),
+])
+def test_kate_document_buffer_is_not_a_visible_search_hit(
+    fake_atspi, monkeypatch, owner_name, role, contents, omitted,
+) -> None:
+    """A widget box does not prove visibility of KTextEditor's buffer text."""
+    owner = _Acc("application", name=owner_name)
+    editor = _Acc(role, states={"EDITABLE"} | ({"MULTI_LINE"} if role == "text" else set()),
+                  width=600, height=400)
+    editor.text = contents
+    editor.get_application = lambda: owner
+    monkeypatch.setattr(
+        _atspi, "_state_flags", lambda acc: (True, False, None, False, None, True, True),
+    )
+    raw = _atspi.ATSPIAccessor().read(editor)
+    assert raw.role == ("AXTextField" if role == "entry" else "AXTextArea")
+    assert raw.value == (None if omitted else contents)
+    tree = (raw, [])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app=owner_name,
+                          pid=42, geometry=_geometry())
+    assert bool(observe.find_elements(snap, text="BOTTOM_MARKER_520")) is not omitted
+    assert observe.find_elements(snap, role="textarea" if role == "text" else "textfield")
+    if omitted:
+        assert "in-document navigation" in raw.description
+
+        from a11y_computer_use import server
+
+        class Driver:
+            def ensure_trusted(self):
+                pass
+
+            def snapshot(self, scope, app):
+                return snap
+
+            def scroll(self, *args, **kwargs):
+                pytest.fail("zero-scroll search must not move the editor")
+
+        monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+        runtime = _bare_runtime(Driver())
+        assert "no elements match" in runtime.find(owner_name, text="BOTTOM_MARKER_520")
+        result = runtime.scroll_to_find(owner_name, text="BOTTOM_MARKER_520", max_scrolls=0)
+        assert result.startswith("not found after 0 scroll(s)")
+    # Snapshot refusal must not change the buffer or caret.
+    assert editor.text == contents
+    assert not hasattr(editor, "caret")
 @pytest.mark.parametrize("name", [
     "xfce4-appfinder", "xfce4-run", "krunner", "rofi", "dmenu_run",
     "python3", "python3.12", "/usr/bin/python3", "pypy3", "perl", "ruby",
