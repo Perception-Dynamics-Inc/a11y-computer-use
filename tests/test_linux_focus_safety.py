@@ -65,6 +65,57 @@ def test_detectable_owner_preserves_ref_typing_without_widget_focus(focus_driver
     assert typed == []
 
 
+@pytest.mark.parametrize("app", ["xournalpp", "abiword"])
+def test_canvas_without_text_types_once_and_reports_unverifiable(
+    focus_driver, monkeypatch, app,
+) -> None:
+    driver, front, _, _, inserted, typed = focus_driver
+    front["app"] = app
+
+    class Canvas:
+        def get_text_iface(self):
+            return None
+
+        def get_role_name(self):
+            return "unknown"
+
+    canvas = Canvas()
+    monkeypatch.setattr(_atspi, "focused_text", _ORIGINAL_FOCUSED_TEXT)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *args, **kwargs: (canvas, False))
+    # GTK's static Text call returns an empty string even without Text.
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "")
+    assert _atspi.focused_text(app) is None
+    assert driver.type_text("XPROBE1 beta") == 12
+    assert typed == ["XPROBE1 beta"]
+    assert inserted == []
+    runtime = server.Runtime(driver=driver)
+    assert runtime._drawing_type_verdict(app, "XPROBE1 beta") == (
+        "unverifiable", "unverified",
+    )
+
+
+_ORIGINAL_FOCUSED_TEXT = _atspi.focused_text
+
+
+def test_readable_empty_text_is_still_a_mismatch(focus_driver, monkeypatch) -> None:
+    driver, _, _, _, inserted, typed = focus_driver
+
+    class Field:
+        def get_text_iface(self):
+            return self
+
+        def get_role_name(self):
+            return "entry"
+
+    monkeypatch.setattr(_atspi, "focused_text", _ORIGINAL_FOCUSED_TEXT)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *args, **kwargs: (Field(), False))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "")
+    with pytest.raises(ComputerUseError) as error:
+        driver.type_text("hello")
+    assert error.value.detail["reason"] == "text_mismatch"
+    assert typed == ["hello"] and inserted == []
+
+
 def test_runtime_cannot_use_another_apps_full_grant_for_a_cached_editable(
     focus_driver, monkeypatch, tmp_path
 ) -> None:
