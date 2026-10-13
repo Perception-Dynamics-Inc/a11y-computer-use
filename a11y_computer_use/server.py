@@ -10,6 +10,9 @@ structured errors (`schema.ComputerUseError`) are rendered as clear
 tool-error strings that carry the doctor hint, never raised across the wire
 as stack traces.
 
+The opt-in Linux ``files`` tool uses a host-configured filesystem root
+allowlist instead of app grants; attempts and verified effects are audited.
+
 Gating policy: ref-based actions are gated against the app of the snapshot
 that issued the ref; target-less actions (typing, keys, clipboard, raw
 coordinates, list verbs) and screen captures are gated against the frontmost
@@ -2056,6 +2059,9 @@ class Runtime:
         self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        from a11y_computer_use.files import FileOperations
+
+        self.file_operations = FileOperations(os.environ.get("A11Y_COMPUTER_USE_FILE_ROOTS", ""), self.audit)
         #: The OS backend. Every platform op (observe/act/capture) routes through
         #: it, so the Runtime is OS-agnostic; defaults to the current platform.
         self.driver = driver if driver is not None else drivers.get_driver()
@@ -8074,6 +8080,15 @@ class Runtime:
         return self._frontmost()
 
     @_serialized
+    def files(self, action: str, path: str, destination: str | None = None) -> str:
+        """Explicit filesystem operations authorized by the host's root allowlist.
+
+        No app grant or UI focus is involved. Every attempt is audit logged;
+        mutations return success only after filesystem verification.
+        """
+        return json.dumps(self.file_operations.run(action, path, destination))
+
+    @_serialized
     def notes(self, action: str, text: str | None = None) -> str:
         """The agent's scratchpad. ``add`` records a fact, ``list`` returns the
         numbered notes, ``clear`` empties them. Notes are injected into every
@@ -8151,7 +8166,7 @@ class Runtime:
     #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
     #: need a live snapshot epoch, which a one-shot process never has.
     RUN_ONCE_TOOLS = frozenset(
-        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog"}
+        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog", "files"}
     )
 
     @_serialized
@@ -8196,6 +8211,7 @@ class Runtime:
             "clipboard": self.clipboard,
             "menu": partial(self.menu, confirm=confirm),
             "file_dialog": self.file_dialog,
+            "files": self.files,
             "notes": self.notes,
             "wait_until": self.wait_until,
             "webmcp": partial(self.webmcp, confirm=confirm),
@@ -9309,6 +9325,19 @@ def build_server(
         the page's file input has to show the file. Windows and the
         browser also return unsupported."""
         return await run(runtime.file_dialog, action, path, app)
+
+    @server.tool(name="files")
+    async def files_tool(action: str, path: str, destination: str | None = None) -> str:
+        """Linux file operations for file managers whose items are inaccessible.
+        action: list, mkdir, rename, move. Use absolute paths inside the host's
+        A11Y_COMPUTER_USE_FILE_ROOTS allowlist. Disabled unless configured.
+        list returns at most 200 names. mkdir creates one directory; rename
+        requires a destination in the same parent; move accepts an exact
+        destination path (including the name). Parents must already exist.
+        No overwrites, symlinks, special files, or cross-filesystem moves.
+        Mutations are audit logged and verified. This changes files directly;
+        it does not select items or inject clicks into the file manager."""
+        return await run(runtime.files, action, path, destination)
 
     @server.tool(name="notes")
     async def notes_tool(action: str, text: str | None = None) -> str:

@@ -51,6 +51,7 @@ EXPECTED_TOOLS = {
     "clipboard",
     "menu",
     "file_dialog",
+    "files",
     "notes",
     "wait_until",
     "request_permission",
@@ -3570,6 +3571,51 @@ async def test_request_permission_is_a_no_op_off_macos(mcp_server, monkeypatch) 
     assert json.loads(result.content[0].text)["needed"] is False
 
 
+async def test_files_mcp_named_task_without_pixel_clicks(tmp_path, monkeypatch, mocked_driver):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    source = root / "alpha.txt"
+    source.write_text("contents")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_FILE_ROOTS", str(root))
+    with server.Runtime(audit=safety.AuditLog(tmp_path / "audit")) as runtime:
+        mcp = server.build_server(runtime=runtime)
+        if sys.platform != "linux":
+            result = await call_tool(mcp, "files", {"action": "mkdir", "path": str(root / "subfolder")})
+            assert result.isError and "requires Linux" in result.content[0].text
+            assert not (root / "subfolder").exists()
+            return
+        folder = root / "subfolder"
+        for args in [
+            {"action": "mkdir", "path": str(folder)},
+            {"action": "rename", "path": str(source), "destination": str(root / "renamed.txt")},
+            {"action": "move", "path": str(root / "renamed.txt"), "destination": str(folder / "renamed.txt")},
+        ]:
+            result = await call_tool(mcp, "files", args)
+            assert not result.isError
+            assert json.loads(result.content[0].text)["verified"] is True
+        assert (folder / "renamed.txt").read_text() == "contents"
+        assert mocked_driver == {"click": [], "type": [], "key": [], "scroll": [], "drag": []}
+        assert [e["result"] for e in audit_entries(tmp_path / "audit")] == ["attempt", "ok"] * 3
+
+
+async def test_files_mcp_disabled_and_dispatch(tmp_path, monkeypatch):
+    monkeypatch.delenv("A11Y_COMPUTER_USE_FILE_ROOTS", raising=False)
+    with server.Runtime(audit=safety.AuditLog(tmp_path / "audit")) as runtime:
+        result = await call_tool(server.build_server(runtime=runtime), "files", {
+            "action": "mkdir", "path": str(tmp_path / "folder"),
+        })
+        if sys.platform != "linux":
+            assert result.isError and "requires Linux" in result.content[0].text
+            with pytest.raises(ComputerUseError, match="requires Linux"):
+                runtime.dispatch("files", {"action": "mkdir", "path": str(tmp_path / "folder")})
+            assert not (tmp_path / "folder").exists()
+            return
+        assert result.isError and "disabled" in result.content[0].text
+        with pytest.raises(ValueError, match="disabled"):
+            runtime.dispatch("files", {"action": "mkdir", "path": str(tmp_path / "folder")})
+    assert not (tmp_path / "folder").exists()
+
+
 @pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
 async def test_unknown_tool_argument_is_rejected_before_input(
     mcp_server, mocked_driver, audit_dir, name: str,
@@ -4128,4 +4174,3 @@ async def test_window_list_for_an_app_includes_its_windows_on_other_spaces(bg, m
     rows = json.loads(result.content[0].text)
     assert rows == [{"window_id": 105, "app": APP, "title": "X Library", "on_screen": False,
                      "bounds": {"display_id": 1, "x": 0, "y": 160, "width": 3024, "height": 1804}}]
-
