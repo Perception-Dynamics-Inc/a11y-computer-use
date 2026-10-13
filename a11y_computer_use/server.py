@@ -6023,8 +6023,18 @@ class Runtime:
         self._run_gated(action, app, execute)
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
+        text = f"set {ref} = {shown!r}"
+        if getattr(self.driver, "name", None) == "linux" and live.role in {
+            "AXTextField", "AXTextArea",
+        }:
+            text += (
+                "; text read-back does not verify activation or navigation. "
+                "set_value does not guarantee keyboard focus. For GTK path entries "
+                "(Thunar/FileZilla), focus the field, select all, type the path, "
+                "then Return; verify the folder title/file list in a fresh snapshot."
+            )
         return self._conclude(
-            f"set {ref} = {shown!r}",
+            text,
             tool="select" if choice else "set_value",
             app=app, before=before, element=live, requested=value,
             had_ref=True, previous=previous,
@@ -9093,9 +9103,17 @@ def build_server(
         range is named. No keystrokes are sent for that conversion. A Chrome date, time, or month segment is typed, and
         the read-back is that segment's displayed text, not the Value float.
         An editable Linux field succeeds when the value read
-        back matches. A mismatch is an error, not a success. Gated at tier 'full';
-        refuses secure/password fields (secrets are entered by the human, never
-        this tool). Ideal for filling forms fast. The text is unchanged.
+        back matches. A mismatch is an error, not a success.
+        Text read-back does not verify activation or navigation, and an API
+        write does not guarantee keyboard focus. GTK path entries such as
+        Thunar's location bar and FileZilla's Local site field may display
+        the new path without navigating, even after Return. For those entries,
+        focus the field, select all, type the path, then Return. Verify the
+        folder title/file list in a fresh desktop_snapshot; Return without
+        target focus can activate a different control. set_value does not
+        send Return or activate the field automatically.
+        Gated at tier 'full'; refuses secure/password fields (secrets are
+        entered by the human, never this tool). Ideal for filling forms fast.
         Structured content adds outcome, next, and evidence. A combo, popup,
         or list is the select action: the same sentence, judged by read-back."""
         return _publish(await run(runtime.set_value, ref, value, _outcome=True, _tool="set_value"))

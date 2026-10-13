@@ -181,6 +181,20 @@ async def test_click_description_states_ref_and_permission_contract(mcp_server) 
     assert "needs_permission" in click.description  # the permission model
 
 
+async def test_set_value_description_explains_gtk_path_entry_commit(mcp_server) -> None:
+    async with client_session(mcp_server) as client:
+        listed = (await client.list_tools()).tools
+    description = " ".join(
+        next(tool for tool in listed if tool.name == "set_value").description.split()
+    )
+    assert "does not verify activation or navigation" in description
+    assert "does not guarantee keyboard focus" in description
+    assert "Thunar" in description and "FileZilla" in description
+    assert "focus the field, select all, type the path, then Return" in description
+    assert "fresh desktop_snapshot" in description
+    assert "does not send Return or activate the field automatically" in description
+
+
 # --- round-trip: snapshot -> click through gate, driver, and audit -----------
 
 
@@ -1545,6 +1559,52 @@ def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
     with pytest.raises(ComputerUseError) as ei:
         rt.set_value("e1", "secret")
     assert ei.value.code is ErrorCode.SECURE_FIELD
+
+
+@pytest.mark.parametrize("app", ["thunar", "filezilla"])
+def test_linux_set_value_path_readback_does_not_claim_navigation(app) -> None:
+    """A text write can land while another field retains keyboard focus."""
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Element
+
+    rt = server.Runtime.__new__(server.Runtime)
+    field = Element(ref="e1", role="AXTextField", title="Location",
+                    value="/old", bounds=Bounds(0, 0, 0, 10, 10), snapshot_id="s")
+    snap = type("S", (), {"app": app})()
+    rt._anchor = lambda ref: (snap, field)
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    state = {"text": "/old", "folder": "/old", "focus": "Host"}
+    calls = []
+
+    class Driver:
+        name = "linux"
+
+        def resolve_ref(self, snapshot, ref):
+            return field
+
+        def set_value(self, element, value):
+            calls.append(("set_value", element.ref, value))
+            state["text"] = value
+            return state["text"] == value
+
+        def press_element(self, element):
+            pytest.fail("set_value must not implicitly click or focus")
+
+        def type_text(self, text):
+            pytest.fail("set_value must not implicitly type")
+
+        def key(self, chord):
+            pytest.fail("set_value must not implicitly activate")
+
+    rt.driver = Driver()
+    result = rt.set_value("e1", "/new")
+    assert state == {"text": "/new", "folder": "/old", "focus": "Host"}
+    assert calls == [("set_value", "e1", "/new")]
+    assert "set e1 = '/new'" in result
+    assert "text read-back does not verify activation or navigation" in result
+    assert "does not guarantee keyboard focus" in result
+    assert "focus the field, select all, type the path, then Return" in result
+    assert "verify the folder title/file list in a fresh snapshot" in result
 
 
 def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
@@ -4128,4 +4188,3 @@ async def test_window_list_for_an_app_includes_its_windows_on_other_spaces(bg, m
     rows = json.loads(result.content[0].text)
     assert rows == [{"window_id": 105, "app": APP, "title": "X Library", "on_screen": False,
                      "bounds": {"display_id": 1, "x": 0, "y": 160, "width": 3024, "height": 1804}}]
-
