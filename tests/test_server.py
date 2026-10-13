@@ -2032,10 +2032,22 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
         def scroll(self, target, **kw):
             scrolls.append(int(kw.get("dy") or 0))
 
+        bar = False
+
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return _D.bar
+
         def key_chord(self, chord, **_kw):
             chords.append(chord)
+            if chord == "ctrl+f":
+                _D.bar = True
             if chord == "Return":
                 _D.found = True
+            if chord == "Escape":
+                _D.bar = False
 
         def type_text(self, text, **_kw):
             chords.append(f"type:{text}")
@@ -2107,10 +2119,22 @@ def test_scroll_to_find_uses_in_page_find_on_a_short_overflow_list(monkeypatch) 
         def scroll(self, target, **kw):
             scrolls.append(int(kw.get("dy") or 0))
 
+        bar = False
+
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return _D.bar
+
         def key_chord(self, chord, **_kw):
             chords.append(chord)
+            if chord == "ctrl+f":
+                _D.bar = True
             if chord == "Return":
                 _D.found = True
+            if chord == "Escape":
+                _D.bar = False
 
         def type_text(self, text, **_kw):
             chords.append(f"type:{text}")
@@ -2350,9 +2374,18 @@ def test_scroll_to_find_re_reads_until_the_page_frame_returns(monkeypatch) -> No
             scrolled.append(target.role)
             raise AssertionError(f"wheeled {target.role} {target.ref}")
 
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return state.get("bar", False)
+
         def key_chord(self, chord, **_kw):
             if chord == "ctrl+f":
                 state["poison"] = True
+                state["bar"] = True
+            if chord == "Escape":
+                state["bar"] = False
 
         def type_text(self, text, **_kw):
             pass
@@ -2403,9 +2436,18 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
         def scroll(self, target, **kw):
             scrolled.append(f"{target.role}:{target.ref}")
 
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return poisoned.get("bar", False)
+
         def key_chord(self, chord, **_kw):
             if chord == "ctrl+f":
                 poisoned["on"] = True
+                poisoned["bar"] = True
+            if chord == "Escape":
+                poisoned["bar"] = False
 
         def type_text(self, text, **_kw):
             pass
@@ -2444,7 +2486,7 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     A Next link under a table that still runs past the window is the
     next page, not a reason to Page Down in place. The wheel moves the
     document. The missing row is not found, and page_unchanged is not
-    reported.
+    reported. The table has no find bar, so the search text is not typed.
     """
     from a11y_computer_use import server
 
@@ -2497,7 +2539,8 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     assert out.startswith("not found after")
     assert "page_unchanged" not in out
     assert "pagedown" not in chords
-    assert "ctrl+f" in chords
+    assert "ctrl+f" not in chords
+    assert not any(item.startswith("type:") for item in chords)
     assert scrolls == [5, 5]
 
 
