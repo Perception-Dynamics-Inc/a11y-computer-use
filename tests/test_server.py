@@ -1649,6 +1649,76 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     assert scrolls == [5, 5]  # scrolled twice, found on the third observation
 
 
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("readable", [False, "text", "group_value"])
+def test_scroll_to_find_refuses_opaque_contents(monkeypatch, pinned, readable) -> None:
+    """Synthetic wxGTK-style list; unrelated rows cannot justify blind input."""
+    elements = [
+        Element(ref="box", role="AXScrollArea", title="Files", value=None,
+                bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="group", role="AXGroup", title="", value=None, parent="box",
+                bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="surface", role="opaque_region", title="File list", value=None,
+                parent="group", bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="bar", role="AXScrollBar", title="Vertical", value=36,
+                parent="box", bounds=Bounds(0, 780, 0, 20, 600), snapshot_id="s"),
+        Element(ref="other", role="AXRow", title="Unrelated row", value=None,
+                bounds=Bounds(0, 810, 0, 80, 20), snapshot_id="s"),
+    ]
+    if readable == "group_value":
+        elements[1] = dataclasses.replace(elements[1], value="file-001.txt")
+    elif readable:
+        elements.append(Element(
+            ref="row", role="AXStaticText", title="file-001.txt", value=None,
+            parent="group", bounds=Bounds(0, 10, 10, 100, 20), snapshot_id="s",
+        ))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1,
+                    created_at=0.0, displays=(Display(0, 1000, 800, 1.0, True),),
+                    elements=tuple(elements))
+    inputs = []
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+        def resolve_ref(self, snapshot, ref, live=None):
+            return snap.element(ref)
+
+        def scroll(self, target, **kw):
+            inputs.append("scroll")
+
+        def key_chord(self, chord):
+            inputs.append(chord)
+
+        def type_text(self, text):
+            inputs.append(text)
+
+        def scroll_offset(self, anchor):
+            return 36
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    rt._anchor_audited = lambda *args: (snap, snap.element("box"))
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "a"))
+    out = rt.scroll_to_find("app", text="file-030.txt", max_scrolls=1,
+                            ref="box" if pinned else None)
+    if readable:
+        assert "container_not_readable" not in out
+        assert inputs
+    else:
+        assert out.startswith("container_not_readable after 0 scroll(s)")
+        assert "container: AXScrollArea 'Files' ref=box" in out
+        assert "scroll_position: 36" in out
+        assert "cannot determine whether the target is present" in out
+        assert inputs == []
+
+
 def _item_window(head: int) -> Snapshot:
     """Eight rows starting at ``head``. Synthetic snapshot, not a Chrome list."""
     els = [Element(ref="box", role="AXScrollArea", title="", value=None,
@@ -1975,7 +2045,7 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=15, budget_s=15)
     assert "ITEM-180" in out
@@ -2050,7 +2120,7 @@ def test_scroll_to_find_uses_in_page_find_on_a_short_overflow_list(monkeypatch) 
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
     assert "ITEM-020" in out
@@ -2291,14 +2361,14 @@ def test_scroll_to_find_re_reads_until_the_page_frame_returns(monkeypatch) -> No
             state["latched"] += 1
             state["poison"] = False
             state["stale"] = 2
-            assert app == "com.a"
+            assert app == "com.google.Chrome"
 
     rt = server.Runtime.__new__(server.Runtime)
     rt.driver = _D()
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
     assert "ITEM-020" in out
@@ -2351,7 +2421,7 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
     monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(server.time, "sleep", sleep)
 
@@ -2363,7 +2433,7 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     assert "container: AXGroup ref=e2" in out
     assert "last_rows: none" in out
     assert "scroll_position: unknown" in out
-    assert latched == ["com.a"]
+    assert latched == ["com.google.Chrome"]
     assert scrolled == []
     assert clock["t"] < 1015.0
 
@@ -2421,7 +2491,7 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=15)
     assert out.startswith("not found after")
@@ -4234,3 +4304,102 @@ async def test_window_list_for_an_app_includes_its_windows_on_other_spaces(bg, m
     rows = json.loads(result.content[0].text)
     assert rows == [{"window_id": 105, "app": APP, "title": "X Library", "on_screen": False,
                      "bounds": {"display_id": 1, "x": 0, "y": 160, "width": 3024, "height": 1804}}]
+
+
+@pytest.mark.parametrize("hit_at", [0, 1, 2])
+@pytest.mark.parametrize("status_child, role", [(False, None), (True, None), (True, "text")])
+def test_scroll_to_find_refuses_statusbar_only_opaque_hit(monkeypatch, hit_at, status_child, role) -> None:
+    """Status metadata is not a character ref, including on confirming reads."""
+    elements = [
+        Element(ref="window", role="AXWindow", title="Character Map", value=None,
+                bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="box", role="AXScrollArea", title="Scripts", value=None,
+                bounds=Bounds(0, 0, 0, 150, 500), snapshot_id="s", parent="window"),
+        Element(ref="script", role="AXStaticText", title="Latin", value=None,
+                bounds=Bounds(0, 10, 10, 100, 20), snapshot_id="s", parent="box"),
+        Element(ref="table", role="opaque_region", title="Character Table", value=None,
+                bounds=Bounds(0, 160, 0, 640, 500), snapshot_id="s", parent="window"),
+        Element(ref="status", role="AXStatusBar", title="", value=None,
+                bounds=Bounds(0, 0, 550, 800, 30), snapshot_id="s", parent="window"),
+    ]
+    if status_child:
+        elements.append(Element(
+            ref="label", role="AXStaticText", title="", value=None,
+            bounds=Bounds(0, 0, 550, 800, 30), snapshot_id="s", parent="status",
+        ))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="gucharmap", pid=1,
+                    created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                    elements=tuple(elements))
+    calls = []
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            index = len(calls)
+            calls.append("snapshot")
+            if index >= hit_at:
+                return dataclasses.replace(snap, elements=tuple(
+                    dataclasses.replace(el, title="U+2764 HEAVY BLACK HEART")
+                    if el.ref == ("label" if status_child else "status") else el
+                    for el in snap.elements
+                ))
+            # A real candidate in the naming read must also be checked again.
+            if hit_at == 2 and index == 1:
+                return dataclasses.replace(snap, elements=tuple(
+                    dataclasses.replace(el, title="HEAVY BLACK HEART")
+                    if el.ref == "script" else el for el in snap.elements
+                ))
+            return snap
+
+        def scroll(self, target, **kw):
+            pass
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "gucharmap"))
+    with pytest.raises(ComputerUseError) as caught:
+        rt.scroll_to_find("gucharmap", text="HEAVY BLACK HEART", role=role)
+    assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "statusbar_only_match"
+    assert "opaque" in caught.value.message
+
+
+@pytest.mark.parametrize("explicit_status", [False, True])
+def test_scroll_to_find_keeps_content_hits_and_explicit_status_search(monkeypatch, explicit_status) -> None:
+    """An opaque sibling does not invalidate a real cell or requested statusbar."""
+    elements = [
+        Element(ref="table", role="opaque_region", title="Character Table", value=None,
+                bounds=Bounds(0, 0, 0, 400, 400), snapshot_id="s"),
+        Element(ref="status", role="AXStatusBar", title="HEART", value=None,
+                bounds=Bounds(0, 0, 450, 400, 20), snapshot_id="s"),
+    ]
+    if not explicit_status:
+        elements.append(Element(
+            ref="cell", role="AXCell", title="HEART", value=None, parent="table",
+            bounds=Bounds(0, 10, 10, 20, 20), snapshot_id="s", clickable=True,
+        ))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="gucharmap", pid=1,
+                    created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                    elements=tuple(elements))
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "gucharmap"))
+    out = rt.scroll_to_find("gucharmap", text="HEART",
+                            role="statusbar" if explicit_status else None)
+    assert out.startswith("found after 0 scroll(s)")
+    assert ("status" if explicit_status else "cell") in out

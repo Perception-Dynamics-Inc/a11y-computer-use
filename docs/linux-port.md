@@ -197,13 +197,16 @@ For clipboard support install one of `xclip`, `xsel`, or `wl-clipboard`; headles
 In CI the shared core tests (`tests/test_drivers.py`, `tests/test_observe.py`, `tests/test_linux_synthetic.py`) and the MCP `build_server()` smoke run on `ubuntu-latest`, and `tests/test_linux_live.py` exercises the driver name, an AT-SPI snapshot of the GTK app, an a11y button press with an observable effect, a11y typing via `EditableText`, and the `org.a11y.Status` flip against a live bus. Coordinate click/drag/scroll, key chords, capture, EWMH windowing, and clipboard are implemented but have no live test yet. The `Driver` contract is a shared signature protocol (`a11y_computer_use/drivers/base.py`), and `tests/test_drivers.py` checks only that `LinuxDriver` satisfies it structurally, so a green Linux job shows that the platform-free engine passes on `ubuntu-latest` and that the five live-tested paths (driver name, AT-SPI snapshot, accessibility press, accessibility typing, `org.a11y.Status` flip) work against a GTK3 window; it is not a behavioural comparison with the macOS driver, which no test performs.
 
 Audacity's wxGTK toolbar tools may be childless AT-SPI panels with the command
-name in the description. The Linux driver exposes these as buttons, so
+name in the description. The Linux driver recognizes a native toolbar ancestor
+or an immediate sibling grip described as `Audacity … Toolbar` and exposes the
+command panels as buttons, keeping the grip a group, so
 `find(role="button", text="Play")` includes the transport control. A childless,
 unnamed track view remains an `opaque_region`, labelled `Audacity track / waveform`;
 Mute, Solo, track names, Gain, and Pan painted inside it are not separate controls
 in that tree. Use Audacity's `Tracks > Mute/Unmute` menus for mute operations.
 The unnamed panel in the Time toolbar is labelled `Audacity Time clock` and stays
-opaque: its displayed reading is not an accessible value. When Audacity publishes
+opaque, including the wxGTK layout with the toolbar description on a sibling
+grip: its displayed reading is not an accessible value. When Audacity publishes
 real children or names, the driver preserves them.
 
 ## Meld file comparisons
@@ -222,6 +225,26 @@ use `Push current change to the left`, `Push current change to the right`, or
 pane's text to verify the result. These are separate requested operations:
 an explicit gutter-arrow click must not be silently replaced with navigation
 or a header-bar action. If that arrow cannot be addressed, report the limitation.
+
+Okular's Thumbnails sidebar can expose its painted thumbnail strip as an
+empty AT-SPI filler, without page icons or page-label text. In the reported
+Sidebar structure (a Thumbnails label above a filler beside a scrollbar),
+the Linux driver labels that opaque region `Okular thumbnails` and includes
+a navigation note. `find` cannot select a thumbnail by page number in this
+tree. Use the page-number field, `Go to Page…`, or the Find bar instead.
+Native names and per-page children, when exposed, retain the normal role and
+label handling; the driver does not synthesize thumbnail targets or bounds.
+This fallback is covered by synthetic tests; a live Okular run has not been
+verified for this change.
+
+GTK grid buttons with empty or duplicated accessible names use the nearest
+sibling label to their left with overlapping vertical extents. Explicit
+`labelled-by` relations take precedence. Missing geometry or equally near
+labels leave the raw name unchanged. The original nonempty button name (for
+example `Sans Bold`) is retained as its value when no value is exposed. This
+lets snapshots and `find` identify font and colour controls by their row label;
+button handles, actions, and measured bounds are unchanged. Covered by hermetic
+galculator-shaped regression tests; no local live verification.
 
 ## Gnumeric name-box navigation
 

@@ -4209,7 +4209,9 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds."""
+        that stays off screen is reported with no bounds. When a cell,
+        row, or other control has the exact name, that control is the
+        match. A label counts only when its own title is the text."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -4238,8 +4240,11 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
-            matches = observe.find_elements(
-                snap, text=text, role=role, editable=editable, clickable=clickable
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
             )
             return observe.render_matches(snap, matches, text=text)
 
@@ -6123,10 +6128,18 @@ class Runtime:
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
+        When a cell, row, or other control has the exact name, that control
+        is the match. A label counts only when its own title is the text,
+        so a label that merely mentions the name does not stop the search.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
         body-scroll page, not the window's tab strip.
+        An opaque container without readable contents returns
+        ``container_not_readable`` before input; the target's presence
+        cannot be determined from that accessibility tree. An unscoped text
+        search with only statusbar hits and an opaque content surface refuses
+        with ``statusbar_only_match`` rather than returning a content ref.
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
@@ -6164,8 +6177,9 @@ class Runtime:
         also stops at 120 seconds from the start. ``budget_s`` of 0 stops
         before any scroll. The note names the scroll container, its
         scroll position, and the last rows on screen. A document, a
-        table, or a list is tried with Ctrl+F first, including an
-        overflow list shorter than the window. A miss keeps the wheel.
+        table, or a list in a recognized Chromium app is tried with
+        Ctrl+F first, including an overflow list shorter than the window.
+        A miss keeps the wheel.
         After Ctrl+F, Chrome is latched and the tree is read again until
         the page frame is back. The find bar and an empty cached frame
         are not wheeled.
@@ -6258,9 +6272,38 @@ class Runtime:
             center_y = bounds.y + bounds.height / 2
             return left <= center_x < right and top <= center_y < bottom
 
+        def search_matches(snap: Snapshot) -> tuple[Element, ...]:
+            matches = observe.find_elements(snap, text=text, role=role)
+            if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
+                return observe.prefer_exact_targets(matches, text)
+            by_ref = {el.ref: el for el in snap.elements}
+
+            def in_statusbar(el: Element) -> bool:
+                seen: set[str] = set()
+                while el.ref not in seen:
+                    seen.add(el.ref)
+                    if el.role == "AXStatusBar":
+                        return True
+                    if el.parent not in by_ref:
+                        break
+                    el = by_ref[el.parent]
+                return False
+
+            if all(in_statusbar(el) for el in matches) and any(
+                el.role == observe.OPAQUE_ROLE for el in snap.elements
+            ):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "only the statusbar matches; the content surface remains opaque, "
+                    "so accessibility search cannot verify a content target or return "
+                    "an actionable content ref",
+                    detail={"reason": "statusbar_only_match", "content_readable": False},
+                )
+            return observe.prefer_exact_targets(matches, text)
+
         def visible_matches(snap: Snapshot) -> list[Element]:
             return [
-                el for el in observe.find_elements(snap, text=text, role=role)
+                el for el in search_matches(snap)
                 if on_screen(el, snap)
             ]
 
@@ -6272,7 +6315,7 @@ class Runtime:
             no match in this snapshot. A document table keeps rows that have
             already left the viewport, so a name in the tree is not a hit.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = search_matches(snap)
             located = [el for el in found if el.bounds is not None]
             if not located:
                 return "missing"
@@ -6331,7 +6374,7 @@ class Runtime:
             many viewports below never arrives one line at a time, so
             the search keeps the five-line burst until the row is close.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = search_matches(snap)
             box = viewport_box(snap)
             if not found or box is None:
                 return False
@@ -6446,6 +6489,40 @@ class Runtime:
                 if budget_s > 0 and (rows_moved or offset_moved):
                     stall_deadline = time.monotonic() + budget_s
 
+            def container_not_readable(shot: Snapshot, anchor: Element | None) -> bool:
+                """An opaque surface without readable content in this container.
+
+                Empty virtualized lists can acquire children after scrolling;
+                require an actual opaque surface rather than just missing rows.
+                Names outside this container do not make its contents readable.
+                """
+                if anchor is None:
+                    return False
+                under = {anchor.ref}
+                children: dict[str, list[str]] = {}
+                for el in shot.elements:
+                    if el.parent:
+                        children.setdefault(el.parent, []).append(el.ref)
+                stack = [anchor.ref]
+                while stack:
+                    for child in children.get(stack.pop(), ()):
+                        if child not in under:
+                            under.add(child)
+                            stack.append(child)
+                opaque = False
+                for el in shot.elements:
+                    if el.ref not in under:
+                        continue
+                    if el.role == observe.OPAQUE_ROLE:
+                        opaque = True
+                    elif el.role == "AXGroup" and el.value is not None and str(el.value).strip():
+                        return False
+                    elif el.ref != anchor.ref and el.role not in (
+                        "AXScrollBar", "AXScrollArea", "AXGroup", "AXSplitter",
+                    ) and ((el.title or "").strip() or (el.value is not None and str(el.value).strip())):
+                        return False
+                return opaque
+
             def expired_cap() -> float | None:
                 """The cap that has run out, or None while the search may continue.
 
@@ -6502,6 +6579,14 @@ class Runtime:
                 visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
                 return visible <= 80
 
+            # Native viewers share these roles, but Escape may close their
+            # window rather than a find bar. Require a resolved Chromium id.
+            chromium_find = bundle.casefold() in {
+                "chrome", "chrome.exe", "google-chrome", "google-chrome-stable",
+                "chromium", "chromium.exe", "chromium-browser",
+                "com.google.chrome", "org.chromium.chromium",
+            }
+
             def wants_in_page_find(_shot: Snapshot, anchor: Element | None) -> bool:
                 """Ctrl+F once before the wheel, for a document, a table, or a list.
 
@@ -6511,7 +6596,7 @@ class Runtime:
                 budget. A miss falls through to the wheel. A tall list, the
                 document group, or a scroll area is the same find.
                 """
-                if not text or "\n" in text or len(text) > 80 or anchor is None:
+                if not chromium_find or not text or "\n" in text or len(text) > 80 or anchor is None:
                     return False
                 if not callable(getattr(self.driver, "key_chord", None)):
                     return False
@@ -6536,7 +6621,7 @@ class Runtime:
                 return f"{float(value):g}"
 
             def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
-                           budget_cap: float | None = None) -> str:
+                           budget_cap: float | None = None, unreadable: bool = False) -> str:
                 names = row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
@@ -6546,9 +6631,18 @@ class Runtime:
                     container = f"{anchor.role}{title} ref={anchor.ref}"
                 shown_budget = budget_s if budget_cap is None else budget_cap
                 why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
-                return (
+                heading = (
                     f"not found after {count} scroll(s){why}: "
-                    f"no element matches text={text!r} role={role!r}\n"
+                    f"no element matches text={text!r} role={role!r}"
+                )
+                if unreadable:
+                    heading = (
+                        f"container_not_readable after {count} scroll(s): "
+                        "the container exposes an opaque surface but no readable contents; "
+                        "accessibility search cannot determine whether the target is present"
+                    )
+                return (
+                    f"{heading}\n"
                     f"container: {container}\n"
                     f"scroll_position: {read_offset(anchor)}\n"
                     f"last_rows: {tail}"
@@ -6624,7 +6718,7 @@ class Runtime:
                 read again until that page frame is back. A miss does not
                 count as a scroll.
                 """
-                if not text or "\n" in text or len(text) > 80:
+                if not chromium_find or not text or "\n" in text or len(text) > 80:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
@@ -6742,7 +6836,9 @@ class Runtime:
                     else:
                         same_rows = 0
                     previous_rows = seen
-                matches = observe.find_elements(snap, text=text, role=role)
+                matches = search_matches(snap)
+                if not matches and container_not_readable(snap, anchor_now):
+                    return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
@@ -8774,7 +8870,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches). A
+        (text past the 200 characters kept on the element still matches). When
+        a cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. A
         terminal's shown value is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
@@ -9215,9 +9313,15 @@ def build_server(
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
         Give text (substring of title or the field's full value, including
-        text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
+        text past the 200 characters a snapshot keeps) and/or role. When a
+        cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. budget_s is how long the
+        matching ref(s) or a not-found note. An opaque container with no
+        readable contents returns container_not_readable before sending input;
+        this does not establish that the target is absent. An unscoped text search
+        with only statusbar hits and an opaque content surface returns an
+        unsupported statusbar_only_match error. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
         A step that changes either one starts that clock again. The search
