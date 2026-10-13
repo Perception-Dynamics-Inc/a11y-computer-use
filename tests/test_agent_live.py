@@ -1647,9 +1647,59 @@ def _clear_focus(*, show_desktop: bool = False) -> str:
     try:
         from a11y_computer_use.drivers import _linux_system
 
-        return _linux_system.frontmost_app_id() or "unknown"
+        # EWMH client messages are asynchronous. The window manager can still
+        # report the previous terminal while it processes show-desktop, even
+        # after our own connection has flushed the active-window property.
+        deadline = time.monotonic() + 3
+        while True:
+            front = _linux_system.frontmost_app_id() or "unknown"
+            if front == "unknown" or time.monotonic() >= deadline:
+                return front
+            time.sleep(0.05)
     except Exception:
         return "unknown"
+
+
+@pytest.mark.parametrize("focus", ["", "unknown"])
+def test_clear_focus_waits_for_the_window_manager(monkeypatch, focus) -> None:
+    """A pending desktop request must settle before the short agent run."""
+    from types import SimpleNamespace
+
+    from a11y_computer_use.drivers import _linux_system
+
+    # No display, Xlib installation, or GI is needed for this setup regression.
+    monkeypatch.setitem(sys.modules, "Xlib", SimpleNamespace())
+    monkeypatch.setattr(sys.modules[__name__], "_set_showing_desktop", lambda showing: None)
+    reads = []
+    states = iter(["xfce4-terminal", "xfce4-terminal", focus])
+
+    def frontmost():
+        reads.append(True)
+        return next(states)
+
+    sleeps = []
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", frontmost)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert _clear_focus(show_desktop=True) == "unknown"
+    assert len(reads) == 3
+    assert sleeps == [0.05, 0.05]
+
+
+def test_clear_focus_reports_a_window_that_stays_focused(monkeypatch) -> None:
+    """Exhausting the setup wait must preserve the live assertion's failure."""
+    from types import SimpleNamespace
+
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setitem(sys.modules, "Xlib", SimpleNamespace())
+    monkeypatch.setattr(sys.modules[__name__], "_set_showing_desktop", lambda showing: None)
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", lambda: "xfce4-terminal")
+    ticks = iter([0, 0, 3])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert _clear_focus(show_desktop=True) == "xfce4-terminal"
+    assert sleeps == [0.05]
 
 
 @requires_display
