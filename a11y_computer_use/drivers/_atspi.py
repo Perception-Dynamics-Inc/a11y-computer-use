@@ -1769,8 +1769,11 @@ _HTML_TAG_NAMES = (
 )
 # The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
 # not a tag: HTML does not allow a space between ``<`` and the name.
+# Quoted attributes may contain angle brackets; require the full tag name
+# so a literal ``<p-custom>`` is not mistaken for a paragraph.
 _HTML_TAG_RE = re.compile(
-    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    rf"<(/)?({_HTML_TAG_NAMES})(?=[\s/>])"
+    r"((?:[^<>\"']|\"[^\"]*\"|'[^']*')*)>",
     re.IGNORECASE,
 )
 _HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
@@ -3254,7 +3257,10 @@ class ATSPIAccessor:
         if role_str == "combo box" and _gtk_combo(node):
             expanded = bool(_popup_open(node))
         name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
-        description = _call_first(node, ("get_description",), default="") or ""
+        # The snapshot uses the description as its title when the name is empty.
+        description = _plain_accessible_name(
+            str(_call_first(node, ("get_description",), default="") or "")
+        )
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
