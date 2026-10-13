@@ -1993,6 +1993,22 @@ class LinuxDriver:
                 "and make it current",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # Qt's Toggle flips a button/item's state without clicked/triggered/
+        # itemClicked, so the application's handlers never run. Send one
+        # real click at the visible center, after raising the owning window
+        # above. With no usable screen box (or no X11 pointer input), keep
+        # the accessible action. Never Toggle after sending a pointer click.
+        if self._run(lambda: _atspi.qt_toggle_only_control(handle)):
+            bounds = element.bounds
+            if bounds is not None and bounds.width > 0 and bounds.height > 0 and not _on_wayland():
+                width, height = _screen_span()
+                left, top = max(0, bounds.x), max(0, bounds.y)
+                right = min(width, bounds.x + bounds.width)
+                bottom = min(height, bounds.y + bounds.height)
+                if right > left and bottom > top:
+                    self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+                    return True
+            return self._run(lambda: _atspi.do_press(handle))
         # A GTK tree cell's activate/expand action reports success and leaves
         # the selection where it was. Select through the parent's Selection
         # interface, or click the row's on-screen center, and require the
