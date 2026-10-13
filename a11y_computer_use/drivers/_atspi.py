@@ -10741,13 +10741,17 @@ def control_kind(acc) -> str | None:
 
 
 def _collect_options(acc) -> list[tuple[str, object, object, int]]:
-    """(label, node, parent, index) for each choice under ``acc``."""
+    """(label, node, parent, index) for each choice under ``acc``.
+
+    Enumerate every child: GTK font menus routinely have hundreds of items,
+    and the flattened order is also the combo's Selection model index.
+    """
     found: list[tuple[str, object, object, int]] = []
 
     def walk(node, depth: int) -> None:
         if depth > 5:
             return
-        count = min(_child_count(node), 64)
+        count = _child_count(node)
         for index in range(count):
             child = _child_at(node, index)
             if child is None:
@@ -11462,7 +11466,22 @@ def set_combo_value(acc, value: str) -> None:
             match = next((item for item in options if item[0] == value), None)
             if match is None:
                 labels = [label for label, *_rest in options if label]
-                listed = ", ".join(labels)
+                # Bound the diagnostic, independently of the choices searched.
+                shown: list[str] = []
+                size = 0
+                for label in labels[:64]:
+                    added = len(label) + (2 if shown else 0)
+                    if size + added > 2048:
+                        break
+                    shown.append(label)
+                    size += added
+                listed = ", ".join(shown)
+                if len(shown) < len(labels):
+                    raise ValueError(
+                        f"value {value!r} is not an available option; "
+                        f"showing first {len(shown)} of {len(labels)} options "
+                        f"(list truncated): {listed}"
+                    )
                 raise ValueError(f"value {value!r} is not one of: {listed}")
             _activate_combo_option(acc, options, match)
     finally:
