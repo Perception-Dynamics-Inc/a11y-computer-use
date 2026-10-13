@@ -236,6 +236,15 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+## Kate document text search
+Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
+omit Kate textarea buffer values because the editor bounds do not establish
+character visibility. `find` and `scroll_to_find` cannot verify individual
+document text matches; even visible buffer text is excluded until character
+visibility can be established. The editor ref remains available, with a hint
+to use in-document navigation. Single-line search fields keep their values.
+This conservative behavior is covered by synthetic tests; no live Kate run
+was performed for #477.
 
 GTK grid buttons with empty or duplicated accessible names use the nearest
 sibling label to their left with overlapping vertical extents. Explicit
@@ -245,6 +254,28 @@ example `Sans Bold`) is retained as its value when no value is exposed. This
 lets snapshots and `find` identify font and colour controls by their row label;
 button handles, actions, and measured bounds are unchanged. Covered by hermetic
 galculator-shaped regression tests; no local live verification.
+
+
+### Masked GTK 4 entries
+
+Password roles, password/protected states, and explicit entry visibility-off
+signals are treated as secure fields and their text is not read. GTK 4 can omit
+all masking metadata for a masked `Gtk.Entry`. An empty `GetText(0, -1)`
+result therefore stays empty in snapshots, find, and action readback, even when
+the character count is positive. This also hides values for plain GTK 4 entries
+with the same empty sentinel behavior. Positive-offset reads are used only for
+private boolean write verification; their contents are never published.
+### Execution permission and launchers
+
+With `allow_exec=False` (the default), terminal launches and input require an
+explicit execution grant, independently of a FULL app grant. The same launch
+gate refuses known run dialogs/app finders, script interpreters, shells, and
+generic launch wrappers (including `exo-open`, `gtk-launch`, and `xdg-open`).
+It checks command strings before application resolution, executable symlinks,
+desktop-file Exec programs, and resolved launch arguments. Each refusal returns
+`exec_disabled` and writes an audit entry. Input to known app finders is also
+refused; a Python process hosting an ordinary GUI editor is not itself a
+terminal input target. These name-based checks are not a process sandbox.
 
 ## gucharmap Character Table
 

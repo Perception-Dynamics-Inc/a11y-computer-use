@@ -9728,6 +9728,15 @@ def test_outcome_confirms_a_calc_formula_the_cell_displays_as_a_number(
     assert typed == "confirmed", typed_evidence
     assert "Résumé ✓" in typed_evidence
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    typed, typed_evidence = runtime._judge_mutation(
+        "soffice.bin", before, None, "42", previous="",
+    )
+    assert typed == "confirmed", typed_evidence
+    assert "42" in typed_evidence
+    assert runtime.driver._sheet_type_readback is None
+    # A read from another app cannot confirm this mutation.
+    runtime.driver._sheet_type_readback = ("other", "=Z9")
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
     untouched, untouched_evidence = runtime._judge_mutation(
         "soffice.bin", before, before_el, "=Z9", previous="",
@@ -10078,6 +10087,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
     assert driver.type_text("42") == 2
+    assert driver._sheet_type_readback == ("soffice.bin", "42")
 
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: "42")
@@ -10089,6 +10099,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     assert exc.value.code is ErrorCode.UNSUPPORTED
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] in {None, ""}
+    assert driver._sheet_type_readback is None
 
 
 def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
@@ -12730,6 +12741,166 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     assert LinuxDriver().terminal_target("console-alias", launch=True)
 
 
+@pytest.mark.parametrize("owner_name,role,contents,omitted", [
+    ("Kate", "text", "TOP\nBOTTOM_MARKER_520", True),
+    ("kate", "text", "TOP\nBOTTOM_MARKER_520", True),
+    ("Kate", "text", "BOTTOM_MARKER_520", True),
+    ("Other editor", "text", "TOP\nBOTTOM_MARKER_520", False),
+    ("Kate", "entry", "BOTTOM_MARKER_520", False),
+])
+def test_kate_document_buffer_is_not_a_visible_search_hit(
+    fake_atspi, monkeypatch, owner_name, role, contents, omitted,
+) -> None:
+    """A widget box does not prove visibility of KTextEditor's buffer text."""
+    owner = _Acc("application", name=owner_name)
+    editor = _Acc(role, states={"EDITABLE"} | ({"MULTI_LINE"} if role == "text" else set()),
+                  width=600, height=400)
+    editor.text = contents
+    editor.get_application = lambda: owner
+    monkeypatch.setattr(
+        _atspi, "_state_flags", lambda acc: (True, False, None, False, None, True, True),
+    )
+    raw = _atspi.ATSPIAccessor().read(editor)
+    assert raw.role == ("AXTextField" if role == "entry" else "AXTextArea")
+    assert raw.value == (None if omitted else contents)
+    tree = (raw, [])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app=owner_name,
+                          pid=42, geometry=_geometry())
+    assert bool(observe.find_elements(snap, text="BOTTOM_MARKER_520")) is not omitted
+    assert observe.find_elements(snap, role="textarea" if role == "text" else "textfield")
+    if omitted:
+        assert "in-document navigation" in raw.description
+
+        from a11y_computer_use import server
+
+        class Driver:
+            def ensure_trusted(self):
+                pass
+
+            def snapshot(self, scope, app):
+                return snap
+
+            def scroll(self, *args, **kwargs):
+                pytest.fail("zero-scroll search must not move the editor")
+
+        monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+        runtime = _bare_runtime(Driver())
+        assert "no elements match" in runtime.find(owner_name, text="BOTTOM_MARKER_520")
+        result = runtime.scroll_to_find(owner_name, text="BOTTOM_MARKER_520", max_scrolls=0)
+        assert result.startswith("not found after 0 scroll(s)")
+    # Snapshot refusal must not change the buffer or caret.
+    assert editor.text == contents
+    assert not hasattr(editor, "caret")
+@pytest.mark.parametrize("name", [
+    "xfce4-appfinder", "xfce4-run", "krunner", "rofi", "dmenu_run",
+    "python3", "python3.12", "/usr/bin/python3", "pypy3", "perl", "ruby",
+    "bash", "env python3", "exo-open --launch TerminalEmulator",
+    "xdg-terminal-exec", "gtk-launch org.gnome.Terminal", "gio launch shell.desktop",
+])
+def test_shell_capable_launcher_is_refused_before_resolution(monkeypatch, tmp_path, name):
+    import json
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(name, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda *_: pytest.fail("resolved before gate"))
+    monkeypatch.setattr(driver, "launch_app", lambda *_args, **_kw: pytest.fail("launched"))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", name)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+    assert row["app"] == name
+    runtime.allow_exec = True
+    from a11y_computer_use.schema import AppOp, AppVerb
+    runtime._reject_terminal(AppOp(verb=AppVerb.LAUNCH, app=name), name)
+
+
+@pytest.mark.parametrize("command", ["python3 -c 'import os; os.system(\"sh\")'", "exo-open --launch TerminalEmulator"])
+def test_shell_desktop_exec_alias_is_refused_and_audited(monkeypatch, tmp_path, command):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+
+    desktop = tmp_path / "innocent.desktop"
+    desktop.write_text("[Desktop Entry]\nName=Innocent\nType=Application\nExec=" + command + "\n")
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(_linux_system, "_desktop_entry", lambda _: ("innocent", str(desktop)))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "launch_app", lambda *_a, **_kw: pytest.fail("launched"))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("innocent", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "innocent")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_shell_capable_launch_alias_symlink_and_resolved_argv(monkeypatch, tmp_path):
+    interpreter = tmp_path / "python3.12"
+    interpreter.touch()
+    alias = tmp_path / "innocent"
+    alias.symlink_to(interpreter)
+    monkeypatch.setattr("shutil.which", lambda _: str(alias))
+    driver = LinuxDriver()
+    assert driver.terminal_target("innocent", launch=True)
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    assert driver.terminal_target("innocent", ("env", "python3"), launch=True)
+
+
+def test_python_gui_input_does_not_require_exec(fake_atspi, monkeypatch):
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda _: "python3")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _: (_Acc("text"), False))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert not driver.terminal_target("python3")
+    assert not driver.terminal_target("mousepad", launch=True)
+
+
+def test_appfinder_input_is_refused_and_audited(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xfce4-appfinder", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    for action in (TypeText(text="sh\n"), KeyChord(chord="Return")):
+        with pytest.raises(ComputerUseError) as caught:
+            runtime._run_gated(action, "xfce4-appfinder", lambda: pytest.fail("input sent"))
+        assert caught.value.code is ErrorCode.EXEC_DISABLED
+    rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert len(rows) == 2
+    assert all(row["metrics"]["security_violation"] == "exec_disabled" for row in rows)
+
+
+def test_resolved_shell_argv_is_refused_and_audited(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(_linux_system, "_desktop_entry", lambda _: None)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("innocent", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda _: ("innocent", "innocent", ("python3", "-c", "pass")))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "innocent")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
 def test_gtk_grid_button_names_follow_rows_not_child_order(fake_atspi, monkeypatch):
     monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
     monkeypatch.setattr(_atspi, "_action_names", lambda node: ("AXPress",) if node.role == "push button" else ())
@@ -12996,10 +13167,15 @@ def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, mon
         state["events_processed"] = True
 
     def check(app, origin, text):
-        assert state["in_operation"]
+        assert not state["in_operation"]
         assert state["events_processed"]
         assert origin == "A1"
         return None
+
+    def commit(app):
+        assert state["in_operation"]
+        assert app == "soffice.bin"
+        return True
 
     driver._run = run
     monkeypatch.setattr(linux, "_on_wayland", lambda: False)
@@ -13010,8 +13186,83 @@ def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, mon
     monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
     monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
     monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: "A1")
-    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", lambda app: True)
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", commit)
     monkeypatch.setattr(_atspi, "sheet_grid_check", check)
     monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
     monkeypatch.setattr(linux.time, "sleep", pause)
     assert driver.type_text("Item\tQ1") == len("Item\tQ1")
+
+
+def test_sheet_child_cache_restores_default_after_read_failure(fake_atspi, monkeypatch):
+    fake_atspi.Cache = _NS(NONE=0, UNDEFINED=128)
+    app = _Acc("application", name="soffice")
+    masks = []
+    app.set_cache_mask = masks.append
+
+    def fail():
+        assert masks == [0]
+        raise RuntimeError("read failed")
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        _atspi._without_child_cache(app, fail)
+    assert masks == [0, 128]
+
+
+def test_direct_atspi_read_runs_on_event_thread(monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events
+
+    on_thread = [False]
+    calls = []
+
+    def run(fn):
+        on_thread[0] = True
+        try:
+            return fn()
+        finally:
+            on_thread[0] = False
+
+    def native_read():
+        assert on_thread[0]
+        calls.append("table read")
+        return "Item"
+
+    monkeypatch.setattr(_atspi_events, "run", run)
+    assert _atspi._safe(native_read) == "Item"
+    assert calls == ["table read"]
+    assert not on_thread[0]
+
+
+def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    driver._typed_readback = lambda _app: ""
+    on_event_thread = [False]
+
+    def run(fn):
+        on_event_thread[0] = True
+        try:
+            return fn()
+        finally:
+            on_event_thread[0] = False
+
+    driver._run = run
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda _app: False)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: True)
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda _app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda _app: "A1")
+    sent = []
+    monkeypatch.setattr(_linux_input, "type_string", sent.append)
+
+    def verify(app, origin, text):
+        # Verification waits for publication between native reads. Keeping
+        # this entire operation on the event thread starves those replies.
+        assert not on_event_thread[0]
+        assert (app, origin, text) == ("soffice.bin", "A1", "Item\tQ1")
+        return None
+
+    monkeypatch.setattr(_atspi, "sheet_grid_check", verify)
+    assert driver.type_text("Item\tQ1") == len("Item\tQ1")
+    assert sent == ["Item\tQ1"]
