@@ -316,17 +316,36 @@ def _is_dialog_window(win, d) -> bool:
         return True
 
 
+_PORTAL_BACKENDS = frozenset({
+    "xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome", "xdg-desktop-portal-kde",
+})
+
+
 def _app_id(win, d, *, settle: bool = False) -> str:
     """Permission-keying app id: full program name, else comm, else WM_CLASS.
 
     The full name comes from ``/proc/<pid>/cmdline`` or the exe when the
     kernel comm is that name's 15-byte cut. A short comm is the id, which is
-    how ``chrome`` stays ``chrome``.
+    how ``chrome`` stays ``chrome``. A recognized portal backend dialog
+    uses its managed transient parent's process identity.
     """
     pid = _settled_pid(win, d) if settle else _pid_of(win, d)
     comm = _comm_for_pid(pid)
     if comm:
-        return _identity_for_pid(pid, comm) or comm
+        identity = _identity_for_pid(pid, comm) or comm
+        # Portal backends serve many apps. Only a managed transient dialog
+        # inherits its explicit parent's identity; never grant the backend.
+        if identity in _PORTAL_BACKENDS:
+            parent = _prop(win, d, "WM_TRANSIENT_FOR")
+            if parent and int(parent[0]) != int(win.id):
+                owner = _window_by_id(d, int(parent[0]))
+                if owner is not None:
+                    owner_pid = _pid_of(owner, d)
+                    owner_comm = _comm_for_pid(owner_pid)
+                    owner_id = _identity_for_pid(owner_pid, owner_comm)
+                    if owner_id and not owner_id.startswith("xdg-desktop-portal"):
+                        return owner_id
+        return identity
     return _wm_class_instance(win, d)
 
 
@@ -434,7 +453,7 @@ def frontmost_app_id() -> str:
             comm = _comm_for_pid(pid)
             if not comm:
                 return ""
-            return _identity_for_pid(pid, comm) or ""
+            return _app_id(win, d)
     except ComputerUseError:
         raise
     except Exception:
@@ -525,6 +544,18 @@ def app_at_point_id(x: float, y: float) -> str | None:
 def pid_at_point(x: float, y: float) -> int | None:
     """Pid of the topmost client window containing a screen point."""
     return _top_window_pid(x, y)
+
+
+def window_at_point(x: float, y: float) -> dict | None:
+    """Identity and title of the topmost managed window at a screen point."""
+    try:
+        with _open_display() as d:
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            return {"window_id": int(win.id), "title": _win_title(win, d)}
+    except Exception:
+        return None
 
 
 def _launcher_comm(identifier: str, comm: str) -> bool:

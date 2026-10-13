@@ -72,3 +72,25 @@ def test_status_bar_snapshot_says_statusbar(monkeypatch) -> None:
     bar = next(el for el in snap.elements if el.title == title)
     assert bar.role == "AXStatusBar"
     assert bar.bounds.width == 1276 and bar.bounds.height == 19
+
+
+def test_unnamed_status_bar_keeps_its_text_message(monkeypatch) -> None:
+    """Geany's unnamed caret status remains visible without a Value probe."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_direct_text", lambda acc: "line: 301 col: 0")
+    monkeypatch.setattr(
+        _atspi, "_value_text", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probed")),
+    )
+    raw = _atspi.ATSPIAccessor().read(_Bar(""))
+    assert raw.role == "AXStatusBar"
+    assert raw.title == "line: 301 col: 0"
+    assert raw.value is None
+    window = (
+        RawNode(role="AXWindow", title="Geany", position=(0.0, 0.0), size=(1280.0, 800.0)),
+        [(raw, [])],
+    )
+    snap = build_snapshot(
+        window, _FakeAccessor(), scope=Scope.WINDOW, app="geany", pid=1, geometry=_geometry(),
+    )
+    assert 'statusbar "line: 301 col: 0"' in observe.render_text(snap, mode="full")
