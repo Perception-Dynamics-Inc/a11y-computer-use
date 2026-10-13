@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -80,10 +81,15 @@ def _point_of(target: Target) -> tuple[int, int]:
     """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
-    if target.bounds is None:
+    bounds = target.bounds
+    center = bounds.center if bounds is not None else None
+    if center is None or any(
+        not math.isfinite(v) or v < -32768 or v > 32767
+        for v in (center.x, center.y)
+    ):
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
-            f"{target.ref} ({target.role}) has no bounds; no pointer click was sent",
+            f"{target.ref} ({target.role}) has no usable bounds; no pointer click was sent",
             detail={"ref": target.ref, "role": target.role, "reason": "not_actionable"},
         )
     return int(target.bounds.center.x), int(target.bounds.center.y)
