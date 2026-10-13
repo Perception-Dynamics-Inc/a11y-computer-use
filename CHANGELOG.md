@@ -9,7 +9,7 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.66] - 2026-10-12
 
-Fifty-six commits since v0.4.65, through #463.
+Sixty-six commits since v0.4.65, through #489.
 
 ### Safety
 
@@ -26,6 +26,8 @@ Fifty-six commits since v0.4.65, through #463.
 - Each ref can carry a replay locator: role, name, stable id, and the role path, plus a selector of those fields from the root. A later snapshot resolves the selector to the new ref. A stored point is not used when a selector is present. Fixes #122 (#418) (32957f7, 2026-10-13).
 - A task class sets the step and time budget on top of the stuck budget and the hard `max_time` deadline. At 90 percent of either cap the model gets one turn to check the goal. A failed check on that turn is `verify_failed`, not done. The class and that turn do not choose a click from the goal text or replace an action with a different effect. (#382) (95a3e98, 2026-10-12).
 - Each observation starts with the step index, the steps left, and the seconds left of the cap in force. At or below 20 percent of either cap, a second line says to call done if the goal is met. A task class names itself on that line, and the trace records the class caps beside the caps in force. Fixes #404 (#442) (f9bc514, 2026-10-13).
+- With no file dialog open, `choose_file` could treat a stale tree or ordinary Open/Cancel buttons elsewhere in the app as a chooser, then fail with `file_not_chosen`. An ambiguous Open or Save window counts only when that window holds Open or Save and Cancel buttons plus an editable field, a stale unmapped chooser is not brought back, and the Linux confirm does not fall back to the whole app. The error is now `no_file_chooser` and says to open the file dialog first. No key, type, or `set_value` is sent. Fixes #482 (#486) (6bb5926, 2026-10-13).
+- A file-save goal accepted `file_exists` even when the file was there before the task, so a web form's Save button could finish the task on a stale file. That condition now also needs the file's mtime to be after task start, with one second of slack for the kernel's coarse clock. The planner prompt says a browser form Save is not evidence of a file write. `check_conditions` takes an optional `written_after`; replay and other callers are unchanged. Fixes #483 (#487) (7e42178, 2026-10-13).
 
 ### Linux drivers
 
@@ -75,6 +77,14 @@ Fifty-six commits since v0.4.65, through #463.
 - A snapshot-text wait wakes on a structural AT-SPI event (`children-changed`, `load-complete`, `property-change`, `window:activate`) instead of sleeping out the poll. A state or text event, including a caret blink, does not end the wait. When AT-SPI events are off, the wait keeps the poll sleep. Refs #12 (#412) (c9b8184, 2026-10-12).
 - Linux `wait_for` of `actionable` returns only when the target is showing, on the primary screen, enabled or sensitive, stable (the same box on two reads at least 0.05s apart), and the process that owns the top window at its center, with the hit on that node or a descendant. The wait wakes on AT-SPI state, children, bounds, and focus events. An event is not success; the next read has to pass every check. A timeout is `ErrorCode.TIMEOUT` and names the check that failed (`visible`, `enabled`, `stable`, `receiving_events`, or `actionable`). While that listener is up, a snapshot drops the application's cached children before the walk, so a Chromium page that never entered the cache is still read, and a Firefox combo select refreshes `SELECTED` before the read-back. Fixes #120 (#408) (bd691bd, 2026-10-13).
 - Electron's page sits several panels under the frame. `get_parent` returns a new wrapper, and CPython reuses the id of one the walk has already dropped, so the seen set stops early and a showing document is reported hidden. Visited ancestors now use the bus name and object path, and stay referenced when that key is missing. Fixes #424 (#427) (90b5a44, 2026-10-12).
+- On Linux an unset `A11Y_COMPUTER_USE_ATSPI_EVENTS` now turns the AT-SPI event thread on when the Atspi typelib imports. `0`, `false`, `no`, and `off` force inline; `1`, `true`, `yes`, and `on` turn it on; any other value warns once and uses the default. Before, `0` was treated as on. Other platforms stay inline when the variable is unset. (#411) (e554b12, 2026-10-12).
+- GIMP 3 brush tips are icons with no name. The selected tip now takes the dock label beside the icon grid, such as `2. Hardness 050 (51 × 51)`, when its filler has exactly one non-generic label. Unselected tips stay unlabeled opaque regions, and an icon that already has a name keeps it. Fixes #451 (#456) (b0c095e, 2026-10-12).
+- After `menu(path=...)` in a Java Swing app the JMenu stayed SELECTED, so a later click sent Escape first, which cancelled a JOptionPane and let the click land on the window behind. Leftover Java menus are closed, and a click on a dialog that has vanished is refused instead of reported as success. Fixes #458 (#461) (fe4c307, 2026-10-13).
+- A Java Swing JTable snapshot listed rows below the scroll viewport, and a ref click on them landed outside the window. Off-screen rows are scrolled into view before the click. Fixes #459 (#462) (74f46a6, 2026-10-12).
+- A Geany Symbols outline cell has no AT-SPI action, so a click only selected it. The result now says that the row opens on a double-click. Fixes #466 (#468) (ab8c7bc, 2026-10-12).
+- Inkscape tool and toolbar controls publish a multi-line name with the tooltip and shortcut, such as `Text Tool` followed by `Create and edit text objects (T)`. The name, the hint, and the shortcut are now split. Fixes #470 (#473) (45f3692, 2026-10-13).
+- Inkscape's zoom status field shows a percent such as `88%` while its AT-SPI Value is on a log2 scale. `set_value` accepts the percent and converts it to that scale. Fixes #471 (#474) (6dd2151, 2026-10-12).
+- Audacity's wxGTK toolbar tools are childless panels whose command name is only in the description. Inside an Audacity tool bar they are now buttons, so `find(role="button", text="Play")` finds the transport controls; pressing one is a pointer click at its center. The painted track view and the Time clock stay `opaque_region` but get a surface name and a note that their contents are not exposed. No track names or clock readings are made up. Fixes #484 and #485 (#489) (d8436c2, 2026-10-13).
 
 ## [0.4.65] - 2026-10-12
 
