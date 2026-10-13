@@ -3466,6 +3466,82 @@ def test_table_body_cells_are_added_when_children_are_only_headers() -> None:
     assert _atspi._with_table_body(empty, [header]) == [header]
 
 
+@pytest.mark.parametrize("app, checked, showing, label, binding, accepted, success", [
+    ("Thunar", False, True, "List View", "", True, True),
+    ("gedit", False, True, "List View", "", True, False),
+    ("thunar", True, True, "List View", "", True, False),
+    ("thunar", False, False, "List View", "", True, False),
+    ("thunar", False, True, "Vue détaillée", ";<Primary>2;", True, True),
+    ("thunar", False, True, "Icon View", "", True, False),
+    ("thunar", False, True, "List View", "", False, False),
+])
+def test_thunar_opaque_view_uses_the_named_list_view_action(
+    monkeypatch, app, checked, showing, label, binding, accepted, success,
+) -> None:
+    """An opaque Exo view becomes named GTK cells without a pointer or keys."""
+    class _Node:
+        def __init__(self, role, name="", children=()):
+            self.role, self.name, self.children = role, name, list(children)
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+        def get_application(self):
+            return application
+
+    opaque = _Node("unknown")
+    cell = _Node("table cell", "report.txt")
+    frame = _Node("frame", children=[opaque])
+    application = _Node("application", app, [frame])
+    command = _Node("radio menu item", label)
+    frame.children.append(_Node("menu bar", children=[_Node("menu item", "View", [command])]))
+    calls = []
+
+    class _Action:
+        def get_n_actions(self):
+            return 1
+
+        def get_action_name(self, index):
+            return "click"
+
+        def get_key_binding(self, index):
+            return binding
+
+        def do_action(self, index):
+            calls.append(index)
+            if accepted:
+                frame.children[0] = _Node("table", children=[cell])
+            return accepted
+
+    monkeypatch.setattr(_atspi, "_action_iface", lambda node: _Action() if node is command else None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: (
+        node is opaque and state == "SHOWING" and showing
+    ) or (node is command and state == "CHECKED" and checked))
+    assert _atspi.thunar_list_view(frame, [opaque]) is success
+    assert calls == ([0] if success or (app == "thunar" and not accepted) else [])
+    if success:
+        accessor = _atspi.ATSPIAccessor()
+        monkeypatch.setattr(accessor, "read", lambda node: RawNode(
+            role=_atspi._ROLE.get(node.role, "AXGroup"), title=node.name,
+            position=(20.0, 30.0), size=(400.0, 200.0),
+            actions=("press",) if node is cell else (),
+        ))
+        shot = build_snapshot(frame, accessor, scope=Scope.WINDOW, app=app, pid=1, geometry=_geometry())
+        named = next(el for el in shot.elements if el.title == "report.txt")
+        assert observe.ax_handle_for(shot.snapshot_id, named.ref) is cell
+        assert not any(el.role == "opaque_region" for el in shot.elements)
+        assert _atspi.thunar_list_view(frame, []) is False
+
+
 def test_pixel_scroll_on_wayland_uses_the_bar_and_lines_stay_unsupported(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:

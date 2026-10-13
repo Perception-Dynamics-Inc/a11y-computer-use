@@ -12662,6 +12662,55 @@ _PATH_COMMANDS = frozenset({
 _FOLDER_LOCATION_WAIT_S = 1.2
 
 
+def thunar_list_view(root, surfaces: Sequence[object]) -> bool:
+    """Activate Thunar's accessible List View command, if it is available.
+
+    Some Exo icon views expose only an opaque surface. The detailed view
+    uses GTK table cells with file names and selection. Use the menu action
+    rather than a global key chord, so another application's focus is safe.
+    The caller only requests this when the snapshot has an opaque region.
+    """
+    app = _application_of(root)
+    if _node_name(app).casefold() != "thunar":
+        return False
+    if not any(_raw_child_count(node) == 0 and _state_has(node, "SHOWING") for node in surfaces):
+        return False
+    if _role_name(root) == "application":
+        for frame in snapshot_window_list(root):
+            if frame is root:
+                continue
+            owned = [node for node in surfaces if _frame_cache_key(_toplevel_of(node)) == _frame_cache_key(frame)]
+            if owned and thunar_list_view(frame, owned):
+                return True
+        return False
+    queue = [root]
+    visited: list = []
+    command = None
+    while queue and len(visited) < 200:
+        node = queue.pop(0)
+        if not _hold_new(node, visited):
+            continue
+        role = _role_name(node)
+        if role in {"radio menu item", "menu item", "check menu item"}:
+            action = _action_iface(node)
+            binding = _call_first(action, ("get_key_binding", "getKeyBinding"), 0, default="") or ""
+            name = _node_name(node).replace("_", "").casefold()
+            if name in {"list view", "detailed list"} or "<Primary>2" in binding or "<Control>2" in binding:
+                if _state_has(node, "CHECKED"):
+                    return False
+                command = node
+        # Do not enumerate file rows or other top-level windows.
+        if role in _LIST_ROLES or (node is not root and role in _TOP_LEVEL_WINDOW_ROLES):
+            continue
+        for index in range(min(max(_raw_child_count(node), 0), 32)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    if command is not None:
+        return do_named_action(command, "click") or do_named_action(command, "activate")
+    return False
+
+
 def _raw_action_names(acc) -> list[str]:
     """AT-SPI action names, lowercased, in the order the toolkit lists them."""
     action = _action_iface(acc)

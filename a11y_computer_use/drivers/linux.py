@@ -1340,6 +1340,9 @@ class LinuxDriver:
 
         ``Scope.WINDOW`` includes every showing top-level window of the app.
         The active window is first. One showing window stays a single tree.
+
+        A Thunar icon view with no accessible file children is switched to
+        List View through its menu action, so files have named GTK cell refs.
         """
         from a11y_computer_use.drivers import _dbus_guard
 
@@ -1554,6 +1557,27 @@ class LinuxDriver:
                         node, accessor, scope=scope, app=app, pid=watch.pid,
                         geometry=geometry,
                     )
+                    # Exo can publish Thunar's icon view without any file
+                    # children. Its List View command replaces that surface
+                    # with GTK's named table cells. Rebuild after the action;
+                    # never invent file names or coordinates for the surface.
+                    surfaces = [
+                        observe.ax_handle_for(snap.snapshot_id, el.ref)
+                        for el in snap.elements if el.role == "opaque_region"
+                    ]
+                    if surfaces and _atspi.thunar_list_view(node, surfaces):
+                        deadline = time.monotonic() + 1.2
+                        while True:
+                            _atspi._drop_read_cache()
+                            _atspi._invalidate_tree_cache(node)
+                            accessor.refresh_visible(node)
+                            snap = observe.build_snapshot(
+                                node, accessor, scope=scope, app=app, pid=watch.pid,
+                                geometry=geometry,
+                            )
+                            if not any(el.role == "opaque_region" for el in snap.elements) or time.monotonic() >= deadline:
+                                break
+                            time.sleep(0.05)
                     # A GTK table cell find could not scroll on screen. Attach
                     # it with the extents AT-SPI reported, which the pruner
                     # drops when they miss the display. No box is invented.
