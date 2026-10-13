@@ -3389,6 +3389,18 @@ class ATSPIAccessor:
             if sentence:
                 value = sentence
         screen_text = None
+        if role == "AXTextArea":
+            owner = _application_of(node)
+            owner_name = str(_call_first(owner, ("get_name",), default="") or "")
+            if owner_name.casefold() == "kate":
+                # KTextEditor publishes the whole buffer, including off-screen
+                # characters. Its widget box cannot verify substring visibility,
+                # even for a document containing one long line. Keep the ref.
+                value = None
+                description = (
+                    f"{description} Document text visibility unavailable; "
+                    "use in-document navigation to locate text."
+                ).strip()
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
