@@ -31,3 +31,5 @@
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
 
 - 2026-10-14 (#464 repair): When combining Calc commit fixes, marshal the editor commit and individual native reads to the event thread, but keep both the post-commit pause and the grid verification loop on the caller. Regression tests should assert that events can run between operations as well as that native reads retain thread ownership.
+
+- 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
