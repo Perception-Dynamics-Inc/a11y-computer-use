@@ -192,3 +192,14 @@ use `Push current change to the left`, `Push current change to the right`, or
 pane's text to verify the result. These are separate requested operations:
 an explicit gutter-arrow click must not be silently replaced with navigation
 or a header-bar action. If that arrow cannot be addressed, report the limitation.
+
+Okular's Thumbnails sidebar can expose its painted thumbnail strip as an
+empty AT-SPI filler, without page icons or page-label text. In the reported
+Sidebar structure (a Thumbnails label above a filler beside a scrollbar),
+the Linux driver labels that opaque region `Okular thumbnails` and includes
+a navigation note. `find` cannot select a thumbnail by page number in this
+tree. Use the page-number field, `Go to Page…`, or the Find bar instead.
+Native names and per-page children, when exposed, retain the normal role and
+label handling; the driver does not synthesize thumbnail targets or bounds.
+This fallback is covered by synthetic tests; a live Okular run has not been
+verified for this change.
