@@ -14,4 +14,6 @@
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
 
+- 2026-10-14 (#446 repair): A Calc grid read can time out while the final cell editor remains open. Refresh both native child caches and operation-scoped getters, keep mask changes on the AT-SPI event thread, and commit the discovered editor before reading sibling cells. Refresh the subsequent table lookup too. Reproduce live failures with CI's window manager and display size.
 - 2026-10-13 (#503): Keep the GTK 4 garbage-allocation filter limited to unnamed, childless panels; large real containers still need their extents for clipping and sampling. When merge conflicts join appended regression tests, retain both branches' tests and compare the final diff against main.
+- 2026-10-14 (#446 repair): A post-commit pause inside the AT-SPI event-thread callback cannot process the editor-removal event. Commit in one driver operation, pause on the caller, then verify in the next operation; keep the existing pause bound.
