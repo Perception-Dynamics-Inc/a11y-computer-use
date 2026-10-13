@@ -5591,6 +5591,11 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
+    # GTK can return an empty string from Text.get_text even for a drawing
+    # area without Text. That is no read-back, not a readable empty field.
+    getter = getattr(acc, "get_text_iface", None)
+    if callable(getter) and _safe(lambda: getter()) is None:
+        return None
     # A PDF page's Text interface is the document, not a field. Evince
     # leaves that page focused while Ctrl+F types into the find bar. Using
     # the page as the read-back makes the type look like a mismatch and
