@@ -2912,8 +2912,8 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
     Text, or the accessible name, is what those roles show. Value is read for
     a slider, spin button, or progress bar, and only when Qt's minimum and
-    maximum are a real range. GTK's fallback for a non-range control is
-    unchanged, except a dialog or a checkbox whose CurrentValue is a
+    maximum are a real range. GTK's fallback for a non-range control requires
+    a Value interface. A dialog or a checkbox whose CurrentValue is a
     subnormal double: that reading is absent. Zero and a small normalized
     value on those roles stay. An empty entry, text field, or paragraph
     (character count 0) has no value either: Chromium's empty input
@@ -3000,11 +3000,11 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
         return None
-    # GTK 4 text (the calculator display, a new text-editor document) has
-    # Text and no Value. Reading CurrentValue is an uninitialized double.
+    # GTK 4 text and popover menu items have no Value. Reading CurrentValue
+    # without that interface can return an uninitialized double.
     # ``_value_interface_present`` is false only when the accessible reports
     # the interface missing. A test double with no getter still reads Value.
-    if role_name in _TEXT_ROLE_NAMES and not _value_interface_present(acc):
+    if not _value_interface_present(acc):
         return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is None:
@@ -3431,6 +3431,14 @@ class ATSPIAccessor:
             position, size = (-1.0, -1.0), (-1.0, -1.0)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
+        if role == "AXMenuItem" and not str(name).strip():
+            # GTK 4 Gio.Menu labels live on LABELLED_BY targets, sometimes
+            # only as Text rather than an accessible name.
+            for target in _relation_targets(node, "labelled_by"):
+                label = _node_name(target) or _direct_text(target).strip()
+                if label:
+                    name = _plain_accessible_name(label)
+                    break
         button_name = str(name)
         if role_str == "push button":
             name = _gtk_button_row_name(node, button_name)
