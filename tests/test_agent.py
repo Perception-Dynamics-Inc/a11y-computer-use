@@ -31,7 +31,7 @@ EXPECTED_TOOLS = {
     "desktop_snapshot", "find", "screenshot", "zoom", "crop", "screen_text", "click", "hover", "type", "key",
     "scroll", "drag",
     "wait_for", "act", "set_value", "scroll_to_find", "app", "window", "clipboard",
-    "menu", "file_dialog",
+    "menu", "file_dialog", "files",
     "notes", "wait_until",
 }
 

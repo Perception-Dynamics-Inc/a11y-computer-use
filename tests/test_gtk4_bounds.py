@@ -1,8 +1,9 @@
-"""GTK 4 reports every SCREEN origin as (0, 0). WINDOW coordinates are real.
+"""GTK 4 reports every SCREEN origin as (0, 0).
 
 The screen point is the X client origin plus the WINDOW box. A missing
 origin is not replaced with a guess, and a pointer click is not sent to
-that collapsed point. Synthetic nodes and fake X windows; no live GTK.
+that collapsed point. Header-bar WINDOW boxes with negative origins are
+also unreliable. Synthetic nodes and fake X windows; no live GTK.
 """
 
 from __future__ import annotations
@@ -464,4 +465,103 @@ def test_right_click_on_a_collapsed_box_is_refused(monkeypatch) -> None:
         driver.click(_element(Bounds(0, 0, 0, 71, 44)), button=MouseButton.RIGHT)
     assert exc.value.detail["reason"] == "not_actionable"
     assert clicks == []
+    assert button.pressed == []
+
+
+@pytest.mark.parametrize("window", [(227, -5, 34, 34), (-6, 10, 34, 34)])
+@pytest.mark.parametrize("action", ["click", "press"])
+def test_gtk4_header_bar_click_activates_without_pointer(monkeypatch, window, action):
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    _frame, button = _button(_App("GTK", "4.18.6"), window=window)
+    button.actions = ("expand", action)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    # Even a positive recovered screen box must not bypass the WINDOW guard.
+    assert driver.click(_element(Bounds(0, 524, 275, 34, 34))) is None
+    assert button.pressed == [1]
+    assert clicks == []
+
+
+@pytest.mark.parametrize("failure", ["missing", "unrelated", "failed", "right", "double", "modified"])
+def test_gtk4_header_bar_unreliable_click_is_refused(monkeypatch, failure):
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    _frame, button = _button(_App("GTK", "4.18.6"), window=(227, -5, 34, 34))
+    if failure == "missing":
+        button.actions = ()
+    elif failure == "unrelated":
+        button.actions = ("expand",)
+    elif failure == "failed":
+        monkeypatch.setattr(button, "do_action", lambda _index: False)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    kwargs = {
+        "right": {"button": MouseButton.RIGHT},
+        "double": {"count": 2},
+        "modified": {"modifiers": ("shift",)},
+    }.get(failure, {})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(_element(Bounds(0, 1054, -5, 34, 34)), **kwargs)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["outcome"] == "refused"
+    assert button.pressed == []
+    assert clicks == []
+
+
+@pytest.mark.parametrize("toolkit,version", [("GTK", "3.24"), ("Qt", "6.8"), ("GTK", "")])
+def test_non_gtk4_negative_window_origin_keeps_pointer_click(monkeypatch, toolkit, version):
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    _frame, button = _button(_App(toolkit, version), window=(227, -5, 34, 34))
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    driver.click(_element(Bounds(0, 524, 275, 34, 34)))
+    assert clicks == [(541, 292)]
+    assert button.pressed == []
+
+
+@pytest.mark.parametrize("role", ["alert", "dialog"])
+@pytest.mark.parametrize("kwargs", [{}, {"button": MouseButton.RIGHT}, {"count": 2}, {"modifiers": ("shift",)}])
+def test_gtk4_in_window_dialog_positive_box_refuses_click(monkeypatch, role, kwargs):
+    """#520: a recovered positive box can omit the AdwAlertDialog offset."""
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    frame, button = _button(_App("GTK", "4.18.6"), window=(377, 372, 156, 44))
+    dialog = _Node(role, "End sleep?", (0, 0, 400, 200), (200, 250, 400, 200),
+                   parent=frame, app=button.app)
+    panel = _Node("panel", "", (0, 0, 400, 100), (200, 350, 400, 100),
+                  parent=dialog, app=button.app)
+    button.parent = panel
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(_element(Bounds(0, 852, 447, 156, 44)), **kwargs)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+    assert exc.value.detail["outcome"] == "refused"
+    assert clicks == []
+    assert button.pressed == []
+
+
+@pytest.mark.parametrize("toolkit,version,nested", [
+    ("GTK", "3.24", True), ("Qt", "6.8", True), ("GTK", "", True),
+    ("GTK", "4.18.6", False),
+])
+def test_other_dialogs_keep_pointer_click(monkeypatch, toolkit, version, nested):
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    frame, button = _button(_App(toolkit, version))
+    dialog = _Node("dialog", "Confirm", (0, 0, 400, 200), (0, 0, 400, 200),
+                   parent=frame if nested else None, app=button.app)
+    button.parent = dialog
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    driver.click(_element(Bounds(0, 852, 447, 156, 44)))
+    assert clicks == [(930, 469)]
     assert button.pressed == []
