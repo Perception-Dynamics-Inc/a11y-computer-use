@@ -12735,3 +12735,46 @@ def test_sheet_grid_commits_editor_before_reading_other_cells(monkeypatch):
     monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
     assert _atspi.sheet_grid_check("soffice", "A1", "Item\tQ1") is None
     assert calls == ["commit", "scan"]
+
+
+def test_gtk_grid_button_names_follow_rows_not_child_order(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    monkeypatch.setattr(_atspi, "_action_names", lambda node: ("AXPress",) if node.role == "push button" else ())
+    labels = ["Result font", "RPN stack font", "Module font", "Background color",
+              "Result font color", "RPN stack color", "Module color", "Module font color"]
+    buttons = [_place_row(_Acc("push button", name="Sans Bold" if i < 3 else ""),
+                          200, 100 + i * 40, 140, 30) for i in range(8)]
+    texts = [_place_row(_Acc("label", name=name + ":"), 20, 105 + i * 40, 160, 20)
+             for i, name in enumerate(labels)]
+    grid = _adopt(_place_row(_Acc("panel"), 10, 80, 400, 400), *reversed(buttons), *reversed(texts))
+    root = _adopt(_place_row(_Acc("frame", name="Preferences"), 0, 0, 600, 600), grid)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="galculator", pid=561, geometry=_geometry())
+    for i, name in enumerate(labels):
+        found = [el for el in observe.find_elements(snap, text=name, role="button")
+                 if el.title == name]
+        assert len(found) == 1, [(el.role, el.title, el.value) for el in snap.elements]
+        assert found[0].title == name
+        assert found[0].value == ("Sans Bold" if i < 3 else None)
+        assert found[0].bounds == Bounds(0, 200, 100 + i * 40, 140, 30)
+        assert found[0].clickable
+    rendered = observe.render_text(snap, mode="interactive")
+    assert all(name in rendered for name in labels)
+
+
+@pytest.mark.parametrize("case", ["unique", "non_gtk", "missing", "other_row", "right", "tie", "relation"])
+def test_gtk_button_row_names_preserve_authority_and_require_geometry(fake_atspi, monkeypatch, case):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    button = _place_row(_Acc("push button", name="Choose" if case == "unique" else ""), 200, 100, 140, 30)
+    label = _place_row(_Acc("label", name="Result font:"),
+                       350 if case == "right" else 20, 200 if case == "other_row" else 105, 160, 20)
+    _adopt(_Acc("panel"), button, label)
+    if case == "missing":
+        button.component = None
+    if case == "tie":
+        other = _place_row(_Acc("label", name="Other:"), 20, 105, 160, 20)
+        _adopt(button.parent, button, label, other)
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: "Explicit:" if case == "relation" else "")
+    assert _atspi.ATSPIAccessor().read(button).title == (
+        "Explicit" if case == "relation" else button.name
+    )
