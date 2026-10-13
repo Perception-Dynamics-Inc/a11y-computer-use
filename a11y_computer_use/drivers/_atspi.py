@@ -1134,6 +1134,51 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
+    """Role, surface name, and note for Audacity's childless wx panels.
+
+    Toolbar tools put their label in the tooltip. The track view and Time
+    clock paint their contents without publishing controls or a value. Keep
+    those surfaces opaque; never invent track names or clock readings.
+    """
+    if _child_count(node) != 0 or not _parent_of(node):
+        return "", "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "audacity":
+        return "", "", ""
+    toolbar = None
+    parent = _parent_of(node)
+    for _ in range(20):
+        if parent is None:
+            return "", "", ""
+        role = _role_name(parent)
+        if role == "dialog":
+            return "", "", ""
+        if role == "tool bar" and toolbar is None:
+            toolbar = parent
+        if role in {"frame", "window"}:
+            break
+        if role == "application":
+            return "", "", ""
+        parent = _parent_of(parent)
+    else:
+        return "", "", ""
+    name = _node_name(node).strip()
+    description = str(_call_first(node, ("get_description",), default="") or "").strip()
+    if toolbar is not None:
+        if description and not name:
+            return "AXButton", "", ""
+        if not name and not description and _node_name(toolbar).casefold() in {"time", "time toolbar"}:
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
+    elif not name and not description and focusable and size is not None:
+        if size[0] >= 300 and size[1] >= 100:
+            return (
+                "", "Audacity track / waveform",
+                "Track controls are not exposed by AT-SPI; use Tracks > Mute/Unmute menus.",
+            )
+    return "", "", ""
+
+
 def _direct_label_names(acc) -> list[str]:
     """Non-generic names of ``acc``'s immediate label children.
 
@@ -3468,8 +3513,13 @@ class ATSPIAccessor:
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
+        panel_note = ""
+        if role_str == "panel" and role == "AXGroup":
+            panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
+            if panel_role:
+                role = panel_role
         if role_str == "panel" and not str(name).strip() and not str(description).strip():
-            surface_name = _panel_surface_name(node, size, focusable)
+            surface_name = surface_name or _panel_surface_name(node, size, focusable)
         if (
             role_str == "icon"
             and selected
@@ -3510,7 +3560,7 @@ class ATSPIAccessor:
             surface_name=surface_name,
             hint=hint,
             shortcut=shortcut,
-            note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else "",
+            note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else panel_note,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
