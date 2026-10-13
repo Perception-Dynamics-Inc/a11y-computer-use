@@ -14,3 +14,5 @@
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
 
 - 2026-10-13 (#503): Keep the GTK 4 garbage-allocation filter limited to unnamed, childless panels; large real containers still need their extents for clipping and sampling. When merge conflicts join appended regression tests, retain both branches' tests and compare the final diff against main.
+
+- 2026-10-14 (#491): In restricted Linux sandboxes, CLI subprocess tests can abort in libatspi before Python handles an error when the accessibility bus is unavailable. Use a fresh D-Bus session and writable XDG_CACHE_HOME; preserve access to GSettings schemas when isolating XDG desktop entries. Installed desktop programs can also change mock launch-resolution results, so distinguish environment-dependent failures from code regressions.
