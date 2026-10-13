@@ -3578,6 +3578,8 @@ class LinuxDriver:
                     return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
+        if after is None:
+            self._type_unverified = True
         if after is not None and not _atspi._typed_visible(
             before, after, text, selection=selection,
         ):
