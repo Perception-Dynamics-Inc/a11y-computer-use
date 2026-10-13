@@ -4871,6 +4871,33 @@ def find_root(app: str, scope) -> object | None:
         raise
     except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
         pids = set()
+    # A portal process can contain dialogs for several apps. Bind only its
+    # active, explicitly parented window, never its whole application tree.
+    portal = None
+    try:
+        row = _linux_system.active_window()
+        if row and row.get("app", "").lower() == needle:
+            pid = int(row.get("pid") or 0)
+            identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+            if identity in _linux_system._PORTAL_BACKENDS and row["app"] != identity:
+                rows = [r for r in _linux_system.windows()
+                        if r.get("pid") == pid and r.get("title") == row.get("title")]
+                if row.get("title") and len(rows) == 1:
+                    portal = row
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - unavailable X11 cannot authorize a portal
+        pass
+    if portal is not None:
+        for i in range(int(count)):
+            candidate = _call_first(desktop, ("get_child_at_index",), i)
+            if candidate is None or pid_of(candidate) != portal["pid"]:
+                continue
+            frames = [f for f in _frames(candidate)
+                      if _call_first(f, ("get_name",), default="") == portal["title"]]
+            if len(frames) == 1 and _is_active(frames[0]):
+                return frames[0]
+        return None
     best = None
     best_rank = -1
     hinted = next(iter(pids)) if len(pids) == 1 else None
@@ -4967,6 +4994,12 @@ def showing_toplevels(node) -> list:
         return []
     app = _application_of(node)
     if app is None:
+        return [node]
+    from a11y_computer_use.drivers import _linux_system
+
+    pid = pid_of(app)
+    identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+    if identity in _linux_system._PORTAL_BACKENDS:
         return [node]
     count = _child_count(app)
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
