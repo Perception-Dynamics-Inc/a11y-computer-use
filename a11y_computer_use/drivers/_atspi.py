@@ -7316,6 +7316,8 @@ def _blocks_text_replace(acc) -> bool:
     role = _role_name(acc)
     if role == "":
         return False
+    if is_writer_document(acc):
+        return False
     if _chrome_date_segment(acc):
         return False
     if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
