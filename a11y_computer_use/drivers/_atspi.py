@@ -1170,6 +1170,45 @@ def _audacity_track_area(container) -> bool:
 
     return walk(container, 0)
 
+def _okular_thumbnail_surface(node) -> tuple[str, str]:
+    """Label an empty thumbnail strip from its native sidebar context.
+
+    No page labels or thumbnail bounds are inferred from this painted filler.
+    Native names and children take precedence over the fallback.
+    """
+    if _child_count(node) != 0:
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "okular":
+        return "", ""
+    parent = _parent_of(node)
+    if parent is None or not any(
+        _role_name(child) == "scroll bar" for child in _direct_children(parent)
+    ):
+        return "", ""
+    thumbnails = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if _node_name(parent).casefold() == "sidebar" and thumbnails:
+                return (
+                    "Okular thumbnails",
+                    "Per-page thumbnails are not exposed by AT-SPI; use the page-number "
+                    "field, Go to Page…, or the Find bar for navigation.",
+                )
+            break
+        thumbnails = thumbnails or any(
+            _role_name(child) in {"label", "static", "text"}
+            and _node_name(child).casefold() == "thumbnails"
+            for child in _direct_children(parent)
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
 
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
@@ -3356,6 +3395,11 @@ class ATSPIAccessor:
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         panel_note = ""
+        if (
+            role_str == "filler" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _okular_thumbnail_surface(node)
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
