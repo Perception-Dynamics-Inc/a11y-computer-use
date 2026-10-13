@@ -87,7 +87,9 @@ _DENSE_CONTAINER_ROLES = frozenset({"AXGrid", "AXTable", "AXOutline"})
 
 #: A Calc sheet is an AXTable whose children are titled with cell addresses.
 #: The dense cap of 12 keeps A1–L1 and elides B2. Calendars stay at 12.
-#: A visible sheet window is about 16 columns by 6 rows. A table or outline
+#: One band of that grid is at most this many cells. The Linux walker splits
+#: the on-screen window (more than the first six rows) into bands of this
+#: size so the walk cap does not drop the lower rows. A table or outline
 #: with at most MAX_CHILDREN children is not that grid: a Qt 4×3 table plus
 #: its headers is 19 nodes and keeps every cell.
 _SHEET_ADDRESS = re.compile(r"^[A-Z]{1,3}[1-9][0-9]*$")
@@ -99,6 +101,10 @@ _MAX_WALK_CHILDREN = 200
 
 _MAX_VALUE_CHARS = 200  #: Element.value cap the model reads (anchors never use value)
 _RENDER_VALUE_CHARS = 48  #: value cap in the text rendering
+#: A VTE screen is kept whole up to this many characters. Past it, the
+#: snapshot shows the tail and a leading ellipsis marks the cut. ``find``
+#: still searches the whole buffer.
+_TERMINAL_VALUE_CHARS = 4000
 _MAX_EPOCHS = 8  #: snapshot epochs kept in the render registry
 _AMBIGUITY_PX = 2.0  #: distance tie window that makes re-resolution ambiguous
 _WEAK_ANCHOR_DRIFT_PX = 400.0  #: max drift when only one of title/path matches
@@ -108,6 +114,32 @@ _DECORATIVE_ROLES = frozenset({"AXUnknown", "AXSplitter", "AXGrowArea"})
 _WRAPPER_ROLES = frozenset(
     {"AXGroup", "AXGenericElement", "AXLayoutArea", "AXScrollArea", "AXSplitGroup"}
 )
+#: Painted pixels the accessibility tree does not describe. A canvas, a
+#: drawing area, and an image with no usable name. The snapshot role is this
+#: string, not an ``AX*`` name, so the rendered line says ``opaque_region``.
+OPAQUE_ROLE = "opaque_region"
+_OPAQUE_SURFACE_ROLES = frozenset({"AXImage", "AXCanvas", OPAQUE_ROLE})
+#: Childless containers that currently survive as untitled groups. A group
+#: that still has children is layout, not a pixel surface.
+_DEAD_REGION_ROLES = frozenset({"AXGroup", "AXGenericElement", "AXLayoutArea"})
+_GENERIC_REGION_NAMES = frozenset({
+    "",
+    "image",
+    "img",
+    "graphic",
+    "icon",
+    "photo",
+    "picture",
+    "canvas",
+    "webgl",
+    "drawing area",
+    "unnamed",
+    "unknown",
+    "group",
+})
+#: Chrome's name for an ``<img>`` that has no alt. It is a placeholder, not
+#: a description of the pixels, so the image is still an opaque region.
+_CHROME_IMAGE_PLACEHOLDER = "to get missing image descriptions"
 _PRESS_ACTIONS = frozenset({"AXPress", "AXOpen", "AXConfirm", "AXPick"})
 _CLICKABLE_ROLES = frozenset(
     {
@@ -129,6 +161,25 @@ _CLICKABLE_ROLES = frozenset(
 _EDITABLE_ROLES = frozenset(
     {"AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
 )
+#: Controls kept when a Chromium page is already at ``MAX_DEPTH``. A named
+#: group is not one of these: it is walked through and not kept. Static text
+#: is not one either, so a buried label stays elided.
+_BURIED_CONTROL_ROLES = frozenset(
+    {
+        "AXButton",
+        "AXCheckBox",
+        "AXComboBox",
+        "AXLink",
+        "AXPopUpButton",
+        "AXRadioButton",
+        "AXSearchField",
+        _SECURE_ROLE,
+        "AXSlider",
+        "AXSpinButton",
+        "AXTextArea",
+        "AXTextField",
+    }
+)
 
 #: Rendering views of a snapshot. ``full`` is the whole pruned tree. ``interactive``
 #: is the same snapshot (same elements, same refs) rendered down to what an agent
@@ -142,8 +193,9 @@ SNAPSHOT_MODES = ("full", "interactive", "diff")
 
 #: Roles kept by the interactive view even when the platform exposes no press
 #: action on them: rows are what an agent selects in lists/tables/trees, tabs
-#: switch panes, sliders take values. Cells are folded into their row's text.
-_INTERACTIVE_ROLES = frozenset({"AXRow", "AXTab", "AXSlider", "AXIncrementor"})
+#: switch panes, sliders and ARIA spin buttons take values. Cells are folded
+#: into their row's text.
+_INTERACTIVE_ROLES = frozenset({"AXRow", "AXTab", "AXSlider", "AXSpinButton", "AXIncrementor"})
 #: Containers the interactive view keeps as structure (even untitled) so refs
 #: inside them stay disambiguated: windows/dialogs, menus, toolbars, tab groups.
 _STRUCTURAL_ROLES = frozenset(
@@ -207,8 +259,9 @@ class RawNode:
     #: contenteditable section (a div or span with ``STATE_EDITABLE``).
     #: EditableText support is not that signal. A paragraph, panel, document,
     #: or combo is not an entry, even when Firefox reports ``STATE_EDITABLE``
-    #: or EditableText on it. Default false, so macOS, Windows, and the
-    #: browser stay editable only when the role is a text field.
+    #: or EditableText on it. Impress and Draw paragraphs with both signals
+    #: remain editable. Default false, so macOS, Windows, and the browser
+    #: stay editable only when the role is a text field.
     editable: bool = False
     #: AT-SPI's own answer for ``editable``, or None when this tree did not
     #: come from AT-SPI. False wins over a text-field role, so an address-bar
@@ -216,6 +269,46 @@ class RawNode:
     #: edit. None keeps the role rule for macOS, Windows, and synthetic
     #: snapshots.
     platform_editable: bool | None = None
+    #: Process identity of the app that owns this node. Linux sets
+    #: ``pid:<pid>|start:<ticks>`` and appends ``|bus:<name>`` when the
+    #: application exposes an AT-SPI bus name. None on backends that do not
+    #: record one, so those refs still re-resolve by role and title.
+    instance_id: str | None = None
+    #: Window or document this node belongs to. Set on a frame, window, or
+    #: dialog; descendants inherit it while the tree is flattened. None when
+    #: the backend has no document identity for the node.
+    document_id: str | None = None
+    #: Chromium or Firefox UI outside a content document. Default false, so
+    #: macOS, Windows, GTK, and page content are unchanged. A childless group
+    #: with this flag is the browser frame, not a page region.
+    browser_chrome: bool = False
+    #: VTE only. The on-screen slice of ``value``, with a leading ellipsis
+    #: when characters sit above the widget. None on every other node, and
+    #: when the driver could not separate the screen from the buffer. The
+    #: snapshot shows this text; ``find`` still searches ``value``.
+    screen_text: str | None = None
+    #: A control the toolkit did not allocate, such as a notebook page tab
+    #: while the tab bar is hidden. The snapshot keeps the name and does not
+    #: invent a box. Also used for visible Evince page text whose native
+    #: extents are unreliable. Default false on other nodes.
+    unallocated: bool = False
+    #: Linux only. A title read from somewhere else in the tree (the image
+    #: label, or the frame title) for a surface that has no name of its own.
+    #: It is not the node's name: the dead-region check ignores it, so a
+    #: childless panel still becomes an opaque region. The pruner copies it
+    #: onto that region's title. Empty on macOS, Windows, and the browser.
+    surface_name: str = ""
+    #: Tooltip sentence split off a multiline accessible name. Empty when
+    #: the name was a single line. The snapshot prints it as ``hint=``, not
+    #: inside the name.
+    hint: str = ""
+    #: Key chord split off the end of that tooltip, such as ``T`` or
+    #: ``Ctrl+S``. Empty when the name had no parenthetical chord.
+    shortcut: str = ""
+    #: Linux only. ``activates on double-click`` when a single click on this
+    #: GTK outline row only selects it. Empty everywhere else. The click is
+    #: not turned into that double-click.
+    note: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -347,6 +440,111 @@ def build_snapshot(
     )
 
 
+def merge_snapshots(snaps: Sequence[Snapshot]) -> Snapshot:
+    """One display snapshot containing every element of ``snaps``.
+
+    Refs are renumbered ``e1..eN`` in the order given, and the live handles
+    move with them so a ref from the merged tree still activates. Each input
+    keeps its own epoch. ``app`` and ``pid`` are None, which is the display
+    scope contract.
+    """
+    if not snaps:
+        raise ValueError("merge_snapshots needs at least one snapshot")
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements: list[Element] = []
+    handles: dict[str, object] = {}
+    elisions: dict[str, int] = {}
+    full_values: dict[str, str] = {}
+    for snap in snaps:
+        mapping: dict[str, str] = {}
+        old_handles = _HANDLES.get(snap.snapshot_id, {})
+        old_values = _FULL_VALUES.get(snap.snapshot_id, {})
+        old_elisions = _EPOCHS.get(snap.snapshot_id, {})
+        for el in snap.elements:
+            new_ref = f"e{len(elements) + 1}"
+            mapping[el.ref] = new_ref
+            parent = mapping[el.parent] if el.parent and el.parent in mapping else None
+            elements.append(
+                dataclasses.replace(el, ref=new_ref, snapshot_id=snapshot_id, parent=parent)
+            )
+            if el.ref in old_handles:
+                handles[new_ref] = old_handles[el.ref]
+            if el.ref in old_values:
+                full_values[new_ref] = old_values[el.ref]
+        for parent_ref, count in old_elisions.items():
+            mapped = mapping.get(parent_ref)
+            if mapped is not None:
+                elisions[mapped] = count
+    _register_epoch(snapshot_id, elisions, handles, full_values)
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        scope=Scope.DISPLAY,
+        app=None,
+        pid=None,
+        created_at=time.time(),
+        displays=snaps[0].displays,
+        elements=tuple(elements),
+    )
+
+
+def merge_window_snapshots(
+    snaps: Sequence[Snapshot],
+    *,
+    scope: Scope,
+    app: str | None,
+    pid: int | None,
+) -> Snapshot:
+    """One app snapshot whose roots are ``snaps``, in the order given.
+
+    The first snapshot is the active window. Refs are renumbered and the
+    live handles move with them, so a ref in a window that is not active
+    still activates. ``scope``, ``app``, and ``pid`` stay the caller's.
+    Two or more windows mark the first root ``(active)`` when rendered.
+    One snapshot is returned unchanged, with no active mark.
+    """
+    if not snaps:
+        raise ValueError("merge_window_snapshots needs at least one snapshot")
+    if len(snaps) == 1:
+        return snaps[0]
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements: list[Element] = []
+    handles: dict[str, object] = {}
+    elisions: dict[str, int] = {}
+    full_values: dict[str, str] = {}
+    for snap in snaps:
+        mapping: dict[str, str] = {}
+        old_handles = _HANDLES.get(snap.snapshot_id, {})
+        old_values = _FULL_VALUES.get(snap.snapshot_id, {})
+        old_elisions = _EPOCHS.get(snap.snapshot_id, {})
+        for el in snap.elements:
+            new_ref = f"e{len(elements) + 1}"
+            mapping[el.ref] = new_ref
+            parent = mapping[el.parent] if el.parent and el.parent in mapping else None
+            elements.append(
+                dataclasses.replace(el, ref=new_ref, snapshot_id=snapshot_id, parent=parent)
+            )
+            if el.ref in old_handles:
+                handles[new_ref] = old_handles[el.ref]
+            if el.ref in old_values:
+                full_values[new_ref] = old_values[el.ref]
+        for parent_ref, count in old_elisions.items():
+            mapped = mapping.get(parent_ref)
+            if mapped is not None:
+                elisions[mapped] = count
+    _register_epoch(snapshot_id, elisions, handles, full_values)
+    if elements:
+        _note_active_root(snapshot_id, elements[0].ref)
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        scope=scope,
+        app=app,
+        pid=pid,
+        created_at=time.time(),
+        displays=snaps[0].displays,
+        elements=tuple(elements),
+    )
+
+
 def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
     """Re-resolve a snapshot-scoped ref against the *live* tree.
 
@@ -376,6 +574,124 @@ def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> El
     return rematch_ref(snap, ref, live)
 
 
+def normalize_document_title(title: str) -> str:
+    """Window title with one leading modified marker removed.
+
+    GTK editors prefix ``*`` when the buffer is dirty
+    (``*/tmp/a.txt - Mousepad``). The path is the document. The marker is not,
+    so a later action on the same file still resolves after the first edit.
+    """
+    text = " ".join(str(title or "").split())
+    if text.startswith("*"):
+        text = text[1:].lstrip()
+    return text
+
+
+def _file_document(document_id: str | None) -> str | None:
+    """The file path carried in a document id, or None.
+
+    GTK editors put the path in the window title (``/tmp/a.txt - Mousepad``).
+    A browser title (``Form Probe - Google Chrome``) has no path. Comparing
+    those titles treats a tab switch, or a title that flickers, as a different
+    document and hides the not-showing result the background tab should get.
+    """
+    if not document_id or not document_id.startswith("title:"):
+        return None
+    text = document_id[len("title:"):]
+    if "/" not in text and "\\" not in text:
+        return None
+    return text
+
+
+def _bound_to_same_target(anchor: Element, el: Element) -> bool:
+    """Whether ``el`` is the same process instance and file as ``anchor``.
+
+    A side that did not record an id does not fail the check. A different
+    process instance does. A different file path does. Two browser window
+    titles do not: the title follows the active tab.
+    """
+    if not _same_instance(anchor, el):
+        return False
+    anchor_file = _file_document(anchor.document_id)
+    live_file = _file_document(el.document_id)
+    if anchor_file and live_file and anchor_file != live_file:
+        return False
+    return True
+
+
+def _identity_mismatch(anchor: Element, live: Snapshot) -> str | None:
+    """``app_restarted`` or ``document_changed`` when no live node shares the binding.
+
+    None when the anchor recorded no identity, or the live tree did not, so
+    older snapshots and non-Linux backends keep the role/title matcher.
+    """
+    if anchor.instance_id:
+        seen = {el.instance_id for el in live.elements if el.instance_id}
+        if seen and anchor.instance_id not in seen:
+            return "app_restarted"
+    anchor_file = _file_document(anchor.document_id)
+    if anchor_file:
+        files = {
+            _file_document(el.document_id)
+            for el in live.elements
+            if _same_instance(anchor, el) and _file_document(el.document_id)
+        }
+        if files and anchor_file not in files:
+            return "document_changed"
+    return None
+
+
+def _same_instance(anchor: Element, el: Element) -> bool:
+    """Whether ``el`` is the same process instance as ``anchor``.
+
+    A side that did not record an instance id does not fail the check.
+    """
+    if anchor.instance_id and el.instance_id and anchor.instance_id != el.instance_id:
+        return False
+    return True
+
+
+def _raise_identity_stale(
+    snap: Snapshot, ref: str, anchor: Element, live: Snapshot, reason: str,
+) -> None:
+    """``stale_ref`` for a process or document that is not the one the ref names.
+
+    No candidates. The elements in ``live`` belong to the replacement, and
+    offering them would point the next action at the wrong document.
+    """
+    if reason == "app_restarted":
+        message = (
+            f"{ref} ({anchor.role} {anchor.title!r}) was issued by an application "
+            "instance that is no longer running. The process was quit or relaunched; "
+            "re-snapshot before acting. Nothing was changed."
+        )
+    else:
+        message = (
+            f"{ref} ({anchor.role} {anchor.title!r}) belongs to a different window "
+            "or document than the one now showing. Re-snapshot before acting. "
+            "Nothing was changed."
+        )
+    raise ComputerUseError(
+        ErrorCode.STALE_REF,
+        message,
+        detail={
+            "ref": ref,
+            "snapshot_id": snap.snapshot_id,
+            "live_snapshot_id": live.snapshot_id,
+            "reason": reason,
+            "anchor": {
+                "role": anchor.role,
+                "title": anchor.title,
+                "path": list(anchor.path),
+            },
+            "candidates": [],
+            "next": ["ref"],
+            "instance_id": anchor.instance_id,
+            "document_id": anchor.document_id,
+        },
+    )
+
+
 def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     """Re-resolve ``ref`` (issued by ``snap``) against an already-captured
     ``live`` snapshot via the shared anchor matcher — the backend-agnostic core
@@ -387,11 +703,16 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
 
     Raises:
         KeyError: if ``ref`` was never part of ``snap`` (see `Snapshot.element`).
-        ComputerUseError: `ErrorCode.STALE_REF` when the element no longer exists
-            or the anchors no longer match unambiguously — with near-miss
-            candidates so the agent can retry a likely ref without re-observing.
+        ComputerUseError: `ErrorCode.STALE_REF` when the element no longer exists,
+            the anchors no longer match unambiguously, or the live tree is a
+            different process instance or document. An instance or document
+            mismatch carries no candidates: those elements are the replacement,
+            and the action must not use them.
     """
     anchor = snap.element(ref)
+    mismatch = _identity_mismatch(anchor, live)
+    if mismatch is not None:
+        _raise_identity_stale(snap, ref, anchor, live, mismatch)
     match, reason = _match_anchor(anchor, live)
     if match is None:
         message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
@@ -549,6 +870,26 @@ def _set_focused(handle: object) -> bool:
         return False
 
 
+def focus_for_type(element: Element) -> bool:
+    """Focus ``element`` and return True only when AXFocused reads back true.
+
+    Does not type. False means the caller must not send keystrokes: the
+    set failed, the handle is gone, or the read-back does not show focus.
+    """
+    if element.secure:
+        return False
+    handle = ax_handle_for(element.snapshot_id, element.ref)
+    if handle is None:
+        return False
+    if not _set_focused(handle):
+        return False
+    try:
+        err, value = _appservices().AXUIElementCopyAttributeValue(handle, "AXFocused", None)
+    except Exception:
+        return False
+    return err == 0 and bool(value)
+
+
 def render_text(
     snap: Snapshot,
     *,
@@ -576,7 +917,10 @@ def render_text(
     basis): the header always survives, lines are kept in order until the next
     one would overflow, and a final marker states how many element lines were
     omitted so the agent knows to use ``find``/``scroll_to_find`` or raise it.
-    Deterministic for a given snapshot.
+    Two or more top-level windows share that budget. Each window is offered
+    an equal part of what remains, and a window that does not fit ends with
+    ``… N more`` instead of the single-window tail marker. Deterministic for
+    a given snapshot.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"mode must be one of {RENDER_MODES}")
@@ -584,6 +928,8 @@ def render_text(
         entries = _interactive_entries(snap, include_bounds)
     else:
         entries = _full_entries(snap, include_bounds)
+    if budget is not None and _several_windows(entries):
+        return "\n".join(_apply_window_budget(entries, budget))
     return "\n".join(_apply_budget(entries, budget))
 
 
@@ -716,7 +1062,7 @@ def _interactive_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str
             if text and text != el.title and (not items or items[-1] != text):
                 total += 1
                 if len(items) < _COLLAPSED_TEXT_ITEMS:
-                    items.append(text.replace("\n", " "))
+                    items.append(_compact_value(text))
             stack.extend(reversed(children.get(node.ref, ())))
         return items, total, elided
 
@@ -784,6 +1130,148 @@ def _apply_budget(entries: Sequence[tuple[str, bool]], budget: int | None) -> li
     return out
 
 
+def _several_windows(entries: Sequence[tuple[str, bool]]) -> bool:
+    """True when ``entries`` has two or more depth-1 roots."""
+    roots = 0
+    for line, _is_element in entries[1:]:
+        if len(line) - len(line.lstrip(" ")) == 2:
+            roots += 1
+            if roots >= 2:
+                return True
+    return False
+
+
+def _split_window_entries(
+    entries: Sequence[tuple[str, bool]],
+) -> tuple[tuple[str, bool], list[list[tuple[str, bool]]], list[tuple[str, bool]]]:
+    """Header, one group per top-level window, and unindented footer lines."""
+    header = entries[0]
+    groups: list[list[tuple[str, bool]]] = []
+    footer: list[tuple[str, bool]] = []
+    current: list[tuple[str, bool]] | None = None
+    for item in entries[1:]:
+        indent = len(item[0]) - len(item[0].lstrip(" "))
+        if indent == 0:
+            footer.append(item)
+            continue
+        if indent == 2:
+            if current:
+                groups.append(current)
+            current = [item]
+            continue
+        if current is None:
+            current = [item]
+        else:
+            current.append(item)
+    if current:
+        groups.append(current)
+    return header, groups, footer
+
+
+def _apply_window_budget(entries: Sequence[tuple[str, bool]], budget: int) -> list[str]:
+    """Split ``budget`` across top-level windows and fold each overflow.
+
+    Each window is offered ``remaining / windows_left`` characters, with the
+    same newline accounting as `_apply_budget`. Characters a window does not
+    use stay in the pool for the windows after it. A window that does not
+    fit ends with ``… N more``, counting the element lines of that window
+    that were left out. One window, or no budget, stays on `_apply_budget`.
+    """
+    if budget <= 0:
+        raise ValueError("budget must be a positive token count")
+    header, groups, footer = _split_window_entries(entries)
+    if len(groups) < 2:
+        return _apply_budget(entries, budget)
+    limit = budget * 4
+    out = [header[0]]
+    used = len(out[0])
+    remaining = len(groups)
+    for group in groups:
+        share = max(0, limit - used) // remaining if remaining else 0
+        cap = used + share
+        omitted = 0
+        kept_any = False
+        for line, is_element in group:
+            if used + 1 + len(line) <= cap:
+                out.append(line)
+                used += 1 + len(line)
+                kept_any = True
+            else:
+                omitted += int(is_element)
+        if omitted:
+            marker = ("    " if kept_any else "  ") + f"… {omitted} more"
+            if used + 1 + len(marker) <= limit:
+                out.append(marker)
+                used += 1 + len(marker)
+        remaining -= 1
+    for line, _is_element in footer:
+        if used + 1 + len(line) <= limit:
+            out.append(line)
+            used += 1 + len(line)
+    return out
+
+
+def expand_start_index(names: Sequence[str], shown: set[str], cursor: int = 0) -> int:
+    """Child index where the next expand page starts.
+
+    A positive ``cursor`` is that index exactly: the next page resumes where
+    the previous page ended, even when the snapshot also shows a later name.
+    With no cursor, the start is the first child whose name is not already
+    listed. A later listed name does not skip the hole in front of it, and
+    an empty name ends the prefix (it is not proof the child was shown).
+    """
+    if cursor > 0:
+        return int(cursor)
+    shown_folded = {item.casefold() for item in shown if item}
+    for index, name in enumerate(names):
+        text = (name or "").strip()
+        if text and text.casefold() in shown_folded:
+            continue
+        return index
+    return len(names)
+
+
+def render_subtree(snap: Snapshot, ref: str) -> str:
+    """``ref`` and the descendants this snapshot kept, plus ``… N more``.
+
+    The lines use the same shape as ``render_text``. The header names the
+    ref so a caller can tell this page from a whole-window listing.
+    """
+    children = _children_map(snap)
+    root = next((el for el in snap.elements if el.ref == ref), None)
+    if root is None:
+        return f"[{snap.snapshot_id}] {ref} is not in this snapshot"
+    elisions = _EPOCHS.get(snap.snapshot_id, {})
+    lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {ref}"]
+
+    def emit(el: Element, depth: int) -> None:
+        lines.append("  " * depth + _render_line(el))
+        for child in children.get(el.ref, ()):
+            emit(child, depth + 1)
+        hidden = elisions.get(el.ref, 0)
+        if hidden:
+            lines.append("  " * (depth + 1) + f"… {hidden} more")
+
+    emit(root, 0)
+    return "\n".join(lines)
+
+
+def folded_children(snap: Snapshot) -> tuple[tuple[str, int], ...]:
+    """``(ref, count)`` for nodes whose children ``render_text`` hides as ``… N more``.
+
+    The count is the elision recorded for this snapshot epoch. An empty tuple
+    means nothing was folded, or the epoch has already left the registry.
+    """
+    counts = _EPOCHS.get(snap.snapshot_id, {})
+    if not counts:
+        return ()
+    return tuple(
+        (element.ref, counts[element.ref])
+        for element in snap.elements
+        if counts.get(element.ref, 0)
+    )
+
+
 def estimate_tokens(snap: Snapshot, *, mode: str = "full") -> int:
     """Estimate the LLM token footprint of ``snap``'s serialized form.
 
@@ -820,7 +1308,11 @@ def find_elements(
         text: case-insensitive substring matched against an element's title or
             its full value (either may contain it). ``Element.value`` is capped
             at `_MAX_VALUE_CHARS` for the text the model reads; a snapshot built
-            here is still searched past that cap.
+            here is still searched past that cap. A VTE terminal's snapshot
+            value is the on-screen text, or the tail when that text is longer,
+            with a leading ellipsis when older output was omitted. Find still
+            searches the whole buffer, including text that has scrolled above
+            the view.
         role: case-insensitive substring of the role, with an optional ``AX``
             prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
             and ``"AXTextField"`` matches exactly.
@@ -840,7 +1332,7 @@ def find_elements(
             value = full_values.get(el.ref, el.value or "")
             # NBSP is a space. The container value already has each U+FFFC
             # replaced by the embedded child's text, so the sentence matches.
-            haystack = f"{el.title} {value}".replace("\u00a0", " ").lower()
+            haystack = f"{el.title} {value} {el.hint} {el.shortcut}".replace("\u00a0", " ").lower()
             if needle.replace("\u00a0", " ") not in haystack:
                 continue
         if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
@@ -853,20 +1345,115 @@ def find_elements(
     return tuple(out)
 
 
-def render_matches(snap: Snapshot, matches: Sequence[Element]) -> str:
+_EXACT_NAME_ROLES = frozenset({
+    "cell", "row", "column", "listitem",
+    "button", "link", "menu", "menuitem", "menubutton",
+    "checkbox", "radiobutton", "combobox", "popupbutton",
+    "textfield", "textarea", "searchfield", "tab",
+})
+
+
+def _folded_title(title: str) -> str:
+    return title.replace("\u00a0", " ").strip().casefold()
+
+
+def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[Element, ...]:
+    """Prefer an exact name on a cell or control over a label that mentions it.
+
+    ``find_elements`` stays a substring search. ``find`` and ``scroll_to_find``
+    apply this ranking. When a cell, row, or other control is titled exactly
+    with ``text``, only those matches are returned. A label whose title merely
+    contains ``text`` is dropped. A label whose title is ``text`` stays. A
+    paragraph or other static text whose value contains ``text`` stays, and so
+    does a button or field matched by substring when no exact control exists.
+    """
+    if not matches or not isinstance(text, str) or not text.strip():
+        return tuple(matches)
+    needle = _folded_title(text)
+
+    def exact_control(el: Element) -> bool:
+        if _folded_title(el.title or "") != needle:
+            return False
+        if el.clickable:
+            return True
+        role = el.role.lower().removeprefix("ax")
+        return role in _EXACT_NAME_ROLES
+
+    exact = tuple(el for el in matches if exact_control(el))
+    if exact:
+        return exact
+
+    def mentions_label(el: Element) -> bool:
+        if el.subrole != "label" or el.role not in {"AXStaticText", "AXHeading"}:
+            return False
+        return _folded_title(el.title or "") != needle
+
+    return tuple(el for el in matches if not mentions_label(el))
+
+
+def render_matches(
+    snap: Snapshot, matches: Sequence[Element], *, text: str | None = None,
+) -> str:
     """Render `find_elements` results as compact lines — one per match with its
     ref, role, title, value, flags, and bounds (unlike the tree render, bounds
-    show on every match since results are a flat list, not a nested tree)."""
+    show on every match since results are a flat list, not a nested tree).
+
+    ``text`` is the substring ``find`` searched for. A VTE match that sits only
+    in the buffer, not in the on-screen value, is marked above the view or
+    off-screen.
+    """
     if not matches:
         return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match"
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
     for el in matches:
         line = _render_line(el)
-        if el.parent is not None:  # _render_line prints bounds only for roots
-            b = el.bounds
+        b = el.bounds
+        if b is not None and el.parent is not None:  # _render_line prints bounds only for roots
             line += f" [{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]"
+        note = _terminal_match_note(snap, el, text)
+        if note:
+            line += f" ({note})"
+        elif el.bounds is None:
+            # The toolkit exposed the node and did not give it an on-screen
+            # box. The line does not invent one.
+            line += " (off-screen)"
         lines.append("  " + line)
     return "\n".join(lines)
+
+
+def _terminal_match_note(snap: Snapshot, el: Element, text: str | None) -> str | None:
+    """Where a terminal match sits when it is not in the snapshot value.
+
+    ``above the view`` is scrollback (or the omitted head of a long buffer).
+    ``off-screen`` is a match the snapshot value does not show and that is
+    not above that value. None when the match is on screen, or when ``text``
+    was not the query.
+    """
+    if not text or el.subrole != "terminal":
+        return None
+
+    def fold(value: str) -> str:
+        return value.replace("\u00a0", " ").lower()
+
+    needle = fold(text)
+    if not needle:
+        return None
+    if needle in fold(el.title or ""):
+        return None
+    shown = el.value or ""
+    if needle in fold(shown):
+        return None
+    full = _FULL_VALUES.get(snap.snapshot_id, {}).get(el.ref, shown)
+    folded_full = fold(str(full))
+    at = folded_full.find(needle)
+    if at < 0:
+        return None
+    body = shown[1:] if shown.startswith("…") else shown
+    folded_body = fold(body)
+    where = folded_full.rfind(folded_body) if folded_body else len(folded_full)
+    if where >= 0 and at + len(needle) <= where:
+        return "above the view"
+    return "off-screen"
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +1482,13 @@ def _state_changes(a: Element, b: Element) -> dict[str, tuple]:
         if av != bv:
             changes[attr] = (av, bv)
     ab, bb = a.bounds, b.bounds
-    if (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
+    if ab is None or bb is None:
+        if (ab is None) != (bb is None):
+            changes["bounds"] = (
+                None if ab is None else (ab.x, ab.y),
+                None if bb is None else (bb.x, bb.y),
+            )
+    elif (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
         changes["bounds"] = ((ab.x, ab.y), (bb.x, bb.y))
     return changes
 
@@ -968,7 +1561,7 @@ def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = 
                 kept_changes.append((old, new, ch))
             elif "value" in ch or "title" in ch:
                 a, b = ch.get("value") or ch["title"]
-                text_changes.append(f"{new.ref} {_clip(str(a), 24)}→{_clip(str(b), 24)}")
+                text_changes.append(f"{new.ref} {_compact_clip(a)}→{_compact_clip(b)}")
         changed = tuple(kept_changes)
         hidden_added = len(diff.added) - len(added)
         hidden_removed = len(diff.removed) - len(removed)
@@ -981,7 +1574,7 @@ def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = 
         entries.append((f"  - {el.ref} {role}{title} (gone)", True))
     for _old, new, changes in changed:
         parts = ", ".join(
-            f"{attr}: {_clip(str(a), 24)}→{_clip(str(b), 24)}" for attr, (a, b) in changes.items()
+            f"{attr}: {_compact_clip(a)}→{_compact_clip(b)}" for attr, (a, b) in changes.items()
         )
         role = new.role[2:].lower() if new.role.startswith("AX") else new.role.lower()
         entries.append((f"  ~ {new.ref} {role} [{parts}]", True))
@@ -998,6 +1591,393 @@ def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = 
 
 
 # ---------------------------------------------------------------------------
+# Model observations: full tree once, then a diff with stable refs
+# ---------------------------------------------------------------------------
+
+
+#: A bounds change smaller than this is not reported. Accessibility walks
+#: jitter by a pixel or two; the ref still resolves. A real move or resize
+#: is included.
+_BOUNDS_MOVE_PX = 8
+
+_WINDOW_ROLES = frozenset({"AXWindow", "AXWebArea", "AXDialog", "AXSheet"})
+
+_ELEMENT_LINE = re.compile(r"^\s*e\d+\s")
+
+
+def window_identity(snap: Snapshot) -> tuple:
+    """Identity of the front window.
+
+    A different value means the next observation sent to the model is a full
+    snapshot. A developer-assigned stable id, or a file path carried in the
+    document id, wins over the title. Otherwise the title is used, with one
+    leading modified-marker removed, so ``*name`` and ``name`` are the same
+    window. A different title, app, pid, or instance is a different window.
+    """
+    scope = snap.scope.value if isinstance(snap.scope, Scope) else str(snap.scope)
+    window = next((el for el in snap.elements if el.role in _WINDOW_ROLES), None)
+    if window is None:
+        window = next((el for el in snap.elements if el.parent is None), None)
+    if window is None:
+        return (snap.app, snap.pid, scope, None)
+    file_id = _file_document(window.document_id)
+    instance = window.instance_id
+    if window.stable_id:
+        kind: tuple = ("id", window.stable_id, instance, file_id)
+    elif file_id:
+        kind = ("file", file_id, instance)
+    else:
+        kind = ("title", normalize_document_title(window.title), instance)
+    return (snap.app, snap.pid, scope, window.role, kind)
+
+
+def observation_side_lines(text: str) -> tuple[str, ...]:
+    """Non-element lines a full snapshot adds: open menu, page tools, notes.
+
+    Element lines, the ``[snap]`` header, and ``… N more`` markers are not
+    included. Those markers travel with the element they belong to.
+    """
+    from a11y_computer_use.untrusted import unwrap
+
+    body = unwrap(text)
+    plain = body if body is not None else text
+    kept: list[str] = []
+    for line in plain.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[") or stripped.startswith("…") or stripped.startswith("..."):
+            continue
+        if _ELEMENT_LINE.match(line) or stripped.startswith("text:"):
+            continue
+        kept.append(stripped)
+    return tuple(kept)
+
+
+def _bounds_matter(old: Bounds, new: Bounds) -> bool:
+    if old.display_id != new.display_id:
+        return True
+    return any(
+        abs(getattr(old, name) - getattr(new, name)) > _BOUNDS_MOVE_PX
+        for name in ("x", "y", "width", "height")
+    )
+
+
+def _model_changes(
+    old: Element, new: Element, old_snap: Snapshot, new_snap: Snapshot,
+) -> dict[str, tuple]:
+    """State the model must see. Sub-pixel bounds jitter is not a change."""
+    changes = dict(_state_changes(old, new))
+    # `_state_changes` ignores display_id. A move to another display is still
+    # a change the model has to see. Jitter within `_BOUNDS_MOVE_PX` is not.
+    moved = "bounds" in changes or old.bounds.display_id != new.bounds.display_id
+    changes.pop("bounds", None)
+    if moved and _bounds_matter(old.bounds, new.bounds):
+        ab, bb = old.bounds, new.bounds
+        changes["bounds"] = (
+            f"{ab.width}x{ab.height}@{ab.display_id}:{ab.x},{ab.y}",
+            f"{bb.width}x{bb.height}@{bb.display_id}:{bb.x},{bb.y}",
+        )
+    old_more = _EPOCHS.get(old_snap.snapshot_id, {}).get(old.ref, 0)
+    new_more = _EPOCHS.get(new_snap.snapshot_id, {}).get(new.ref, 0)
+    if old_more != new_more:
+        changes["more"] = (old_more, new_more)
+    return changes
+
+
+def _stable_id_keeps(old: Element, new: Element) -> bool:
+    """A slot id on a row or link does not survive a new label.
+
+    Buttons and fields may relabel (Submit → Sending) under a developer
+    assigned id. Rows, cells, links, and static text do not: the label is
+    the identity, matching `rematch_ref`.
+    """
+    if new.role not in _ITEM_ROLES:
+        return True
+    if _labels_match(old.title, new.title):
+        return True
+    if not old.title and not new.title:
+        return _labels_match(str(old.value or ""), str(new.value or ""))
+    return False
+
+
+def _claim(mapping: dict[str, str], claimed: set[str], new: Element, old: Element) -> None:
+    mapping[new.ref] = old.ref
+    claimed.add(old.ref)
+
+
+def _match_refs(old: Snapshot, new: Snapshot) -> dict[str, str]:
+    """Map ``new`` ref → ``old`` ref for the same element.
+
+    Order: stable id (except a relabeled row or link), then role + title +
+    path, then a unique role + title whose path changed, then a unique
+    role + path whose title changed, then the same ref string when that
+    element still has the same role, title, and path. The last pass is how
+    two controls with the same name keep the refs a fresh walk assigned
+    them again. Item roles do not match on path alone, because every row
+    in a list shares one path.
+    """
+    claimed: set[str] = set()
+    mapping: dict[str, str] = {}
+    old_by_sid: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.stable_id:
+            old_by_sid.setdefault((el.stable_id, el.role), []).append(el)
+    rest: list[Element] = []
+    for el in new.elements:
+        cands: list[Element] = []
+        if el.stable_id:
+            cands = [c for c in old_by_sid.get((el.stable_id, el.role), []) if c.ref not in claimed]
+        if len(cands) == 1 and _stable_id_keeps(cands[0], el):
+            _claim(mapping, claimed, el, cands[0])
+        else:
+            rest.append(el)
+
+    old_by_rtp: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.ref not in claimed:
+            old_by_rtp.setdefault((el.role, el.title, el.path), []).append(el)
+    still: list[Element] = []
+    for el in rest:
+        cands = [c for c in old_by_rtp.get((el.role, el.title, el.path), []) if c.ref not in claimed]
+        if len(cands) == 1:
+            _claim(mapping, claimed, el, cands[0])
+        else:
+            still.append(el)
+
+    old_by_rt: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.ref not in claimed and el.title:
+            old_by_rt.setdefault((el.role, el.title), []).append(el)
+    titled = [el for el in still if el.ref not in mapping and el.title]
+    new_by_rt: dict[tuple, list[Element]] = {}
+    for el in titled:
+        new_by_rt.setdefault((el.role, el.title), []).append(el)
+    for key, group in new_by_rt.items():
+        cands = [c for c in old_by_rt.get(key, []) if c.ref not in claimed]
+        if len(group) == 1 and len(cands) == 1:
+            _claim(mapping, claimed, group[0], cands[0])
+
+    old_by_rp: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.ref not in claimed:
+            old_by_rp.setdefault((el.role, el.path), []).append(el)
+    new_by_rp: dict[tuple, list[Element]] = {}
+    for el in new.elements:
+        if el.ref not in mapping:
+            new_by_rp.setdefault((el.role, el.path), []).append(el)
+    for key, group in new_by_rp.items():
+        if key[0] in _ITEM_ROLES:
+            continue
+        cands = [c for c in old_by_rp.get(key, []) if c.ref not in claimed]
+        if len(group) == 1 and len(cands) == 1:
+            _claim(mapping, claimed, group[0], cands[0])
+
+    # A walk that did not insert or remove nodes assigns the same pre-order
+    # refs. Duplicates (two Save buttons) are not unique by title, so the
+    # passes above leave them unmatched. Keeping the ref that both snapshots
+    # already used leaves those refs valid. A shifted walk gives the ref to
+    # a different node, and a different title or path does not take it.
+    old_by_ref = {el.ref: el for el in old.elements}
+    for el in new.elements:
+        if el.ref in mapping:
+            continue
+        prev = old_by_ref.get(el.ref)
+        if prev is None or prev.ref in claimed:
+            continue
+        if prev.role != el.role or prev.path != el.path:
+            continue
+        if not _labels_match(prev.title, el.title):
+            continue
+        _claim(mapping, claimed, el, prev)
+    return mapping
+
+
+def _alloc_ref(used: set[str]) -> str:
+    number = 1
+    while True:
+        ref = f"e{number}"
+        number += 1
+        if ref not in used:
+            used.add(ref)
+            return ref
+
+
+def align_refs(basis: Snapshot, current: Snapshot) -> Snapshot:
+    """Copy ``current`` so elements that still exist keep ``basis`` refs.
+
+    Added elements get refs that are not in ``basis``, so a removed ref is
+    not handed to a new element in the same step. Handles, elision counts,
+    and unclipped values move with the refs. ``basis`` is not modified.
+    """
+    touch_epoch(basis.snapshot_id)
+    touch_epoch(current.snapshot_id)
+    mapping = _match_refs(basis, current)
+    used = {el.ref for el in basis.elements}
+    assigned: dict[str, str] = {}
+    for el in current.elements:
+        kept = mapping.get(el.ref)
+        if kept is not None and kept not in assigned.values():
+            assigned[el.ref] = kept
+        else:
+            assigned[el.ref] = _alloc_ref(used)
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements: list[Element] = []
+    for el in current.elements:
+        parent = assigned.get(el.parent) if el.parent else None
+        elements.append(dataclasses.replace(
+            el, ref=assigned[el.ref], snapshot_id=snapshot_id, parent=parent,
+        ))
+
+    def move(store: dict) -> dict:
+        return {assigned[key]: value for key, value in store.items() if key in assigned}
+
+    _register_epoch(
+        snapshot_id,
+        move(_EPOCHS.get(current.snapshot_id, {})),
+        move(_HANDLES.get(current.snapshot_id, {})),
+        move(_FULL_VALUES.get(current.snapshot_id, {})),
+    )
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        scope=current.scope,
+        app=current.app,
+        pid=current.pid,
+        created_at=current.created_at,
+        displays=current.displays,
+        elements=tuple(elements),
+    )
+
+
+def _element_depth(el: Element, by_ref: dict[str, Element]) -> int:
+    depth = 0
+    parent = el.parent
+    seen: set[str] = set()
+    while parent is not None and parent not in seen and parent in by_ref:
+        seen.add(parent)
+        depth += 1
+        parent = by_ref[parent].parent
+    return depth
+
+
+def _role_name(el: Element) -> str:
+    return el.role[2:].lower() if el.role.startswith("AX") else el.role.lower()
+
+
+def render_model_diff(basis: Snapshot, aligned: Snapshot) -> str:
+    """Added, removed, and changed elements, with the refs on ``aligned``.
+
+    A changed line is the element's current rendering plus the old->new
+    values. The markers are ASCII so a UTF-8 trace still decodes with the
+    Windows locale encoding. The focused element is included when it did
+    not itself change, so a diff still says where the keyboard is. Bounds
+    jitter below `_BOUNDS_MOVE_PX` is omitted. Nothing else the snapshot
+    kept is omitted from an element that changed: the line is the same
+    shape as `render_text`.
+    """
+    old = {el.ref: el for el in basis.elements}
+    new = {el.ref: el for el in aligned.elements}
+    added = [el for el in aligned.elements if el.ref not in old]
+    removed = [el for el in basis.elements if el.ref not in new]
+    changed: list[tuple[Element, Element, dict[str, tuple]]] = []
+    for el in aligned.elements:
+        prev = old.get(el.ref)
+        if prev is None:
+            continue
+        delta = _model_changes(prev, el, basis, aligned)
+        if delta:
+            changed.append((prev, el, delta))
+    changed_refs = {el.ref for _prev, el, _delta in changed}
+    added_refs = {el.ref for el in added}
+    head = (
+        f"[{aligned.snapshot_id} <- {basis.snapshot_id}] "
+        f"+{len(added)} -{len(removed)} ~{len(changed)}"
+    )
+    lines = [head]
+    if not added and not removed and not changed:
+        lines.append("  (no change)")
+    by_ref = {el.ref: el for el in aligned.elements}
+    for el in added:
+        parent = f" parent={el.parent}" if el.parent else ""
+        indent = "  " * _element_depth(el, by_ref)
+        lines.append(f"{indent}+ {_render_line(el)}{parent}")
+    for el in removed:
+        title = f' "{el.title}"' if el.title else ""
+        lines.append(f"  - {el.ref} {_role_name(el)}{title} (gone)")
+    for _prev, el, delta in changed:
+        shown = ", ".join(
+            f"{attr}: {_clip(str(before), _RENDER_VALUE_CHARS)}->{_clip(str(after), _RENDER_VALUE_CHARS)}"
+            for attr, (before, after) in delta.items()
+        )
+        lines.append(f"  ~ {_render_line(el)} [{shown}]")
+    for el in aligned.elements:
+        if el.focused and el.ref not in changed_refs and el.ref not in added_refs:
+            lines.append(f"  focus {_render_line(el)}")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelObservation:
+    """The text to send, the snapshot its refs name, and whether it is full.
+
+    ``window`` and ``side`` are what the next diff compares against. ``side``
+    is the open-menu, page-tool, and snapshot-note lines of the runtime text.
+    """
+
+    text: str
+    snap: Snapshot
+    full: bool
+    window: tuple
+    side: tuple[str, ...]
+
+
+def project_model_observation(
+    basis: Snapshot | None,
+    snap: Snapshot,
+    full_text: str,
+    *,
+    basis_window: tuple | None = None,
+    basis_side: tuple[str, ...] = (),
+    force_full: bool = False,
+) -> ModelObservation:
+    """Choose a full snapshot or a diff for the model.
+
+    The first observation, a window change, an empty tree, and ``force_full``
+    send every element. A later observation of the same window sends the
+    diff from `render_model_diff`. Refs of elements that still exist are the
+    basis refs, including when ``force_full`` redraws the whole tree, so a
+    request for a full snapshot does not invalidate them. ``full_text`` is
+    the runtime's own rendering and is what a window change returns, so a
+    menu header or page-tool block the runtime added is kept.
+    """
+    window = window_identity(snap)
+    side = observation_side_lines(full_text)
+    if basis is not None and basis_window is None:
+        basis_window = window_identity(basis)
+    same = (
+        basis is not None
+        and bool(basis.elements)
+        and bool(snap.elements)
+        and basis_window == window
+    )
+    if not same:
+        return ModelObservation(full_text, snap, True, window, side)
+    aligned = align_refs(basis, snap)
+    if force_full:
+        text = render_text(aligned)
+        if side:
+            text = text + "\n" + "\n".join(side)
+        return ModelObservation(text, aligned, True, window, side)
+    text = render_model_diff(basis, aligned)
+    if side != basis_side:
+        if side:
+            text = text + "\n" + "\n".join(side)
+        else:
+            text = text + "\n(snapshot note gone)"
+    return ModelObservation(text, aligned, False, window, side)
+
+
+# ---------------------------------------------------------------------------
 # Pruning engine
 # ---------------------------------------------------------------------------
 
@@ -1007,7 +1987,7 @@ class _PNode:
     """One kept node of the pruned tree, pre-flattening."""
 
     raw: RawNode
-    bounds: Bounds
+    bounds: Bounds | None
     children: list[_PNode]
     elided: int  #: direct children hidden by the depth/fan-out caps
     has_interactive: bool  #: self or any kept descendant is interactive
@@ -1068,10 +2048,14 @@ def _target_flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """(clickable, editable, secure) for a kept node.
 
     A plain zero-size wrapper is not clickable, even when Chrome gave it a
-    press action. Every other node uses `_flags`.
+    press action. An opaque region is clickable: the ref addresses the box,
+    and a later coordinate click uses those bounds. Every other node uses
+    `_flags`.
     """
+    if raw.role == OPAQUE_ROLE:
+        return True, False, False
     clickable, editable, secure = _flags(raw)
-    if _plain_zero_wrapper(raw):
+    if _plain_zero_wrapper(raw) or raw.unallocated:
         clickable = False
     return clickable, editable, secure
 
@@ -1117,7 +2101,9 @@ def _prune_inner(
     *,
     in_page: bool = False,
     in_web: bool = False,
+    web_depth: int = 0,
     web: _WebWalk | None = None,
+    parent_bounds: Bounds | None = None,
 ) -> _PNode | None:
     """``depth`` is the raw tree depth; ``kept_depth`` is the exact pruned depth
     of this node. A wrapper candidate adds a level for its children only when it
@@ -1143,8 +2129,21 @@ def _prune_inner(
         kept_depth = 0
     child_in_page = in_page or kind in ("page", "iframe")
     child_in_web = in_web or kind in ("page", "docframe", "iframe")
+    if in_web:
+        child_web_depth = web_depth + 1
+    elif child_in_web:
+        child_web_depth = 1
+    else:
+        child_web_depth = 0
 
     bounds = _to_bounds(raw.position, raw.size, geometry)
+    if raw.unallocated:
+        # A hidden notebook tab has a name and no box. Do not adopt the
+        # page as its bounds, and do not drop the name. The page is hoisted
+        # onto the tab list, so this node keeps no children.
+        return _PNode(
+            raw=raw, bounds=None, children=[], elided=0, has_interactive=False, node=node,
+        )
     # An empty label or paragraph is decorative static text. Returning here
     # used to drop the checkbox, button, or field inside it (#124, #136).
     # Walk those children. A childless empty text node is still dropped below.
@@ -1164,13 +2163,37 @@ def _prune_inner(
     # wrapper looks clickable; it is still hollow when it is unnamed,
     # valueless, and not focusable. Zero-size outside that web content still
     # drops, so macOS trees and their token budgets stay unchanged. A real
-    # rect that merely lies off every display still drops. A focusable,
-    # named, or genuinely interactive zero-size node still drops.
+    # rect that merely lies off every display still drops, except a
+    # viewport-sized Chromium content root shifted above the screen by
+    # find-in-page: that root is hollow so the on-screen descendants stay.
+    # A focusable, named, or genuinely interactive zero-size node still drops.
     hollow_zero = in_web and _plain_zero_wrapper(raw)
-    hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero)
+    # Find-in-page scrolls the document and Chrome leaves the content root
+    # at a negative Y with the viewport's height, so that box misses the
+    # screen while the text now on screen sits underneath it. Walk that
+    # root. A smaller node above the viewport, and everything below the
+    # fold, still drops without a descendant walk.
+    scrolled = (
+        in_web
+        and 1 <= web_depth <= 2
+        and _scrolled_off_web_container(raw, geometry)
+    )
+    hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero or scrolled)
+    # An expand page lists the next children even when they sit below the
+    # viewport. A normal snapshot still drops those nodes. A marked node
+    # with a zero side is hollow so the cell under it is still walked;
+    # a positive off-screen rect keeps its own coordinates.
+    forced = _forced_offscreen(accessor, node, raw)
     # The empty label may have no box of its own. Its checkbox still does.
-    if bounds is None and not hollow and not text_container:
+    if bounds is None and not hollow and not text_container and not forced:
         return None  # zero-size (not web) or fully offscreen: drop subtree
+    if bounds is None and forced and not hollow:
+        if _zero_extent(raw.size):
+            hollow = True
+        else:
+            bounds = _project_offscreen(raw.position, raw.size, geometry)
+            if bounds is None:
+                return None
 
     kept: list[_PNode] = []
     elided = 0
@@ -1182,7 +2205,8 @@ def _prune_inner(
     # which is what keeps the macOS/Windows walk count unchanged.
     if past_cap and in_web and depth < _MAX_RAW_DEPTH and web is not None and web.scan_reads > 0:
         kept, elided = _open_nested_frames(
-            raw_children, accessor, geometry, depth, child_in_page, child_in_web, web
+            raw_children, accessor, geometry, depth, child_in_page, child_in_web, web,
+            parent_bounds=bounds,
         )
     elif past_cap:
         elided = len(raw_children)
@@ -1219,7 +2243,9 @@ def _prune_inner(
                 child_kept_depth,
                 in_page=child_in_page,
                 in_web=child_in_web,
+                web_depth=child_web_depth,
                 web=web,
+                parent_bounds=bounds,
             )
             if pruned is not None:
                 kept.append(pruned)
@@ -1233,31 +2259,71 @@ def _prune_inner(
             kept, dropped = _cap_children(kept, cap)
             elided += dropped
 
-    clickable, editable, _ = _target_flags(raw)
-    interactive = clickable or editable
+    # A table can publish only the on-screen band. The rest are still its
+    # children; the count is what ``… N more`` and expand(ref) page from.
+    take_unlisted = getattr(accessor, "take_unlisted", None)
+    if take_unlisted is not None:
+        try:
+            extra = int(take_unlisted(node) or 0)
+        except (TypeError, ValueError):
+            extra = 0
+        if extra > 0:
+            elided += extra
+
     if hollow:
         if not kept:
             return None  # zero-size and nothing visible below it
-        bounds = _union_bounds([c.bounds for c in kept])
+        rects = [c.bounds for c in kept if c.bounds is not None]
+        if not rects:
+            return None
+        bounds = _union_bounds(rects)
     if text_container:
         if not kept:
             return None  # empty static text with nothing under it stays decorative
         if bounds is None:
-            bounds = _union_bounds([c.bounds for c in kept])
+            rects = [c.bounds for c in kept if c.bounds is not None]
+            bounds = _union_bounds(rects) if rects else None
         # One control replaces the empty label, the same way a wrapper
         # collapses. Several controls stay parented so none of them is dropped.
         if len(kept) == 1 and elided == 0:
             return kept[0]
     if candidate and len(kept) == 1 and elided == 0:
         return kept[0]  # collapse single-child wrapper (keeps the child's own handle)
+    if bounds is not None:
+        raw = _as_opaque_region(raw, kept, elided, bounds=bounds, parent_bounds=parent_bounds)
+    clickable, editable, _ = _target_flags(raw)
     return _PNode(
         raw=raw,
         bounds=bounds,
         children=kept,
         elided=elided,
-        has_interactive=interactive or any(c.has_interactive for c in kept),
+        has_interactive=clickable or editable or any(c.has_interactive for c in kept),
         node=node,
     )
+
+
+def _web_scan_identity(node: object) -> object:
+    """Identity of one node in the buried web scan.
+
+    ``get_child_at_index`` returns a new proxy. After a leaf is handled,
+    nothing else referenced it, so it was collected and CPython reused its
+    ``id()`` for a later control. A seen-set of those ids then skipped the
+    control (a settings button under a named group never reached
+    ``_prune_inner``). The AT-SPI bus name and object path stay on the C
+    object and do not call D-Bus. A synthetic node has no GObject pointer
+    and uses ``id()``. The scan also retains every proxy, so that fallback
+    cannot collide with a collected leaf.
+    """
+    if getattr(node, "__gpointer__", None) is not None:
+        try:
+            from a11y_computer_use.drivers._atspi import _atspi_wrapper_key
+
+            stable = _atspi_wrapper_key(node)
+        except Exception:
+            stable = None
+        if stable is not None:
+            return stable
+    return id(node)
 
 
 def _open_nested_frames(
@@ -1268,13 +2334,20 @@ def _open_nested_frames(
     in_page: bool,
     in_web: bool,
     web: _WebWalk,
+    *,
+    parent_bounds: Bounds | None = None,
 ) -> tuple[list[_PNode], int]:
-    """Past `MAX_DEPTH` inside web content, open a nested iframe and nothing else.
+    """Past ``MAX_DEPTH`` inside web content, open a nested frame or a control.
 
-    Descend only through non-interactive wrappers, spending ``web.scan_reads``.
-    A found ``internal frame`` (or a ``document web`` already inside a page)
-    is pruned with a restarted kept-depth budget. Other children stay elided,
-    so the scan does not pull a whole deep page into the snapshot.
+    Descend through wrappers, including a named group, spending
+    ``web.scan_reads``. A found ``internal frame`` (or a ``document web``
+    already inside a page) is pruned with a restarted kept-depth budget. A
+    button, field, link, or other control is kept at the cap, so a phone
+    entry or a settings control under a named group is not dropped. The
+    group itself is not kept. Static text stays elided. ``MAX_DEPTH`` and
+    ``web.scan_reads`` are not raised. Proxies stay referenced for the
+    whole scan, and the seen-set uses `_web_scan_identity` rather than a
+    bare ``id()``.
     """
     kept: list[_PNode] = []
     elided = 0
@@ -1282,13 +2355,17 @@ def _open_nested_frames(
         (child, depth + 1, in_page, in_web) for child in raw_children[:_MAX_WALK_CHILDREN]
     ]
     elided += max(0, len(raw_children) - len(pending))
-    seen: set[int] = set()
+    # Keep every proxy alive. Dropping a leaf lets its id be reused for a
+    # control that has not been walked; the seen-set would then skip it.
+    pinned: list[object] = []
+    seen: set[object] = set()
     while pending and web.scan_reads > 0 and len(kept) < MAX_CHILDREN:
         child, child_depth, page, web_here = pending.pop(0)
+        pinned.append(child)
         if child_depth >= _MAX_RAW_DEPTH:
             elided += 1
             continue
-        marker = id(child)
+        marker = _web_scan_identity(child)
         if marker in seen:
             continue
         seen.add(marker)
@@ -1307,14 +2384,36 @@ def _open_nested_frames(
                 in_page=page,
                 in_web=web_here,
                 web=web,
+                parent_bounds=parent_bounds,
             )
             if pruned is not None:
                 kept.append(pruned)
+            continue
+        if child_raw.role in _BURIED_CONTROL_ROLES:
+            # kept_depth stays at the cap, so this control's own children
+            # are still scanned under the same ``web.scan_reads`` budget.
+            pruned = _prune_inner(
+                child,
+                child_raw,
+                accessor,
+                geometry,
+                child_depth,
+                MAX_DEPTH,
+                in_page=page,
+                in_web=web_here,
+                web=web,
+                parent_bounds=parent_bounds,
+            )
+            if pruned is not None:
+                kept.append(pruned)
+            else:
+                elided += 1
             continue
         if (
             _noninteractive_wrapper(child_raw)
             or _plain_zero_wrapper(child_raw)
             or kind in ("docframe", "page", "iframe")
+            or child_raw.role in _WRAPPER_ROLES
         ):
             kids = tuple(accessor.children(child))
             room = kids[:_MAX_WALK_CHILDREN]
@@ -1322,11 +2421,38 @@ def _open_nested_frames(
             next_page = page or kind in ("page", "iframe")
             next_web = web_here or kind in ("page", "docframe", "iframe")
             for kid in room:
+                pinned.append(kid)
                 pending.append((kid, child_depth + 1, next_page, next_web))
             continue
         elided += 1
     elided += len(pending)
     return kept, elided
+
+
+def _scrolled_off_web_container(
+    raw: RawNode, geometry: tuple[DisplayGeometry, ...]
+) -> bool:
+    """Chrome content root parked above the viewport after find-in-page.
+
+    The section keeps a viewport-sized box and a negative Y, so the rect
+    misses the screen. Descendants that are actually showing still have
+    screen coordinates. A one-line control, a node below the fold, and a
+    section taller than the screen are not this root.
+    """
+    if raw.role not in _WRAPPER_ROLES:
+        return False
+    if raw.position is None or raw.size is None or not geometry:
+        return False
+    width, height = raw.size
+    if width <= 0 or height <= 0 or raw.position[1] >= 0:
+        return False
+    if _to_bounds(raw.position, raw.size, geometry) is not None:
+        return False
+    screen_w = max(geom.display.width / geom.display.scale for geom in geometry)
+    screen_h = max(geom.display.height / geom.display.scale for geom in geometry)
+    if width < min(400.0, screen_w * 0.5) or height < min(400.0, screen_h * 0.5):
+        return False
+    return height <= screen_h * 1.25
 
 
 def _degenerate_size(size: tuple[float, float] | None) -> bool:
@@ -1393,11 +2519,118 @@ def _keep_priority(node: _PNode) -> int:
     return priority
 
 
+def _generic_region_name(text: str) -> bool:
+    """True for an empty name or one that does not describe the pixels.
+
+    Chrome names an ``<img>`` without alt ``To get missing image descriptions,
+    open the context menu.`` That sentence is the same kind of placeholder as
+    ``image``.
+    """
+    folded = text.strip().casefold()
+    if folded in _GENERIC_REGION_NAMES:
+        return True
+    return folded.startswith(_CHROME_IMAGE_PLACEHOLDER)
+
+
+def _no_accessible_content(raw: RawNode) -> bool:
+    """No name, description, value, or placeholder an agent can read.
+
+    A generic name such as ``image`` or ``canvas`` is not content. A described
+    image (``Sync status``) is.
+    """
+    if not _generic_region_name(raw.title) or not _generic_region_name(raw.description):
+        return False
+    if raw.value not in (None, ""):
+        return False
+    return not raw.placeholder
+
+
+def _positive_extent(raw: RawNode) -> bool:
+    size = raw.size
+    return size is not None and size[0] > 0 and size[1] > 0
+
+
+def _bounds_duplicate(bounds: Bounds | None, parent: Bounds | None) -> bool:
+    """True when ``bounds`` is the same box as ``parent``, within one pixel.
+
+    A childless group with its parent's box is not a separate region. Chrome's
+    nested wrappers copy the page box; the shorter content-area view is a
+    browser-frame group instead. A canvas or an image keeps its own role
+    even when the boxes match.
+    """
+    if bounds is None or parent is None or bounds.display_id != parent.display_id:
+        return False
+    return (
+        abs(bounds.x - parent.x) <= 1
+        and abs(bounds.y - parent.y) <= 1
+        and abs(bounds.width - parent.width) <= 1
+        and abs(bounds.height - parent.height) <= 1
+    )
+
+
+def _as_opaque_region(
+    raw: RawNode,
+    kept: list[_PNode],
+    elided: int,
+    *,
+    bounds: Bounds | None = None,
+    parent_bounds: Bounds | None = None,
+) -> RawNode:
+    """Rename a pixel surface or a childless dead group to ``opaque_region``.
+
+    A canvas stays opaque even when it has a real name: the name does not
+    describe the pixels. An image needs an empty or generic name. A group is
+    opaque only when it has a real box, nothing to read, and no kept or
+    elided children. The box has to be at least 32 by 32. A smaller childless
+    panel is a layout spacer; marking it clickable would crowd the child cap
+    and hide a titled document that sits beside it. A zero-size wrapper keeps
+    its role so a hollow section around a form is not reported as a clickable
+    surface. An editable node stays an entry.
+
+    A browser-frame view stays a group. So does a childless group whose box
+    only duplicates its parent: that view is the frame again, not page
+    content. A canvas, a WebGL surface, an unnamed image, and an empty page
+    region that has its own box stay opaque.
+    """
+    if raw.editable or not _positive_extent(raw):
+        return raw
+    size = raw.size or (0.0, 0.0)
+    surface = raw.role in _OPAQUE_SURFACE_ROLES
+    dead = (
+        raw.role in _DEAD_REGION_ROLES
+        and not kept
+        and elided == 0
+        and _no_accessible_content(raw)
+        and size[0] >= 32
+        and size[1] >= 32
+    )
+    if surface and raw.role == "AXImage" and not _no_accessible_content(raw):
+        return raw
+    if not surface and not dead:
+        return raw
+    if dead and (raw.browser_chrome or _bounds_duplicate(bounds, parent_bounds)):
+        return raw
+    title = "" if _generic_region_name(raw.title) else raw.title
+    description = "" if _generic_region_name(raw.description) else raw.description
+    # ``surface_name`` is not the node's own name, so it did not keep this
+    # region from being demoted. Once it is an opaque region, that string is
+    # the honest title. A generic placeholder is not used.
+    if not title and not _generic_region_name(raw.surface_name):
+        title = raw.surface_name
+    return dataclasses.replace(raw, role=OPAQUE_ROLE, title=title, description=description)
+
+
 def _is_decorative(raw: RawNode) -> bool:
     if raw.role in _DECORATIVE_ROLES:
         return True
-    labelled = bool(raw.title or raw.description)
+    labelled = bool(raw.title or raw.description) and not (
+        _generic_region_name(raw.title) and _generic_region_name(raw.description)
+    )
     if raw.role == "AXImage" and not labelled:
+        # A painted image with a real box is an opaque region. A zero-size
+        # or missing box is still decoration and drops with its subtree.
+        if _positive_extent(raw):
+            return False
         return True
     return raw.role == "AXStaticText" and not labelled and raw.value in (None, "")
 
@@ -1454,19 +2687,32 @@ def _flatten(
     elisions: dict[str, int],
     handles: dict[str, object],
     full_values: dict[str, str],
+    instance_id: str | None = None,
+    document_id: str | None = None,
 ) -> None:
     """Assign pre-order refs and emit `Element`s (parents before children)."""
+    instance_id = node.raw.instance_id or instance_id
+    document_id = node.raw.document_id or document_id
     ref = f"e{len(out) + 1}"
     path = parent_path + (node.raw.role,)
     clickable, editable, secure = _target_flags(node.raw)
     if node.node is not None:  # retain the live handle for act-time AX actions
         handles[ref] = node.node
     value: str | None = None
+    terminal = node.raw.subrole == "terminal"
     if node.raw.value is not None and not secure:  # secure fields never leak values
         raw_value = str(node.raw.value)
-        value = _clip(raw_value, _MAX_VALUE_CHARS)
-        if raw_value != value:
-            full_values[ref] = raw_value
+        if terminal:
+            # The snapshot shows the on-screen slice, or the tail of a
+            # longer screen. The full buffer stays searchable.
+            source = node.raw.screen_text if node.raw.screen_text else raw_value
+            value = _terminal_value(source)
+            if raw_value != value:
+                full_values[ref] = raw_value
+        else:
+            value = _clip(raw_value, _MAX_VALUE_CHARS)
+            if raw_value != value:
+                full_values[ref] = raw_value
     out.append(
         Element(
             ref=ref,
@@ -1487,12 +2733,74 @@ def _flatten(
             expanded=node.raw.expanded,
             placeholder=node.raw.placeholder,
             stable_id=node.raw.stable_id or None,
+            instance_id=instance_id,
+            document_id=document_id,
+            subrole=(
+                "terminal" if terminal
+                else "label" if node.raw.subrole == "label"
+                else None
+            ),
+            hint=node.raw.hint,
+            shortcut=node.raw.shortcut,
+            note=node.raw.note or None,
         )
     )
     if node.elided:
         elisions[ref] = node.elided
     for child in node.children:
-        _flatten(child, ref, path, snapshot_id, out, elisions, handles, full_values)
+        _flatten(
+            child, ref, path, snapshot_id, out, elisions, handles, full_values,
+            instance_id, document_id,
+        )
+
+
+def _forced_offscreen(accessor: object, node: object, raw: RawNode) -> bool:
+    """True when an expand page asked to list ``node`` even though it is off screen.
+
+    A normal snapshot has no ``keep_offscreen`` and still drops the node.
+    GTK's off-screen sentinel stays dropped so a parked widget is not given
+    a box. A zero-size marked node is still forced: the caller treats it as
+    hollow and keeps the children that hold the text.
+    """
+    fn = getattr(accessor, "keep_offscreen", None)
+    if not callable(fn):
+        return False
+    try:
+        if not fn(node):
+            return False
+    except Exception:
+        return False
+    pos, size = raw.position, raw.size
+    if pos is None or size is None:
+        return False
+    try:
+        x, y = float(pos[0]), float(pos[1])
+    except (TypeError, ValueError):
+        return False
+    if x <= -2_000_000_000 or y <= -2_000_000_000:
+        return False
+    return True
+
+
+def _project_offscreen(
+    position: tuple[float, float] | None,
+    size: tuple[float, float] | None,
+    geometry: tuple[DisplayGeometry, ...],
+) -> Bounds | None:
+    """Project a real off-screen rect onto the main display without moving it.
+
+    The box stays where the toolkit put it, including past the display edge,
+    so a click is not aimed at a different control that happens to be visible.
+    """
+    if position is None or size is None or not geometry:
+        return None
+    try:
+        if float(size[0]) <= 0 or float(size[1]) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    geom = next((item for item in geometry if item.display.is_main), geometry[0])
+    return _project(position, size, geom)
 
 
 def _to_bounds(
@@ -1547,6 +2855,28 @@ _IMPLICIT_CLICK_ROLES = frozenset(
 )
 
 
+def _compact_value(text: str) -> str:
+    """Escape line breaks so one snapshot field stays on one line.
+
+    ``Element.value`` keeps the real breaks. Compact output writes ``\\n``
+    and ``\\r`` so a multi-line document is not a space-separated line.
+    A value with no break is returned unchanged, including a backslash.
+    """
+    if "\n" not in text and "\r" not in text:
+        return text
+    return (
+        text.replace("\\", "\\\\")
+        .replace("\r\n", "\\r\\n")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def _compact_clip(value: object, limit: int = 24) -> str:
+    """Clip a diff field after escaping its line breaks."""
+    return _clip(_compact_value(str(value)), limit)
+
+
 def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = False) -> str:
     """One element line. ``bounds``: None prints geometry on roots only (the
     full view's rule), True on every line, False never. ``compact`` (the
@@ -1556,8 +2886,17 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     parts = [el.ref, role]
     if el.title:
         parts.append(f'"{el.title}"')
+    if el.hint:
+        parts.append("hint=" + _field_quote(el.hint))
+    if el.shortcut:
+        parts.append("shortcut=" + _field_quote(el.shortcut))
     if el.value is not None:
-        parts.append(f'="{_clip(el.value.replace(chr(10), " "), _RENDER_VALUE_CHARS)}"')
+        # A terminal value is already the on-screen text, or its tail.
+        # Clipping that head would hide the output the snapshot is showing.
+        # Line breaks stay in ``el.value``. The field escapes them so this
+        # line does not become several elements.
+        shown = el.value if el.subrole == "terminal" else _clip(el.value, _RENDER_VALUE_CHARS)
+        parts.append(f'="{_compact_value(shown)}"')
     elif el.placeholder and not el.title:  # blank field: show its prompt for identity
         parts.append(f'~"{_clip(el.placeholder, _RENDER_VALUE_CHARS)}"')
     show_click = el.clickable and not (compact and el.role in _IMPLICIT_CLICK_ROLES)
@@ -1574,19 +2913,56 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
             ("collapsed", el.expanded is False),
             ("focus", el.focused),
             ("disabled", not el.enabled),
+            ("hidden", el.bounds is None),
         )
         if on
     ]
+    if _ACTIVE_ROOTS.get(el.snapshot_id) == el.ref:
+        flags.append("active")
     if flags:
         parts.append(f"({','.join(flags)})")
-    if bounds is True or (bounds is None and el.parent is None):
-        b = el.bounds
+    if el.note:
+        parts.append(f"({el.note})")
+    # An opaque region is addressed by its box. Always print the bounds, in
+    # both views, so a coordinate click does not have to guess the size.
+    # A hidden control has no box. Printing one would invent a click target.
+    b = el.bounds
+    if b is not None and (bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None)):
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
     return " ".join(parts)
 
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _field_quote(text: str) -> str:
+    """One quoted field. Newlines and embedded quotes stay on one line."""
+    shown = " ".join(str(text).replace('"', "'").split())
+    return '"' + _clip(shown, 160) + '"'
+
+
+def _terminal_value(text: str) -> str:
+    """On-screen terminal text, or the tail of a longer buffer.
+
+    Trailing blank rows are the unused part of the screen. When the text
+    is longer than ``_TERMINAL_VALUE_CHARS``, the head is omitted and a
+    leading ellipsis marks the cut. ``find`` still searches the full buffer.
+    """
+    body = str(text).rstrip("\n")
+    limit = _TERMINAL_VALUE_CHARS
+    if len(body) <= limit:
+        return body
+    room = max(1, limit - 1)
+    tail = body[-room:]
+    # Drop a partial first line when the cut landed just after a newline.
+    # A newline near the end of the tail is a real row, not the cut.
+    newline = tail.find("\n")
+    if 0 <= newline <= 120 and newline < len(tail) - 1:
+        tail = tail[newline + 1 :]
+    if tail.startswith("…"):
+        return tail
+    return "…" + tail
 
 
 # ---------------------------------------------------------------------------
@@ -1606,6 +2982,29 @@ _HANDLES: OrderedDict[str, dict[str, object]] = OrderedDict()
 #: the model and the audit anchor never see a whole document; `find_elements`
 #: reads this so a substring past the cap still matches. Same bounded FIFO.
 _FULL_VALUES: OrderedDict[str, dict[str, str]] = OrderedDict()
+#: snapshot_id -> ref of the active top-level window, only when that snapshot
+#: merged two or more windows. Render adds ``(active)`` on that line.
+_ACTIVE_ROOTS: OrderedDict[str, str] = OrderedDict()
+
+
+def _note_active_root(snapshot_id: str, ref: str) -> None:
+    _ACTIVE_ROOTS[snapshot_id] = ref
+    _ACTIVE_ROOTS.move_to_end(snapshot_id)
+    while len(_ACTIVE_ROOTS) > _MAX_EPOCHS:
+        _ACTIVE_ROOTS.popitem(last=False)
+
+
+def discard_epoch(snapshot_id: str) -> None:
+    """Forget one snapshot's render metadata.
+
+    A merged window snapshot copies handles out of the per-window epochs.
+    Those epochs then only consume the FIFO, and the next few snapshots
+    evict the merge the caller is still acting on.
+    """
+    _EPOCHS.pop(snapshot_id, None)
+    _HANDLES.pop(snapshot_id, None)
+    _FULL_VALUES.pop(snapshot_id, None)
+    _ACTIVE_ROOTS.pop(snapshot_id, None)
 
 
 def _register_epoch(
@@ -1631,9 +3030,69 @@ def touch_epoch(snapshot_id: str) -> None:
     A probe snapshot taken to judge an action must not evict the handles the
     action's own ref still uses.
     """
-    for store in (_EPOCHS, _HANDLES, _FULL_VALUES):
+    for store in (_EPOCHS, _HANDLES, _FULL_VALUES, _ACTIVE_ROOTS):
         if snapshot_id in store:
             store.move_to_end(snapshot_id)
+
+
+def attach_offscreen_matches(
+    snap: Snapshot,
+    found: Sequence[tuple[object, RawNode, object | None]],
+) -> Snapshot:
+    """Append sought nodes that have no on-screen box.
+
+    ``found`` is ``(handle, raw, parent_handle)``. Bounds stay None. The
+    live handle is registered so a later read can still name the node. A
+    click is not given a rectangle. An empty list leaves ``snap`` as it was.
+    """
+    if not found:
+        return snap
+    handles = _HANDLES.get(snap.snapshot_id)
+    if handles is None:
+        return snap
+    by_handle = {id(handle): ref for ref, handle in handles.items()}
+    elements = list(snap.elements)
+    added = False
+    for cell, raw, table in found:
+        if cell is None or id(cell) in by_handle:
+            continue
+        parent_ref = by_handle.get(id(table)) if table is not None else None
+        parent = next((el for el in elements if el.ref == parent_ref), None) if parent_ref else None
+        ref = f"e{len(elements) + 1}"
+        clickable, editable, secure = _target_flags(raw)
+        value = None
+        if raw.value is not None and not secure:
+            value = _clip(str(raw.value), _MAX_VALUE_CHARS)
+        elements.append(
+            Element(
+                ref=ref,
+                role=raw.role,
+                title=str(raw.title or raw.description or ""),
+                value=value,
+                bounds=None,
+                snapshot_id=snap.snapshot_id,
+                parent=parent_ref,
+                path=(parent.path if parent is not None else ()) + (raw.role,),
+                enabled=raw.enabled,
+                focused=raw.focused,
+                clickable=clickable,
+                editable=editable,
+                secure=secure,
+                checked=raw.checked,
+                selected=raw.selected,
+                expanded=raw.expanded,
+                stable_id=raw.stable_id or None,
+                instance_id=(parent.instance_id if parent is not None else raw.instance_id),
+                document_id=(parent.document_id if parent is not None else raw.document_id),
+                note=raw.note or None,
+            )
+        )
+        handles[ref] = cell
+        by_handle[id(cell)] = ref
+        added = True
+    if not added:
+        return snap
+    return dataclasses.replace(snap, elements=tuple(elements))
 
 
 def ax_handle_for(snapshot_id: str, ref: str) -> object | None:
@@ -1751,6 +3210,7 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
         exact = [
             el for el in live.elements
             if el.stable_id == anchor.stable_id and el.role == anchor.role
+            and _bound_to_same_target(anchor, el)
         ]
         if label is not None:
             labelled = [el for el in exact if label_ok(el)]
@@ -1770,7 +3230,10 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
             d1 = _center_distance(anchor.bounds, ranked[1].bounds)
             return (None, "ambiguous") if d1 - d0 <= _AMBIGUITY_PX else (ranked[0], "")
 
-    same_role = [el for el in live.elements if el.role == anchor.role]
+    same_role = [
+        el for el in live.elements
+        if el.role == anchor.role and _bound_to_same_target(anchor, el)
+    ]
     candidates: list[tuple[int, float, Element]] = []
     for el in same_role:
         if label is not None:
@@ -1800,7 +3263,9 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
     return pool[0][1], ""
 
 
-def _center_distance(a: Bounds, b: Bounds) -> float:
+def _center_distance(a: Bounds | None, b: Bounds | None) -> float:
+    if a is None or b is None:
+        return 0.0 if a is None and b is None else math.inf
     ca, cb = a.center, b.center
     if ca.display_id != cb.display_id:
         return math.inf
@@ -1820,7 +3285,7 @@ def stale_ref_candidates(anchor: Element, live: Snapshot, limit: int = 3) -> lis
     label = _anchor_label(anchor)
     scored: list[tuple[float, float, Element]] = []
     for el in live.elements:
-        if el.role != anchor.role:
+        if el.role != anchor.role or not _bound_to_same_target(anchor, el):
             continue
         score: float = 0.0
         if label is not None:
@@ -1844,7 +3309,10 @@ def stale_ref_candidates(anchor: Element, live: Snapshot, limit: int = 3) -> lis
         for score, _dist, el in scored[:limit]
     ]
     if label is not None:
-        same_role = [el for el in live.elements if el.role == anchor.role]
+        same_role = [
+            el for el in live.elements
+            if el.role == anchor.role and _bound_to_same_target(anchor, el)
+        ]
         if same_role:
             occupant = min(same_role, key=lambda el: _center_distance(anchor.bounds, el.bounds))
             if math.isfinite(_center_distance(anchor.bounds, occupant.bounds)):

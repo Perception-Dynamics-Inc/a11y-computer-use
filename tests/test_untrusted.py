@@ -67,6 +67,18 @@ def test_render_untrusted_quotes_text_and_keeps_a_fence_for_the_model():
     assert long.endswith('…"')
 
 
+def test_fresh_nonce_contains_a_letter_so_redaction_keeps_the_fence():
+    """An all-digit nonce is eaten by card-number redaction."""
+    from a11y_computer_use.agent.trace import redact_text
+    from a11y_computer_use.untrusted import _fresh_nonce
+
+    for _ in range(40):
+        token = _fresh_nonce("click ok")
+        assert any(char.isalpha() for char in token)
+        wrapped = fence("click ok", nonce=token).text
+        assert unwrap(redact_text(wrapped, [])) == "click ok"
+
+
 def test_fence_wraps_with_a_nonce_and_leaves_plain_text_intact():
     fenced = fence("Save the note", nonce="abc")
     assert fenced.text == "<untrusted nonce=abc>Save the note</untrusted nonce=abc>"

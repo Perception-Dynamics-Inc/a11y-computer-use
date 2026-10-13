@@ -22,7 +22,11 @@ def test_parse_error_text_maps_codes_and_strips_the_mcp_prefix() -> None:
 
 def test_remote_runtime_lists_tools_and_returns_refusals_as_text(tmp_path, monkeypatch) -> None:
     """A local `a11y-computer-use mcp` stands in for the remote machine."""
-    monkeypatch.setenv("HOME", str(tmp_path))  # isolated grants: everything is refused
+    # Isolated grants: everything is refused. Windows ``Path.home()`` reads
+    # USERPROFILE and ignores HOME, so both have to point at the temp dir or
+    # a grant left in the real profile lets ``app list`` through.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     rt = remote.RemoteRuntime([sys.executable, "-m", "a11y_computer_use", "mcp"], start_timeout_s=60)
     try:
         names = {t["name"] for t in rt.remote_tool_specs()}

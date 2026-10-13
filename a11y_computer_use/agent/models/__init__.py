@@ -19,23 +19,33 @@ from a11y_computer_use.agent.models.base import (
     model_turn_from_dict,
 )
 from a11y_computer_use.agent.models.command import CommandModel
+from a11y_computer_use.agent.models.sampling import (
+    DEFAULT_SEED,
+    DEFAULT_TEMPERATURE,
+    Sampling,
+    sampling_trace,
+)
 from a11y_computer_use.agent.models.scripted import ScriptedModel
 
 __all__ = [
     "AnthropicModel",
     "CommandModel",
+    "DEFAULT_SEED",
+    "DEFAULT_TEMPERATURE",
     "GeminiModel",
     "Message",
     "Model",
     "ModelError",
     "ModelTurn",
     "OpenAICompatibleModel",
+    "Sampling",
     "ScriptedModel",
     "ToolCall",
     "assistant_message",
     "make_model",
     "message_to_dict",
     "model_turn_from_dict",
+    "sampling_trace",
 ]
 
 

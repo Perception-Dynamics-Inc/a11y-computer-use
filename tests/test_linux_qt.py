@@ -275,6 +275,18 @@ def atspi(monkeypatch):
     monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
 
 
+def test_text_value_keeps_line_breaks_for_qt_and_gtk(atspi) -> None:
+    """``Text.get_text`` newlines stay in the value. Neither toolkit flattens them.
+
+    The snapshot field used to turn those breaks into spaces later. This
+    read is the string ``Element.value`` stores.
+    """
+    qt = _Node("text", text="AAA\nBBB\nCCC", toolkit="Qt", states=("SHOWING", "EDITABLE"))
+    gtk = _Node("text", text="AAA\r\nBBB", toolkit="gtk", states=("SHOWING", "EDITABLE", "MULTI_LINE"))
+    assert _atspi._value_text(qt, "AXTextArea", "text") == "AAA\nBBB\nCCC"
+    assert _atspi._value_text(gtk, "AXTextArea", "text") == "AAA\r\nBBB"
+
+
 def test_qt_character_length_inserts_exactly_and_a_byte_length_is_rejected(atspi) -> None:
     field = _QtField("Start", caret=5)
     assert _atspi.insert_text(field, "ünï") == 3
@@ -647,3 +659,363 @@ def test_gtk_combo_still_uses_its_own_selection(atspi, monkeypatch) -> None:
     assert clicks == []
     assert _read(combo).title == "Color"
     assert _read(combo).value == "Green"
+
+
+def test_unnamed_gtk_combo_takes_its_name_from_labelled_by_and_its_value_from_the_selection(atspi) -> None:
+    """An empty GTK combo name is the LABELLED_BY label, without the colon.
+
+    The value is the selected item. A selected item whose name is empty
+    contributes its text. A combo that already has a name keeps that name.
+    Qt still uses the label as the title and the accessible name as the value.
+    """
+    label = _Node("label", "Orientation:", toolkit="gtk")
+    landscape = _Node("menu item", "Landscape", toolkit="gtk")
+    portrait = _Node("menu item", "Portrait", states={"SELECTED"}, toolkit="gtk")
+    menu = _Node("menu", "", children=[landscape, portrait], toolkit="gtk")
+    combo = _Node(
+        "combo box", "", text="", toolkit="gtk",
+        states={"ENABLED", "SENSITIVE", "SHOWING", "VISIBLE"},
+        children=[menu],
+    )
+    combo.relations = [_Relation("LABELLED_BY", [label])]
+    raw = _read(combo)
+    assert raw.title == "Orientation"
+    assert raw.value == "Portrait"
+
+    blank = _Node("menu item", "", text="Landscape", states={"SELECTED"}, toolkit="gtk")
+    text_menu = _Node("menu", "", children=[blank], toolkit="gtk")
+    text_combo = _Node("combo box", "", text="", toolkit="gtk", children=[text_menu])
+    text_combo.relations = [_Relation("LABELLED_BY", [label])]
+    text_raw = _read(text_combo)
+    assert text_raw.title == "Orientation"
+    assert text_raw.value == "Landscape"
+
+    named_label = _Node("label", "Color:", toolkit="gtk")
+    red = _Node("menu item", "Red", states={"SELECTED"}, toolkit="gtk")
+    named = _Node("combo box", "Color", text="", toolkit="gtk", children=[red])
+    named.relations = [_Relation("LABELLED_BY", [named_label])]
+    named_raw = _read(named)
+    assert named_raw.title == "Color"
+    assert named_raw.value == "Red"
+
+
+def test_unnamed_gtk_combo_value_is_displayed_text_or_a_selected_cell(atspi) -> None:
+    """No selected menu item: the value is the text the combo shows.
+
+    A label under the combo is that text. A selected table cell is that
+    text when the popup is a tree. The caption is not the value.
+    """
+    caption = _Node("label", "Margin:", toolkit="gtk")
+    shown = _Node("label", "1.25 cm", toolkit="gtk")
+    combo = _Node(
+        "combo box", "", text="", toolkit="gtk",
+        children=[shown],
+    )
+    combo.relations = [_Relation("LABELLED_BY", [caption])]
+    raw = _read(combo)
+    assert raw.title == "Margin"
+    assert raw.value == "1.25 cm"
+
+    entry = _Node("text", "", text="Narrow", toolkit="gtk")
+    filler = _Node("filler", "", toolkit="gtk")
+    sibling = _Node("combo box", "", text="", toolkit="gtk")
+    filler.children = [entry, sibling]
+    entry.parent = filler
+    sibling.parent = filler
+    sibling.relations = [_Relation("LABELLED_BY", [_Node("label", "Format:", toolkit="gtk")])]
+    sibling_raw = _read(sibling)
+    assert sibling_raw.title == "Format"
+    assert sibling_raw.value == "Narrow"
+
+    cell = _Node("table cell", "Portrait", states={"SELECTED"}, toolkit="gtk")
+    other = _Node("table cell", "Landscape", toolkit="gtk")
+    table = _Node("table", "", children=[other, cell], toolkit="gtk")
+    tree_combo = _Node("combo box", "", text="", toolkit="gtk", children=[table])
+    tree_combo.relations = [_Relation("LABELLED_BY", [_Node("label", "Orientation:", toolkit="gtk")])]
+    tree_raw = _read(tree_combo)
+    assert tree_raw.title == "Orientation"
+    assert tree_raw.value == "Portrait"
+
+
+def test_hidden_window_is_omitted_and_a_showing_window_stays(atspi) -> None:
+    """A nested frame that is not showing and not visible leaves the snapshot.
+
+    FeatherPad keeps a Replace dialog in the tree as a frame named
+    Replacement. Its state set is only ENABLED, and its box sits on the
+    parent window, so the pruner would list it. SHOWING or VISIBLE keeps
+    the window. An empty state set is not hidden. A button that is not
+    showing is not a window and is still returned. The hidden frame's
+    children are not walked.
+    """
+    secret = _Node(
+        "push button", "Secret",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Qt", x=4, y=4, w=40, h=16,
+    )
+    label = _Node(
+        "label", "Replace with:", states={"ENABLED"}, toolkit="Qt",
+        x=0, y=0, w=80, h=16,
+    )
+    hidden = _Node(
+        "frame", "Replacement", states={"ENABLED"}, children=[label, secret],
+        toolkit="Qt", x=0, y=0, w=100, h=30,
+    )
+    tool_button = _Node(
+        "push button", "Inside tools",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Qt", x=410, y=50, w=80, h=24,
+    )
+    tools = _Node(
+        "window", "Tools",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, children=[tool_button],
+        toolkit="Qt", x=400, y=40, w=180, h=80,
+    )
+    parked = _Node(
+        "frame", "Parked", states={"VISIBLE", "ENABLED"},
+        toolkit="Qt", x=20, y=400, w=80, h=40,
+    )
+    find = _Node(
+        "dialog", "Find", states={"SHOWING", "ENABLED"},
+        toolkit="Qt", x=120, y=400, w=80, h=40,
+    )
+    about = _Node(
+        "alert", "About", states={"ENABLED"},
+        toolkit="Qt", x=220, y=400, w=80, h=40,
+    )
+    unset = _Node(
+        "frame", "Unset", states=(),
+        toolkit="Qt", x=320, y=400, w=80, h=40,
+    )
+    buried = _Node(
+        "push button", "Buried", states={"ENABLED"}, actions=["press"],
+        toolkit="Qt", x=10, y=300, w=60, h=24,
+    )
+    document = _Node(
+        "text", "Document", text="hello",
+        states={"SHOWING", "VISIBLE", "EDITABLE"},
+        toolkit="Qt", x=10, y=40, w=360, h=200,
+    )
+    frame = _Node(
+        "frame", "FeatherPad",
+        states={"SHOWING", "VISIBLE", "ENABLED", "ACTIVE"},
+        children=[document, buried, hidden, tools, parked, find, about, unset],
+        toolkit="Qt", x=0, y=0, w=800, h=600,
+    )
+    sibling = _Node(
+        "frame", "Replacement", states={"ENABLED"},
+        toolkit="Qt", x=0, y=0, w=100, h=30,
+    )
+    app = _Node(
+        "application", "featherpad", children=[frame, sibling], toolkit="Qt",
+    )
+
+    kids = list(ATSPIAccessor().children(frame))
+    assert hidden not in kids
+    assert about not in kids
+    assert tools in kids and parked in kids and find in kids and unset in kids
+    assert document in kids and buried in kids
+    app_kids = list(ATSPIAccessor().children(app))
+    assert frame in app_kids
+    assert sibling not in app_kids
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    geometry = (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+    snap = observe.build_snapshot(
+        frame, ATSPIAccessor(), scope=Scope.WINDOW, app="featherpad", pid=None,
+        geometry=geometry,
+    )
+    titles = [el.title for el in snap.elements]
+    assert "Replacement" not in titles
+    assert "Replace with:" not in titles
+    assert "Secret" not in titles
+    assert "About" not in titles
+    assert "Tools" in titles
+    assert "Parked" in titles
+    assert "Find" in titles
+    assert "Unset" in titles
+    assert "Buried" in titles
+    rendered = observe.render_text(snap)
+    assert 'window "Replacement"' not in rendered
+    assert 'window "Tools"' in rendered
+    whole = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="featherpad", pid=None,
+        geometry=geometry,
+    )
+    assert not any(el.title == "Replacement" for el in whole.elements)
+    assert any(el.title == "Tools" for el in whole.elements)
+
+
+def test_hidden_frame_that_wraps_a_showing_document_stays(atspi) -> None:
+    """A Firefox content frame with no SHOWING state still holds the page.
+
+    The outer window is SHOWING. The frame under it reports only ENABLED,
+    and the showing document web is inside that frame. Dropping the frame
+    would omit the page. A sibling dialog that is not showing, and that
+    does not wrap a document, is still omitted.
+    """
+    button = _Node(
+        "push button", "Div button",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Gecko", x=20, y=80, w=80, h=24,
+    )
+    document = _Node(
+        "document web", "cuapara",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, children=[button],
+        toolkit="Gecko", x=0, y=60, w=800, h=500,
+    )
+    content = _Node(
+        "frame", "content", states={"ENABLED"}, children=[document],
+        toolkit="Gecko", x=0, y=40, w=800, h=540,
+    )
+    notice = _Node(
+        "label", "Update", states={"ENABLED"}, toolkit="Gecko",
+        x=8, y=8, w=80, h=16,
+    )
+    hidden_dialog = _Node(
+        "dialog", "Hidden notice", states={"ENABLED"}, children=[notice],
+        toolkit="Gecko", x=200, y=200, w=120, h=40,
+    )
+    chrome = _Node(
+        "frame", "cuapara — Mozilla Firefox",
+        states={"SHOWING", "VISIBLE", "ENABLED", "ACTIVE"},
+        children=[content, hidden_dialog],
+        toolkit="Gecko", x=0, y=0, w=900, h=700,
+    )
+    app = _Node("application", "firefox", children=[chrome], toolkit="Gecko")
+
+    kids = list(ATSPIAccessor().children(chrome))
+    assert content in kids
+    assert hidden_dialog not in kids
+    assert document in list(ATSPIAccessor().children(content))
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    geometry = (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+    snap = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="firefox", pid=None,
+        geometry=geometry,
+    )
+    titles = [el.title for el in snap.elements]
+    assert "Div button" in titles
+    assert "cuapara" in titles
+    assert "Hidden notice" not in titles
+    assert "Update" not in titles
+
+
+def test_accessible_name_strips_rich_text_and_keeps_angle_brackets(atspi) -> None:
+    """Qt rich-text names lose their tags. Text that is not markup stays.
+
+    FeatherPad's word-count button exposes
+    ``<p style='white-space:pre'>Calculate number of words</p>``. The
+    snapshot title is that sentence. ``<not-a-tag>``, ``a < b``, ``<3 cats>``,
+    and a bare ``<a>`` are not markup. Entities decode, including a name
+    whose tags were stored as ``&lt;p&gt;``. A name with no ``<`` and no
+    ``&`` is unchanged, backslash included.
+    """
+    cases = {
+        "<p style='white-space:pre'>Calculate number of words</p>": "Calculate number of words",
+        "<P STYLE='white-space:pre'>Calculate number of words</P>": "Calculate number of words",
+        "<p>Calculate<br/>number of words</p>": "Calculate number of words",
+        "<p>Hello</p><p>World</p>": "Hello World",
+        "<p>Tom &amp; <b>Jerry</b></p>": "Tom & Jerry",
+        "<span style=\"color:red\">Calculate number of words</span>": "Calculate number of words",
+        "&lt;p&gt;Hi&lt;/p&gt;": "Hi",
+        "&lt;not-a-tag&gt;": "<not-a-tag>",
+        "&#60;not-a-tag&#62;": "<not-a-tag>",
+        "<not-a-tag>": "<not-a-tag>",
+        "a < b and c > d": "a < b and c > d",
+        "press <a>": "press <a>",
+        "Tom &amp; Jerry": "Tom & Jerry",
+        "already plain": "already plain",
+        "C:\\notes": "C:\\notes",
+        "<3 cats>": "<3 cats>",
+        "if (x < y)": "if (x < y)",
+    }
+    for raw, want in cases.items():
+        assert _atspi._plain_accessible_name(raw) == want, raw
+
+    button = _Node(
+        "push button",
+        "<p style='white-space:pre'>Calculate number of words</p>",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"],
+        toolkit="Qt",
+    )
+    literal = _Node(
+        "push button", "<not-a-tag>",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"], toolkit="Qt", x=10, y=40,
+    )
+    compared = _Node(
+        "push button", "a < b and c > d",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"], toolkit="Qt", x=10, y=70,
+    )
+    bare = _Node(
+        "push button", "press <a>",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"], toolkit="Qt", x=10, y=100,
+    )
+    frame = _Node(
+        "frame", "FeatherPad",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[button, literal, compared, bare],
+        toolkit="Qt", x=0, y=0, w=400, h=300,
+    )
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    snap = observe.build_snapshot(
+        frame, ATSPIAccessor(), scope=Scope.WINDOW, app="featherpad", pid=None,
+        geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+    titles = {el.title for el in snap.elements}
+    assert "Calculate number of words" in titles
+    assert "<not-a-tag>" in titles
+    assert "a < b and c > d" in titles
+    assert "press <a>" in titles
+    assert not any("<p" in el.title or "</" in el.title for el in snap.elements)
+    rendered = observe.render_text(snap)
+    assert 'button "Calculate number of words"' in rendered
+    assert "<p style" not in rendered
+    assert 'button "<not-a-tag>"' in rendered
+    assert 'button "a < b and c > d"' in rendered
+    assert 'button "press <a>"' in rendered
+
+
+@pytest.mark.parametrize("use_description", [False, True])
+@pytest.mark.parametrize("markup, expected", [
+    ("<p style='white-space:pre'>Calculate number of words</p>", "Calculate number of words"),
+    ('<p title="Words > 0">Calculate <b>number</b> of words</p>', "Calculate number of words"),
+    ("<p title='Words > 0'>Calculate number of words</p>", "Calculate number of words"),
+    ("<p-custom>Literal label</p-custom>", "<p-custom>Literal label</p-custom>"),
+])
+def test_rich_text_snapshot_names_and_description_fallback(atspi, use_description, markup, expected):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    button = _Node(
+        "push button", "" if use_description else markup,
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"], toolkit="Qt",
+    )
+    if use_description:
+        button.get_description = lambda: markup
+    frame = _Node(
+        "frame", "FeatherPad", children=[button], toolkit="Qt",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, x=0, y=0, w=400, h=300,
+    )
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    snap = observe.build_snapshot(
+        frame, ATSPIAccessor(), scope=Scope.WINDOW, app="featherpad", pid=None,
+        geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+    control = next(el for el in snap.elements if el.role == "AXButton")
+    assert control.title == expected
+    assert f'button "{expected}"' in observe.render_text(snap)
+    assert control in observe.find_elements(snap, text=expected)

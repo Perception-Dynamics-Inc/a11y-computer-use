@@ -146,6 +146,8 @@ def _launch(kind: str, profile, urls: list[str]) -> subprocess.Popen:
         # /usr/local/bin/google-chrome is a wrapper that pins a shared
         # profile and a debugging port. A fresh profile has to be the real
         # binary, or the active tab is that profile's startup page.
+        # Without --password-store=basic the gnome-keyring prompter covers
+        # the first page and the document never enters the tree.
         binary = "/usr/bin/google-chrome-stable"
         if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
             binary = _chrome_binary()
@@ -154,6 +156,7 @@ def _launch(kind: str, profile, urls: list[str]) -> subprocess.Popen:
         argv = [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
             "--disable-component-update", "--test-type",
             "--disable-features=OmniboxPopup",
             f"--user-data-dir={profile}",

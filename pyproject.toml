@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "a11y-computer-use"
-version = "0.4.60"
+version = "0.4.67"
 description = "Accessibility-first computer-use framework for macOS, Windows, Linux, and the browser (CDP): pruned accessibility-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -92,6 +92,32 @@ linux = [
 # Chrome DevTools Protocol. Only a WebSocket client is needed: CDP target
 # discovery uses stdlib urllib and the AX/DOM tree comes over the socket.
 browser = ["websocket-client"]
+# Linux vision-fallback OCR. RapidOCR (PP-OCRv5 mobile, ONNX Runtime, CPU)
+# is the default engine; it downloads its own models and this package does
+# not vendor weights. The system `tesseract` binary is the fallback when
+# this extra is not installed. Surya and EasyOCR are not dependencies.
+ocr = [
+    "rapidocr>=3.10",
+    "onnxruntime",
+]
+# Local Holo-3.1-0.8B grounding (a11y_computer_use.agent.grounding).
+# Off unless the caller constructs HoloLocalGrounding. Weights are fetched
+# from Hugging Face on the first ground() call and are not vendored.
+# The model config was written by transformers 5.6.2. 5.19.0 is the
+# release the adapter was checked against, so the extra stays on that
+# 5.6–5.19 line. The adapter keeps the model on CPU.
+# AutoProcessor.from_pretrained builds Qwen3VLVideoProcessor, which imports
+# torchvision even when ground() only sends an image. A PEP 621 extra cannot
+# select a wheel index, so this list does not point at a CUDA index and does
+# not embed the CPU index. The default PyPI torchvision wheel does not load
+# into a +cpu torch: import raises RuntimeError "operator torchvision::nms
+# does not exist". Install torch and torchvision from the same index first
+# (the CPU index is documented in docs/agent.md). Weights are not vendored.
+holo = [
+    "torch",
+    "torchvision",
+    "transformers>=5.6,<5.20",
+]
 
 [project.scripts]
 a11y-computer-use = "a11y_computer_use.cli:main"

@@ -8,6 +8,8 @@ plus dedicated tests for the structured permission/app errors.
 
 from __future__ import annotations
 
+import dataclasses
+import os
 import sys
 
 import pytest
@@ -87,10 +89,157 @@ def test_decorative_nodes_dropped_but_described_image_kept() -> None:
     snap = snap_of(typical_app_window())
     images = [el for el in snap.elements if el.role == "AXImage"]
     assert [el.title for el in images] == ["Sync status"], (
-        "unlabelled images and empty static text are decorative; described "
-        "images survive with the description as title"
+        "a described image keeps that description as its title"
     )
+    opaque = [el for el in snap.elements if el.role == "opaque_region"]
+    assert len(opaque) == 1, "an unnamed image is an opaque region, not a dropped decoration"
+    assert opaque[0].clickable and opaque[0].ref
+    assert opaque[0].bounds.width == 48 and opaque[0].bounds.height == 48
     assert not any(el.role == "AXStaticText" and not el.value for el in snap.elements)
+
+
+def test_canvas_unnamed_image_and_dead_group_are_opaque_regions() -> None:
+    """A pixel surface or a childless empty group is ``opaque_region``.
+
+    The line carries the ref and the bounds. A described image stays an
+    image. A group that holds a button collapses onto that button. A named
+    empty group stays a group. Nothing here reads pixels.
+    """
+    tree = ax(
+        "AXWindow",
+        title="Pixels",
+        at=(0.0, 0.0),
+        size=(800.0, 600.0),
+        children=[
+            ax("AXCanvas", at=(40.0, 40.0), size=(320.0, 180.0)),
+            ax("AXCanvas", title="Game board", at=(40.0, 240.0), size=(200.0, 100.0)),
+            ax("AXImage", title="image", at=(400.0, 40.0), size=(64.0, 64.0)),
+            ax("AXImage", description="Sync status", at=(480.0, 40.0), size=(24.0, 24.0)),
+            ax("AXGroup", at=(40.0, 360.0), size=(180.0, 80.0)),
+            ax("AXGroup", at=(40.0, 460.0), size=(10.0, 10.0)),
+            ax("AXGroup", title="Sidebar", at=(240.0, 360.0), size=(180.0, 80.0)),
+            ax(
+                "AXGroup",
+                at=(440.0, 360.0),
+                size=(120.0, 40.0),
+                children=[button("Inside", (448.0, 364.0))],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    opaque = [el for el in snap.elements if el.role == "opaque_region"]
+    assert len(opaque) == 4
+    assert all(el.clickable and el.ref.startswith("e") for el in opaque)
+    assert all(el.bounds.width > 0 and el.bounds.height > 0 for el in opaque)
+    titled = next(el for el in opaque if el.title == "Game board")
+    assert titled.bounds.width == 400 and titled.bounds.height == 200
+    assert any(el.role == "AXImage" and el.title == "Sync status" for el in snap.elements)
+    assert any(el.role == "AXGroup" and el.title == "Sidebar" for el in snap.elements)
+    spacer = next(
+        el for el in snap.elements
+        if el.role == "AXGroup" and not el.title and el.bounds.width == 20
+    )
+    assert not spacer.clickable
+    assert any(el.title == "Inside" and el.role == "AXButton" for el in snap.elements)
+    assert not any(
+        el.role == "AXGroup" and not el.title and el.value is None and el.bounds.width > 20
+        for el in snap.elements
+    )
+    text = render_text(snap)
+    assert "PIXELWORD" not in text
+    for el in opaque:
+        assert f"{el.ref} opaque_region" in text
+        assert f"[{el.bounds.width}x{el.bounds.height} @" in text
+    interactive = render_text(snap, mode="interactive")
+    assert "opaque_region" in interactive
+    assert f"[{titled.bounds.width}x{titled.bounds.height} @" in interactive
+    assert observe.find_elements(snap, role="opaque_region") == tuple(opaque)
+
+
+def test_chrome_frame_views_stay_groups_and_a_placeholder_image_is_opaque() -> None:
+    """Chrome's own childless views are not page regions.
+
+    A full-window browser view and a childless group that only copies its
+    parent stay groups, so interactive mode does not list them as clickable
+    opaque regions. A canvas, a named canvas, an empty page region, and an
+    image whose name is Chrome's missing-alt placeholder stay opaque. A
+    described image stays an image. Synthetic tree. No live Chrome.
+    """
+    page = ax(
+        "AXGroup",
+        title="F117",
+        at=(0.0, 86.0),
+        size=(1271.0, 709.0),
+        focused=True,
+        children=[
+            ax("AXCanvas", at=(12.0, 153.0), size=(302.0, 123.0)),
+            ax("AXCanvas", title="Game board", at=(318.0, 175.0), size=(200.0, 101.0)),
+            ax(
+                "AXImage",
+                title="To get missing image descriptions, open the context menu.",
+                at=(12.0, 300.0),
+                size=(64.0, 65.0),
+            ),
+            ax("AXImage", description="Sync status", at=(100.0, 300.0), size=(24.0, 24.0)),
+            ax("AXGroup", at=(40.0, 400.0), size=(180.0, 80.0)),
+            ax("AXGroup", at=(0.0, 86.0), size=(1271.0, 709.0)),
+        ],
+    )
+    tree = ax(
+        "AXWindow",
+        title="F117 - Google Chrome",
+        at=(0.0, 0.0),
+        size=(1280.0, 800.0),
+        children=[
+            ax(
+                "AXGroup",
+                at=(0.0, 40.0),
+                size=(1271.0, 755.0),
+                browser_chrome=True,
+            ),
+            ax(
+                "AXGroup",
+                at=(0.0, 0.0),
+                size=(1271.0, 36.0),
+                browser_chrome=True,
+            ),
+            ax(
+                "AXGroup",
+                at=(0.0, 86.0),
+                size=(1271.0, 709.0),
+                children=[
+                    ax(
+                        "AXGroup",
+                        at=(0.0, 86.0),
+                        size=(1271.0, 709.0),
+                        browser_chrome=True,
+                    ),
+                    page,
+                    ax("AXButton", title="Marker", at=(20.0, 100.0), size=(80.0, 30.0), actions=("AXPress",)),
+                ],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    opaque = [el for el in snap.elements if el.role == "opaque_region"]
+    assert len(opaque) == 4
+    assert all(el.clickable for el in opaque)
+    window = snap.element("e1")
+    assert all(el.bounds.width < window.bounds.width - 20 for el in opaque)
+    assert any(el.title == "Game board" for el in opaque)
+    assert not any("context menu" in (el.title or "") for el in snap.elements)
+    assert any(el.role == "AXImage" and el.title == "Sync status" for el in snap.elements)
+    wide = [
+        el for el in snap.elements
+        if el.role == "AXGroup" and not el.title and el.bounds.width >= 2000
+    ]
+    assert len(wide) >= 3
+    assert all(not el.clickable for el in wide)
+    interactive = render_text(snap, mode="interactive")
+    assert interactive.count("opaque_region") == 4
+    assert "Marker" in interactive
+    assert "context menu" not in interactive
+    assert observe.find_elements(snap, role="opaque_region") == tuple(opaque)
 
 
 def test_controls_inside_an_empty_text_container_are_kept() -> None:
@@ -233,6 +382,46 @@ def test_find_treats_nbsp_as_a_space() -> None:
     )
     snap = snap_of(tree)
     assert observe.find_elements(snap, text="quick brown fox")
+
+
+def _ranked(role: str, title: str, **kwargs) -> Element:
+    return Element(
+        ref=kwargs.pop("ref", "e1"),
+        role=role,
+        title=title,
+        value=kwargs.pop("value", None),
+        bounds=Bounds(0, 10, 20, 80, 16),
+        snapshot_id="s",
+        clickable=kwargs.pop("clickable", False),
+        subrole=kwargs.pop("subrole", None),
+    )
+
+
+def test_exact_control_names_outrank_a_label_that_mentions_them() -> None:
+    """Ranking for find and scroll_to_find. Not a live tree.
+
+    A cell titled with the needle wins over a label that only mentions it.
+    The label is left out when it is the only hit. An exact label title, a
+    paragraph value, a button substring, and a field value stay.
+    """
+    label = _ranked(
+        "AXStaticText", "See ROW-05000 in the list",
+        subrole="label", ref="e1",
+    )
+    cell = _ranked("AXCell", "ROW-05000", clickable=True, ref="e2")
+    ranked = observe.prefer_exact_targets((label, cell), "ROW-05000")
+    assert [el.ref for el in ranked] == ["e2"]
+    assert observe.prefer_exact_targets((label,), "ROW-05000") == ()
+    welcome = _ranked("AXStaticText", "Welcome back", subrole="label")
+    assert observe.prefer_exact_targets((welcome,), "Welcome back") == (welcome,)
+    paragraph = _ranked("AXStaticText", "", value="The quick brown fox jumps")
+    assert observe.prefer_exact_targets((paragraph,), "quick brown fox") == (paragraph,)
+    button = _ranked("AXButton", "Save document", clickable=True)
+    assert observe.prefer_exact_targets((button,), "Save") == (button,)
+    field = _ranked("AXTextField", "Name", value="Alice")
+    assert observe.prefer_exact_targets((field,), "Alice") == (field,)
+    spaced = _ranked("AXStaticText", "Welcome\u00a0back", subrole="label")
+    assert observe.prefer_exact_targets((spaced,), "Welcome back") == (spaced,)
 
 
 def test_single_child_wrappers_collapse() -> None:
@@ -379,6 +568,71 @@ def test_render_text_is_compact_and_within_budget() -> None:
     assert estimate_tokens(snap) <= 1000, "typical window must fit the ~1k token budget"
 
 
+def test_render_keeps_line_breaks_in_the_value_and_escapes_them_on_one_line() -> None:
+    """A textarea value keeps its newlines. Compact output escapes them.
+
+    Mousepad and FeatherPad store ``AAA\\nBBB\\nCCC``. The snapshot field
+    used to print that as ``AAA BBB CCC``. The element value stays the real
+    breaks. The one-line field writes ``\\n`` and ``\\r``. A value with no
+    break, including a backslash, is unchanged. A folded static line and a
+    diff field use the same escape so they stay one line.
+    """
+    window = ax(
+        "AXWindow", title="Mousepad", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Document body", value="AAA\nBBB\nCCC",
+                at=(10.0, 40.0), size=(760.0, 500.0), focused=True,
+            ),
+            ax(
+                "AXTextArea", title="crlf", value="AAA\r\nBBB",
+                at=(10.0, 40.0), size=(200.0, 40.0),
+            ),
+            ax(
+                "AXTextField", title="path", value="C:\\notes",
+                at=(10.0, 10.0), size=(200.0, 24.0),
+            ),
+            ax(
+                "AXTextField", title="slash-n", value="A\\B\nC",
+                at=(10.0, 10.0), size=(200.0, 24.0),
+            ),
+            ax(
+                "AXStaticText", value="Line1\nLine2",
+                at=(10.0, 560.0), size=(200.0, 20.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    body = by_title(snap, "Document body")
+    crlf = by_title(snap, "crlf")
+    path = by_title(snap, "path")
+    slash = by_title(snap, "slash-n")
+    assert body.value == "AAA\nBBB\nCCC"
+    assert crlf.value == "AAA\r\nBBB"
+    assert path.value == "C:\\notes"
+    assert slash.value == "A\\B\nC"
+    rendered = render_text(snap)
+    assert '="AAA\\nBBB\\nCCC"' in rendered
+    assert '="AAA BBB CCC"' not in rendered
+    assert '="AAA\\r\\nBBB"' in rendered
+    assert '="C:\\notes"' in rendered
+    assert '="A\\\\B\\nC"' in rendered
+    body_line = next(line for line in rendered.splitlines() if "Document body" in line)
+    assert body_line.count("\n") == 0
+    interactive = render_text(snap, mode="interactive")
+    assert '="AAA\\nBBB\\nCCC"' in interactive
+    assert 'text: "Line1\\nLine2"' in interactive
+    assert "Line1 Line2" not in interactive
+    previous = dataclasses.replace(body, value="AAA", snapshot_id="old")
+    diff = observe.SnapshotDiff(
+        "old", snap.snapshot_id, (), (),
+        ((previous, body, {"value": ("AAA", "AAA\nBBB\nCCC")}),),
+    )
+    change = next(line for line in observe.render_diff(diff).splitlines() if line.startswith("  ~"))
+    assert "AAA\\nBBB\\nCCC" in change
+    assert "AAA BBB" not in change
+
+
 def test_estimate_tokens_works_on_foreign_snapshots(synthetic_snapshot: Snapshot) -> None:
     # conftest's snapshot was not built by observe: no epoch metadata, no
     # markers — rendering and the estimate must still work.
@@ -414,6 +668,95 @@ def test_resolve_ref_follows_moved_element_across_epochs() -> None:
     assert resolved.bounds == by_title(live, "Save").bounds
 
 
+def _with_identity(
+    snap: Snapshot, *, instance_id: str | None, document_id: str | None,
+) -> Snapshot:
+    elements = tuple(
+        dataclasses.replace(el, instance_id=instance_id, document_id=document_id)
+        for el in snap.elements
+    )
+    return dataclasses.replace(snap, elements=elements)
+
+
+def test_normalize_document_title_strips_one_modified_marker() -> None:
+    assert observe.normalize_document_title("*/tmp/a.txt - Mousepad") == "/tmp/a.txt - Mousepad"
+    assert observe.normalize_document_title("/tmp/a.txt - Mousepad") == "/tmp/a.txt - Mousepad"
+    assert observe.normalize_document_title("*Untitled 1 - Mousepad") == "Untitled 1 - Mousepad"
+
+
+def test_relaunched_process_ref_is_stale_and_names_no_replacement() -> None:
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    live = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:11|start:200|bus::1.9",
+        document_id="title:/tmp/b.txt - Mousepad",
+    )
+    ref = by_title(old, "Save").ref
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(old, ref, live=live)
+    err = exc.value
+    assert err.code is ErrorCode.STALE_REF
+    assert err.detail["reason"] == "app_restarted"
+    assert err.detail["candidates"] == []
+    assert err.detail["next"] == ["ref"]
+    assert "Nothing was changed" in err.message
+
+
+def test_same_process_and_document_still_resolves() -> None:
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    live = _with_identity(
+        snap_of(save_window(save_at=(240.0, 120.0))),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    resolved = resolve_ref(old, by_title(old, "Save").ref, live=live)
+    assert resolved.title == "Save"
+    assert resolved.snapshot_id == live.snapshot_id
+
+
+def test_different_document_in_the_same_process_is_stale() -> None:
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    live = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/b.txt - Mousepad",
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(old, by_title(old, "Save").ref, live=live)
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "document_changed"
+    assert exc.value.detail["candidates"] == []
+
+
+def test_browser_window_title_change_still_resolves() -> None:
+    """A tab title is not a file path. Switching tabs must not be app_restarted."""
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:Form Probe - Google Chrome",
+    )
+    live = _with_identity(
+        snap_of(save_window(save_at=(240.0, 120.0))),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:Other Probe - Google Chrome",
+    )
+    resolved = resolve_ref(old, by_title(old, "Save").ref, live=live)
+    assert resolved.title == "Save"
+    assert resolved.snapshot_id == live.snapshot_id
+
+
 def test_resolve_ref_raises_structured_stale_ref() -> None:
     old = snap_of(save_window())
     save_ref = by_title(old, "Save").ref
@@ -447,6 +790,21 @@ def test_resolve_ref_ambiguous_twins_are_stale() -> None:
         resolve_ref(old, by_title(old, "Save").ref, live=live)
     assert exc.value.code is ErrorCode.STALE_REF
     assert exc.value.detail["reason"] == "ambiguous"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc start time")
+def test_process_instance_id_is_pid_and_start_time() -> None:
+    from a11y_computer_use.drivers._atspi import process_instance_id
+
+    token = process_instance_id(os.getpid())
+    assert token is not None
+    assert token == process_instance_id(os.getpid())
+    pid_part, start_part = token.split("|", 1)
+    assert pid_part == f"pid:{os.getpid()}"
+    assert start_part.startswith("start:")
+    assert start_part.removeprefix("start:").isdigit()
+    assert process_instance_id(0) is None
+    assert process_instance_id(-1) is None
 
 
 def test_resolve_ref_unknown_ref_is_a_key_error() -> None:
@@ -616,6 +974,31 @@ def test_spreadsheet_addresses_keep_b2_and_cell_text() -> None:
     assert "… " not in render_text(snap)
 
 
+def test_flat_sheet_still_caps_at_96_addresses() -> None:
+    """A flat address grid keeps the first 96 cells. Synthetic tree.
+
+    The Linux walker bands a taller on-screen window so this cap does not
+    drop rows below row 6. A single flat list still stops at 96: that is
+    the token bound for a dump that is not already the visible window.
+    """
+    cells = []
+    for row in range(1, 9):
+        for col in range(16):
+            title = f"{chr(ord('A') + col)}{row}"
+            cells.append(ax(
+                "AXCell", title=title,
+                at=(40.0 + col * 20.0, 80.0 + row * 18.0), size=(18.0, 16.0),
+            ))
+    assert len(cells) == 128
+    table = ax("AXTable", title="Sheet", at=(20.0, 60.0), size=(400.0, 400.0), children=cells)
+    root = ax("AXWindow", title="Calc", at=(0.0, 0.0), size=(800.0, 600.0), children=[table])
+    snap = build_snapshot(root, DictAccessor(), scope=Scope.WINDOW, app="soffice", pid=1, geometry=GEOMETRY)
+    titles = {el.title for el in snap.elements}
+    assert "A1" in titles and "B2" in titles and "P6" in titles
+    assert "A7" not in titles
+    assert f"… {128 - observe.SHEET_MAX_CHILDREN} more" in render_text(snap)
+
+
 def test_calendar_day_numbers_stay_on_the_dense_cap() -> None:
     cells = [
         ax("AXCell", title=str(day), at=(10.0, 10.0 + day), size=(20.0, 16.0))
@@ -731,6 +1114,114 @@ def test_find_matches_text_past_the_value_clip() -> None:
     assert all(el.value is None for el in snap.elements if el.secure)
     rendered = observe.render_matches(snap, observe.find_elements(snap, text=token))
     assert "1 match" in rendered and token not in rendered
+
+
+def test_terminal_snapshot_shows_the_screen_and_find_matches_it() -> None:
+    """A VTE value past the 48-character render cap stays in the snapshot.
+
+    The marker sits past the old head clip. The rendered line and find
+    both see it. A normal text area is still clipped at the head.
+    """
+    marker = "MARKER386"
+    head = "user@host:~$ " + ("H" * 40) + "\n"
+    body = head + "echo " + marker + "\n" + marker + "\n" + ("\n" * 12)
+    assert marker not in body[: observe._RENDER_VALUE_CHARS]
+    window = ax(
+        "AXWindow", title="cuvte386", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Terminal", subrole="terminal", value=body,
+                at=(10.0, 40.0), size=(760.0, 500.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    assert area.subrole == "terminal"
+    assert area.value is not None and marker in area.value
+    assert not area.value.endswith("\n")
+    rendered = observe.render_text(snap)
+    assert marker in rendered
+    matches = observe.find_elements(snap, text=marker)
+    assert [el.ref for el in matches] == [area.ref]
+    assert marker in observe.render_matches(snap, matches)
+
+
+def test_terminal_over_the_cap_keeps_the_tail_for_find() -> None:
+    """A buffer longer than the terminal cap shows its tail, with a leading ellipsis.
+
+    Find still searches the omitted head. That match is above the view.
+    The on-screen marker is not.
+    """
+    dropped = "DROPPEDHEAD"
+    marker = "TAILMARKER"
+    body = dropped + "\n" + ("x" * observe._TERMINAL_VALUE_CHARS) + "\n" + marker
+    window = ax(
+        "AXWindow", title="cuvte386", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Terminal", subrole="terminal", value=body,
+                at=(10.0, 40.0), size=(760.0, 500.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    assert area.value is not None
+    assert area.value.startswith("…")
+    assert marker in area.value
+    assert dropped not in area.value
+    assert len(area.value) <= observe._TERMINAL_VALUE_CHARS
+    rendered = observe.render_text(snap)
+    assert marker in rendered and dropped not in rendered
+    assert [el.ref for el in observe.find_elements(snap, text=marker)] == [area.ref]
+    assert [el.ref for el in observe.find_elements(snap, text=dropped)] == [area.ref]
+    hidden = observe.render_matches(snap, observe.find_elements(snap, text=dropped), text=dropped)
+    assert "above the view" in hidden and dropped not in (area.value or "")
+    shown = observe.render_matches(snap, observe.find_elements(snap, text=marker), text=marker)
+    assert marker in shown and "above the view" not in shown and "off-screen" not in shown
+
+
+def test_terminal_find_matches_text_only_in_the_scrolled_off_head() -> None:
+    """Find still matches a token that exists only above the terminal view.
+
+    The snapshot value is the on-screen text, with a leading ellipsis. The
+    scrolled-off head is not in that value or in the rendered tree. Find
+    returns the terminal and says the match is above the view. A marker on
+    the screen does not get that note.
+    """
+    scrolled = "SCROLLEDHEAD"
+    marker = "MARKER386"
+    screen = "visible row\n" + marker + "\n"
+    body = scrolled + "\n" + ("older line\n" * 30) + screen
+    assert scrolled not in screen and marker not in body[: len(scrolled) + 1]
+    window = ax(
+        "AXWindow", title="cuvte386", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Terminal", subrole="terminal",
+                value=body, screen_text="…" + screen,
+                at=(10.0, 40.0), size=(760.0, 500.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    assert area.subrole == "terminal"
+    assert area.value is not None
+    assert area.value.startswith("…")
+    assert marker in area.value
+    assert scrolled not in area.value
+    rendered = observe.render_text(snap)
+    assert marker in rendered and scrolled not in rendered
+    hidden = observe.find_elements(snap, text=scrolled)
+    assert [el.ref for el in hidden] == [area.ref]
+    hidden_line = observe.render_matches(snap, hidden, text=scrolled)
+    assert "above the view" in hidden_line and scrolled not in (area.value or "")
+    shown = observe.render_matches(
+        snap, observe.find_elements(snap, text=marker), text=marker,
+    )
+    assert marker in shown and "above the view" not in shown and "off-screen" not in shown
 
 
 # ---------------------------------------------------------------------------
@@ -1111,6 +1602,64 @@ def test_budget_truncates_deterministically_and_reports_omissions() -> None:
     assert estimate_tokens(snap, mode="interactive") < estimate_tokens(snap)
 
 
+def test_several_windows_share_a_budget_and_mark_the_active_one() -> None:
+    """The active window is first and marked. A tight budget still lists the other window."""
+    editor = ax(
+        "AXWindow", title="Editor", at=(0.0, 0.0), size=(400.0, 300.0),
+        children=[button(f"Row {i}", (10.0, 40.0 + 16.0 * i)) for i in range(12)],
+    )
+    preferences = ax(
+        "AXDialog", title="Preferences", at=(500.0, 40.0), size=(240.0, 160.0),
+        children=[button("Font", (16.0, 40.0))],
+    )
+    accessor = DictAccessor()
+    editor_snap = build_snapshot(
+        editor, accessor, scope=Scope.WINDOW, app="mousepad", pid=9, geometry=GEOMETRY,
+    )
+    dialog_snap = build_snapshot(
+        preferences, accessor, scope=Scope.WINDOW, app="mousepad", pid=9, geometry=GEOMETRY,
+    )
+    merged = observe.merge_window_snapshots(
+        [editor_snap, dialog_snap], scope=Scope.WINDOW, app="mousepad", pid=9,
+    )
+    assert merged.app == "mousepad" and merged.pid == 9 and merged.scope is Scope.WINDOW
+    assert merged.elements[0].title == "Editor" and merged.elements[0].parent is None
+    assert any(el.title == "Preferences" and el.parent is None for el in merged.elements)
+    font = next(el for el in merged.elements if el.title == "Font")
+    assert observe.ax_handle_for(merged.snapshot_id, font.ref)["title"] == "Font"
+    full = render_text(merged)
+    assert "(active)" not in render_text(editor_snap)
+    assert full.index("Editor") < full.index("Preferences")
+    assert "Font" in full and "Row 11" in full
+    active_lines = [ln for ln in full.splitlines() if "(active)" in ln]
+    assert len(active_lines) == 1 and "Editor" in active_lines[0]
+    cut = render_text(merged, budget=80)
+    assert "truncated at" not in cut
+    assert "Font" in cut and "Preferences" in cut
+    assert cut.index("Editor") < cut.index("Preferences")
+    assert "… " in cut[:cut.index("Preferences")] and " more" in cut[:cut.index("Preferences")]
+    assert any("(active)" in ln and "Editor" in ln for ln in cut.splitlines())
+
+
+def test_discarded_window_epochs_do_not_evict_the_merged_handles() -> None:
+    snaps = []
+    for index in range(6):
+        snaps.append(snap_of(ax(
+            "AXWindow", title=f"W{index}", at=(0.0, 0.0), size=(200.0, 100.0),
+            children=[button(f"B{index}", (10.0, 10.0))],
+        )))
+    merged = observe.merge_window_snapshots(
+        snaps, scope=Scope.WINDOW, app="app", pid=1,
+    )
+    for snap in snaps:
+        observe.discard_epoch(snap.snapshot_id)
+    kept = next(el for el in merged.elements if el.title == "B5")
+    for _ in range(observe._MAX_EPOCHS - 1):
+        snap_of(ax("AXWindow", title="later", at=(0.0, 0.0), size=(100.0, 80.0)))
+    assert observe.ax_handle_for(merged.snapshot_id, kept.ref)["title"] == "B5"
+    assert observe.ax_handle_for(snaps[0].snapshot_id, snaps[0].elements[0].ref) is None
+
+
 def test_render_text_rejects_unknown_mode() -> None:
     snap = snap_of(save_window())
     with pytest.raises(ValueError):
@@ -1367,3 +1916,129 @@ def test_value_is_binding_for_text_like_roles() -> None:
     with pytest.raises(ComputerUseError) as exc:
         resolve_ref(before, anchor.ref, live=after)
     assert exc.value.detail["reason"] == "title_changed"
+
+
+def test_optgroup_labels_render_as_group_lines() -> None:
+    """A select's optgroup labels stay group lines in both snapshot views."""
+    def item(title, y):
+        return ax("AXMenuItem", title=title, at=(40.0, y), size=(160.0, 22.0), actions=("AXPress",))
+
+    tree = ax(
+        "AXWindow", title="Page", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXComboBox", title="Fruit", value="Apple", expanded=False,
+                at=(20.0, 20.0), size=(180.0, 28.0), actions=("AXPress",),
+                children=[
+                    ax(
+                        "AXMenu", at=(20.0, 48.0), size=(180.0, 110.0),
+                        children=[
+                            ax(
+                                "AXGroup", title="Red", at=(20.0, 48.0), size=(180.0, 50.0),
+                                children=[item("Apple", 50.0), item("Cherry", 74.0)],
+                            ),
+                            ax(
+                                "AXGroup", title="Yellow", at=(20.0, 100.0), size=(180.0, 50.0),
+                                children=[item("Banana", 102.0), item("Lemon", 126.0)],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    full = render_text(snap)
+    interactive = render_text(snap, mode="interactive")
+    for rendered in (full, interactive):
+        assert 'group "Red"' in rendered
+        assert 'group "Yellow"' in rendered
+        assert 'menuitem "Lemon"' in rendered
+    red = next(el for el in snap.elements if el.title == "Red")
+    assert red.role == "AXGroup"
+    assert any(el.title == "Lemon" and el.parent == next(
+        group.ref for group in snap.elements if group.title == "Yellow"
+    ) for el in snap.elements)
+
+
+def test_expand_start_index_passes_the_listed_run() -> None:
+    """The next page resumes at the cursor, or at the first hole with none.
+
+    A later listed name does not skip the children in front of it. A
+    positive cursor is that index exactly, even when the snapshot also
+    shows a name further down the list.
+    """
+    names = [f"P{index:02d}" for index in range(1, 65)]
+    shown = set(names[:19]) | set(names[35:40])
+    assert observe.expand_start_index(names, shown, 0) == 19
+    assert observe.expand_start_index(names, shown, 20) == 20
+    assert observe.expand_start_index(names, set(names[:33]), 0) == 33
+    assert observe.expand_start_index(names, set(names[33:57]), 33) == 33
+    assert observe.expand_start_index(names, shown, 40) == 40
+
+
+def test_expand_page_keeps_an_offscreen_child() -> None:
+    """A marked child below the display stays in the snapshot.
+
+    The same node is dropped when the accessor does not ask for it, and a
+    GTK off-screen sentinel stays dropped even when it is marked.
+    """
+
+    class Keep(DictAccessor):
+        def keep_offscreen(self, node: object) -> bool:
+            assert isinstance(node, dict)
+            return node.get("title") in {"Paragraph 40", "Parked"}
+
+    below = ax(
+        "AXStaticText", title="Paragraph 40", at=(10.0, 2000.0), size=(200.0, 20.0),
+    )
+    parked = ax(
+        "AXStaticText", title="Parked", at=(10.0, -2_100_000_000.0), size=(80.0, 20.0),
+    )
+    tree = ax(
+        "AXWindow", title="Doc", at=(0.0, 0.0), size=(400.0, 500.0),
+        children=[
+            ax(
+                "AXGroup", title="Body", at=(0.0, 40.0), size=(400.0, 400.0),
+                children=[below, parked],
+            ),
+        ],
+    )
+    kept = build_snapshot(
+        tree, Keep(), scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY,
+    )
+    assert any(el.title == "Paragraph 40" for el in kept.elements)
+    assert all(el.title != "Parked" for el in kept.elements)
+    dropped = build_snapshot(
+        tree, DictAccessor(), scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY,
+    )
+    assert all(el.title != "Paragraph 40" for el in dropped.elements)
+
+
+def test_unlisted_children_are_folded_on_the_parent() -> None:
+    """A table that only publishes its visible rows still records the rest."""
+
+    class Unlisted(DictAccessor):
+        def take_unlisted(self, node: object) -> int:
+            assert isinstance(node, dict)
+            if node.get("title") == "Rows":
+                return 93
+            return 0
+
+    rows = [
+        ax("AXStaticText", title=f"Row {index:03d}", at=(10.0, 40.0 + index), size=(80.0, 1.0))
+        for index in range(1, 11)
+    ]
+    tree = ax(
+        "AXWindow", title="Doc", at=(0.0, 0.0), size=(400.0, 500.0),
+        children=[
+            ax("AXTable", title="Rows", at=(0.0, 30.0), size=(200.0, 400.0), children=rows),
+        ],
+    )
+    snap = build_snapshot(
+        tree, Unlisted(), scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY,
+    )
+    folded = observe.folded_children(snap)
+    assert folded == ((by_title(snap, "Rows").ref, 93),)
+    assert "… 93 more" in render_text(snap)
+    assert "Row 001" in observe.render_subtree(snap, by_title(snap, "Rows").ref)

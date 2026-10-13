@@ -129,6 +129,89 @@ def _comm_for_pid(pid: int) -> str | None:
         return None
 
 
+# ``/proc/<pid>/comm`` is at most 15 bytes (TASK_COMM_LEN includes the NUL).
+_COMM_MAX = 15
+
+
+def _cmdline_basename(pid: int) -> str | None:
+    """argv[0] basename from ``/proc/<pid>/cmdline``, or None."""
+    if not pid:
+        return None
+    try:
+        raw = open(f"/proc/{int(pid)}/cmdline", "rb").read()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    field = raw.split(b"\x00", 1)[0]
+    if not field:
+        return None
+    name = os.path.basename(field.decode("utf-8", "replace")).strip()
+    return name or None
+
+
+def _exe_basename(pid: int) -> str | None:
+    """Basename of ``/proc/<pid>/exe``, or None when the link cannot be read."""
+    if not pid:
+        return None
+    try:
+        target = os.readlink(f"/proc/{int(pid)}/exe")
+    except OSError:
+        return None
+    name = os.path.basename(target).strip()
+    if name.endswith(" (deleted)"):
+        name = name[: -len(" (deleted)")].strip()
+    return name or None
+
+
+def _comm_cuts(name: str, comm: str) -> bool:
+    """True when ``comm`` is ``name`` or the kernel's 15-byte cut of ``name``.
+
+    The cut is byte-exact. A different program that merely shares a prefix
+    (``gnome-text-editor-nightly`` versus ``gnome-text-editor``) is not this
+    name, even though both comms are ``gnome-text-edit``.
+    """
+    if not name or not comm:
+        return False
+    if name == comm:
+        return True
+    try:
+        raw = name.encode("utf-8")
+        cut = comm.encode("utf-8")
+    except UnicodeError:
+        return False
+    return len(cut) == _COMM_MAX and len(raw) > _COMM_MAX and raw.startswith(cut)
+
+
+def _identity_for_pid(pid: int, comm: str | None) -> str | None:
+    """Program name grants and listings use for ``pid``.
+
+    When ``comm`` is the 15-byte cut of the cmdline argv0 or the exe basename,
+    that full name is the id. cmdline wins when both are the same extension.
+    When they name two different longer programs, ``comm`` is kept: picking
+    either one would grant a program the user did not name. A short comm
+    (``chrome``, ``gedit``) is unchanged, and so is a pid whose cmdline and
+    exe cannot be read.
+    """
+    if not comm or len(comm.encode("utf-8", "replace")) != _COMM_MAX:
+        return comm
+    if not pid:
+        return comm
+    cmdline = _cmdline_basename(pid)
+    exe = _exe_basename(pid)
+
+    def extends(name: str | None) -> bool:
+        return bool(name) and name != comm and _comm_cuts(name, comm)
+
+    if extends(cmdline) and extends(exe) and cmdline != exe:
+        return comm
+    if extends(cmdline):
+        return cmdline
+    if extends(exe):
+        return exe
+    return comm
+
+
 # A client can map a window before ``_NET_WM_PID`` is visible on another
 # connection. One read then reports pid 0 and the app id falls back to
 # WM_CLASS. Wait once per window id, then remember that it stayed unset so
@@ -234,9 +317,17 @@ def _is_dialog_window(win, d) -> bool:
 
 
 def _app_id(win, d, *, settle: bool = False) -> str:
-    """Permission-keying app id: process comm, else the WM_CLASS instance."""
+    """Permission-keying app id: full program name, else comm, else WM_CLASS.
+
+    The full name comes from ``/proc/<pid>/cmdline`` or the exe when the
+    kernel comm is that name's 15-byte cut. A short comm is the id, which is
+    how ``chrome`` stays ``chrome``.
+    """
     pid = _settled_pid(win, d) if settle else _pid_of(win, d)
-    return _comm_for_pid(pid) or _wm_class_instance(win, d)
+    comm = _comm_for_pid(pid)
+    if comm:
+        return _identity_for_pid(pid, comm) or comm
+    return _wm_class_instance(win, d)
 
 
 def _atom_is(candidate, expected) -> bool:
@@ -323,11 +414,13 @@ def _geometry_on_root(win, d):
 
 
 def frontmost_app_id() -> str:
-    """comm name of the active window's owner (e.g. "gedit"); "" if undetectable.
+    """App id of the active window's owner; "" if undetectable.
 
-    This is the process comm only. A window with no pid is not a frontmost
-    app here, even when ``active_window`` can still name it by WM_CLASS.
-    A missing python-xlib is an error, not an empty frontmost app.
+    The id is the full program name when ``/proc/<pid>/comm`` is the 15-byte
+    cut of that name (``gnome-text-editor``, not ``gnome-text-edit``). A short
+    comm stays the comm. A window with no pid is not a frontmost app here,
+    even when ``active_window`` can still name it by WM_CLASS. A missing
+    python-xlib is an error, not an empty frontmost app.
     """
     from a11y_computer_use.schema import ComputerUseError
 
@@ -337,7 +430,11 @@ def frontmost_app_id() -> str:
             if not active:
                 return ""
             win = d.create_resource_object("window", int(active[0]))
-            return _comm_for_pid(_pid_of(win, d)) or ""
+            pid = _pid_of(win, d)
+            comm = _comm_for_pid(pid)
+            if not comm:
+                return ""
+            return _identity_for_pid(pid, comm) or ""
     except ComputerUseError:
         raise
     except Exception:
@@ -371,18 +468,33 @@ def active_window() -> dict | None:
         return None
 
 
+def _window_at_point(d, x: float, y: float):
+    """Topmost on-screen managed window containing a screen point, or None.
+
+    A minimized window keeps the rectangle it had before it was iconified.
+    That rectangle is not on screen, so it is not a hit and not a cover.
+    """
+    for win in reversed(_managed_windows(d)):  # topmost first
+        if _is_hidden(win, d):
+            continue
+        geom = _geometry_on_root(win, d)
+        if geom is None:
+            continue
+        gx, gy, gw, gh = geom
+        if gx <= x < gx + gw and gy <= y < gy + gh:
+            return win
+    return None
+
+
 def _top_window_pid(x: float, y: float) -> int | None:
     """Pid of the topmost client window containing a screen point, or None."""
     try:
         with _open_display() as d:
-            for win in reversed(_managed_windows(d)):  # topmost first
-                geom = _geometry_on_root(win, d)
-                if geom is None:
-                    continue
-                gx, gy, gw, gh = geom
-                if gx <= x < gx + gw and gy <= y < gy + gh:
-                    pid = _pid_of(win, d)
-                    return int(pid) if pid else None
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            pid = _pid_of(win, d)
+            return int(pid) if pid else None
     except ComputerUseError:
         raise
     except Exception:
@@ -391,16 +503,40 @@ def _top_window_pid(x: float, y: float) -> int | None:
 
 
 def app_at_point_id(x: float, y: float) -> str | None:
-    """comm name of the topmost window containing a screen point (act-time hit-test)."""
-    pid = _top_window_pid(x, y)
-    if not pid:
+    """App id of the topmost window containing a screen point.
+
+    The process comm when the window has a pid. A Tk or Xt window has no
+    ``_NET_WM_PID``; the hit-test then uses its WM_CLASS instance, the same
+    key ``window focus`` gates on. None when the point hits no window, or
+    the window has neither a comm nor a class.
+    """
+    try:
+        with _open_display() as d:
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            return _app_id(win, d) or None
+    except ComputerUseError:
+        raise
+    except Exception:
         return None
-    return _comm_for_pid(pid)
 
 
 def pid_at_point(x: float, y: float) -> int | None:
     """Pid of the topmost client window containing a screen point."""
     return _top_window_pid(x, y)
+
+
+def window_at_point(x: float, y: float) -> dict | None:
+    """Identity and title of the topmost managed window at a screen point."""
+    try:
+        with _open_display() as d:
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            return {"window_id": int(win.id), "title": _win_title(win, d)}
+    except Exception:
+        return None
 
 
 def _launcher_comm(identifier: str, comm: str) -> bool:
@@ -458,6 +594,60 @@ def _comm_matches_identifier(identifier: str, comm: str) -> bool:
     return False
 
 
+def _identifier_matches_process(identifier: str, identity: str) -> bool:
+    """True when ``identifier`` names the process whose id is ``identity``.
+
+    ``identity`` is the full program name when the comm was its 15-byte cut,
+    and the comm otherwise. A long name matches that exact name, an alias,
+    or the 15-byte comm of that same name. It does not match a different
+    program that shares the prefix, and a shorter token inside the name
+    (``text`` inside ``gnome-text-editor``) is not a match. A short comm
+    keeps the substring and launcher rules ``resolve_app`` already used.
+    """
+    folded = (identity or "").lower()
+    if not folded:
+        return False
+    from a11y_computer_use.app_identity import shares_alias
+
+    if shares_alias(identifier, folded):
+        return True
+    long_name = len(folded.encode("utf-8", "replace")) > _COMM_MAX
+    for needle in _identity_needles(identifier):
+        if needle == folded:
+            return True
+        if long_name:
+            if _comm_cuts(folded, needle):
+                return True
+            if needle.endswith("-" + folded):
+                return True
+            continue
+        if needle in folded or _launcher_comm(needle, folded):
+            return True
+    return False
+
+
+def _unique_identity(identifier: str, hits: list[str]) -> str | None:
+    """The one program ``hits`` name, or None when they disagree.
+
+    One id is that id. An exact spelling of ``identifier`` wins when several
+    windows matched. Two different full names that share a truncated comm are
+    not collapsed into either name.
+    """
+    ordered: list[str] = []
+    for hit in hits:
+        if hit and hit not in ordered:
+            ordered.append(hit)
+    if not ordered:
+        return None
+    if len(ordered) == 1:
+        return ordered[0]
+    wanted = (identifier or "").lower()
+    exact = [hit for hit in ordered if hit.lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    return None
+
+
 def _class_matches_identifier(identifier: str, instance: str, klass: str) -> bool:
     """True when WM_CLASS instance or class is one of ``identifier``'s names."""
     inst = (instance or "").lower()
@@ -475,56 +665,63 @@ def _class_matches_identifier(identifier: str, instance: str, klass: str) -> boo
 
 
 def resolve_app(identifier: str) -> str:
-    """Resolve a window title / comm substring to the owning comm name (the
-    permission-keying id), or the identifier itself if unmatched.
+    """Resolve a window title or program name to the permission-keying id.
 
-    A comm substring wins over a launcher alias, and both win over a window
-    title: ``krita`` stays Krita even when a Chrome tab is titled
-    "Donations | Krita". ``google-chrome`` and "Google Chrome" both resolve to
-    the running ``chrome`` process. An unmatched name is returned unchanged so
-    a grant or a launch can name an app that has no window yet.
+    The id is the full program name when the kernel comm is that name's
+    15-byte cut, and the comm otherwise. ``gnome-text-editor`` stays
+    ``gnome-text-editor``; ``google-chrome`` still resolves to ``chrome``.
+    A comm match wins over a window title: ``krita`` stays Krita even when a
+    Chrome tab is titled "Donations | Krita". Two different programs that
+    share a truncated comm are not collapsed, so a grant for one is not a
+    grant for the other. An unmatched name is returned unchanged so a grant
+    or a launch can name an app that has no window yet.
     """
     needle = (identifier or "").lower()
     if not needle:
         return identifier
+    hits: list[str] = []
     by_class: str | None = None
     by_title: str | None = None
     try:
         with _open_display() as d:
             for win in _managed_windows(d):
-                comm = (_app_id(win, d) or "").lower()
-                if comm and _comm_matches_identifier(identifier, comm):
-                    return comm  # the app itself beats any window that merely names it
+                identity = (_app_id(win, d) or "").lower()
+                if identity and _identifier_matches_process(identifier, identity):
+                    hits.append(identity)
+                    continue
                 instance, klass = _wm_class_strings(win, d)
                 if by_class is None and _class_matches_identifier(identifier, instance, klass):
-                    by_class = comm or instance
-                # A title match is a fallback, never a winner over a comm match:
-                # a Chromium tab "Donations | Krita" stacked above Krita's window
-                # must not turn `krita` into `chrome`. A path matches its
-                # basename in the title the same way the bare name does.
-                if by_title is None and comm:
+                    by_class = identity or instance.lower()
+                # A title match is a fallback, never a winner over a program
+                # match: a Chromium tab "Donations | Krita" stacked above
+                # Krita's window must not turn `krita` into `chrome`. A path
+                # matches its basename in the title the same way the bare
+                # name does.
+                if by_title is None and identity:
                     title = _win_title(win, d).lower()
                     if any(name and name in title for name in _identity_needles(identifier)):
-                        by_title = comm
+                        by_title = identity
     except ComputerUseError:
         raise
     except Exception:
         pass
+    chosen = _unique_identity(identifier, hits)
+    if chosen:
+        return chosen
     return by_class or by_title or identifier
 
 
 def pids_matching(identifier: str) -> set[int]:
-    """PIDs of the managed windows whose owner comm is ``identifier``.
+    """PIDs of the managed windows whose program ``identifier`` names.
 
-    A comm substring matches, and so does a launcher alias (``google-chrome``
-    for comm ``chrome``). Bridges the two Linux identities: the
-    permission-keying app id is the process comm ("python3"), while an AT-SPI
-    application registers under its program name ("cuatestapp"), so a
-    comm-based lookup must find the a11y application by PID, not by name.
-    Titles are deliberately NOT matched here: Runtime already maps a title to
-    its comm via `resolve_app`, and a title match at this layer would let any
-    window whose title merely mentions the app id (a browser tab
-    "gedit - Google Search") hand find_root a foreign application's tree."""
+    The match is the full program name when the comm is its 15-byte cut, and
+    the comm otherwise. A launcher alias (``google-chrome`` for comm
+    ``chrome``) still matches. A different longer program that shares the
+    cut does not. Titles are deliberately NOT matched here: Runtime already
+    maps a title to its id via `resolve_app`, and a title match at this layer
+    would let any window whose title merely mentions the app id (a browser
+    tab "gedit - Google Search") hand find_root a foreign application's tree.
+    """
     needle = (identifier or "").lower()
     pids: set[int] = set()
     if not needle:
@@ -535,8 +732,9 @@ def pids_matching(identifier: str) -> set[int]:
                 pid = _pid_of(win, d)
                 if not pid:
                     continue
-                comm = (_comm_for_pid(pid) or "").lower()
-                if _comm_matches_identifier(identifier, comm):
+                comm = _comm_for_pid(pid) or ""
+                identity = (_identity_for_pid(pid, comm) or comm).lower()
+                if _identifier_matches_process(identifier, identity):
                     pids.add(pid)
     except ComputerUseError:
         raise
@@ -577,8 +775,10 @@ def running_apps() -> list[dict]:
 def windows() -> list[dict]:
     """Managed windows: {window_id, app, title, pid, bounds, on_screen}.
 
-    ``app`` is the process comm, or the WM_CLASS instance when the window has
-    no pid. A missing ``_NET_WM_PID`` is read again before that fallback, so
+    ``app`` is the full program name (or the process comm when that name is
+    not longer than the kernel's 15-byte comm), or the WM_CLASS instance when
+    the window has no pid. A missing ``_NET_WM_PID`` is read again before that
+    fallback, so
     a window that has just mapped does not list pid 0 while the property is
     still arriving. A minimized window (ICCCM iconic or ``_NET_WM_STATE_HIDDEN``) has
     ``on_screen`` false and ``bounds`` null, so a caller does not aim at the
@@ -596,6 +796,58 @@ def windows() -> list[dict]:
     except Exception:
         return rows
     return rows
+
+
+def window_id_for_toplevel(*, title: str, pid: int | None, extents) -> int | None:
+    """X id of the on-screen window that owns an AT-SPI top-level window.
+
+    An exact title within the same pid wins. Several windows with that title,
+    or a window with no title, match the box that overlaps ``extents`` the
+    most. ``extents`` is ``(x, y, width, height)`` in screen pixels. The X
+    client box sits inside the frame, so the match is overlap, not equality.
+    None when nothing on screen matches: the caller still runs the action.
+    """
+    rows = [row for row in windows() if row.get("on_screen") and row.get("bounds")]
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        owned = [row for row in rows if int(row.get("pid") or 0) == int(pid)]
+        if owned:
+            rows = owned
+    titled = (title or "").strip()
+    if titled:
+        named = [row for row in rows if (row.get("title") or "") == titled]
+        if len(named) == 1:
+            return int(named[0]["window_id"])
+        if len(named) > 1:
+            picked = _window_overlapping(named, extents)
+            if picked is not None:
+                return picked
+    return _window_overlapping(rows, extents)
+
+
+def _window_overlapping(rows: list[dict], extents) -> int | None:
+    """Window id whose client box overlaps ``extents`` the most, or None."""
+    if not extents or len(extents) != 4:
+        return None
+    ax, ay, aw, ah = (float(part) for part in extents)
+    if aw <= 0 or ah <= 0:
+        return None
+    best = None
+    best_area = 0.0
+    for row in rows:
+        bounds = row.get("bounds") or {}
+        try:
+            bx = float(bounds["x"])
+            by = float(bounds["y"])
+            bw = float(bounds["width"])
+            bh = float(bounds["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        overlap_w = min(ax + aw, bx + bw) - max(ax, bx)
+        overlap_h = min(ay + ah, by + bh) - max(ay, by)
+        area = max(overlap_w, 0.0) * max(overlap_h, 0.0)
+        if area > best_area:
+            best, best_area = int(row["window_id"]), area
+    return best
 
 
 def _window_rows(d) -> list[dict]:
@@ -930,6 +1182,177 @@ def _frame_insets(win, d) -> tuple[int, int]:
     return left, top
 
 
+def _client_rows_for_pid(d, pid: int) -> list[tuple]:
+    """On-screen ``(window, x, y, width, height)`` rows owned by ``pid``."""
+    rows = []
+    for win in _managed_windows(d):
+        if _is_hidden(win, d):
+            continue
+        owner = _pid_of(win, d)
+        if not owner or int(owner) != int(pid):
+            continue
+        geom = _geometry_on_root(win, d)
+        if geom is None:
+            continue
+        x, y, w, h = geom
+        if w <= 0 or h <= 0:
+            continue
+        rows.append((win, int(x), int(y), int(w), int(h)))
+    return rows
+
+
+def _choose_client_row(rows: list[tuple], width: float | None, height: float | None):
+    """The one row whose origin is known, or None when the windows disagree.
+
+    One window, or several that share an origin, is that origin. A size
+    match breaks a tie between different origins. Anything else is None.
+    """
+    if not rows:
+        return None
+    origins = {(row[1], row[2]) for row in rows}
+    if len(origins) == 1:
+        if width is None or height is None:
+            return rows[0]
+        try:
+            want_w = float(width)
+            want_h = float(height)
+        except (TypeError, ValueError):
+            return rows[0]
+        sized = [
+            row for row in rows
+            if want_w > 0 and want_h > 0
+            and abs(row[3] - want_w) <= 8 and abs(row[4] - want_h) <= 8
+        ]
+        return sized[0] if sized else rows[0]
+    if width is None or height is None:
+        return None
+    try:
+        want_w = float(width)
+        want_h = float(height)
+    except (TypeError, ValueError):
+        return None
+    if want_w <= 0 or want_h <= 0:
+        return None
+    sized = [
+        row for row in rows
+        if abs(row[3] - want_w) <= 8 and abs(row[4] - want_h) <= 8
+    ]
+    unique = {(row[1], row[2]) for row in sized}
+    if len(unique) == 1:
+        return sized[0]
+    return None
+
+
+def client_origin_for_pid(
+    pid: int, width: float | None = None, height: float | None = None,
+) -> tuple[int, int] | None:
+    """X client origin of an on-screen window owned by ``pid``, or None.
+
+    Hidden windows are skipped. One on-screen window is that window, and
+    several windows that share an origin are that origin. Several origins
+    resolve only when ``width`` and ``height`` match one window's client
+    size within a few pixels. Disagreeing origins with no unique size match
+    are None: picking one would place every element in the wrong window.
+    """
+    try:
+        wanted = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if wanted <= 0:
+        return None
+    try:
+        with _open_display() as d:
+            chosen = _choose_client_row(_client_rows_for_pid(d, wanted), width, height)
+    except ComputerUseError:
+        raise
+    except Exception:
+        return None
+    if chosen is None:
+        return None
+    return chosen[1], chosen[2]
+
+
+def _input_shape_rect(d, win):
+    """The window's one X input-shape rectangle, or None.
+
+    A client-side-decorated GTK window is larger than the surface that
+    receives clicks. The input shape is that surface, in window coordinates.
+    A missing extension, or more than one rectangle, is None rather than a
+    guessed margin.
+    """
+    try:
+        if not d.has_extension("SHAPE"):
+            return None
+    except Exception:
+        return None
+    method = getattr(win, "shape_get_rectangles", None)
+    if method is None:
+        return None
+    try:
+        from Xlib.ext import shape
+
+        kind = shape.SK.Input
+    except Exception:
+        kind = 2
+    try:
+        reply = method(kind)
+    except Exception:
+        return None
+    rects = list(getattr(reply, "rectangles", None) or [])
+    if len(rects) != 1:
+        return None
+    rect = rects[0]
+    try:
+        return int(rect.x), int(rect.y), int(rect.width), int(rect.height)
+    except (TypeError, ValueError):
+        return None
+
+
+def gtk4_content_origin(
+    pid: int, width: float | None = None, height: float | None = None,
+) -> tuple[int, int] | None:
+    """Screen origin of a GTK 4 frame inside the X window that owns ``pid``.
+
+    The client origin plus the input-shape offset. When that shape is a few
+    pixels larger than the AT-SPI frame on every side, half the difference
+    is the border between the shape and the frame (a shadow or resize
+    margin). A shape that cannot be read leaves the client origin as it is.
+    None when no on-screen window matches.
+    """
+    try:
+        wanted = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if wanted <= 0:
+        return None
+    try:
+        with _open_display() as d:
+            chosen = _choose_client_row(_client_rows_for_pid(d, wanted), width, height)
+            if chosen is None:
+                return None
+            win, x, y, _w, _h = chosen
+            rect = _input_shape_rect(d, win)
+    except ComputerUseError:
+        raise
+    except Exception:
+        return None
+    if rect is None:
+        return x, y
+    ix, iy, iw, ih = rect
+    dx, dy = ix, iy
+    try:
+        frame_w = float(width) if width is not None else 0.0
+        frame_h = float(height) if height is not None else 0.0
+    except (TypeError, ValueError):
+        frame_w = frame_h = 0.0
+    extra_w = iw - frame_w
+    extra_h = ih - frame_h
+    if frame_w > 0 and frame_h > 0 and 0 <= extra_w <= 48 and 0 <= extra_h <= 48:
+        dx += int(round(extra_w / 2))
+        dy += int(round(extra_h / 2))
+    return int(x + dx), int(y + dy)
+
+
 def client_origin_for_outer_frame(
     x: int, y: int, width: int, height: int, title: str = "",
 ) -> tuple[int, int] | None:
@@ -971,6 +1394,92 @@ def client_origin_for_outer_frame(
         return None
 
 
+# Signed 32-bit range of an EWMH move coordinate. The client-message field
+# is CARD32 on the wire; values outside this range are not a position.
+_INT32_MIN = -1 << 31
+_INT32_MAX = (1 << 31) - 1
+
+
+def _screen_pixels(d) -> tuple[int, int] | None:
+    """(width, height) of this X screen, or None when it publishes none.
+
+    A synthetic display has no ``width_in_pixels``. That absence is not a
+    1280x800 guess, and it is not a reason to widen the range.
+    """
+    try:
+        screen = d.screen()
+        width = screen.width_in_pixels
+        height = screen.height_in_pixels
+    except Exception:
+        return None
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return None
+    if width < 1 or height < 1:
+        return None
+    return width, height
+
+
+def _move_integers(x: object, y: object) -> tuple[int, int]:
+    """``(x, y)`` when both are integers. A bool is not an integer.
+
+    A float is not truncated. Truncating would place the window somewhere
+    other than the coordinate the caller passed.
+    """
+    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+        raise ValueError(f"window move x and y must be integers, got ({x!r}, {y!r})")
+    return x, y
+
+
+def _reject_move_point(x: object, y: object, size: tuple[int, int] | None) -> tuple[int, int]:
+    """The client origin, or ValueError when it is not a pixel we can place.
+
+    With a screen size, valid pixels are 0..width-1 and 0..height-1, the
+    same range as a click. Without one, the point has to be a non-negative
+    signed 32-bit coordinate. Nothing is clamped into range.
+    """
+    px, py = _move_integers(x, y)
+    if size is None:
+        if px < 0 or py < 0 or px > _INT32_MAX or py > _INT32_MAX:
+            raise ValueError(
+                f"window move ({px}, {py}) is outside the signed screen range "
+                f"(valid x and y are 0..{_INT32_MAX})"
+            )
+        return px, py
+    width, height = size
+    if 0 <= px <= width - 1 and 0 <= py <= height - 1:
+        return px, py
+    raise ValueError(
+        f"window move ({px}, {py}) is outside the screen "
+        f"({width}x{height} physical px; "
+        f"valid x is 0..{width - 1}, y is 0..{height - 1})"
+    )
+
+
+def _card32(value: int) -> int:
+    """CARD32 wire form of a signed frame coordinate.
+
+    python-xlib packs client-message data with an unsigned array, which
+    raises ``OverflowError: can't convert negative value to unsigned int``
+    for a negative. EWMH reads the field as signed. The two's-complement
+    bits are that same coordinate, not a clamp to zero. A value outside
+    signed 32-bit is rejected and no message is sent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"window move coordinate must be an integer, got {value!r}")
+    if value < _INT32_MIN or value > _INT32_MAX:
+        raise ValueError(
+            f"window move coordinate {value} is outside the signed 32-bit range"
+        )
+    if value < 0:
+        return value + (1 << 32)
+    return value
+
+
 def move_window(window_id: int, x: int, y: int) -> bool:
     """Move the client window of ``window_id`` so its top-left is (x, y).
 
@@ -978,25 +1487,40 @@ def move_window(window_id: int, x: int, y: int) -> bool:
     with NorthWest gravity places the outer frame, so the request is shifted
     back by ``_NET_FRAME_EXTENTS`` (left, top). A move to (100, 80) with a
     5px border and a 29px title bar sends the frame to (95, 51), and the
-    client then lists at (100, 80). Only the X and Y flags are set, so the
-    window manager keeps the current size. The request is sent again, with
-    fresh frame extents, until the client origin is that point. Returns
-    False when the id is not managed.
+    client then lists at (100, 80). A point inside the title bar makes the
+    frame origin negative. That signed coordinate is sent as a CARD32; it
+    is not clamped to zero, and the client origin stays the one asked for.
+    Only the X and Y flags are set, so the window manager keeps the current
+    size. The request is sent again, with fresh frame extents, until the
+    client origin is that point.
+
+    ``x`` and ``y`` have to be integers. When the display reports a size
+    they also have to be on that screen (0..width-1 and 0..height-1). A
+    float, a bool, a negative, or a point past that edge raises ValueError
+    and sends nothing. Returns False when the id is not managed.
     """
+    _reject_move_point(x, y, None)
     with _with_window(window_id) as (d, win):
+        px, py = _reject_move_point(x, y, _screen_pixels(d))
         if win is None:
             return False
 
         def send() -> None:
-            _restore_if_hidden(d, win)
             left, top = _frame_insets(win, d)
             # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
-            _client_message(
-                d, win, "_NET_MOVERESIZE_WINDOW",
-                [1 | (3 << 8), int(x) - left, int(y) - top, 0, 0],
-            )
+            # Validate the frame origin before any client message, including
+            # the uniconify a hidden window would otherwise receive.
+            data = [
+                1 | (3 << 8),
+                _card32(px - left),
+                _card32(py - top),
+                0,
+                0,
+            ]
+            _restore_if_hidden(d, win)
+            _client_message(d, win, "_NET_MOVERESIZE_WINDOW", data)
 
-        _retry_until(d, send, lambda: _geometry_matches(win, d, x=x, y=y))
+        _retry_until(d, send, lambda: _geometry_matches(win, d, x=px, y=py))
         return True
 
 
@@ -1089,6 +1613,115 @@ def _desktop_entry(identifier: str) -> tuple[str, str] | None:
             path = os.path.join(root, rel)
             if os.path.isfile(path):
                 return entry, path
+    return _desktop_entry_scan(identifier)
+
+
+def _desktop_launch_id(root: str, path: str) -> str:
+    """gtk-launch id for a desktop file under an applications directory.
+
+    ``applications/foo/bar.desktop`` is ``foo-bar.desktop``.
+    """
+    rel = os.path.relpath(path, root)
+    if rel.endswith(".desktop"):
+        rel = rel[: -len(".desktop")]
+    return rel.replace(os.sep, "-") + ".desktop"
+
+
+def _desktop_keys(path: str) -> dict[str, str] | None:
+    """Selected ``[Desktop Entry]`` keys, or None when the file cannot be read."""
+    try:
+        if os.path.getsize(path) > 262144:
+            return None
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return None
+    fields: dict[str, str] = {}
+    in_entry = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_entry = stripped == "[Desktop Entry]"
+            continue
+        if not in_entry or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key in {"Name", "GenericName", "Type", "Hidden", "NoDisplay"} and key not in fields:
+            fields[key] = value.strip()
+    return fields
+
+
+def _desktop_visible(fields: dict[str, str]) -> bool:
+    """False for a hidden, ``NoDisplay``, or non-application entry.
+
+    An exact desktop id still launches those files. A display-name lookup
+    does not.
+    """
+    if fields.get("Type") not in {None, "", "Application"}:
+        return False
+    if fields.get("Hidden", "").casefold() == "true":
+        return False
+    if fields.get("NoDisplay", "").casefold() == "true":
+        return False
+    return True
+
+
+def _desktop_entry_scan(identifier: str) -> tuple[str, str] | None:
+    """Desktop file for ``identifier`` by case-insensitive id, then display name.
+
+    The id is compared case-insensitively after the exact path lookup misses.
+    ``Name`` wins over ``GenericName``. The first installed file in XDG order
+    wins within each. A hidden or ``NoDisplay`` file is skipped here. An exact
+    id still launches that file.
+    """
+    from a11y_computer_use.app_identity import normalize
+
+    want_id = identifier.casefold()
+    if want_id.endswith(".desktop"):
+        want_id = want_id[: -len(".desktop")]
+    want_name = normalize(identifier)
+    generic_hit: tuple[str, str] | None = None
+    for root in _application_dirs():
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                if not filename.endswith(".desktop"):
+                    continue
+                path = os.path.join(dirpath, filename)
+                launch_id = _desktop_launch_id(root, path)
+                stem = launch_id[: -len(".desktop")]
+                fields = _desktop_keys(path)
+                if fields is None or not _desktop_visible(fields):
+                    continue
+                if want_id and stem.casefold() == want_id:
+                    return launch_id, path
+                if not want_name:
+                    continue
+                title = fields.get("Name") or ""
+                if title and normalize(title) == want_name:
+                    return launch_id, path
+                generic = fields.get("GenericName") or ""
+                if generic_hit is None and generic and normalize(generic) == want_name:
+                    generic_hit = (launch_id, path)
+    return generic_hit
+
+
+def _which_program(name: str) -> str | None:
+    """Absolute executable for ``name``.
+
+    The lower-case spelling is tried when the caller's case is not on PATH,
+    so ``Mousepad`` finds ``mousepad``.
+    """
+    if not name:
+        return None
+    found = shutil.which(name)
+    if found:
+        return found
+    folded = name.casefold()
+    if folded != name:
+        found = shutil.which(folded)
+        if found:
+            return found
     return None
 
 
@@ -1124,7 +1757,7 @@ def _desktop_exec(path: str) -> list[str] | None:
     argv = [part for part in parts if not _DESKTOP_FIELD_CODE.match(part)]
     if not argv:
         return None
-    program = shutil.which(argv[0])
+    program = _which_program(argv[0])
     if not program:
         return None
     return [program, *argv[1:]]
@@ -1207,13 +1840,25 @@ def _desktop_match_names(identifier: str, path: str) -> list[str]:
     return names
 
 
-def launch_app(identifier: str) -> dict:
+_OFFICE_WINDOW_NAMES = ("soffice", "soffice.bin", "libreoffice")
+_OFFICE_WRAPPERS = frozenset({"localc", "lowriter", "loimpress", "soffice", "libreoffice"})
+_OFFICE_FLAGS = frozenset({"--calc", "--writer", "--impress"})
+
+
+def launch_app(identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
     """Launch ``identifier`` or raise `ErrorCode.APP_NOT_FOUND` immediately.
 
-    An executable on PATH is started directly. Otherwise a matching desktop
-    file is started with ``gtk-launch``, or with its ``Exec`` line when
-    ``gtk-launch`` is not installed. A name that is neither is not handed to
+    An executable on PATH is started directly. The lookup is case-insensitive,
+    so ``Mousepad`` starts ``mousepad``. Otherwise a desktop file is started
+    with ``gtk-launch``, or with its ``Exec`` line when ``gtk-launch`` is not
+    installed: first by id, then by ``Name``, then by ``GenericName``
+    (``Text Editor``). A name that is none of these is not handed to
     ``xdg-open`` and does not wait for a window.
+
+    ``argv`` starts that program and its arguments instead of ``identifier``.
+    A Calc, Writer, or Impress launch passes ``localc`` or ``soffice --calc``
+    (and the writer and impress equivalents). The handle names include
+    ``soffice.bin``, which is the process that owns the document window.
 
     The return value is a handle: pid, the process (so a caller can see it
     exit), the names a window of this launch may use, and whether the process
@@ -1222,7 +1867,25 @@ def launch_app(identifier: str) -> dict:
     """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
-    executable = shutil.which(identifier) if identifier else None
+    if argv:
+        program = argv[0]
+        executable = shutil.which(program) if program else None
+        if not executable:
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"could not launch {identifier!r}: not on PATH",
+                detail={"app": identifier},
+            )
+        base = os.path.basename(executable)
+        names = [identifier, base, executable]
+        if base in _OFFICE_WRAPPERS or any(part in _OFFICE_FLAGS for part in argv[1:]):
+            names.extend(_OFFICE_WINDOW_NAMES)
+        proc = _spawn([executable, *argv[1:]], identifier)
+        return _launch_handle(
+            proc, identifier, names, is_launcher=base in _LAUNCHER_BASENAMES,
+        )
+
+    executable = _which_program(identifier) if identifier else None
     if executable:
         base = os.path.basename(executable)
         proc = _spawn([executable], identifier)
@@ -1253,21 +1916,64 @@ def launch_app(identifier: str) -> dict:
     )
 
 
-def activate_app(identifier: str) -> str:
-    """Raise+focus a window whose comm/title matches ``identifier`` (EWMH
-    _NET_ACTIVE_WINDOW client message). Returns the resolved app id.
+def _root_screen_size(d) -> tuple[int, int] | None:
+    """Pixel size of the X screen, or None when the display does not say.
 
-    The request is retried until ``_NET_ACTIVE_WINDOW`` stays on that window.
+    Synthetic tests omit ``width_in_pixels``. A missing size is not treated
+    as a zero screen.
+    """
+    try:
+        screen = d.screen()
+        width = int(getattr(screen, "width_in_pixels", 0) or 0)
+        height = int(getattr(screen, "height_in_pixels", 0) or 0)
+    except Exception:
+        return None
+    if width > 0 and height > 0:
+        return width, height
+    return None
+
+
+def _geometry_on_screen(geom, screen: tuple[int, int] | None) -> bool:
+    """Whether ``geom`` (x, y, w, h) meets the screen.
+
+    A box that sits entirely left of or above the origin does not. When the
+    screen size is known, a box that starts at or past the far edge does not
+    either. When the size is missing, a positive box that reaches the origin
+    side counts, so a test double without ``width_in_pixels`` still focuses
+    a window at (10, 20).
+    """
+    if geom is None:
+        return False
+    try:
+        x, y, width, height = (int(geom[0]), int(geom[1]), int(geom[2]), int(geom[3]))
+    except (TypeError, ValueError, IndexError):
+        return False
+    if width <= 0 or height <= 0:
+        return False
+    if x + width <= 0 or y + height <= 0:
+        return False
+    if screen is None:
+        return True
+    return x < screen[0] and y < screen[1]
+
+
+def activate_app(identifier: str) -> str:
+    """Raise+focus the topmost on-screen window matching ``identifier``.
+
+    Stacking is bottom to top, so the last on-screen match is the front
+    window. A minimized window and a window whose box misses the screen are
+    not that match. When every match is hidden or off the display, this
+    raises ``window_off_screen`` and does not send ``_NET_ACTIVE_WINDOW``.
     No matching window is ``app_not_found``. The call does not report that
-    it activated an app that was never launched. That answer does not build
-    an X client message, so a desktop with no matching window does not need
-    the X connection beyond the window list.
+    it activated an app that was never launched.
     """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     with _open_display() as d:
+        screen = _root_screen_size(d)
         resolved = identifier
         matched = None
+        saw = False
         for win in _managed_windows(d):
             comm = (_app_id(win, d) or "")
             instance, klass = _wm_class_strings(win, d)
@@ -1277,11 +1983,26 @@ def activate_app(identifier: str) -> str:
             )
             if not named and title:
                 named = any(name and name in title.lower() for name in _identity_needles(identifier))
-            if named:
-                resolved = comm or instance or identifier
-                matched = win
-                break
+            if not named:
+                continue
+            saw = True
+            if _is_hidden(win, d):
+                continue
+            if not _geometry_on_screen(_geometry_on_root(win, d), screen):
+                continue
+            resolved = comm or instance or identifier
+            matched = win
         if matched is None:
+            if saw:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{identifier!r} has no window on this screen",
+                    detail={
+                        "app": identifier,
+                        "reason": "window_off_screen",
+                        "hint": "every matching window is minimized or outside the display",
+                    },
+                )
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {identifier!r}",

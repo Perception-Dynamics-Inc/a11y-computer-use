@@ -47,6 +47,8 @@ _ROLE = {
     "heading": "AXHeading",
     "img": "AXImage",
     "image": "AXImage",
+    "canvas": "AXCanvas",
+    "Canvas": "AXCanvas",
     "StaticText": "AXStaticText",
     "text": "AXStaticText",
     "RootWebArea": "AXWebArea",

@@ -234,7 +234,10 @@ def test_destructive_tool_names_need_confirmation() -> None:
 
 
 def test_audit_row_redacts_arguments(tmp_path) -> None:
-    log = safety.AuditLog(tmp_path / "a")
+    # The clock is part of the row. A live timestamp such as
+    # 1791586345.8411171 contains these four digits, so the assertion freezes
+    # the clock and still scans the whole row, including ts.
+    log = safety.AuditLog(tmp_path / "a", now=lambda: 1_700_000_000.0)
     op = WebMcpOp(verb=WebMcpVerb.CALL, app="TAB1", name="leave_review",
                   arguments=json.dumps({"text": "my card is 4111"}), sensitive=True)
     store = safety.PermissionStore(tmp_path / "p.json")
@@ -242,6 +245,7 @@ def test_audit_row_redacts_arguments(tmp_path) -> None:
     decision = safety.check_action(op, "TAB1", store=store)
     log.record_action(op, app="TAB1", decision=decision, result="ok")
     row = _audit_rows(tmp_path)[-1]
+    assert row["ts"] == 1_700_000_000.0
     assert row["action"] == "webmcpop" and row["params"]["name"] == "leave_review"
     assert row["params"]["arguments"] == safety.REDACTED
     assert "4111" not in json.dumps(row)

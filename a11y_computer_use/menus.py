@@ -64,6 +64,7 @@ class MenuItem:
     shortcut: str | None
     submenu: bool
     checked: bool | None = None
+    mnemonic: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -72,6 +73,7 @@ class MenuItem:
             "shortcut": self.shortcut,
             "submenu": self.submenu,
             "checked": self.checked,
+            "mnemonic": self.mnemonic,
         }
 
 

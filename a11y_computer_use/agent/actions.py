@@ -15,11 +15,24 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from a11y_computer_use.agent.choose_file import chooser_argument_error
 from a11y_computer_use.agent.models.base import ToolCall
+from a11y_computer_use.schema import unknown_fields_message
+
+#: Pointer gestures. Each one is a click. The name sets button and count.
+#: An explicit ``x,y`` is that point and is not moved onto another element.
+POINTER_CLICKS: dict[str, dict[str, str | int]] = {
+    "click": {},
+    "left_click": {"button": "left", "count": 1},
+    "double_click": {"button": "left", "count": 2},
+    "triple_click": {"button": "left", "count": 3},
+    "right_click": {"button": "right", "count": 1},
+    "middle_click": {"button": "middle", "count": 1},
+}
 
 #: Desktop actions. ``done`` and ``ask_human`` end or pause the run.
 ACTION_NAMES = frozenset({
-    "click",
+    *POINTER_CLICKS,
     "type",
     "key",
     "set_value",
@@ -30,6 +43,11 @@ ACTION_NAMES = frozenset({
     "menu",
     "wait",
     "crop",
+    "find",
+    "expand",
+    "scroll_to_find",
+    "choose_file",
+    "snapshot",
     "done",
     "ask_human",
 })
@@ -176,9 +194,15 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
     if action.name in EXEC_ACTION_NAMES:
         if not allow_exec:
             return "exec is not allowed"
+        unknown = _unknown_argument(action)
+        if unknown is not None:
+            return unknown
         return _exec_error(action)
     if action.name not in ACTION_NAMES:
         return f"unknown action {action.name!r}"
+    unknown = _unknown_argument(action)
+    if unknown is not None:
+        return unknown
     args = action.args
     if action.name == "type" and "text" not in args:
         return "type requires text"
@@ -200,10 +224,73 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         kind = str(args.get("kind") or "other")
         if kind not in {"login", "captcha", "2fa", "payment", "other"}:
             return f"ask_human kind {kind!r} is not one of login, captcha, 2fa, payment, other"
-    if action.name == "click" and not args.get("ref") and (args.get("x") is None or args.get("y") is None):
-        return "click requires ref or x and y"
+    if action.name in POINTER_CLICKS:
+        point_error = _click_target_error(args, name=action.name)
+        if point_error is not None:
+            return point_error
     if action.name == "crop" and not args.get("ref"):
         return "crop requires ref"
+    if action.name == "find" and not _find_filter(args):
+        return "find requires text, role, editable, or clickable"
+    if action.name == "expand" and not args.get("ref"):
+        return "expand requires ref"
+    if action.name == "scroll_to_find" and not (args.get("text") or args.get("role")):
+        return "scroll_to_find requires text or role"
+    if action.name == "scroll_to_find" and args.get("direction") not in (None, "down", "up"):
+        return "scroll_to_find direction must be down or up"
+    if action.name == "choose_file":
+        return chooser_argument_error(args)
+    if action.name == "snapshot" and args.get("mode") not in (None, "full", "diff"):
+        return "snapshot mode must be full or diff"
+    return None
+
+
+def pointer_to_click(action: Action) -> Action:
+    """Map a pointer gesture onto ``click``, keeping the point and the gesture.
+
+    ``double_click`` is a left click with count 2. ``right_click`` is the
+    right button. The gesture name sets button and count; arguments on the
+    call do not override that. An explicit ``x,y`` stays on the action.
+    ``click`` itself is returned unchanged.
+    """
+    gesture = POINTER_CLICKS.get(action.name)
+    if gesture is None or action.name == "click":
+        return action
+    args = {
+        key: value
+        for key, value in action.args.items()
+        if key not in {"button", "count"}
+    }
+    args.update(gesture)
+    return replace(action, name="click", args=args)
+
+
+def _click_target_error(args: dict, *, name: str = "click") -> str | None:
+    """Reject a click that names two targets, or names none.
+
+    A ref together with ``x`` or ``y`` is ``invalid_arguments``: the call
+    must not silently drop the point. ``label`` is the only other target,
+    and it stands alone. A point needs both coordinates. ``name`` is the
+    gesture the model called (``click``, ``double_click``, ``right_click``,
+    and the other pointer names).
+    """
+    ref = str(args.get("ref") or "").strip()
+    label = str(args.get("label") or "").strip()
+    has_x = args.get("x") is not None
+    has_y = args.get("y") is not None
+    if ref and (has_x or has_y):
+        return (
+            f"invalid_arguments: {name}: ref and x/y are both set; "
+            "pass a ref or a point, not both"
+        )
+    if label and (ref or has_x or has_y):
+        return (
+            f"invalid_arguments: {name}: label cannot be combined with ref or x/y"
+        )
+    if has_x != has_y:
+        return f"{name} requires both x and y"
+    if not ref and not label and not (has_x and has_y):
+        return f"{name} requires ref or x and y"
     return None
 
 
@@ -334,14 +421,14 @@ def risk_reason(
     if action.name == "window" and verb == "close":
         return "closing a window"
     text = (label or "").casefold()
-    if action.name in {"click", "menu"} and not is_toggle_control(role):
+    if action.name in {"click", "menu", "expand"} and not is_toggle_control(role):
         named = bool(label) and _PAYMENT_LABEL.search(label) is not None and _is_button_or_link(role)
         on_form = payment_form and _is_button_or_link(role)
         if named or on_form:
             return f"paying {label or 'payment'}"
-    if action.name in {"click", "menu"} and not is_toggle_control(role) and any(word in text for word in _SEND_WORDS):
+    if action.name in {"click", "menu", "expand"} and not is_toggle_control(role) and any(word in text for word in _SEND_WORDS):
         return f"sending {label}"
-    if action.name in {"click", "menu"} and any(word in text for word in _DELETE_WORDS):
+    if action.name in {"click", "menu", "expand"} and any(word in text for word in _DELETE_WORDS):
         return f"deleting {label}"
     if action.name == "menu" and any(word in text for word in ("quit", "exit", "close window", "log out", "sign out")):
         return f"menu {label}"
@@ -383,6 +470,35 @@ def _done_error(args: dict) -> str | None:
     return None
 
 
+def _find_filter(args: dict) -> bool:
+    """True when find names at least one filter the runtime accepts."""
+    if args.get("text") or args.get("role"):
+        return True
+    return args.get("editable") is not None or args.get("clickable") is not None
+
+
+def _declared_fields(name: str) -> set[str] | None:
+    for spec_name, _description, properties, _required in (*_SPECS, *_EXEC_SPECS):
+        if spec_name == name:
+            return set(properties)
+    return None
+
+
+def _unknown_argument(action: Action) -> str | None:
+    """An undeclared top-level argument. None when every key is in the schema.
+
+    ``_source_ref`` is not a model argument. Recovery adds it after this
+    check, on a click the runtime maps without that key.
+    """
+    allowed = _declared_fields(action.name)
+    if allowed is None:
+        return None
+    message = unknown_fields_message(action.args, allowed)
+    if message is None:
+        return None
+    return f"invalid_arguments: {action.name}: {message}"
+
+
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {
         "name": name,
@@ -391,6 +507,7 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
             "type": "object",
             "properties": properties,
             "required": required,
+            "additionalProperties": False,
         },
     }
 
@@ -400,17 +517,75 @@ _INT = {"type": "integer"}
 _NUM = {"type": "number"}
 _OBJ = {"type": "object"}
 
+_CLICK_PROPERTIES = {
+    "ref": _STR,
+    "label": _STR,
+    "button": _STR,
+    "count": _INT,
+    "x": _INT,
+    "y": _INT,
+    "display_id": _INT,
+}
+_CLICK_TARGET_RULES = (
+    "Pass only one target: a ref, an exact label, or x and y. "
+    "A ref together with x or y is invalid_arguments. "
+    "A missing ref is resolved only from that ref's last-known role and name, "
+    "never from the goal. An x,y point is not moved onto a different element. "
+    "scroll at x,y is that scroll, not a click on a word from the goal."
+)
+
 _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     (
         "click",
-        "Click an element by accessibility ref, or at x,y when a ref click cannot land.",
-        {"ref": _STR, "button": _STR, "count": _INT, "x": _INT, "y": _INT, "display_id": _INT},
+        "Click an element by accessibility ref, by an exact label, or at x,y. "
+        + _CLICK_TARGET_RULES
+        + " double_click, right_click, middle_click, triple_click, and left_click "
+        "are the same rules; the name sets the button and count.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "left_click",
+        "Left-click (left button, count 1). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "double_click",
+        "Double-click (left button, count 2). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "triple_click",
+        "Triple-click (left button, count 3). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "right_click",
+        "Right-click (right button, count 1). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "middle_click",
+        "Middle-click (middle button, count 1). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
         [],
     ),
     (
         "type",
-        "Type text into the focused element. Never use this for passwords, OTP, or card numbers.",
-        {"text": _STR, "app": _STR},
+        "Type text. With ref, focus that element, confirm the focus landed, and type only "
+        "there; if focus cannot be confirmed, nothing is typed. Without ref, type into "
+        "the focused element. An undeclared argument is invalid_arguments and no text "
+        "is sent. Never use this for passwords, OTP, or card numbers.",
+        {"text": _STR, "app": _STR, "ref": _STR},
         ["text"],
     ),
     (
@@ -476,9 +651,73 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "crop",
         "Return a PNG of one element's on-screen bounds. Use it for an unnamed "
         "image, a canvas, or any opaque control. padding (0..512) and scale "
-        "(greater than 0, at most 8) are optional. The library does not read the pixels.",
+        "(greater than 0, at most 8) are optional. When an OCR engine is "
+        "installed, the result lists each word with [x, y, width, height] in "
+        "screen pixels, fenced as untrusted. A missing engine says no text was read.",
         {"ref": _STR, "padding": _INT, "scale": _NUM},
         ["ref"],
+    ),
+    (
+        "find",
+        "Search the tracked app by name and/or role. text is a case-insensitive "
+        "substring of the title or value. role is a substring of the accessibility "
+        "role. Use this before a pixel click when the target may be folded or "
+        "scrolled out of view.",
+        {
+            "text": _STR,
+            "role": _STR,
+            "editable": {"type": "boolean"},
+            "clickable": {"type": "boolean"},
+            "scope": _STR,
+        },
+        [],
+    ),
+    (
+        "expand",
+        "Open a collapsed menu, tree, or section and list that subtree. Use "
+        "expand(ref) when the observation says the node is collapsed or has "
+        "more children. Prefer this over a coordinate click.",
+        {"ref": _STR},
+        ["ref"],
+    ),
+    (
+        "scroll_to_find",
+        "Scroll until an element matching text and/or role is on screen, then "
+        "return its ref. Use this when the target is below the fold, before "
+        "falling back to pixels. direction is down or up.",
+        {
+            "text": _STR,
+            "role": _STR,
+            "direction": _STR,
+            "max_scrolls": _INT,
+            "ref": _STR,
+        },
+        [],
+    ),
+    (
+        "choose_file",
+        "In an open GTK, Qt, or Chrome file chooser, choose this absolute path. "
+        "Always use choose_file; never navigate folders. Presses Ctrl+L, types the "
+        "path once, and presses Return. When the location entry is visible and the "
+        "typed text is not the path, one set_value writes the path. Return is not "
+        "pressed until that entry reads the path back. Succeeds only when the dialog "
+        "has closed and the file name is shown outside the dialog. If that cannot be "
+        "verified, the result is a failure. action is open (default) or save. open "
+        "requires the file to exist. This does not call file_dialog.",
+        {
+            "path": _STR,
+            "action": {"type": "string", "enum": ["open", "save"]},
+        },
+        ["path"],
+    ),
+    (
+        "snapshot",
+        "Send the accessibility tree again. mode full (the default) redraws the "
+        "current window and keeps the refs of elements that are still there. "
+        "mode diff repeats the changes since the last observation you were shown. "
+        "A different window is always the full tree.",
+        {"mode": {"type": "string", "enum": ["full", "diff"]}},
+        [],
     ),
     (
         "done",
@@ -487,8 +726,15 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         '{"element": {"role", "name"}}, {"value": {"ref" or "name", "equals"}}, '
         '{"window_title_contains": text}, {"file_exists": path, "contains"?: text}. '
         "When the goal saves or creates a file, include file_exists, and contains "
-        "when the text is known. contains on .odt, .ods, .docx, and .xlsx reads "
-        "the document text inside the zip, not the raw bytes. A window title "
+        "for the text the file should hold. When the goal says to replace or "
+        "remove text, contains is the new text, not the text being replaced or "
+        "removed; a file that still has the old text is rejected. contains treats "
+        "a newline, CR, CRLF, U+2028, U+2029, and U+FFFC as the same break, and "
+        "ignores one leading UTF-8 BOM. A plain-text file that starts with that "
+        "mark still passes, and the evidence includes bom_present: true, unless "
+        "the goal forbids a byte-order mark. contains on .odt, .ods, .docx, and "
+        ".xlsx reads the document text inside the zip, not the raw bytes, and a "
+        "paragraph end or a line break in that text is a newline. A window title "
         "alone does not prove a file was written.",
         {
             "answer": _STR,
@@ -535,6 +781,8 @@ _EXEC_SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
 __all__ = [
     "ACTION_NAMES",
     "EXEC_ACTION_NAMES",
+    "POINTER_CLICKS",
+    "pointer_to_click",
     "Action",
     "ReservedPermission",
     "approval_target",

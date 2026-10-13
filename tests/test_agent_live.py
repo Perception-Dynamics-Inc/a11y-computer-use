@@ -110,6 +110,22 @@ def test_snapshot_text_parser_matches_rendered_lines() -> None:
     assert ping is not None and ping.ref == "e16" and "click" in ping.flags
     status = pick(elements, role="statictext", name="Status")
     assert status is not None and status.value == "idle"
+    diff = "\n".join([
+        sample,
+        "[snap-2 <- snap-1] +1 -1 ~1",
+        '  + e18 button "Extra" (click) parent=e1',
+        '  - e16 button "Ping" (gone)',
+        '  ~ e17 statictext "Status" ="saved plain" [value: idle->saved plain]',
+        '  focus e10 textfield "Save path" ="/tmp/n.txt" (click,edit)',
+    ])
+    revised = parse_snapshot(diff)
+    assert pick(revised, role="button", name="Ping") is None
+    extra = pick(revised, role="button", name="Extra")
+    assert extra is not None and extra.ref == "e18" and "click" in extra.flags
+    status = pick(revised, role="statictext", name="Status")
+    assert status is not None and status.value == "saved plain"
+    path = pick(revised, role="textfield", name="Save path")
+    assert path is not None and path.ref == "e10" and path.value == "/tmp/n.txt"
 
 
 @requires_display
@@ -351,10 +367,63 @@ def _shown_note(value: str | None) -> str:
     return value or ""
 
 
+def _unescape_compact_value(shown: str) -> str:
+    """Turn ``\\n`` and ``\\r`` in a compact snapshot field back into breaks.
+
+    A value with no backslash is unchanged, including the older
+    space-flattened form.
+    """
+    if "\\" not in shown:
+        return shown
+    out: list[str] = []
+    index = 0
+    while index < len(shown):
+        if shown[index] == "\\" and index + 1 < len(shown):
+            nxt = shown[index + 1]
+            if nxt == "n":
+                out.append("\n")
+                index += 2
+                continue
+            if nxt == "r":
+                out.append("\r")
+                index += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                index += 2
+                continue
+        out.append(shown[index])
+        index += 1
+    return "".join(out)
+
+
 def _note_landed(value: str | None) -> bool:
     shown = _shown_note(value)
     flat = NOTE.replace("\n", " ")
-    return shown == flat or shown == NOTE or (shown.endswith("…") and flat.startswith(shown[:-1]))
+    restored = _unescape_compact_value(shown)
+    return (
+        shown == flat
+        or shown == NOTE
+        or restored == NOTE
+        or (shown.endswith("…") and flat.startswith(shown[:-1]))
+    )
+
+
+def test_note_landed_accepts_the_compact_newline_field() -> None:
+    """The save script treats an escaped snapshot value as the written note.
+
+    Compact output is ``M1 live note\\nsecond line\\n``. The space-flattened
+    field and the raw note still count. A shorter or different string does not.
+    """
+    escaped = NOTE.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    assert _note_landed(escaped)
+    assert _note_landed(NOTE.replace("\n", " "))
+    assert _note_landed(NOTE)
+    assert not _note_landed("WRONG")
+    assert not _note_landed("M1 live note")
+    line = f'  e7 textarea "Notes" ="{escaped}" (edit,focus)'
+    seen = pick(parse_snapshot(line), role="textarea", name="Notes")
+    assert seen is not None and seen.value == escaped and _note_landed(seen.value)
 
 
 class _SaveScript:
@@ -897,6 +966,148 @@ def test_agent_changes_strategy_after_a_stuck_ping(tmp_path, isolated_home) -> N
         dest.unlink(missing_ok=True)
 
 
+@requires_display
+def test_agent_stops_early_when_a_subgoal_stays_stuck(tmp_path, isolated_home) -> None:
+    """Ping changes nothing, so the subgoal budget stops before max_time."""
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    proc = launch_gtk()
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    started = time.perf_counter()
+    try:
+        driver = _linux_driver()
+        assert wait_gtk_snapshot(driver) is not None
+        _focus_app()
+        _grant_linux_desktop()
+
+        def script(messages):
+            text = message_text(messages)
+            ping = pick(parse_snapshot(text), role="button", name="Ping")
+            ref = ping.ref if ping is not None else "e999"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+
+        result = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, script),
+            f"In {APP_NAME}, click Ping until the screen changes.",
+            trace,
+            max_steps=30,
+            max_time_s=180,
+            stuck_steps=1,
+            stuck_time_s=60,
+        )
+        elapsed = time.perf_counter() - started
+        assert result.status == "stuck", result
+        assert result.reason and result.reason.startswith("stuck: subgoal")
+        assert result.evidence is not None
+        assert result.evidence["switches"] == ["keyboard", "vision", "replan"]
+        assert result.steps == 4
+        assert elapsed < 90
+        rows = [
+            json.loads(line)
+            for line in (trace / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        switches = [row["switch"] for row in rows if row.get("kind") == "strategy_switch"]
+        assert switches == ["keyboard", "vision", "replan"]
+        assert any(row.get("kind") == "stuck" for row in rows)
+    finally:
+        stop_process(proc)
+
+
+@requires_display
+def test_agent_verify_finish_reports_done_only_when_the_window_matches(tmp_path, isolated_home) -> None:
+    """At 90 percent of the steps, one turn checks the real window.
+
+    A matching title is done. A title that is not on screen is verify_failed,
+    not done. The script clicks Ping by the ref in the snapshot. The goal
+    mentions Archive, and that word is not a click.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    proc = launch_gtk()
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    try:
+        driver = _linux_driver()
+        assert wait_gtk_snapshot(driver) is not None
+        _focus_app()
+        _grant_linux_desktop()
+        goal = f"Confirm the {APP_NAME} window is open. Do not click Archive."
+
+        def success_script(messages):
+            text = message_text(messages)
+            if "final verify-and-finish turn" in text:
+                return ModelTurn(calls=[ToolCall("done", {
+                    "answer": f"the {APP_NAME} window is open",
+                    "conditions": [{"window_title_contains": APP_NAME}],
+                })])
+            ping = pick(parse_snapshot(text), role="button", name="Ping")
+            ref = ping.ref if ping is not None else "e999"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+
+        ok_trace = trace / "ok"
+        ok_trace.mkdir()
+        ok = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, success_script),
+            goal,
+            ok_trace,
+            max_steps=10,
+            max_time_s=120,
+            max_replans=20,
+            stuck_steps=40,
+            stuck_time_s=120,
+            max_retries=0,
+        )
+        assert ok.status == "success", ok
+        assert ok.reason == "done", ok.reason
+        assert ok.answer == f"the {APP_NAME} window is open"
+        assert any(step.action == "done" and step.verified for step in ok.step_log)
+        ok_rows = [
+            json.loads(line)
+            for line in (ok_trace / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(row.get("kind") == "verify_finish" and row.get("limit") == "steps" for row in ok_rows)
+        for step in ok.step_log:
+            assert (step.target or {}).get("name") != "Archive"
+
+        def failed_script(messages):
+            text = message_text(messages)
+            if "final verify-and-finish turn" in text:
+                return ModelTurn(calls=[ToolCall("done", {
+                    "answer": "closed",
+                    "conditions": [{"window_title_contains": "not-a-real-title"}],
+                })])
+            ping = pick(parse_snapshot(text), role="button", name="Ping")
+            ref = ping.ref if ping is not None else "e999"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+
+        bad_trace = trace / "bad"
+        bad_trace.mkdir()
+        bad = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, failed_script),
+            goal,
+            bad_trace,
+            max_steps=10,
+            max_time_s=120,
+            max_replans=20,
+            stuck_steps=40,
+            stuck_time_s=120,
+            max_retries=0,
+        )
+        assert bad.status == "failed", bad
+        assert bad.reason and bad.reason.startswith("verify_failed:"), bad.reason
+        assert bad.reason != "done"
+        assert bad.status != "success"
+        assert bad.answer == ""
+        assert bad.step_log[-1].action == "done"
+        assert bad.step_log[-1].verified is False
+    finally:
+        stop_process(proc)
+
+
 @pytest.fixture
 def pages(tmp_path, isolated_home, monkeypatch):
     assert isolated_home.is_dir()
@@ -938,6 +1149,248 @@ def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
     assert _eval(browser, "document.getElementById('result').textContent") == FORM_RESULT
     _assert_conditions(result, ["RESULT name=Ada"])
     _assert_trace(result, trace)
+
+
+@requires_display
+def test_agent_clicks_a_target_inside_a_chrome_canvas(tmp_path, isolated_home, pages) -> None:
+    """A scripted model clicks a drawn canvas target after the tree cannot name it.
+
+    The first two turns look for a missing ref and get text only. The third
+    turn is the one that receives a crop or a window screenshot, then the
+    coordinate click. The page records whether that point hit the red square.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    browser, site, _endpoint = pages
+    from a11y_computer_use.schema import Scope
+
+    browser.navigate(site.url("canvas.html"))
+    snap = browser.snapshot(Scope.WINDOW, browser._target_id)
+    assert any(el.title == "Ready" for el in snap.elements), render_text(snap)
+    _grant(browser._target_id)
+    point = _eval(
+        browser,
+        "(() => { const pad = document.getElementById('pad');"
+        " const rect = pad.getBoundingClientRect();"
+        " return {x: Math.round(rect.left + window.scrollX + 220),"
+        " y: Math.round(rect.top + window.scrollY + 120)}; })()",
+    )
+    assert isinstance(point, dict), point
+    trace = tmp_path / "trace-canvas"
+    trace.mkdir()
+    seen: list = []
+
+    def _attached(messages) -> list:
+        found = []
+        for message in messages:
+            content = message.content
+            blocks = content if isinstance(content, list) else []
+            found.extend(
+                block for block in blocks
+                if isinstance(block, dict) and block.get("type") == "image"
+            )
+        return found
+
+    def script(messages):
+        seen.append(messages)
+        attached = _attached(messages)
+        if len(seen) < 3:
+            assert not attached, "image attached before the tree was insufficient"
+            ref = "e99991" if len(seen) == 1 else "e99992"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+        if len(seen) == 3:
+            assert attached, "expected a crop or screenshot after repeated not-found"
+            return ModelTurn(calls=[ToolCall("click", {
+                "x": int(point["x"]),
+                "y": int(point["y"]),
+                "display_id": 0,
+            })])
+        return ModelTurn(calls=[ToolCall("done", {
+            "answer": "hit",
+            "conditions": [{"element": {"role": "AXButton", "name": "Ready"}}],
+        })])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Click the red square drawn inside the canvas.",
+        trace,
+        max_retries=0,
+        max_steps=8,
+    )
+    assert result.status == "success", result
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-hit"
+    assert len(seen) >= 3
+    _assert_trace(result, trace)
+
+
+@requires_display
+def test_agent_clicks_a_canvas_target_behind_a_toolbar(tmp_path, isolated_home, pages) -> None:
+    """A toolbar of named buttons does not keep a canvas target as text.
+
+    The page lists Back, Reload, and Ready beside the canvas. The model asks
+    for the sketch. That node is an opaque region, so the next turn receives
+    a crop and the coordinate click lands on the red square.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    browser, site, _endpoint = pages
+    from a11y_computer_use.schema import Scope
+
+    browser.navigate(site.url("toolbar-canvas.html"))
+    snap = browser.snapshot(Scope.WINDOW, browser._target_id)
+    assert any(el.title == "Back" for el in snap.elements), render_text(snap)
+    assert any(el.role == "opaque_region" for el in snap.elements), render_text(snap)
+    _grant(browser._target_id)
+    point = _eval(
+        browser,
+        "(() => { const pad = document.getElementById('pad');"
+        " const rect = pad.getBoundingClientRect();"
+        " return {x: Math.round(rect.left + window.scrollX + 220),"
+        " y: Math.round(rect.top + window.scrollY + 120)}; })()",
+    )
+    assert isinstance(point, dict), point
+    trace = tmp_path / "trace-toolbar-canvas"
+    trace.mkdir()
+    seen: list = []
+
+    def _attached(messages) -> list:
+        found = []
+        for message in messages:
+            content = message.content
+            blocks = content if isinstance(content, list) else []
+            found.extend(
+                block for block in blocks
+                if isinstance(block, dict) and block.get("type") == "image"
+            )
+        return found
+
+    def _text(messages) -> str:
+        parts = []
+        for message in messages:
+            content = message.content
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list) and content and isinstance(content[0], dict):
+                parts.append(str(content[0].get("text") or ""))
+        return "\n".join(parts)
+
+    def script(messages):
+        seen.append(messages)
+        attached = _attached(messages)
+        text = _text(messages)
+        if len(seen) == 1:
+            assert not attached, "image attached while the toolbar still names Back"
+            assert "Back" in text
+            return ModelTurn(calls=[ToolCall("find", {"text": "sketch"})])
+        if len(seen) == 2:
+            assert attached, "expected a crop after the sketch was found inside the canvas"
+            assert "insufficient (opaque_region)" in text
+            return ModelTurn(calls=[ToolCall("click", {
+                "x": int(point["x"]),
+                "y": int(point["y"]),
+                "display_id": 0,
+            })])
+        return ModelTurn(calls=[ToolCall("done", {
+            "answer": "hit",
+            "conditions": [{"element": {"role": "AXButton", "name": "Ready"}}],
+        })])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Click the red square drawn inside the canvas.",
+        trace,
+        max_retries=0,
+        max_steps=8,
+    )
+    assert result.status == "success", result
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-hit"
+    assert len(seen) >= 2
+    _assert_trace(result, trace)
+
+
+@requires_display
+def test_agent_look_again_refines_an_off_target_canvas_click(tmp_path, isolated_home, pages) -> None:
+    """A point a few pixels off the red square is not moved onto it.
+
+    The scripted model asks for a miss. ``ScriptedGrounding`` returns the
+    marked pixel shifted back by that same distance. The trajectory records
+    that suggestion. The click that is sent is the model's point, and the
+    page records ``canvas-miss``.
+    """
+    import io
+    import re
+
+    from PIL import Image
+
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+    from a11y_computer_use.schema import Scope
+
+    browser, site, _endpoint = pages
+    browser.navigate(site.url("canvas.html"))
+    snap = browser.snapshot(Scope.WINDOW, browser._target_id)
+    assert any(el.title == "Ready" for el in snap.elements), render_text(snap)
+    _grant(browser._target_id)
+    point = _eval(
+        browser,
+        "(() => { const pad = document.getElementById('pad');"
+        " const rect = pad.getBoundingClientRect();"
+        " return {x: Math.round(rect.left + window.scrollX + 220),"
+        " y: Math.round(rect.top + window.scrollY + 120)}; })()",
+    )
+    assert isinstance(point, dict), point
+    offset = 30
+    trace = tmp_path / "trace-look"
+    trace.mkdir()
+
+    def ground(png, instruction):
+        match = re.search(r"proposed image pixel \((\d+), (\d+)\)", instruction)
+        size = re.search(r"Crop screen size (\d+)x(\d+)", instruction)
+        assert match and size, instruction
+        mx, my = int(match.group(1)), int(match.group(2))
+        screen_w = int(size.group(1))
+        with Image.open(io.BytesIO(png)) as image:
+            image_w = image.size[0]
+        dx = int(round(offset * image_w / screen_w))
+        return GroundingHit(mx - dx, my)
+
+    stub = ScriptedGrounding(ground)
+    seen = {"n": 0}
+
+    def script(messages):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return ModelTurn(calls=[ToolCall("click", {
+                "x": int(point["x"]) + offset,
+                "y": int(point["y"]),
+                "display_id": 0,
+            })])
+        return ModelTurn(calls=[ToolCall("done", {
+            "answer": "hit",
+            "conditions": [{"element": {"role": "AXButton", "name": "Ready"}}],
+        })])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Click the red square drawn inside the canvas.",
+        trace,
+        max_retries=0,
+        max_steps=6,
+        grounding=stub,
+    )
+    assert result.status == "success", result
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-miss"
+    assert len(stub.seen) == 1
+    rows = [json.loads(line) for line in (trace / "trajectory.jsonl").read_text().splitlines()]
+    notes = [row for row in rows if row.get("kind") == "look_again"]
+    assert notes and notes[0]["decision"] == "refine"
+    assert notes[0]["snap"]["type"] != "ref"
+    clicks = [row for row in rows if row.get("action") == "click"]
+    assert clicks and clicks[0]["args"]["x"] == int(point["x"]) + offset
+    assert clicks[0]["args"]["y"] == int(point["y"])
+    _assert_trace(result, trace)
+
 
 
 @requires_display
@@ -1140,12 +1593,46 @@ def test_cli_json_exit_codes(tmp_path, isolated_home) -> None:
         good.unlink(missing_ok=True)
 
 
-def _clear_focus() -> str:
-    """Drop the active window so the next observation is the empty desktop."""
+def _set_showing_desktop(showing: bool) -> None:
+    """Ask the window manager to show or leave the desktop.
+
+    The short model-timeout run needs every window iconified. Leaving that
+    hint set keeps later Chrome document wheels from landing on the page.
+    """
     import shutil
 
     if shutil.which("wmctrl"):
-        subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
+        subprocess.run(
+            ["wmctrl", "-k", "on" if showing else "off"],
+            check=False, timeout=3, capture_output=True,
+        )
+    try:
+        from a11y_computer_use.drivers._linux_system import _client_message, _open_display
+
+        with _open_display() as opened:
+            _client_message(
+                opened, opened.screen().root, "_NET_SHOWING_DESKTOP",
+                [1 if showing else 0, 0, 0, 0, 0],
+            )
+    except Exception:
+        pass
+
+
+def _clear_focus(*, show_desktop: bool = False) -> str:
+    """Drop the active window so the next observation is the empty desktop.
+
+    ``show_desktop`` asks the window manager to iconify every window. Writing
+    ``_NET_ACTIVE_WINDOW`` as 0 does not do that, and openbox puts the focused
+    app back. A full snapshot of that app can spend a 1s run budget before
+    the model starts. The caller turns the desktop hint off when the run ends.
+    """
+    import shutil
+
+    if show_desktop or shutil.which("wmctrl"):
+        if show_desktop:
+            _set_showing_desktop(True)
+        elif shutil.which("wmctrl"):
+            subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
     try:
         from Xlib import Xatom, display
 
@@ -1160,9 +1647,61 @@ def _clear_focus() -> str:
     try:
         from a11y_computer_use.drivers import _linux_system
 
-        return _linux_system.frontmost_app_id() or "unknown"
+        # EWMH client messages are asynchronous. The window manager can still
+        # report the previous terminal while it processes show-desktop, even
+        # after our own connection has flushed the active-window property.
+        deadline = time.monotonic() + 3
+        while True:
+            front = _linux_system.frontmost_app_id() or "unknown"
+            if front == "unknown" or time.monotonic() >= deadline:
+                return front
+            time.sleep(0.05)
     except Exception:
         return "unknown"
+
+
+@pytest.mark.parametrize("focus", ["", "unknown"])
+def test_clear_focus_waits_for_the_window_manager(monkeypatch, focus) -> None:
+    """A pending desktop request must settle before the short agent run."""
+    from types import SimpleNamespace
+
+    from a11y_computer_use.drivers import _linux_system
+
+    # No display, Xlib installation, or GI is needed for this setup regression.
+    monkeypatch.setitem(sys.modules, "Xlib", SimpleNamespace())
+    monkeypatch.setattr(sys.modules[__name__], "_set_showing_desktop", lambda showing: None)
+    reads = []
+    states = iter(["xfce4-terminal", "xfce4-terminal", focus])
+
+    def frontmost():
+        reads.append(True)
+        return next(states)
+
+    sleeps = []
+    ticks = iter([0, 0, 0.05])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", frontmost)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert _clear_focus(show_desktop=True) == "unknown"
+    assert len(reads) == 3
+    assert sleeps == [0.05, 0.05]
+
+
+def test_clear_focus_reports_a_window_that_stays_focused(monkeypatch) -> None:
+    """Exhausting the setup wait must preserve the live assertion's failure."""
+    from types import SimpleNamespace
+
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setitem(sys.modules, "Xlib", SimpleNamespace())
+    monkeypatch.setattr(sys.modules[__name__], "_set_showing_desktop", lambda showing: None)
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", lambda: "xfce4-terminal")
+    ticks = iter([0, 0, 3])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert _clear_focus(show_desktop=True) == "xfce4-terminal"
+    assert sleeps == [0.05]
 
 
 @requires_display
@@ -1297,11 +1836,12 @@ def test_agent_file_save_done_rejects_a_matching_window_title(tmp_path, isolated
 
 @requires_display
 def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home) -> None:
-    """A grant for the real binary covers Files and Terminal."""
+    """Binary grants cover Files and Terminal; Terminal also needs exec."""
     import shutil
 
     from a11y_computer_use import safety, server
     from a11y_computer_use.safety import Tier
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     files = next((
         name for name in ("thunar", "nautilus", "nemo", "dolphin", "pcmanfm")
@@ -1324,6 +1864,15 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
             assert "ask the user" not in text, text
         if terminal is not None:
             store.set_tier(terminal, Tier.FULL)
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.app("launch", "Terminal")
+            assert caught.value.code is ErrorCode.EXEC_DISABLED
+            rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+                    for line in path.read_text().splitlines()]
+            row = rows[-1]
+            assert row["result"] == "exec_disabled"
+            assert row["metrics"]["security_violation"] == "exec_disabled"
+            runtime.allow_exec = True
             text = runtime.app("launch", "Terminal")
             assert "needs_permission" not in text, text
             assert "ask the user" not in text, text
@@ -1348,39 +1897,43 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
     from a11y_computer_use.agent.cli import exit_code
     from a11y_computer_use.agent.models.command import CommandModel
 
-    _clear_focus()
-    _grant_linux_desktop()
-    started_flag = tmp_path / "model-started"
-    finished_flag = tmp_path / "model-finished"
-    script = tmp_path / "slow_model.py"
-    script.write_text(
-        "import json, sys, time\n"
-        f"open({str(started_flag)!r}, 'w').write('started')\n"
-        "json.load(sys.stdin)\n"
-        "time.sleep(1.5)\n"
-        f"open({str(finished_flag)!r}, 'w').write('finished')\n"
-        "json.dump({'calls': [], 'text': 'slow'}, sys.stdout)\n",
-        encoding="utf-8",
-    )
-    Agent, _ScriptedModel, _ModelTurn, _ToolCall = _agent_api()
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    result = _run_agent(
-        Agent,
-        CommandModel([sys.executable, str(script)]),
-        "Look at the desktop and stop.",
-        trace,
-        approve=None,
-        auto_deny=True,
-        max_steps=4,
-        max_time_s=1.0,
-        model_timeout_s=30,
-    )
-    assert result.status == "failed", result
-    assert result.reason == "max_time", result.reason
-    assert exit_code(result) == 1
-    if started_flag.exists():
-        assert finished_flag.exists(), "the model call was killed before its own timeout"
+    front = _clear_focus(show_desktop=True)
+    try:
+        assert front in {"", "unknown"}, front
+        _grant_linux_desktop()
+        started_flag = tmp_path / "model-started"
+        finished_flag = tmp_path / "model-finished"
+        script = tmp_path / "slow_model.py"
+        script.write_text(
+            "import json, sys, time\n"
+            f"open({str(started_flag)!r}, 'w').write('started')\n"
+            "json.load(sys.stdin)\n"
+            "time.sleep(1.5)\n"
+            f"open({str(finished_flag)!r}, 'w').write('finished')\n"
+            "json.dump({'calls': [], 'text': 'slow'}, sys.stdout)\n",
+            encoding="utf-8",
+        )
+        Agent, _ScriptedModel, _ModelTurn, _ToolCall = _agent_api()
+        trace = tmp_path / "trace"
+        trace.mkdir()
+        result = _run_agent(
+            Agent,
+            CommandModel([sys.executable, str(script)]),
+            "Look at the desktop and stop.",
+            trace,
+            approve=None,
+            auto_deny=True,
+            max_steps=4,
+            max_time_s=1.0,
+            model_timeout_s=30,
+        )
+        assert result.status == "failed", result
+        assert result.reason == "max_time", result.reason
+        assert exit_code(result) == 1
+        if started_flag.exists():
+            assert finished_flag.exists(), "the model call was killed before its own timeout"
+    finally:
+        _set_showing_desktop(False)
 
 
 @requires_display
@@ -1533,7 +2086,7 @@ def test_agent_approve_names_a_gtk_pay_button(tmp_path, isolated_home) -> None:
             assert button is not None, text
             return ModelTurn(calls=[ToolCall(
                 name="click",
-                args={"ref": button.ref, "note": "4111111111111111"},
+                args={"ref": button.ref, "button": "4111111111111111"},
             )])
 
         result = _run_agent(
@@ -1630,6 +2183,78 @@ def test_agent_number_min_only_accepts_a_value(tmp_path, isolated_home) -> None:
 
 
 @requires_display
+def test_agent_server_rejects_unknown_http_fields(tmp_path) -> None:
+    """Live socket. An unknown POST /runs field is 400 and builds no model.
+
+    Approve and cancel bodies with extra keys are the same error. Nothing
+    here opens GTK, Chrome, or AT-SPI.
+    """
+    from a11y_computer_use.agent.httpapi import bind_server
+    from a11y_computer_use.agent.service import RunStore
+
+    built: list[str] = []
+
+    def factory(spec: str):
+        built.append(spec)
+        raise AssertionError("model factory must not run")
+
+    store = RunStore(model_factory=factory, trace_root=tmp_path / "traces")
+    httpd = bind_server(host="127.0.0.1", port=0, store=store)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+
+    def post(path: str, payload: dict) -> tuple[int, dict]:
+        raw = json.dumps(payload).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("POST", path, body=raw, headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(raw)),
+        })
+        response = conn.getresponse()
+        parsed = json.loads(response.read().decode())
+        status = response.status
+        conn.close()
+        return status, parsed
+
+    try:
+        status, body = post("/runs", {
+            "goal": "save the form",
+            "model": "scripted:live",
+            "ref": "e2",
+        })
+        assert status == 400, body
+        assert body["error"].startswith("invalid_arguments:")
+        assert "unknown field 'ref'" in body["error"]
+        assert built == []
+        assert store._runs == {}
+
+        status, body = post("/runs", {
+            "goal": "save the form",
+            "model": "scripted:live",
+            "limits": {"max_steps": 2, "poll_s": 1},
+        })
+        assert status == 400, body
+        assert "invalid_arguments: limits:" in body["error"]
+        assert "poll_s" in body["error"]
+        assert built == []
+
+        status, body = post("/runs/missing/approvals/a1", {"approve": True, "note": "x"})
+        assert status == 400, body
+        assert "unknown field 'note'" in body["error"]
+
+        status, body = post("/runs/missing/cancel", {"force": True})
+        assert status == 400, body
+        assert "unknown field 'force'" in body["error"]
+        assert "no fields" in body["error"]
+        assert built == []
+        assert store._runs == {}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@requires_display
 def test_agent_server_streams_a_gtk_save(tmp_path, isolated_home) -> None:
     """Start ``a11y-agent``'s HTTP server and save the GTK note through it.
 
@@ -1710,4 +2335,297 @@ def test_agent_server_streams_a_gtk_save(tmp_path, isolated_home) -> None:
         httpd.server_close()
         stop_process(proc)
         dest.unlink(missing_ok=True)
+
+
+@requires_display
+def test_agent_escape_in_gtk_file_chooser_does_not_press_open(
+    tmp_path, isolated_home, monkeypatch,
+) -> None:
+    """Live GTK file chooser. Escape must not become Return, which presses Open.
+
+    A no-op chord runs first. On the old ladder every key shared one retry
+    level, so the next Escape was sent as Return and the default Open button
+    accepted the selected file. The chooser records ``open`` only for OK.
+    """
+    import pwd
+    import signal
+    import textwrap
+
+    assert isolated_home.is_dir()
+    # isolated_home replaces $HOME before this process talks to X. Xlib then
+    # looks for $HOME/.Xauthority, Gtk cannot open DISPLAY, and AT-SPI aborts
+    # the test. Set the session cookie before importing the driver.
+    auth = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".Xauthority")
+    if os.path.isfile(auth) and not os.environ.get("XAUTHORITY"):
+        monkeypatch.setenv("XAUTHORITY", auth)
+
+    from a11y_computer_use.agent.core import Agent
+    from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "picked.txt"
+    target.write_text("picked")
+    marker = tmp_path / "chooser-result.txt"
+    script = tmp_path / "cuafileesc.py"
+    script.write_text(textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuafileesc")
+        target = {str(target)!r}
+        marker = {str(marker)!r}
+        win = Gtk.Window(title="FileHost")
+        win.set_default_size(200, 80)
+        win.show_all()
+        dialog = Gtk.FileChooserDialog(
+            title="Open File", transient_for=win, action=Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Open", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.set_current_folder({str(folder)!r})
+        dialog.select_filename(target)
+        dialog.set_default_size(720, 480)
+
+        def _fit(widget):
+            widget.resize(720, 480)
+            widget.move(40, 40)
+        dialog.connect("map", _fit)
+
+        def finish():
+            response = dialog.run()
+            open(marker, "w", encoding="utf-8").write(
+                "open" if response == Gtk.ResponseType.OK else "cancel"
+            )
+            dialog.destroy()
+            Gtk.main_quit()
+        GLib.idle_add(finish)
+        win.connect("destroy", Gtk.main_quit)
+        Gtk.main()
+        """
+    ))
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    # isolated_home replaces $HOME, and this session keeps the X cookie in the
+    # real home. Without it Gtk cannot open DISPLAY and AT-SPI aborts.
+    auth = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".Xauthority")
+    if os.path.isfile(auth):
+        env["XAUTHORITY"] = auth
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], env=env, start_new_session=True,
+    )
+    try:
+        driver = LinuxDriver()
+        driver.ensure_trusted()
+        deadline = time.monotonic() + 15
+        appeared = False
+        while time.monotonic() < deadline:
+            try:
+                rows = driver.windows()
+            except Exception:
+                rows = []
+            if any(str(row.get("title") or "") == "Open File" for row in rows):
+                appeared = True
+                break
+            time.sleep(0.2)
+        assert appeared, "the GTK file chooser did not open"
+        subprocess.run(
+            ["xdotool", "search", "--name", "Open File", "windowactivate"],
+            check=False, timeout=3,
+        )
+        _grant_linux_desktop("cuafileesc", "python3", "python")
+        turns = {"n": 0}
+
+        def model(_messages):
+            turns["n"] += 1
+            if turns["n"] == 1:
+                return ModelTurn(calls=[ToolCall("key", {"chord": "F15"})])
+            if turns["n"] == 2:
+                return ModelTurn(calls=[ToolCall("key", {"chord": "Escape"})])
+            return ModelTurn(calls=[ToolCall("done", {
+                "answer": "left the chooser",
+                "conditions": [{"window_title_contains": "File"}],
+            })])
+
+        result = _run_agent(
+            Agent, ScriptedModel(model), "close the file chooser without opening the file",
+            tmp_path / "trace", max_steps=4, max_time_s=60,
+        )
+        chords = [
+            str(step.args.get("chord") or "")
+            for step in result.step_log
+            if _step_action(step) == "key"
+        ]
+        assert "Return" not in chords, (chords, result.step_log)
+        assert "Escape" in chords, chords
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not marker.is_file():
+            time.sleep(0.2)
+        assert marker.is_file(), "the chooser did not answer Escape or Return"
+        assert marker.read_text() == "cancel", marker.read_text()
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        stop_process(proc)
+
+
+@requires_display
+def test_agent_choose_file_opens_a_gtk_dialog(tmp_path, isolated_home, monkeypatch) -> None:
+    """Live GTK file chooser. choose_file types the path and the dialog must close.
+
+    A missing dialog, a dialog that stays open, or a host that does not show
+    the file fails the test. This does not skip once a display is present.
+    """
+    import pwd
+    import signal
+    import textwrap
+
+    assert isolated_home.is_dir()
+    auth = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".Xauthority")
+    if os.path.isfile(auth) and not os.environ.get("XAUTHORITY"):
+        monkeypatch.setenv("XAUTHORITY", auth)
+
+    from a11y_computer_use.agent.core import Agent
+    from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "picked.txt"
+    target.write_text("picked")
+    marker = tmp_path / "chooser-result.txt"
+    script = tmp_path / "cuafilechoose.py"
+    # dialog.run() has to be inside the Browse handler. Opening it from
+    # idle_add leaves the Open action unable to end that nested loop, so
+    # Return reports the chooser as still open. The GTK Return tests use
+    # this same button.
+    script.write_text(textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuafilechoose")
+        marker = {str(marker)!r}
+        folder = {str(folder)!r}
+        win = Gtk.Window(title="FileHost")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status = Gtk.Label(label="chosen=")
+        button = Gtk.Button(label="Browse")
+
+        def on_click(_btn):
+            dialog = Gtk.FileChooserDialog(
+                title="Open File", transient_for=win, action=Gtk.FileChooserAction.OPEN,
+            )
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Open", Gtk.ResponseType.OK)
+            dialog.set_current_folder(folder)
+            dialog.set_default_size(720, 480)
+
+            def _fit(widget):
+                widget.resize(720, 480)
+                widget.move(40, 40)
+            dialog.connect("map", _fit)
+            response = dialog.run()
+            name = dialog.get_filename() or ""
+            if response == Gtk.ResponseType.OK and name:
+                status.set_text("chosen=" + name)
+                open(marker, "w", encoding="utf-8").write(name)
+            else:
+                status.set_text("chosen=")
+                open(marker, "w", encoding="utf-8").write("cancel")
+            dialog.destroy()
+
+        button.connect("clicked", on_click)
+        box.pack_start(status, False, False, 0)
+        box.pack_start(button, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 160)
+        win.move(40, 40)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    if os.path.isfile(auth):
+        env["XAUTHORITY"] = auth
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], env=env, start_new_session=True,
+    )
+    try:
+        from a11y_computer_use.schema import ComputerUseError, Scope
+        from a11y_computer_use.server import Runtime
+
+        driver = LinuxDriver()
+        driver.ensure_trusted()
+        _grant_linux_desktop("cuafilechoose", "python3", "python")
+        deadline = time.monotonic() + 15
+        host = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.APP, "python3")
+            except ComputerUseError:
+                shot = None
+            if shot is not None and any(el.title == "Browse" and el.clickable for el in shot.elements):
+                host = shot
+                break
+            time.sleep(0.2)
+        assert host is not None, "the GTK file-chooser host did not open"
+        runtime = Runtime(driver=driver)
+        runtime._current = host
+        browse = next(el for el in host.elements if el.title == "Browse" and el.clickable)
+        runtime.click(browse.ref)
+        deadline = time.monotonic() + 8
+        appeared = False
+        while time.monotonic() < deadline:
+            try:
+                rows = driver.windows()
+            except Exception:
+                rows = []
+            if any(str(row.get("title") or "") == "Open File" for row in rows):
+                appeared = True
+                break
+            time.sleep(0.2)
+        assert appeared, "the GTK file chooser did not open"
+        subprocess.run(
+            ["xdotool", "search", "--name", "Open File", "windowactivate"],
+            check=False, timeout=3,
+        )
+
+        def model(_messages):
+            return ModelTurn(calls=[ToolCall("choose_file", {"path": str(target)})])
+
+        result = _run_agent(
+            Agent, ScriptedModel(model), "choose the file in the open dialog",
+            tmp_path / "trace", max_steps=1, max_time_s=90,
+        )
+        step = next(item for item in result.step_log if _step_action(item) == "choose_file")
+        assert _step_verified(step) is True, (step, result)
+        assert str(target) in str(getattr(step, "result", "") or ""), step
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not marker.is_file():
+            time.sleep(0.2)
+        assert marker.is_file(), "the chooser did not accept or cancel"
+        assert marker.read_text() == str(target), marker.read_text()
+        assert not any(
+            str(row.get("title") or "") == "Open File" for row in driver.windows()
+        ), driver.windows()
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        stop_process(proc)
 

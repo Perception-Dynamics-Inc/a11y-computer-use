@@ -35,6 +35,8 @@ def focus_driver(monkeypatch):
     monkeypatch.setattr(_atspi, "insert_text", lambda acc, text: inserted.append((acc, text)) or True)
     monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)
     monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    # This fixture models an editor with no native terminal focused.
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (None, False))
     monkeypatch.setattr(_atspi, "focused_text", lambda app: None)
     fake_input = types.ModuleType("a11y_computer_use.drivers._linux_input")
     fake_input.held = lambda modifiers: nullcontext()
@@ -61,6 +63,57 @@ def test_detectable_owner_preserves_ref_typing_without_widget_focus(focus_driver
     driver.type_text(" again")
     assert inserted == [(handle, "hello"), (handle, " again")]
     assert typed == []
+
+
+@pytest.mark.parametrize("app", ["xournalpp", "abiword"])
+def test_canvas_without_text_types_once_and_reports_unverifiable(
+    focus_driver, monkeypatch, app,
+) -> None:
+    driver, front, _, _, inserted, typed = focus_driver
+    front["app"] = app
+
+    class Canvas:
+        def get_text_iface(self):
+            return None
+
+        def get_role_name(self):
+            return "unknown"
+
+    canvas = Canvas()
+    monkeypatch.setattr(_atspi, "focused_text", _ORIGINAL_FOCUSED_TEXT)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *args, **kwargs: (canvas, False))
+    # GTK's static Text call returns an empty string even without Text.
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "")
+    assert _atspi.focused_text(app) is None
+    assert driver.type_text("XPROBE1 beta") == 12
+    assert typed == ["XPROBE1 beta"]
+    assert inserted == []
+    runtime = server.Runtime(driver=driver)
+    assert runtime._drawing_type_verdict(app, "XPROBE1 beta") == (
+        "unverifiable", "unverified",
+    )
+
+
+_ORIGINAL_FOCUSED_TEXT = _atspi.focused_text
+
+
+def test_readable_empty_text_is_still_a_mismatch(focus_driver, monkeypatch) -> None:
+    driver, _, _, _, inserted, typed = focus_driver
+
+    class Field:
+        def get_text_iface(self):
+            return self
+
+        def get_role_name(self):
+            return "entry"
+
+    monkeypatch.setattr(_atspi, "focused_text", _ORIGINAL_FOCUSED_TEXT)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *args, **kwargs: (Field(), False))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "")
+    with pytest.raises(ComputerUseError) as error:
+        driver.type_text("hello")
+    assert error.value.detail["reason"] == "text_mismatch"
+    assert typed == ["hello"] and inserted == []
 
 
 def test_runtime_cannot_use_another_apps_full_grant_for_a_cached_editable(
@@ -291,6 +344,34 @@ def test_xtest_type_rejects_a_readback_that_does_not_contain_the_text(focus_driv
         _atspi.focused_editable = lambda app: None
     assert exc.value.code is ErrorCode.UNSUPPORTED
     assert exc.value.detail["reason"] == "text_mismatch"
+    assert typed == ["Hello"]
+
+
+def test_xtest_type_still_types_when_the_selection_lookup_has_no_atspi(focus_driver, monkeypatch) -> None:
+    """A host without PyGObject still types. The selection read is not required.
+
+    macOS and Windows hermetic runs have no ``gi``. ``_focused_node`` raises
+    ImportError there. That is not a failed type.
+    """
+    import sys
+
+    driver, _, _, _, _, typed = focus_driver
+    state = {"text": ""}
+    fake = sys.modules["a11y_computer_use.drivers._linux_input"]
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        state["text"] = text
+
+    fake.type_string = type_string
+    monkeypatch.setattr(_atspi, "focused_text", lambda app: state["text"])
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+
+    def missing(_app, **_kwargs):
+        raise ImportError("PyGObject is not installed; the AT-SPI2 binding is unavailable")
+
+    monkeypatch.setattr(_atspi, "_focused_node", missing)
+    assert driver.type_text("Hello") == 5
     assert typed == ["Hello"]
 
 
