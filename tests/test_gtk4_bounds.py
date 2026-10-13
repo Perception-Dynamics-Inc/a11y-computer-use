@@ -529,6 +529,7 @@ def test_non_gtk4_negative_window_origin_keeps_pointer_click(monkeypatch, toolki
 def test_gtk4_text_click_requires_observed_focus(monkeypatch, role, focused) -> None:
     """An entry's no-op activate cannot replace a pointer click or its evidence."""
     clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, field = _button(_App("GTK", "4.18.6"))
     field.role = "text"
     field.actions = ("activate",)
@@ -568,6 +569,7 @@ def test_gtk4_text_click_requires_observed_focus(monkeypatch, role, focused) -> 
 @pytest.mark.parametrize("role", ["AXTextField", "AXTextArea", "AXSearchField"])
 def test_gtk4_text_click_refuses_untrusted_geometry_even_with_activate(monkeypatch, role) -> None:
     clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, field = _button(_App("GTK", "4.18.6"))
     field.actions = ("activate",)
     monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: field)
