@@ -15,3 +15,5 @@
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
 
 - 2026-10-13 (#503): Keep the GTK 4 garbage-allocation filter limited to unnamed, childless panels; large real containers still need their extents for clipping and sampling. When merge conflicts join appended regression tests, retain both branches' tests and compare the final diff against main.
+
+- 2026-10-14 (#202): Compare a failed Actions run's head SHA with the current remote PR head before repairing it; a newer commit may already address the failure. Preserve those remote commits when merging main and pushing without force.
