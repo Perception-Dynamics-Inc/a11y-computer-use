@@ -3001,6 +3001,81 @@ def fake_atspi(monkeypatch):
     _atspi.reset_shown_rows()
 
 
+@pytest.fixture
+def gtk_font_combo(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    def make(labels):
+        app = _Acc("application", name="AbiWord")
+        app.get_toolkit_name = lambda: "gtk"
+        combo = _Acc("combo box")
+        combo.get_application = lambda: app
+        menu = _adopt(_Acc("menu"), *[
+            _Acc("menu item", name=label) for label in labels
+        ])
+        _adopt(combo, menu)
+        selected = []
+        combo.get_selection_iface = lambda: combo
+        combo.get_selected_child = lambda index: menu.children[selected[-1] if selected else 0]
+
+        def select_child(index):
+            selected.append(index)
+            return True
+
+        combo.select_child = select_child
+        driver = LinuxDriver()
+        monkeypatch.setattr(driver, "_run", lambda fn: fn())
+        monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+        monkeypatch.setattr(observe, "ax_handle_for", lambda *args: combo)
+        monkeypatch.setattr(_cdp_forms, "write_element", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_atspi, "peer_field_texts", lambda handle: {})
+        monkeypatch.setattr(_atspi, "is_sheet_cell", lambda handle: False)
+        element = Element("e1", "AXComboBox", "Font", labels[0],
+                          Bounds(0, 0, 0, 100, 20), "font-combo")
+        return driver, element, menu, selected
+
+    return make
+
+
+@pytest.mark.parametrize("option_number", [65, 300, 600])
+def test_gtk_font_combo_set_value_searches_all_options(gtk_font_combo, option_number):
+    labels = [f"Font {index:03}" for index in range(1, 601)]
+    driver, element, menu, selected = gtk_font_combo(labels)
+    assert driver.set_value(element, labels[option_number - 1]) is True
+    assert selected == [option_number - 1]
+    assert menu.children[selected[-1]].name == labels[option_number - 1]
+
+
+def test_gtk_font_combo_missing_option_has_bounded_honest_message(gtk_font_combo):
+    labels = [f"Font {index:03}" for index in range(1, 601)]
+    driver, element, menu, selected = gtk_font_combo(labels)
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Missing Font")
+    message = str(exc.value)
+    assert "showing first 64 of 600 options (list truncated)" in message
+    assert "is not one of" not in message
+    assert len(message) < 2200
+    assert selected == []
+
+
+def test_gtk_small_combo_selection_and_missing_message_unchanged(gtk_font_combo):
+    driver, element, menu, selected = gtk_font_combo(["Red", "Green", "Blue"])
+    assert driver.set_value(element, "Blue") is True
+    assert selected == [2]
+    with pytest.raises(ValueError, match="^value 'Missing' is not one of: Red, Green, Blue$"):
+        driver.set_value(element, "Missing")
+    assert selected == [2]
+
+
+def test_gtk_combo_missing_message_bounds_long_labels(gtk_font_combo):
+    driver, element, menu, selected = gtk_font_combo(["F" * 3000, "Blue"])
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Missing")
+    assert "showing first 0 of 2 options (list truncated)" in str(exc.value)
+    assert len(str(exc.value)) < 2200
+    assert selected == []
+
+
 def _toggle_click_target(monkeypatch, *, toolkit="Qt", role="check box",
                          actions=("Toggle", "SetFocus"), bounds=Bounds(0, 40, 60, 100, 20)):
     """Synthetic Qt Toggle changes state; only mouse input runs the handler."""
