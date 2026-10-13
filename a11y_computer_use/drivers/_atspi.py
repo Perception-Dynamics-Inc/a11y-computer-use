@@ -6030,11 +6030,11 @@ def file_chooser_controls(pid: int | None, title: str):
     folded = _folded_title(title)
     apps = _desktop_apps(desktop)
     owned = [app for app in apps if pid and pid_of(app) == pid]
-    found = _chooser_in_apps(owned, folded, title, title_only=False)
+    found = _chooser_in_apps(owned, folded, title)
     if found is not None:
         return found
     rest = [app for app in apps if app not in owned]
-    return _chooser_in_apps(rest, folded, title, title_only=True)
+    return _chooser_in_apps(rest, folded, title)
 
 
 def chooser_controls_under(root, title: str):
@@ -6096,7 +6096,7 @@ def _desktop_apps(desktop) -> list:
     return apps
 
 
-def _chooser_in_apps(apps, folded: str, title: str, *, title_only: bool):
+def _chooser_in_apps(apps, folded: str, title: str):
     for app in apps:
         frames = _direct_children(app)
         named = [
@@ -6106,10 +6106,9 @@ def _chooser_in_apps(apps, folded: str, title: str, *, title_only: bool):
         ]
         if named:
             targets = named
-        elif title_only:
-            continue
         else:
-            targets = [app]
+            # Buttons elsewhere in the app are not an active chooser frame.
+            continue
         for target in targets:
             found = chooser_controls_under(target, title)
             if found is not None:
