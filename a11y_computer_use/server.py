@@ -3845,19 +3845,80 @@ class Runtime:
     def _dismiss_open_menu(self, app: str) -> str:
         """Close a menu left open in ``app`` so the next keystroke or click is not
         swallowed by menu tracking. Returns a note for the result, or "".
-        Never raises: backends without menu bars report no open menu."""
+
+        A driver with no menu bar reports no open menu. Escape is not sent
+        when it would land on a different window, such as a modal dialog
+        that does not contain the menu: the click or type is refused instead.
+        A close that fails is also refused, so the action does not continue
+        as if the menu had been dismissed.
+        """
         state_fn = getattr(self.driver, "menu_state", None)
         close_fn = getattr(self.driver, "menu_close", None)
         if state_fn is None or close_fn is None:
             return ""
         try:
             state = state_fn(app)
-            if not state or not state.get("open"):
-                return ""
-            path = close_fn(app) or state.get("path") or []
         except (ComputerUseError, NotImplementedError, OSError):
             return ""
+        if not state or not state.get("open"):
+            return ""
+        safe_fn = getattr(self.driver, "menu_escape_safe", None)
+        if callable(safe_fn):
+            try:
+                safe = safe_fn(app)
+            except Exception:
+                safe = True
+            if safe is False:
+                path = [str(part) for part in (state.get("path") or [])]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "a dialog is in front of the open menu; Escape was not sent",
+                    detail={
+                        "reason": "menu_dismiss_blocked",
+                        "outcome": "refused",
+                        "path": path,
+                        "next": ["ref"],
+                        "evidence": "Escape would dismiss the dialog, so the click was not sent",
+                    },
+                )
+        try:
+            path = close_fn(app) or state.get("path") or []
+        except ComputerUseError as exc:
+            exc.detail.setdefault("outcome", "refused")
+            exc.detail.setdefault("next", ["ref"])
+            raise
+        except (NotImplementedError, OSError):
+            return ""
         return f" (closed open menu {' > '.join(str(t) for t in path)} first)" if path else ""
+
+    def _refuse_vanished_target(self, element: Element) -> None:
+        """Refuse when ``element`` disappeared before the pointer or the keys.
+
+        The action has not been sent. A driver without this check, or a
+        target that is still there, returns. Success is not reported.
+        """
+        checker = getattr(self.driver, "target_vanished", None)
+        if not callable(checker):
+            return
+        try:
+            gone = checker(element)
+        except Exception:
+            return
+        if not gone:
+            return
+        title = f" {element.title!r}" if element.title else ""
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}{title}) vanished before the action; nothing was sent",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "target_vanished",
+                "outcome": "refused",
+                "next": ["ref"],
+                "evidence": f"{element.ref} was gone before the action, so nothing was sent",
+            },
+        )
 
     def _open_menu_header(self, app: str) -> str:
         """``open menu: File > Font`` for the snapshot header, or ""."""
@@ -4633,6 +4694,8 @@ class Runtime:
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, act)
             menu_note.append(self._dismiss_open_menu(app))
+            if isinstance(act, Element):
+                self._refuse_vanished_target(act)
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier
@@ -5361,6 +5424,7 @@ class Runtime:
             self._refuse_disabled(live, verb="type")
             self._guard_user(gate)
             note.append(self._dismiss_open_menu(gate))
+            self._refuse_vanished_target(live)
             return self._deliver_type_at_ref(live, text)
 
         count = self._run_gated(action, gate, execute)
