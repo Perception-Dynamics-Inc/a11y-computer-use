@@ -11989,3 +11989,119 @@ def test_click_on_an_outline_row_stays_a_single_click(
     presses = [event for event in events if event[0] == _X_BPRESS]
     assert len(presses) == 2, events
     assert named == []
+
+
+@pytest.fixture
+def kate_document(monkeypatch):
+    """A Qt document with a whole-buffer Text interface and a narrow filler."""
+    app = _Acc("application", name="kate")
+    editor = _Acc("text", name="Document", states=("MULTI_LINE", "EDITABLE"))
+    gutter = _Acc("filler")
+    _adopt(app, _adopt(_Acc("panel"), gutter, editor))
+    editor.text = "".join(f"LINE-{n:03d}\n" for n in range(1, 521))
+    editor.first = 1
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _FakeAtspi)
+    monkeypatch.setattr(_atspi, "_qt_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: (
+        (10, 20, 40, 100) if node is gutter else (50, 20, 500, 100)
+    ))
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: (
+        ((10, 20), (40, 100)) if node is gutter else ((50, 20), (500, 100))
+    ))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
+        True, False, None, False, None, node is editor, node is editor,
+    ))
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda node: {})
+    monkeypatch.setattr(_atspi, "_action_names", lambda node: ())
+    def extents(node, offset, coord):
+        number = node.text.count("\n", 0, offset) + 1
+        return _NS(x=50, y=20 + (number - node.first) * 10, width=8, height=10)
+    monkeypatch.setattr(_FakeAtspi.Text, "get_character_extents", extents, raising=False)
+    return app, editor, gutter
+
+
+def test_qt_document_find_matches_only_the_visible_lines(kate_document) -> None:
+    """A bottom marker in the buffer is not a hit at the top of the editor."""
+    _, editor, _ = kate_document
+    accessor = _atspi.ATSPIAccessor()
+    def snapshot():
+        return build_snapshot(editor, accessor, scope=Scope.WINDOW, app="kate", pid=1, geometry=_geometry())
+    top = snapshot()
+    assert observe.find_elements(top, text="LINE-001")
+    assert not observe.find_elements(top, text="LINE-520")
+    editor.first = 511
+    bottom = snapshot()
+    assert observe.find_elements(bottom, text="LINE-520")
+    assert not observe.find_elements(bottom, text="LINE-001")
+
+
+def test_qt_document_unknown_extents_do_not_match_the_buffer(kate_document, monkeypatch) -> None:
+    """An unavailable Text geometry must not turn an off-screen line into a hit."""
+    _, editor, _ = kate_document
+    monkeypatch.setattr(_FakeAtspi.Text, "get_character_extents", lambda *args: None)
+    assert _atspi.ATSPIAccessor().read(editor).value == ""
+
+
+def test_kate_gutter_names_follow_visible_document_lines(kate_document) -> None:
+    """The filler receives actual visible line numbers, including after scrolling."""
+    _, editor, gutter = kate_document
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.read(gutter).title == "Line numbers: " + ", ".join(map(str, range(1, 11)))
+    snap = build_snapshot(
+        gutter, accessor, scope=Scope.WINDOW, app="kate", pid=1, geometry=_geometry(),
+    )
+    assert observe.find_elements(snap, text="Line numbers")
+    editor.first = 511
+    assert accessor.read(gutter).title == "Line numbers: " + ", ".join(map(str, range(511, 521)))
+
+
+def test_kate_gutter_does_not_name_other_chrome(kate_document, monkeypatch) -> None:
+    """Neither another app nor a filler away from the editor is a gutter."""
+    app, _, gutter = kate_document
+    app.name = "other"
+    assert _atspi._kate_gutter_name(gutter) == ""
+    app.name = "kate"
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: (500, 20, 40, 100))
+    assert _atspi._kate_gutter_name(gutter) == ""
+
+
+def test_qt_scroll_to_find_waits_for_the_line_to_enter_the_viewport(kate_document, monkeypatch) -> None:
+    """The runtime must issue a scroll before confirming the bottom marker."""
+    from a11y_computer_use import server
+
+    _, editor, _ = kate_document
+    accessor = _atspi.ATSPIAccessor()
+    scrolls = []
+    def snapshot(scope, app):
+        return build_snapshot(editor, accessor, scope=scope, app=app, pid=1, geometry=_geometry())
+    def scroll(target, **kwargs):
+        scrolls.append(kwargs)
+        editor.first = 511
+    driver = _NS(ensure_trusted=lambda: None, snapshot=snapshot, scroll=scroll)
+    runtime = _runtime_for(driver, monkeypatch)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, "kate"))
+    result = runtime.scroll_to_find("kate", text="LINE-520", max_scrolls=2)
+    assert scrolls
+    assert "found after 0 scroll" not in result
+    assert "found after" in result
+
+
+def test_qt_document_filter_keeps_single_line_and_non_qt_values(kate_document, monkeypatch) -> None:
+    """Single-line fields and other toolkit readers retain their value path."""
+    _, editor, _ = kate_document
+    accessor = _atspi.ATSPIAccessor()
+    monkeypatch.setattr(_atspi, "_qt_app", lambda node: False)
+    assert accessor.read(editor).value == editor.text
+    monkeypatch.setattr(_atspi, "_qt_app", lambda node: True)
+    editor.states = {"SINGLE_LINE", "EDITABLE"}
+    assert accessor.read(editor).value == editor.text
+
+
+def test_qt_document_zero_extents_do_not_match_the_buffer(kate_document, monkeypatch) -> None:
+    """Qt can return an empty rectangle for characters outside the viewport."""
+    _, editor, _ = kate_document
+    monkeypatch.setattr(_FakeAtspi.Text, "get_character_extents", lambda *args: (
+        _NS(x=0, y=0, width=0, height=0)
+    ))
+    assert _atspi.ATSPIAccessor().read(editor).value == ""

@@ -2439,6 +2439,62 @@ def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
     return y < top + box_h and y + height > top and x < left + box_w and x + width > left
 
 
+def _qt_visible_lines(acc, full: str) -> list[tuple[int, str]]:
+    """Numbered on-screen lines of a Qt editor, using character extents.
+
+    Qt Text contains the entire document. Missing or zero-size extents
+    are not evidence that a line is visible. The probe is bounded for
+    large documents; an unplaced line must not become a search hit.
+    """
+    box = _raw_rect(acc, "SCREEN")
+    if box is None:
+        return []
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    offset = 0
+    shown = []
+    for number, line in enumerate(full.splitlines(keepends=True), 1):
+        if number > 20000:
+            break
+        probe = offset + len(line) - len(line.lstrip())
+        if probe < offset + len(line):
+            rect = _safe(lambda: Atspi.Text.get_character_extents(acc, probe, coord))
+            if _rect_hits_box(rect, box):
+                shown.append((number, line))
+        offset += len(line)
+    return shown
+
+
+def _kate_gutter_name(acc) -> str:
+    """Name Kate's unnamed filler immediately left of its document editor.
+
+    Numbers come from the adjacent editor's Text offsets, never from the
+    strip's height. Other fillers and other applications stay unnamed.
+    """
+    app = _application_ancestor(acc)
+    if app is None or _node_name(app).casefold() != "kate" or not _qt_app(acc):
+        return ""
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or not 0 < box[2] <= 80:
+        return ""
+    parent = _parent_of(acc)
+    for editor in _direct_children(parent) if parent is not None else ():
+        if _role_name(editor) != "text" or not _state_has(editor, "MULTI_LINE"):
+            continue
+        other = _raw_rect(editor, "SCREEN")
+        if other is None:
+            continue
+        x, y, width, height = box
+        ex, ey, ew, eh = other
+        if abs(x + width - ex) > 8 or abs(y - ey) > 8 or abs(height - eh) > 16:
+            continue
+        full = _value_text(editor, "AXTextArea", "text")
+        if isinstance(full, str):
+            numbers = [str(number) for number, _ in _qt_visible_lines(editor, full)]
+            return "Line numbers: " + ", ".join(numbers) if numbers else "Line numbers"
+    return ""
+
+
 def _terminal_on_screen(acc, full: str) -> str:
     """The on-screen slice of a VTE buffer.
 
@@ -3134,6 +3190,17 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        # Search consumes the snapshot value, not just the rendered text.
+        # Keep the whole-buffer reader for editing and read-back checks;
+        # only the snapshot of a Qt multiline control is viewport text.
+        if (
+            role == "AXTextArea" and role_str != "terminal"
+            and _state_has(node, "MULTI_LINE") and _qt_app(node)
+        ):
+            if isinstance(value, str):
+                value = "".join(line for _, line in _qt_visible_lines(node, value))
+        if role_str == "filler" and not str(name).strip() and not str(description).strip():
+            name = _kate_gutter_name(node) or name
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
