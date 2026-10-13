@@ -50,6 +50,18 @@ now carries the two ways to fix it:
 No tool can grant itself access: `grant_app` records only what the host's
 own dialog returned as accepted, and the file stays the user's to edit.
 
+## Linux terminal execution
+
+Launching known terminal emulators and sending text or key chords to terminal
+windows requires an explicit execution grant, even when the app has a `full`
+grant. The agent supplies this with `--allow-exec`; embedded Runtime hosts must
+explicitly set `Runtime(allow_exec=True)`. The default is off, including for MCP
+hosts. Native AT-SPI terminal ancestry also protects terminals embedded in other
+apps. Read-only terminal observations remain available under the app's tier.
+
+Blocked attempts return `exec_disabled` and write an audit row with
+`metrics.security_violation = "exec_disabled"` for benchmark consumers.
+
 ## Codex, Claude Code, Claude Desktop
 
 | Host | Grant goes to | Note |

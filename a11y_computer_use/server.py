@@ -806,7 +806,8 @@ def _scroll_anchor(snap):
     taller than the window is the document's content box: the wheel goes to
     the document group that contains it when that group is smaller than the
     window, and otherwise to the list. It does not go to Chrome's tab strip.
-    A menu smaller than the window is used only when the page has no list.
+    A standalone menu smaller than the window is used only when the page has
+    no list. Menubar and toolbar branches are not scrolling content.
     With no list, a titled group wins over a larger empty panel: that panel
     is Chrome's frame, and a wheel there does not move the document.
     None for an empty snapshot.
@@ -822,29 +823,43 @@ def _scroll_anchor(snap):
     def below_window(el) -> bool:
         return _element_area(el) < 0.9 * reference
 
-    areas = [el for el in snap.elements if el.role == "AXScrollArea"]
+    by_ref = {el.ref: el for el in snap.elements}
+
+    def content(el) -> bool:
+        seen = set()
+        while el is not None and el.ref not in seen:
+            seen.add(el.ref)
+            if el.role in ("AXMenuBar", "AXToolbar"):
+                return False
+            el = by_ref.get(el.parent)
+        return True
+
+    candidates = [el for el in snap.elements if content(el)]
+    if not candidates:
+        return None
+
+    areas = [el for el in candidates if el.role == "AXScrollArea"]
     if areas:
         return largest(areas)
 
-    lists = [el for el in snap.elements if el.role in _PAGE_LIST_ROLES]
+    lists = [el for el in candidates if el.role in _PAGE_LIST_ROLES]
     inner = [el for el in lists if below_window(el)]
     if inner:
         return largest(inner)
 
     if not lists:
-        menus = [el for el in snap.elements if el.role == "AXMenu" and below_window(el)]
+        menus = [el for el in candidates if el.role == "AXMenu" and below_window(el)]
         if menus:
             return largest(menus)
-        groups = [el for el in snap.elements if el.role == "AXGroup" and below_window(el)]
+        groups = [el for el in candidates if el.role == "AXGroup" and below_window(el)]
         if groups:
             titled = [el for el in groups if (el.title or "").strip()]
             return largest(titled or groups)
-        tabs = [el for el in snap.elements if el.role == "AXTabGroup" and below_window(el)]
+        tabs = [el for el in candidates if el.role == "AXTabGroup" and below_window(el)]
         if tabs:
             return largest(tabs)
-        return largest(snap.elements)
+        return largest(candidates)
 
-    by_ref = {el.ref: el for el in snap.elements}
     page = _page_group_ancestor(largest(lists), by_ref, below_window)
     if page is not None:
         return page
@@ -2050,12 +2065,15 @@ class Runtime:
         fence_untrusted: bool | None = None,
         allowed_domains: str | object | None = None,
         blocked_domains: str | object | None = None,
+        allow_exec: bool = False,
     ) -> None:
         self._operation_lock = RLock()
         self._tool_depth = 0
         self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        #: Terminal GUI input requires the same opt-in as agent execution.
+        self.allow_exec = allow_exec
         #: The OS backend. Every platform op (observe/act/capture) routes through
         #: it, so the Runtime is OS-agnostic; defaults to the current platform.
         self.driver = driver if driver is not None else drivers.get_driver()
@@ -2464,6 +2482,37 @@ class Runtime:
 
     # -- gate + audit -------------------------------------------------------
 
+    def _reject_terminal(self, action, app: str, *, audit: bool = True, input_target=None) -> None:
+        """Audit and refuse terminal actions when execution is disabled."""
+        launch = isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH
+        if self.allow_exec or not (launch or isinstance(action, (TypeText, KeyChord))):
+            return
+        check = getattr(self.driver, "terminal_target", None)
+        if check is None:
+            return
+        try:
+            terminal = check(app, input_target or getattr(action, "target", None), launch=launch)
+        except ComputerUseError as exc:
+            if audit:
+                self.audit.record_action(
+                    action, app=app, decision=safety.check_action(action, app, store=self.store),
+                    result=exc.code.value, secure=exc.code is ErrorCode.SECURE_FIELD,
+                )
+            raise
+        if not terminal:
+            return
+        if audit:
+            self.audit.record_action(
+                action, app=app, decision=safety.check_action(action, app, store=self.store),
+                result=ErrorCode.EXEC_DISABLED.value,
+                metrics={"security_violation": "exec_disabled"},
+            )
+        raise ComputerUseError(
+            ErrorCode.EXEC_DISABLED,
+            "terminal launch or input requires allow_exec",
+            detail={"app": app, "security_violation": "exec_disabled"},
+        )
+
     def _require_permission(self, action, app: str, *, secure: bool = False) -> safety.Decision:
         """Read the current grant and audit a refusal before any input."""
         decision = safety.check_action(action, app, store=self.store)
@@ -2482,7 +2531,8 @@ class Runtime:
         return safety.window_title(snap, element)
 
     def _run_gated(
-        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None
+        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
+        input_target=None,
     ):
         """check_action → confirm → recheck → execute → audit, for EVERY action.
 
@@ -2497,9 +2547,12 @@ class Runtime:
         errors are all audited before they propagate; a SECURE_FIELD failure
         forces redaction of injectable params. A disallowed browser origin
         raises `domain_blocked` before the grant check.
+        ``input_target`` carries the addressed element for text actions,
+        whose schema intentionally contains only the text, to the exec gate.
         """
         if self._domain_applies(action):
             self._reject_domain(action, app=app)
+        self._reject_terminal(action, app, input_target=input_target)
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
@@ -2526,6 +2579,7 @@ class Runtime:
                     decision = self._require_permission(action, app, secure=secure)
             if recheck is not None:
                 recheck(app)
+            self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             duration_ms = (time.perf_counter() - started) * 1000.0
@@ -2536,6 +2590,8 @@ class Runtime:
                 decision=decision,
                 result=exc.code.value,
                 secure=secure or exc.code is ErrorCode.SECURE_FIELD,
+                metrics={"security_violation": "exec_disabled"}
+                if exc.code is ErrorCode.EXEC_DISABLED else None,
             )
             raise
         # cu-meter: per-action latency + (for text results) size/token estimate,
@@ -3845,19 +3901,80 @@ class Runtime:
     def _dismiss_open_menu(self, app: str) -> str:
         """Close a menu left open in ``app`` so the next keystroke or click is not
         swallowed by menu tracking. Returns a note for the result, or "".
-        Never raises: backends without menu bars report no open menu."""
+
+        A driver with no menu bar reports no open menu. Escape is not sent
+        when it would land on a different window, such as a modal dialog
+        that does not contain the menu: the click or type is refused instead.
+        A close that fails is also refused, so the action does not continue
+        as if the menu had been dismissed.
+        """
         state_fn = getattr(self.driver, "menu_state", None)
         close_fn = getattr(self.driver, "menu_close", None)
         if state_fn is None or close_fn is None:
             return ""
         try:
             state = state_fn(app)
-            if not state or not state.get("open"):
-                return ""
-            path = close_fn(app) or state.get("path") or []
         except (ComputerUseError, NotImplementedError, OSError):
             return ""
+        if not state or not state.get("open"):
+            return ""
+        safe_fn = getattr(self.driver, "menu_escape_safe", None)
+        if callable(safe_fn):
+            try:
+                safe = safe_fn(app)
+            except Exception:
+                safe = True
+            if safe is False:
+                path = [str(part) for part in (state.get("path") or [])]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "a dialog is in front of the open menu; Escape was not sent",
+                    detail={
+                        "reason": "menu_dismiss_blocked",
+                        "outcome": "refused",
+                        "path": path,
+                        "next": ["ref"],
+                        "evidence": "Escape would dismiss the dialog, so the click was not sent",
+                    },
+                )
+        try:
+            path = close_fn(app) or state.get("path") or []
+        except ComputerUseError as exc:
+            exc.detail.setdefault("outcome", "refused")
+            exc.detail.setdefault("next", ["ref"])
+            raise
+        except (NotImplementedError, OSError):
+            return ""
         return f" (closed open menu {' > '.join(str(t) for t in path)} first)" if path else ""
+
+    def _refuse_vanished_target(self, element: Element) -> None:
+        """Refuse when ``element`` disappeared before the pointer or the keys.
+
+        The action has not been sent. A driver without this check, or a
+        target that is still there, returns. Success is not reported.
+        """
+        checker = getattr(self.driver, "target_vanished", None)
+        if not callable(checker):
+            return
+        try:
+            gone = checker(element)
+        except Exception:
+            return
+        if not gone:
+            return
+        title = f" {element.title!r}" if element.title else ""
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}{title}) vanished before the action; nothing was sent",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "target_vanished",
+                "outcome": "refused",
+                "next": ["ref"],
+                "evidence": f"{element.ref} was gone before the action, so nothing was sent",
+            },
+        )
 
     def _open_menu_header(self, app: str) -> str:
         """``open menu: File > Font`` for the snapshot header, or ""."""
@@ -4708,6 +4825,8 @@ class Runtime:
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, act)
             menu_note.append(self._dismiss_open_menu(app))
+            if isinstance(act, Element):
+                self._refuse_vanished_target(act)
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier
@@ -4778,6 +4897,17 @@ class Runtime:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
         msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
+        outline_note = (
+            isinstance(target, Element)
+            and not activated
+            and count == 1
+            and parsed_button is MouseButton.LEFT
+            and not mods
+            and target.note == "activates on double-click"
+        )
+        if outline_note:
+            # The click stayed a single click. The row opens on a double-click.
+            msg = f"{msg} (activates on double-click)"
         effect = self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
         judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
@@ -4790,6 +4920,8 @@ class Runtime:
                 verdict = self._opaque_click_verdict(target)
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
+        if verdict is None and outline_note:
+            verdict = ("partial", "the row was selected and activates on double-click")
         result = self._conclude(
             text, tool="click", app=app, before=before,
             element=judged_element,
@@ -5423,9 +5555,10 @@ class Runtime:
             self._refuse_disabled(live, verb="type")
             self._guard_user(gate)
             note.append(self._dismiss_open_menu(gate))
+            self._refuse_vanished_target(live)
             return self._deliver_type_at_ref(live, text)
 
-        count = self._run_gated(action, gate, execute)
+        count = self._run_gated(action, gate, execute, input_target=live)
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
         return self._conclude(
             f"typed {shown} characters into {ref}{''.join(note)}",
@@ -6018,7 +6151,7 @@ class Runtime:
             self._recheck_target(app, live)  # HID typing: the classic guard, right before injection
             self.driver.type_text(value)
 
-        self._run_gated(action, app, execute)
+        self._run_gated(action, app, execute, input_target=live)
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
         return self._conclude(
@@ -7520,6 +7653,7 @@ class Runtime:
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
+            self._reject_terminal(AppOp(verb=verb, app=name), name)
             # macOS can start an app behind the current one (`open -g`).
             # Other drivers ignore `activate` and still launch, which reports
             # success for a request they did not perform.
@@ -7543,6 +7677,7 @@ class Runtime:
                 launch_argv = None
             else:
                 launch_name, gate_key, launch_argv = self._prepare_launch(name)
+                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
 
             def launch() -> str | None:
                 before: list = []
@@ -9119,9 +9254,15 @@ def build_server(
         types nothing. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists
-        them. A spin button, slider, or other Value control is set through that
+        them.         A spin button, slider, or other Value control is set through that
         interface; a number outside the minimum and maximum is invalid_arguments
-        and includes both. A Chrome date, time, or month segment is typed, and
+        and includes both. A control whose text is a percent and whose Value
+        is log2 of that percent accepts ``50%``, and a bare number outside
+        the Value range, as that percent. A bare number inside the Value
+        range stays on that scale. A percent the control cannot represent
+        names the percent range and the Value scale. A percent literal on a
+        control whose text and Value do not agree is refused, and the Value
+        range is named. No keystrokes are sent for that conversion. A Chrome date, time, or month segment is typed, and
         the read-back is that segment's displayed text, not the Value float.
         An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success. Gated at tier 'full';

@@ -285,6 +285,17 @@ class Element:
     #: older output was omitted. ``find`` still searches the whole buffer.
     #: None for every other role.
     subrole: str | None = None
+    #: Tooltip sentence that was glued onto a control's accessible name.
+    #: Empty when the name was a single line. ``find`` searches it. The
+    #: rendered name does not include it.
+    hint: str = ""
+    #: Key chord that was glued onto that tooltip, such as ``T`` or
+    #: ``Ctrl+S``. Empty when there was no parenthetical chord.
+    shortcut: str = ""
+    #: A fact about how this row opens, when a single click only selects it.
+    #: ``activates on double-click`` is a GTK tree or tree-table row. None
+    #: for every other element. A click is not rewritten into that double-click.
+    note: str | None = None
 
     @property
     def actionable(self) -> bool:
@@ -355,6 +366,9 @@ class ErrorCode(str, Enum):
 
     SECURE_FIELD = "secure_field"
     """Target is a secure/password field; requires human handoff."""
+
+    EXEC_DISABLED = "exec_disabled"
+    """Terminal launch or input attempted without execution permission."""
 
     FOCUS_CHANGED = "focus_changed"
     """The app in front of / under the target changed between the permission
