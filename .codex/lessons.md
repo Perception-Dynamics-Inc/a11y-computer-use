@@ -46,3 +46,5 @@
 
 - 2026-10-14 (#467 repair): GtkStatusbar may expose caret status only through its Text interface. Preserve that text as the unnamed bar's title while keeping numeric Value probes disabled; verify Geany symbol clicks alongside Scintilla search.
 - 2026-10-13 (#467): Refresh AT-SPI status-bar properties before reading geometry. GTK can cache the bar's unallocated startup rectangle; refreshing later in `_state_flags` leaves that snapshot with stale zero-size geometry and drops caret/status evidence. Cover the allocation transition hermetically and verify Geany symbol clicks and Scintilla find together live.
+
+- 2026-10-14 (PR #467 repair): Repair checkouts may fetch only main. Inspect remote.origin.fetch and explicitly fetch the PR branch before pushing so concurrent repairs are merged rather than overlooked.
