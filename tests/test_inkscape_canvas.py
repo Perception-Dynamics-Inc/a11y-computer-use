@@ -278,6 +278,19 @@ def test_the_frame_title_suffix_names_the_canvas_without_an_app_name(monkeypatch
     assert raw.content_note == _NOTE
 
 
+def test_childless_inkscape_tab_surface_keeps_native_document_context(monkeypatch) -> None:
+    surface = _Node("filler", box=_CANVAS_BOX)
+    tab = _Node("page tab", "Fill", children=[surface])
+    frame = _frame(tab)
+    _patch(monkeypatch)
+    raw = _atspi.ATSPIAccessor().read(surface)
+    assert raw.surface_name == _FRAME
+    assert raw.content_note == ""
+    assert (raw.position, raw.size) == _CANVAS_BOX
+    surface.app.name = "another app"
+    assert _atspi.ATSPIAccessor().read(surface).surface_name == ""
+
+
 def test_live_inkscape_canvas_is_named_and_hidden_svg_is_not_silent(tmp_path) -> None:
     """Live Inkscape. The document canvas is named from the window title.
 

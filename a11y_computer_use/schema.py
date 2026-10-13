@@ -283,12 +283,26 @@ class Element:
     #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
     #: text, or the tail of a longer buffer, with a leading ellipsis when
     #: older output was omitted. ``find`` still searches the whole buffer.
+    #: ``label`` for an AT-SPI label. ``find`` keeps that label when its
+    #: title is the search text, and leaves it out when the title only
+    #: mentions the text and a cell or control has the exact name.
     #: None for every other role.
     subrole: str | None = None
     #: Set when a canvas has no accessible text and no children. The
     #: snapshot and a find that misses print this sentence. Empty when the
     #: toolkit exposed the content, and on every other role. It is not a box.
     content_note: str = ""
+    #: Tooltip sentence that was glued onto a control's accessible name.
+    #: Empty when the name was a single line. ``find`` searches it. The
+    #: rendered name does not include it.
+    hint: str = ""
+    #: Key chord that was glued onto that tooltip, such as ``T`` or
+    #: ``Ctrl+S``. Empty when there was no parenthetical chord.
+    shortcut: str = ""
+    #: A fact about how this row opens, when a single click only selects it.
+    #: ``activates on double-click`` is a GTK tree or tree-table row. None
+    #: for every other element. A click is not rewritten into that double-click.
+    note: str | None = None
 
     @property
     def actionable(self) -> bool:
@@ -359,6 +373,9 @@ class ErrorCode(str, Enum):
 
     SECURE_FIELD = "secure_field"
     """Target is a secure/password field; requires human handoff."""
+
+    EXEC_DISABLED = "exec_disabled"
+    """Terminal launch or input attempted without execution permission."""
 
     FOCUS_CHANGED = "focus_changed"
     """The app in front of / under the target changed between the permission

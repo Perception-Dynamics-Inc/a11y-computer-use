@@ -8,7 +8,37 @@
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
 - `observe.build_snapshot` and the pruning engine: walks any `TreeAccessor` and prunes/indexes it. The Linux `ATSPIAccessor` feeds the *same* engine; `_match_anchor` (ref re-resolution) is reused verbatim.
-- `safety.py` (tiers, gates, audit log, confirmation classifier) and the MCP server. `build_server` registers 26 tools on the Linux, macOS, and Windows drivers (`desktop_snapshot`, `find`, `screenshot`, `zoom`, `crop`, `screen_text`, `click`, `hover`, `type`, `key`, `scroll`, `drag`, `wait_for`, `act`, `set_value`, `scroll_to_find`, `app`, `window`, `clipboard`, `menu`, `file_dialog`, `notes`, `wait_until`, `request_permission`, `grant_app`, `report_issue`). The browser driver adds `console`, `network`, and `webmcp` when the driver has those methods. Platform-free.
+- `safety.py` (tiers, gates, audit log, confirmation classifier) and the MCP server. `build_server` registers 27 tools on the Linux, macOS, and Windows drivers (`desktop_snapshot`, `find`, `screenshot`, `zoom`, `crop`, `screen_text`, `click`, `hover`, `type`, `key`, `scroll`, `drag`, `wait_for`, `act`, `set_value`, `scroll_to_find`, `app`, `window`, `clipboard`, `menu`, `file_dialog`, `files`, `notes`, `wait_until`, `request_permission`, `grant_app`, `report_issue`). The browser driver adds `console`, `network`, and `webmcp` when the driver has those methods. Platform-free.
+
+## Files in opaque file-manager views
+
+Thunar 4.20 exposes named cells in List View, but its Icon and Compact views
+can expose only an unnamed `opaque_region`. The Linux `files` helper supports
+named file tasks without clicking that surface. Configure the MCP server's
+environment with `A11Y_COMPUTER_USE_FILE_ROOTS=/absolute/task/root` (multiple
+roots are separated by `:`). The helper is disabled by default. This setting
+grants direct filesystem access inside those roots independently of app grants.
+
+Use `files(action="list", path="/absolute/task/root")` to discover names, then
+`mkdir`, `rename`, or `move` with absolute paths. For example:
+
+```python
+files(action="mkdir", path="/absolute/task/root/archive")
+files(action="rename", path="/absolute/task/root/alpha.txt",
+      destination="/absolute/task/root/final.txt")
+files(action="move", path="/absolute/task/root/final.txt",
+      destination="/absolute/task/root/archive/final.txt")
+```
+
+The CLI can call the same helper with `run-once` and a JSON object containing
+`"tool": "files"`. Paths must stay inside the configured roots; roots themselves
+cannot be renamed or moved. Parents must exist. Symlink traversal, overwrites,
+special-file moves, and cross-filesystem moves are refused. `rename` keeps the
+same parent; `move` takes the exact destination path including its name. Listing
+is limited to 200 entries and returns an error rather than a partial list.
+Every attempt is audit logged before mutation, and success requires filesystem
+verification. These operations change files directly; they do not select items
+in Thunar. D3's live agent acceptance rate has not been measured by these tests.
 
 ## The role-vocabulary trick
 
@@ -122,6 +152,18 @@ name:
 pip install 'a11y-computer-use[agent,linux]'
 ```
 
+That command compiles PyGObject and pycairo in an isolated venv. PyGObject is sdist-only and pycairo has no Linux wheel, so the build needs `pkg-config` plus the cairo and girepository headers. Without those headers, pip fails while compiling one of the two.
+
+The install that does not compile them uses the distro GI packages and a venv that can import those modules (`--system-site-packages`):
+
+```bash
+sudo apt install python3-gi python3-gi-cairo gir1.2-atspi-2.0
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install 'a11y-computer-use[agent,linux]'
+```
+
+`python3-gi` is PyGObject, `python3-gi-cairo` is the cairo override those bindings import, and `gir1.2-atspi-2.0` is the AT-SPI2 typelib. An isolated venv still works when the build dependencies later in this section are installed first.
+
 `a11y-agent` refuses to start when `gi` or `Xlib` cannot be imported. The
 process exits 3 with status `failed` and an install message. It does not hand
 that ImportError to the model as a permission observation.
@@ -132,7 +174,7 @@ From a clone, the same extra is an editable install:
 pip install -e '.[linux]'
 ```
 
-**python-xlib** is a core dependency on Linux (`sys_platform == 'linux'`), so `pip install a11y-computer-use` can list X11 windows. If that import still fails, `app list`, `window list`, `key` with `app`, and an app-scoped `find` return `unsupported` with `reason` `missing_dependency` and the hint `pip install python-xlib`. They do not return an empty list as `confirmed`, and they do not wait 15s and report LibreOffice's gtk3 bridge as missing. The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe) and repeats **python-xlib**, both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so a Linux install of the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
+**python-xlib** is a core dependency on Linux (`sys_platform == 'linux'`), so `pip install a11y-computer-use` can list X11 windows. If that import still fails, `app list`, `window list`, `key` with `app`, and an app-scoped `find` return `unsupported` with `reason` `missing_dependency` and the hint `pip install python-xlib`. They do not return an empty list as `confirmed`, and they do not wait 15s and report LibreOffice's gtk3 bridge as missing. The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe) and repeats **python-xlib**, both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so an isolated venv that installs the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
 
 Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibility bus:
 
@@ -140,7 +182,7 @@ Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibil
 sudo apt install gir1.2-atspi-2.0 at-spi2-core
 ```
 
-A source build, when those wheels are absent, also needs headers and pkg-config. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
+A source build into an isolated venv, when those wheels are absent, also needs headers and pkg-config. This is the alternative to the `--system-site-packages` install above. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
 
 ```bash
 sudo apt install pkg-config libcairo2-dev python3-dev python3.13-dev \
@@ -153,3 +195,84 @@ PyGObject's Debian/Ubuntu instructions also install `gcc`. The Debian 13 report 
 For clipboard support install one of `xclip`, `xsel`, or `wl-clipboard`; headless boxes add `xvfb`.
 
 In CI the shared core tests (`tests/test_drivers.py`, `tests/test_observe.py`, `tests/test_linux_synthetic.py`) and the MCP `build_server()` smoke run on `ubuntu-latest`, and `tests/test_linux_live.py` exercises the driver name, an AT-SPI snapshot of the GTK app, an a11y button press with an observable effect, a11y typing via `EditableText`, and the `org.a11y.Status` flip against a live bus. Coordinate click/drag/scroll, key chords, capture, EWMH windowing, and clipboard are implemented but have no live test yet. The `Driver` contract is a shared signature protocol (`a11y_computer_use/drivers/base.py`), and `tests/test_drivers.py` checks only that `LinuxDriver` satisfies it structurally, so a green Linux job shows that the platform-free engine passes on `ubuntu-latest` and that the five live-tested paths (driver name, AT-SPI snapshot, accessibility press, accessibility typing, `org.a11y.Status` flip) work against a GTK3 window; it is not a behavioural comparison with the macOS driver, which no test performs.
+
+Audacity's wxGTK toolbar tools may be childless AT-SPI panels with the command
+name in the description. The Linux driver recognizes a native toolbar ancestor
+or an immediate sibling grip described as `Audacity … Toolbar` and exposes the
+command panels as buttons, keeping the grip a group, so
+`find(role="button", text="Play")` includes the transport control. A childless,
+unnamed track view remains an `opaque_region`, labelled `Audacity track / waveform`;
+Mute, Solo, track names, Gain, and Pan painted inside it are not separate controls
+in that tree. Use Audacity's `Tracks > Mute/Unmute` menus for mute operations.
+The unnamed panel in the Time toolbar is labelled `Audacity Time clock` and stays
+opaque, including the wxGTK layout with the toolbar description on a sibling
+grip: its displayed reading is not an accessible value. When Audacity publishes
+real children or names, the driver preserves them.
+
+## Meld file comparisons
+
+Meld 3.22.3 (GTK 3) exposes the file-diff chunk-action gutter between text
+panes as a single unnamed `opaque_region`. Its painted per-chunk merge arrows
+are not separate accessible controls or AT-SPI actions. Targeting a specific
+gutter arrow by ref is unsupported; the gutter ref identifies the whole strip,
+and a reported click on it does not verify that a change was merged. Do not
+infer arrow locations from the strip's bounds.
+
+For a merge operation, explicitly select the intended change with the named
+`Go to the next change` or `Go to the previous change` header-bar buttons, then
+use `Push current change to the left`, `Push current change to the right`, or
+`Delete change` as appropriate. Take a fresh snapshot and check the destination
+pane's text to verify the result. These are separate requested operations:
+an explicit gutter-arrow click must not be silently replaced with navigation
+or a header-bar action. If that arrow cannot be addressed, report the limitation.
+
+Okular's Thumbnails sidebar can expose its painted thumbnail strip as an
+empty AT-SPI filler, without page icons or page-label text. In the reported
+Sidebar structure (a Thumbnails label above a filler beside a scrollbar),
+the Linux driver labels that opaque region `Okular thumbnails` and includes
+a navigation note. `find` cannot select a thumbnail by page number in this
+tree. Use the page-number field, `Go to Page…`, or the Find bar instead.
+Native names and per-page children, when exposed, retain the normal role and
+label handling; the driver does not synthesize thumbnail targets or bounds.
+This fallback is covered by synthetic tests; a live Okular run has not been
+verified for this change.
+## Kate document text search
+Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
+omit Kate textarea buffer values because the editor bounds do not establish
+character visibility. `find` and `scroll_to_find` cannot verify individual
+document text matches; even visible buffer text is excluded until character
+visibility can be established. The editor ref remains available, with a hint
+to use in-document navigation. Single-line search fields keep their values.
+This conservative behavior is covered by synthetic tests; no live Kate run
+was performed for #477.
+
+GTK grid buttons with empty or duplicated accessible names use the nearest
+sibling label to their left with overlapping vertical extents. Explicit
+`labelled-by` relations take precedence. Missing geometry or equally near
+labels leave the raw name unchanged. The original nonempty button name (for
+example `Sans Bold`) is retained as its value when no value is exposed. This
+lets snapshots and `find` identify font and colour controls by their row label;
+button handles, actions, and measured bounds are unchanged. Covered by hermetic
+galculator-shaped regression tests; no local live verification.
+
+
+### Masked GTK 4 entries
+
+Password roles, password/protected states, and explicit entry visibility-off
+signals are treated as secure fields and their text is not read. GTK 4 can omit
+all masking metadata for a masked `Gtk.Entry`. An empty `GetText(0, -1)`
+result therefore stays empty in snapshots, find, and action readback, even when
+the character count is positive. This also hides values for plain GTK 4 entries
+with the same empty sentinel behavior. Positive-offset reads are used only for
+private boolean write verification; their contents are never published.
+### Execution permission and launchers
+
+With `allow_exec=False` (the default), terminal launches and input require an
+explicit execution grant, independently of a FULL app grant. The same launch
+gate refuses known run dialogs/app finders, script interpreters, shells, and
+generic launch wrappers (including `exo-open`, `gtk-launch`, and `xdg-open`).
+It checks command strings before application resolution, executable symlinks,
+desktop-file Exec programs, and resolved launch arguments. Each refusal returns
+`exec_disabled` and writes an audit entry. Input to known app finders is also
+refused; a Python process hosting an ordinary GUI editor is not itself a
+terminal input target. These name-based checks are not a process sandbox.

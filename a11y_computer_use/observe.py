@@ -283,7 +283,8 @@ class RawNode:
     screen_text: str | None = None
     #: A control the toolkit did not allocate, such as a notebook page tab
     #: while the tab bar is hidden. The snapshot keeps the name and does not
-    #: invent a box. Default false, so every other node is unchanged.
+    #: invent a box. Also used for visible Evince page text whose native
+    #: extents are unreliable. Default false on other nodes.
     unallocated: bool = False
     #: Linux only. A title read from somewhere else in the tree (the image
     #: label, or the frame title) for a surface that has no name of its own.
@@ -296,6 +297,17 @@ class RawNode:
     #: toolkit exposed that content. The pruner copies it onto the element.
     #: It does not invent a box for a shape inside the canvas.
     content_note: str = ""
+    #: Tooltip sentence split off a multiline accessible name. Empty when
+    #: the name was a single line. The snapshot prints it as ``hint=``, not
+    #: inside the name.
+    hint: str = ""
+    #: Key chord split off the end of that tooltip, such as ``T`` or
+    #: ``Ctrl+S``. Empty when the name had no parenthetical chord.
+    shortcut: str = ""
+    #: Linux only. ``activates on double-click`` when a single click on this
+    #: GTK outline row only selects it. Empty everywhere else. The click is
+    #: not turned into that double-click.
+    note: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -1337,7 +1349,7 @@ def find_elements(
             value = full_values.get(el.ref, el.value or "")
             # NBSP is a space. The container value already has each U+FFFC
             # replaced by the embedded child's text, so the sentence matches.
-            haystack = f"{el.title} {value}".replace("\u00a0", " ").lower()
+            haystack = f"{el.title} {value} {el.hint} {el.shortcut}".replace("\u00a0", " ").lower()
             if needle.replace("\u00a0", " ") not in haystack:
                 continue
         if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
@@ -1348,6 +1360,52 @@ def find_elements(
             continue
         out.append(el)
     return tuple(out)
+
+
+_EXACT_NAME_ROLES = frozenset({
+    "cell", "row", "column", "listitem",
+    "button", "link", "menu", "menuitem", "menubutton",
+    "checkbox", "radiobutton", "combobox", "popupbutton",
+    "textfield", "textarea", "searchfield", "tab",
+})
+
+
+def _folded_title(title: str) -> str:
+    return title.replace("\u00a0", " ").strip().casefold()
+
+
+def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[Element, ...]:
+    """Prefer an exact name on a cell or control over a label that mentions it.
+
+    ``find_elements`` stays a substring search. ``find`` and ``scroll_to_find``
+    apply this ranking. When a cell, row, or other control is titled exactly
+    with ``text``, only those matches are returned. A label whose title merely
+    contains ``text`` is dropped. A label whose title is ``text`` stays. A
+    paragraph or other static text whose value contains ``text`` stays, and so
+    does a button or field matched by substring when no exact control exists.
+    """
+    if not matches or not isinstance(text, str) or not text.strip():
+        return tuple(matches)
+    needle = _folded_title(text)
+
+    def exact_control(el: Element) -> bool:
+        if _folded_title(el.title or "") != needle:
+            return False
+        if el.clickable:
+            return True
+        role = el.role.lower().removeprefix("ax")
+        return role in _EXACT_NAME_ROLES
+
+    exact = tuple(el for el in matches if exact_control(el))
+    if exact:
+        return exact
+
+    def mentions_label(el: Element) -> bool:
+        if el.subrole != "label" or el.role not in {"AXStaticText", "AXHeading"}:
+            return False
+        return _folded_title(el.title or "") != needle
+
+    return tuple(el for el in matches if not mentions_label(el))
 
 
 def render_matches(
@@ -2692,7 +2750,14 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             instance_id=instance_id,
             document_id=document_id,
-            subrole="terminal" if terminal else None,
+            subrole=(
+                "terminal" if terminal
+                else "label" if node.raw.subrole == "label"
+                else None
+            ),
+            hint=node.raw.hint,
+            shortcut=node.raw.shortcut,
+            note=node.raw.note or None,
             content_note=node.raw.content_note,
         )
     )
@@ -2837,6 +2902,10 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     parts = [el.ref, role]
     if el.title:
         parts.append(f'"{el.title}"')
+    if el.hint:
+        parts.append("hint=" + _field_quote(el.hint))
+    if el.shortcut:
+        parts.append("shortcut=" + _field_quote(el.shortcut))
     if el.value is not None:
         # A terminal value is already the on-screen text, or its tail.
         # Clipping that head would hide the output the snapshot is showing.
@@ -2868,6 +2937,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         flags.append("active")
     if flags:
         parts.append(f"({','.join(flags)})")
+    if el.note:
+        parts.append(f"({el.note})")
     # An opaque region is addressed by its box. Always print the bounds, in
     # both views, so a coordinate click does not have to guess the size.
     # A hidden control has no box. Printing one would invent a click target.
@@ -2881,6 +2952,12 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _field_quote(text: str) -> str:
+    """One quoted field. Newlines and embedded quotes stay on one line."""
+    shown = " ".join(str(text).replace('"', "'").split())
+    return '"' + _clip(shown, 160) + '"'
 
 
 def _terminal_value(text: str) -> str:
@@ -3025,6 +3102,7 @@ def attach_offscreen_matches(
                 stable_id=raw.stable_id or None,
                 instance_id=(parent.instance_id if parent is not None else raw.instance_id),
                 document_id=(parent.document_id if parent is not None else raw.document_id),
+                note=raw.note or None,
             )
         )
         handles[ref] = cell

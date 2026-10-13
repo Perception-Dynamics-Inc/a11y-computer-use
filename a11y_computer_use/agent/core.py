@@ -191,7 +191,9 @@ not done. Do not derive a click target from the goal text. Do not substitute
 an action with a different effect. A click that already has x and y stays
 that click. A key stays that key. When the goal
 saves or creates a file, one condition must be file_exists for that path,
-and it must include contains for the text the file should hold. When the
+and it must include contains for the text the file should hold. The file
+must have a modification time newer than task start; a browser form Save
+is not evidence of a file write. When the
 goal says to replace or remove text, contains is the new text, not the
 text being replaced or removed; a file that still has the old text is
 rejected. contains treats a newline, CR, CRLF, U+2028, U+2029, and U+FFFC
@@ -578,6 +580,10 @@ class Agent:
     def _loop(self, goal: str) -> Iterator[Event]:
         self._result = None
         started = time.perf_counter()
+        # One second of slack: the kernel stamps file times from a coarse
+        # clock that can trail time.time(). A file written before the task
+        # started still fails the check.
+        self._task_started_wall = time.time() - 1.0
         self._steps: list[StepRecord] = []
         self._conditions: list[dict] = []
         self._messages: list[Message] = []
@@ -698,6 +704,8 @@ class Agent:
             elif isinstance(existing, DomainPolicy):
                 self.domain_policy = existing
         self._require_linux_bindings()
+        # The Runtime gate covers GUI execution through terminal emulators.
+        self.runtime.allow_exec = self.allow_exec
         # The wait loop polls these so a signal during time.sleep stops this
         # step instead of running the next turn. Missing attributes on a test
         # double are ignored.
@@ -1325,7 +1333,11 @@ class Agent:
         })
         raw_conditions = list(action.args.get("conditions") or [])
         structural = file_evidence_error(self._goal, raw_conditions)
-        checked = check_conditions(raw_conditions, snap, self._goal)
+        started_wall = getattr(self, "_task_started_wall", None)
+        checked = check_conditions(
+            raw_conditions, snap, self._goal,
+            written_after=started_wall if goal_writes_a_file(self._goal) else None,
+        )
         self._conditions = checked
         ok = structural is None and all(item["ok"] for item in checked)
         if structural:
@@ -3291,17 +3303,22 @@ def file_evidence_error(goal: str, conditions: list) -> str | None:
 
 def check_conditions(
     conditions_arg: list, snap: Snapshot | None, goal: str | None = None,
+    *, written_after: float | None = None,
 ) -> list[dict]:
     """Evaluate done-evidence. Each result is condition, ok, detail.
 
     When ``goal`` saves a file and says to replace or remove text, a
     ``file_exists`` condition fails while that text is still in the file.
+    ``written_after`` requires filesystem evidence of a write after task start,
+    regardless of whether a Save control was activated.
     """
     absent = _file_text_expectations(goal)[1] if goal and goal_writes_a_file(goal) else []
     forbid_bom = _goal_forbids_bom(goal)
     checked: list[dict] = []
     for condition in conditions_arg:
-        ok, detail = _one_condition(condition, snap, absent, forbid_bom=forbid_bom)
+        ok, detail = _one_condition(
+            condition, snap, absent, forbid_bom=forbid_bom, written_after=written_after,
+        )
         checked.append({"condition": condition, "ok": ok, "detail": detail})
     return checked
 
@@ -3312,6 +3329,7 @@ def _one_condition(
     absent: list[tuple[str, str]] | None = None,
     *,
     forbid_bom: bool = False,
+    written_after: float | None = None,
 ) -> tuple[bool, str]:
     if not isinstance(condition, dict) or not condition:
         return False, "a condition must be one object with one key"
@@ -3320,7 +3338,9 @@ def _one_condition(
         extra = set(condition) - {"file_exists", "contains", "min_bytes"}
         if extra:
             return False, "a condition must be one object with one key"
-        return _file_condition(condition, absent or [], forbid_bom=forbid_bom)
+        return _file_condition(
+            condition, absent or [], forbid_bom=forbid_bom, written_after=written_after,
+        )
     if len(condition) != 1:
         return False, "a condition must be one object with one key"
     key = next(iter(condition))
@@ -3371,6 +3391,7 @@ def _file_condition(
     absent: list[tuple[str, str]] | None = None,
     *,
     forbid_bom: bool = False,
+    written_after: float | None = None,
 ) -> tuple[bool, str]:
     raw = condition["file_exists"]
     probe_condition = {"file_exists": raw}
@@ -3385,11 +3406,19 @@ def _file_condition(
         return False, exc.message
     if not matched:
         return False, f"file {raw!r} was not found"
+    path = (state.get("last") or {}).get("path")
+    if written_after is not None:
+        if not path:
+            return False, "file exists but its path was not reported"
+        try:
+            if Path(path).stat().st_mtime <= written_after:
+                return False, f"file {path} was not modified after task start"
+        except OSError as exc:
+            return False, f"file could not be checked: {exc}"
     contains = condition.get("contains")
     pending = list(absent or [])
     if contains is None and not pending:
         return True, str(matched)
-    path = (state.get("last") or {}).get("path")
     if not path:
         return False, "file exists but its path was not reported"
     try:

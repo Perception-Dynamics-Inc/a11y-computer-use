@@ -443,3 +443,31 @@ def test_dry_run_does_not_activate_the_chooser(monkeypatch) -> None:
         _linux_system, "active_window", lambda: (_ for _ in ()).throw(AssertionError("window")),
     )
     assert LinuxDriver().key_chord("Return", dry_run=True) is None
+
+
+@pytest.mark.parametrize("title", ["Open", "Save"])
+def test_return_in_an_ordinary_browser_window_is_a_key(monkeypatch, title) -> None:
+    keys = []
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {
+        "window_id": 3, "app": "chrome", "pid": 8, "title": title,
+    })
+    monkeypatch.setattr(_atspi, "file_chooser_controls", lambda *_args: (
+        _ for _ in ()).throw(AssertionError("walked")))
+    monkeypatch.setattr(_linux_input, "press_chord", keys.append)
+    LinuxDriver().key_chord("Return")
+    assert keys == ["Return"]
+
+
+def test_missing_chooser_frame_does_not_use_app_buttons() -> None:
+    host = _Node("frame", name="FileHost", children=[
+        _Node("push button", name="Open"),
+        _Node("text", name="Location", text="/tmp/picked.txt"),
+    ])
+    app = _Node("application", name="host", children=[host])
+    assert _atspi._chooser_in_apps([app], "open file", "Open File") is None
+    chooser = _Node("frame", name="Open File", children=[
+        _Node("push button", name="Open"),
+        _Node("text", name="Location", text="/tmp/picked.txt"),
+    ])
+    app.children.append(chooser)
+    assert _atspi._chooser_in_apps([app], "open file", "Open File") is not None

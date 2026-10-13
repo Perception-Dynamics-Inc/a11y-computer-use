@@ -541,7 +541,15 @@ document tree, not only the on-screen or budgeted nodes: on Linux a match
 inside a table that starts below the viewport is scrolled into the snapshot,
 and the ref is that cell rather than only the table that contains it.
 `scroll_to_find` takes `text` and/or `role` and scrolls until that element
-is on screen. `expand` takes `ref`. A collapsed node, or a menu or tree, is
+is on screen. If the selected container exposes an opaque surface without
+readable contents, it returns `container_not_readable` before sending input.
+This means accessibility search cannot read the list, rather than that the
+target is absent. An unscoped text search whose only matches are a statusbar
+or its labels refuses with `unsupported` / `statusbar_only_match` when the
+snapshot also exposes an opaque content surface. Status text does not verify
+an actionable content target, such as a character cell in gucharmap. An
+explicit statusbar role search remains available. Empty containers without opaque surfaces can still be
+scrolled to discover virtualized children. `expand` takes `ref`. A collapsed node, or a menu or tree, is
 pressed first. The result is the next contiguous page of that node's own
 children, including children that do not fit on screen. The following
 `expand` of that node resumes at the exact index where the previous page

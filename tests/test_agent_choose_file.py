@@ -393,3 +393,134 @@ def test_agent_choose_file_is_verified_only_when_the_file_is_shown(tmp_path) -> 
     chords = [params.get("chord") for name, params in runtime.calls if name == "key"]
     assert chords == ["ctrl+l", "Return"]
     assert not any(name == "file_dialog" for name, _params in runtime.calls)
+
+
+def test_choose_file_rejects_a_stale_chooser_without_input(tmp_path) -> None:
+    desk = _Desk(str(tmp_path / "picked.txt"))
+    desk.windows = lambda: [{"window_id": 3, "app": "python3", "title": "FileHost"}]
+    io = desk.io()
+    io.sleep = lambda _seconds: (_ for _ in ()).throw(AssertionError("waited"))
+    result = perform_choose_file(io, desk.path, apps=["python3"])
+    assert result.reason == "no_file_chooser"
+    assert "open the file dialog first" in result.message
+    assert "Ctrl+O" in result.message
+    assert desk.calls == []
+
+
+def test_choose_file_rejects_unrelated_open_cancel_buttons(tmp_path) -> None:
+    desk = _Desk(str(tmp_path / "picked.txt"), titles=["Open"])
+    desk.snapshot = lambda _app: _snap(
+        _node("e1", "AXWindow", "Open"),
+        _node("e2", "AXWindow", "Preferences"),
+        _node("e3", "AXButton", "Open", parent="e2"),
+        _node("e4", "AXButton", "Cancel", parent="e2"),
+        _node("e5", "AXTextField", "Name", editable=True, parent="e2"),
+    )
+    result = perform_choose_file(desk.io(), desk.path, apps=["python3"])
+    assert result.reason == "no_file_chooser"
+    assert desk.calls == []
+
+
+def test_agent_choose_file_without_dialog_sends_no_input(tmp_path) -> None:
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    runtime = _Runtime(str(target), accept=False)
+    runtime.open = False
+    result, _agent = _run(runtime, str(target), tmp_path)
+    step = result.step_log[0]
+    assert step.verified is False
+    assert step.error and "no_file_chooser" in step.error
+    assert "open the file dialog first" in step.error
+    assert "file_not_chosen" not in step.error
+    assert not any(name in {"key", "type", "set_value"} for name, _ in runtime.calls)
+
+
+def test_ordinary_open_window_does_not_match_a_stale_other_chooser(tmp_path) -> None:
+    desk = _Desk(str(tmp_path / "picked.txt"), titles=["Open"])
+    # The tree still contains Open File, but the only mapped candidate is Open.
+    result = perform_choose_file(desk.io(), desk.path, apps=["python3"])
+    assert result.reason == "no_file_chooser"
+    assert desk.calls == []
+
+
+class _OfficeDesk(_Desk):
+    """VCL's Open dialog: Ctrl+L does not expose a location entry."""
+
+    def __init__(self, path, *, focused=True, read_back=True, **kwargs):
+        super().__init__(path, titles=["Open"], **kwargs)
+        self.filename_focused = focused
+        self.read_back = read_back
+
+    def windows(self):
+        return [{**row, "app": "soffice"} for row in super().windows()]
+
+    def snapshot(self, app):
+        host = _node("e1", "AXWindow", "LibreOffice Calc")
+        label = _node("e4", "AXLabel", self.label, parent="e1")
+        if not self.open:
+            return _snap(host, label)
+        return _snap(
+            host, label,
+            _node("e2", "AXDialog", "Open", parent="e1"),
+            _node("e5", "AXButton", "Open", parent="e2"),
+            _node("e6", "AXButton", "Cancel", parent="e2"),
+            _node("e9", "AXTextField", "File name", editable=True,
+                  focused=self.filename_focused and ("key", "alt+n") in self.calls,
+                  parent="e2"),
+        )
+
+    def set_value(self, ref, value):
+        result = super().set_value(ref, value)
+        return result if self.read_back else _confirmed(value + "-extra")
+
+
+def test_choose_file_drives_libreoffice_filename_field(tmp_path) -> None:
+    desk = _OfficeDesk(str(tmp_path / "data (20).csv"))
+    result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+    assert result.ok
+    assert desk.calls == [
+        ("focus", 7), ("key", "alt+n"),
+        ("set_value", ("e9", desk.path)), ("key", "Return"),
+    ]
+    assert "dialog closed" in result.evidence
+
+
+def test_libreoffice_requires_filename_focus_and_exact_readback(tmp_path) -> None:
+    for kwargs in ({"focused": False}, {"read_back": False}):
+        desk = _OfficeDesk(str(tmp_path / "data.csv"), **kwargs)
+        result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+        assert not result.ok
+        assert result.reason == "path_not_entered"
+        assert "File name field" in result.message
+        assert ("key", "Return") not in desk.calls
+        if not desk.filename_focused:
+            assert desk.set_values == []
+
+
+def test_libreoffice_requires_closed_dialog_and_file_evidence(tmp_path) -> None:
+    for kwargs, reason in (({"close": False}, "file_chooser_unchanged"),
+                           ({"show": False}, "file_not_chosen")):
+        desk = _OfficeDesk(str(tmp_path / "data.csv"), **kwargs)
+        result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+        assert not result.ok
+        assert result.reason == reason
+
+
+def test_libreoffice_does_not_use_filename_field_outside_chooser(tmp_path) -> None:
+    desk = _OfficeDesk(str(tmp_path / "data.csv"))
+    original = desk.snapshot
+
+    def snapshot(app):
+        snap = original(app)
+        for element in snap.elements:
+            if element.ref == "e9":
+                element.title = "Search"
+        return _snap(*snap.elements,
+                     _node("e10", "AXTextField", "File name", editable=True,
+                           focused=True, parent="e1"))
+
+    desk.snapshot = snapshot
+    result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+    assert result.reason == "path_not_entered"
+    assert desk.set_values == []
+    assert ("key", "Return") not in desk.calls

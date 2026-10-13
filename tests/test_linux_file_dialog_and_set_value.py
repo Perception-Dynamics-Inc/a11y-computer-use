@@ -236,6 +236,8 @@ def test_linux_file_dialog_without_an_app_stays_unsupported(tmp_path, monkeypatc
 def test_linux_key_still_rechecks_frontmost(tmp_path, monkeypatch) -> None:
     """The file_dialog skip does not drop the guard on other Linux actions."""
     calls = {"n": 0}
+    # The synthetic editor has no native terminal; do not query a real bus.
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (None, False))
 
     def frontmost() -> str:
         calls["n"] += 1
@@ -324,6 +326,28 @@ def test_set_value_on_a_gtk_text_area_replaces_and_reads_back(spies, monkeypatch
     assert field.deletes == 0
     assert events == []
     assert document["text"] == "CONTROL"
+
+
+@pytest.mark.parametrize("role", ["text", "entry"])
+def test_abiword_entry_refuses_unverifiable_dialog_commit(spies, monkeypatch, role) -> None:
+    """A matching GtkEntry buffer would not prove AbiWord stored the spacing."""
+    events, _document = spies
+    field = _ReplacingField("0pt")
+    field.get_role_name = lambda: role
+    field.get_application = lambda: field
+    field.get_toolkit_name = lambda: "gtk"
+    field.get_name = lambda: "AbiWord"
+    # This fake deliberately accepts EditableText without updating its model.
+    field.committed_spacing = "0pt"
+    element = _element("e3", "AXTextField", "", editable=True, value="0pt")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(element, "12pt")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "commit_unverified"
+    assert field.text == field.committed_spacing == "0pt"
+    assert field.deletes == 0
+    assert events == []
 
 
 def test_set_value_on_a_chromium_field_still_replaces(spies, monkeypatch) -> None:
