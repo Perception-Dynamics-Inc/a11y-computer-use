@@ -441,11 +441,19 @@ def press_chord(chord: str) -> None:
 @contextmanager
 def held(modifiers):
     """Hold ``modifiers`` (e.g. ('shift',)) pressed for the block — modifier
-    clicks. Unknown modifiers are ignored."""
+    clicks. Unknown modifiers are ignored.
+
+    Nothing to hold does not import python-xlib or open a display. A plain
+    click is that path. The package is not installed on macOS or Windows,
+    and the hermetic Linux step has no display name.
+    """
+    names = [m for m in (modifiers or ()) if m in _KEYSYM_MODS]
+    if not names:
+        yield
+        return
     from Xlib import X
 
-    kcs = [_disp().keysym_to_keycode(_KEYSYM_MODS[m]) for m in (modifiers or ())
-           if m in _KEYSYM_MODS]
+    kcs = [_disp().keysym_to_keycode(_KEYSYM_MODS[m]) for m in names]
     kcs = [kc for kc in kcs if kc]
     for kc in kcs:
         _fake(X.KeyPress, kc)
@@ -513,33 +521,59 @@ def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
 
 DRAG_STEP_PX = 8  #: longest pointer jump inside a held-button stroke
 DRAG_PACE_S = 0.004  #: pause between motion events so apps see a stroke, not a teleport
+# GTK's gtk-dnd-drag-threshold defaults to 8. The check is strict: a drag
+# starts only when |dx| or |dy| from the press is greater than that value.
+GTK_DRAG_THRESHOLD_PX = 8
+# After the pointer has passed the threshold, and again on the target
+# before release. A 28px stroke of 8px hops at 4ms is over before GTK
+# begins the drag or the destination answers the first position.
+DRAG_THRESHOLD_PAUSE_S = 0.15
+DRAG_HOVER_S = 0.20
 
 
 def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left",
          path: Sequence[tuple[int, int]] = ()) -> None:
-    """Press at (x1, y1), move through ``path`` to (x2, y2), release.
+    """Press at (x1, y1), move through ``path`` to (x2, y2), hover, release.
 
-    The pointer is walked in DRAG_STEP_PX hops with a short pace between
-    them. One press + one motion + one release is a valid X drag, but a
-    freehand brush (Krita, GIMP) or a canvas that samples pointer velocity
-    turns a single jump into a dot or a straight line; walking the stroke
-    makes the waypoints an actual curve. Each hop is flushed so the pace is
-    real time, not a queue the server drains at once."""
+    The pointer is walked in DRAG_STEP_PX hops. The first hop that passes
+    the GTK drag threshold pauses so the drag can begin, later hops keep
+    the short pace, and the pointer rests on the endpoint before release
+    so the drop target can answer. A stroke that never passes the threshold
+    keeps the short pace only: a short slider must not detour or stall.
+    Each hop is flushed so the pause is real time, not a queue the server
+    drains at once. One press and one release still bound the stroke."""
     import time
 
     from Xlib import X
 
     num = _BUTTON_NUM.get(button, 1)
-    _move(x1, y1)
+    ox, oy = int(x1), int(y1)
+    _move(ox, oy)
     _fake(X.ButtonPress, num)
     _flush()
-    cx, cy = int(x1), int(y1)
-    for px, py in [*path, (x2, y2)]:
+    points: list[tuple[int, int]] = []
+    cx, cy = ox, oy
+    for px, py in [*path, (int(x2), int(y2))]:
         for hx, hy in _hops(cx, cy, int(px), int(py)):
-            _move(hx, hy)  # motion while the button is held = the drag
-            _flush()
-            time.sleep(DRAG_PACE_S)
+            points.append((int(hx), int(hy)))
         cx, cy = int(px), int(py)
+    armed = False
+    for index, (hx, hy) in enumerate(points):
+        _move(hx, hy)  # motion while the button is held = the drag
+        _flush()
+        last = index + 1 == len(points)
+        # Read at the hop so a test can zero the pauses without editing the walk.
+        crossed = (
+            abs(hx - ox) > GTK_DRAG_THRESHOLD_PX or abs(hy - oy) > GTK_DRAG_THRESHOLD_PX
+        )
+        just_armed = crossed and not armed
+        if just_armed:
+            armed = True
+            time.sleep(DRAG_THRESHOLD_PAUSE_S)
+        if last and armed:
+            time.sleep(DRAG_HOVER_S)
+        elif not just_armed:
+            time.sleep(DRAG_PACE_S)
     _fake(X.ButtonRelease, num)
     _flush()
 

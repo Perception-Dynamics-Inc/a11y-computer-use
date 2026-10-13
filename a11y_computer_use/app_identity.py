@@ -3,9 +3,16 @@
 A grant stored under one name covers the same app asked for under another:
 case, a desktop-file id, an executable basename, a WM_CLASS, or a known
 alias. ``Files`` is nautilus or thunar, ``Terminal`` is gnome-terminal or
-xterm, and ``libreoffice calc`` is soffice. Alias matches are exact tokens.
-They are not substrings, so ``Files`` does not match an unrelated name that
-merely contains those letters.
+xterm, and ``libreoffice calc`` is soffice. Calc, Writer, and Impress labels
+start ``localc``, ``lowriter``, or ``loimpress`` when that program is on
+PATH, and otherwise ``soffice`` or ``libreoffice`` with the module flag.
+Alias matches are exact tokens. They are not substrings, so ``Files`` does
+not match an unrelated name that merely contains those letters.
+
+On Linux a display name is the desktop file's ``Name`` or ``GenericName``
+(``Mousepad``, ``Text Editor``). The program is that file's executable when
+it is on PATH, otherwise the desktop id. The grant only decides whether the
+launch is allowed. It does not pick a different program.
 """
 
 from __future__ import annotations
@@ -39,23 +46,51 @@ _GROUPS: tuple[frozenset[str], ...] = (
     frozenset({
         "libreoffice calc",
         "libreoffice-calc",
+        "libreoffice writer",
+        "libreoffice-writer",
+        "libreoffice impress",
+        "libreoffice-impress",
         "libreoffice",
         "soffice",
         "soffice.bin",
         "localc",
+        "lowriter",
+        "loimpress",
         "calc",
+        "writer",
+        "impress",
     }),
 )
 
 #: Labels a person says that are not the executable. A launch of one of these
-#: is started as the granted or installed binary.
+#: is started as the granted or installed binary. Calc, Writer, and Impress
+#: also select that module's program or flag.
 _LABELS = frozenset({
     "files",
     "terminal",
     "libreoffice calc",
     "libreoffice-calc",
     "calc",
+    "libreoffice writer",
+    "libreoffice-writer",
+    "writer",
+    "libreoffice impress",
+    "libreoffice-impress",
+    "impress",
 })
+
+# Dedicated wrapper, then the flag passed to soffice or libreoffice.
+_OFFICE_MODULES: dict[str, tuple[str, str]] = {
+    "calc": ("localc", "--calc"),
+    "libreoffice-calc": ("localc", "--calc"),
+    "libreoffice calc": ("localc", "--calc"),
+    "writer": ("lowriter", "--writer"),
+    "libreoffice-writer": ("lowriter", "--writer"),
+    "libreoffice writer": ("lowriter", "--writer"),
+    "impress": ("loimpress", "--impress"),
+    "libreoffice-impress": ("loimpress", "--impress"),
+    "libreoffice impress": ("loimpress", "--impress"),
+}
 
 
 def normalize(name: str) -> str:
@@ -124,10 +159,12 @@ def matching_stored_key(name: str, stored: Sequence[str]) -> str | None:
 
 
 def load_desktop_entries() -> list[dict[str, str]]:
-    """Installed desktop files as ``id``, ``name``, ``exec``, and ``wm_class``.
+    """Installed desktop files.
 
-    This reads files only. It does not open a display. A missing applications
-    directory is an empty list.
+    Each entry has ``id``, ``name``, ``generic_name``, ``exec``, and
+    ``wm_class``. ``generic_name`` is the desktop file's ``GenericName``
+    (``Text Editor`` for Mousepad). This reads files only. It does not open
+    a display. A missing applications directory is an empty list.
     """
     try:
         from a11y_computer_use.drivers._linux_system import _application_dirs
@@ -160,6 +197,7 @@ def _read_desktop_entry(path: str, filename: str) -> dict[str, str] | None:
     except OSError:
         return None
     name = ""
+    generic = ""
     program = ""
     wm_class = ""
     in_entry = False
@@ -173,14 +211,22 @@ def _read_desktop_entry(path: str, filename: str) -> dict[str, str] | None:
         key, value = stripped.split("=", 1)
         if key == "Name" and not name:
             name = value.strip()
+        elif key == "GenericName" and not generic:
+            generic = value.strip()
         elif key == "StartupWMClass" and not wm_class:
             wm_class = value.strip()
         elif key == "Exec" and not program:
             program = _exec_basename(value.strip())
     stem = filename[: -len(".desktop")]
-    if not any((stem, name, program, wm_class)):
+    if not any((stem, name, generic, program, wm_class)):
         return None
-    return {"id": stem, "name": name, "exec": program, "wm_class": wm_class}
+    return {
+        "id": stem,
+        "name": name,
+        "generic_name": generic,
+        "exec": program,
+        "wm_class": wm_class,
+    }
 
 
 def _exec_basename(exec_line: str) -> str:
@@ -197,7 +243,12 @@ def _exec_basename(exec_line: str) -> str:
 
 
 class LaunchResolution:
-    """How to start ``name`` and which grant key to check."""
+    """How to start ``name`` and which grant key to check.
+
+    ``argv`` is set for a Calc, Writer, or Impress label: the dedicated
+    wrapper, or ``soffice``/``libreoffice`` plus the module flag. Other
+    launches leave it unset and start ``launch_name`` alone.
+    """
 
     def __init__(
         self,
@@ -205,10 +256,174 @@ class LaunchResolution:
         gate_key: str | None,
         *,
         resolved: bool,
+        argv: tuple[str, ...] | None = None,
     ) -> None:
         self.launch_name = launch_name
         self.gate_key = gate_key
         self.resolved = resolved
+        self.argv = argv
+
+
+def _exact_grant(name: str, granted: Sequence[str]) -> str | None:
+    """A grant whose spelling is ``name``, ignoring case and a ``.desktop`` suffix.
+
+    This does not walk alias groups. ``Text Editor`` does not match a grant
+    for a different editor, and ``Files`` does not match ``thunar`` here.
+    """
+    folded = normalize(name)
+    if not folded:
+        return None
+    stems = {folded}
+    if folded.endswith(".desktop"):
+        stems.add(folded[: -len(".desktop")])
+    else:
+        stems.add(folded + ".desktop")
+    for key in granted:
+        if normalize(key) in stems:
+            return key
+    return None
+
+
+def _path_spelling(name: str, lookup: Callable[[str], str | None]) -> str | None:
+    """The PATH spelling of ``name``, or None when it is not an executable.
+
+    ``Mousepad`` is ``mousepad`` when only the lower-case program is installed.
+    A lookup that raises ``OSError`` is a miss. The caller's own spelling is
+    kept when that exact string is on PATH.
+    """
+    if not name or os.sep in name or name.endswith(".desktop"):
+        return None
+    if os.altsep and os.altsep in name:
+        return None
+    if _lookup_program(lookup, name):
+        return name
+    folded = name.casefold()
+    if folded != name and _lookup_program(lookup, folded):
+        return folded
+    return None
+
+
+def _display_entry(name: str, catalog: Sequence[dict]) -> dict | None:
+    """The desktop entry whose ``Name`` or ``GenericName`` is ``name``.
+
+    ``Name`` wins over ``GenericName``. The first entry in ``catalog`` wins
+    within each. Matching ignores case and repeated spaces. It is not an
+    alias-group match, so one ``Text Editor`` does not select every editor.
+    """
+    folded = normalize(name)
+    if not folded:
+        return None
+    generic: dict | None = None
+    for entry in catalog:
+        title = str(entry.get("name") or "")
+        if title and normalize(title) == folded:
+            return entry
+        if generic is None:
+            label = str(entry.get("generic_name") or "")
+            if label and normalize(label) == folded:
+                generic = entry
+    return generic
+
+
+def _desktop_id_spelling(name: str, catalog: Sequence[dict]) -> str | None:
+    """The catalog id that is ``name``, ignoring case, or None."""
+    folded = normalize(name)
+    if not folded:
+        return None
+    for entry in catalog:
+        ident = str(entry.get("id") or "")
+        if ident and normalize(ident) == folded:
+            return ident
+    return None
+
+
+def _linux_launch_program(
+    name: str,
+    catalog: Sequence[dict],
+    lookup: Callable[[str], str | None],
+    display: dict | None,
+) -> str | None:
+    """Program to start for ``name``, or None to keep ``name``.
+
+    An executable on PATH wins, then a desktop id, then a ``Name`` or
+    ``GenericName``. A request that is already that executable or id keeps
+    the caller's spelling. ``Mousepad`` becomes ``mousepad``. ``Text Editor``
+    becomes the executable when it is on PATH, otherwise the desktop id.
+    """
+    spelling = _path_spelling(name, lookup)
+    if spelling:
+        return None if spelling == name else spelling
+    ident = _desktop_id_spelling(name, catalog)
+    if ident:
+        return None if ident == name else ident
+    if display is None:
+        return None
+    exe = str(display.get("exec") or "")
+    desktop_id = str(display.get("id") or "")
+    folded = normalize(name)
+    if exe and normalize(exe) == folded:
+        return None if exe == name else exe
+    if desktop_id and normalize(desktop_id) == folded:
+        return None if desktop_id == name else desktop_id
+    exe_spelling = _path_spelling(exe, lookup) if exe else None
+    if exe_spelling:
+        return exe_spelling
+    if desktop_id:
+        return desktop_id
+    return exe or None
+
+
+def _lookup_program(lookup: Callable[[str], str | None], name: str) -> str | None:
+    try:
+        found = lookup(name)
+    except OSError:
+        return None
+    return found or None
+
+
+def _office_host(lookup: Callable[[str], str | None], hosts: Sequence[str]) -> str | None:
+    """``soffice`` or ``libreoffice`` for a module flag.
+
+    A program on PATH wins. A host already chosen for this launch is used
+    when the lookup finds nothing, so a grant or desktop exec of ``soffice``
+    still carries ``--calc`` in a test that stubs PATH.
+    """
+    named: list[str] = []
+    for host in hosts:
+        base = os.path.basename(normalize(host))
+        if base in {"soffice", "libreoffice"} and base not in named:
+            named.append(base)
+    for candidate in ("soffice", "libreoffice"):
+        found = _lookup_program(lookup, candidate)
+        if found:
+            return found
+        if candidate in named:
+            return candidate
+    return None
+
+
+def _office_module_argv(
+    name: str,
+    lookup: Callable[[str], str | None],
+    hosts: Sequence[str],
+) -> tuple[str, ...] | None:
+    """Argv for a Calc, Writer, or Impress label, or None for any other name.
+
+    ``localc`` (and the writer and impress wrappers) already pass the module
+    flag. Otherwise the command is ``soffice`` or ``libreoffice`` plus
+    ``--calc``, ``--writer``, or ``--impress``.
+    """
+    spec = _OFFICE_MODULES.get(normalize(name))
+    if spec is None:
+        return None
+    dedicated, flag = spec
+    found = _lookup_program(lookup, dedicated)
+    if found:
+        return (found,)
+    host = _office_host(lookup, hosts)
+    if host is None:
+        return None
+    return (host, flag)
 
 
 def resolve_launch(
@@ -226,6 +441,10 @@ def resolve_launch(
     bundle, no running comm, and no grant names this app. The caller reports
     that as ``app_not_found`` and lists ``granted``, instead of asking for a
     permission grant of the raw string.
+
+    A Linux display name is resolved the same way whatever the grant list
+    spells. PATH (case-insensitive) wins, then the desktop id, then ``Name``
+    or ``GenericName``. The grant is only the gate.
     """
     import shutil
 
@@ -237,11 +456,10 @@ def resolve_launch(
         candidates.append(running)
 
     on_path = False
+    path_spelling: str | None = None
     if name and os.sep not in name and not name.endswith(".desktop"):
-        try:
-            on_path = bool(lookup(name))
-        except OSError:
-            on_path = False
+        path_spelling = _path_spelling(name, lookup)
+        on_path = path_spelling is not None
     elif name and os.sep in name:
         try:
             on_path = bool(lookup(name)) or os.path.isfile(name)
@@ -263,10 +481,21 @@ def resolve_launch(
             matched.append(entry)
             candidates.extend(field for field in fields if field)
 
+    # Name= / GenericName= is exact, not an alias group, so the chosen file's
+    # fields are not mixed with every other editor's grant.
+    display = _display_entry(name, catalog)
+    if display is not None and display not in matched:
+        matched.append(display)
+
     hit = matching_stored_key(name, granted)
     if hit is None:
         for candidate in candidates:
             hit = matching_stored_key(candidate, granted)
+            if hit is not None:
+                break
+    if hit is None and display is not None:
+        for field in ("exec", "id", "name", "wm_class", "generic_name"):
+            hit = _exact_grant(str(display.get(field) or ""), granted)
             if hit is not None:
                 break
 
@@ -288,9 +517,37 @@ def resolve_launch(
             concrete = str(matched[0].get("exec") or matched[0].get("id") or "")
         if concrete:
             launch_name = concrete
-    elif hit and normalize(hit) == normalize(name) and hit != name and not on_path:
-        launch_name = hit
+    else:
+        program = _linux_launch_program(name, catalog, lookup, display)
+        if program:
+            launch_name = program
+        elif (
+            hit
+            and normalize(hit) == normalize(name)
+            and hit != name
+            and not on_path
+            and _path_spelling(hit, lookup)
+        ):
+            # The grant's own spelling is an executable and the request is
+            # not. A display-name grant that is not on PATH does not replace
+            # the program name.
+            launch_name = hit
 
     resolved = bool(on_path or matched or installed_bundle or running or hit)
     gate_key = hit or (launch_name if resolved else None)
-    return LaunchResolution(launch_name, gate_key, resolved=resolved)
+    hosts = [launch_name]
+    if hit:
+        hosts.append(hit)
+    if running:
+        hosts.append(running)
+    for entry in matched:
+        exe = str(entry.get("exec") or "")
+        if exe:
+            hosts.append(exe)
+    argv = _office_module_argv(name, lookup, hosts)
+    if argv:
+        launch_name = os.path.basename(argv[0])
+        resolved = True
+        if not gate_key:
+            gate_key = launch_name
+    return LaunchResolution(launch_name, gate_key, resolved=resolved, argv=argv)

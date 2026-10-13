@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Canvas target</title>
+<button id="ready">Ready</button>
+<canvas id="pad" width="400" height="300" style="display:block"></canvas>
+<p id="result">waiting</p>
+<script>
+const pad = document.getElementById("pad");
+const ctx = pad.getContext("2d");
+ctx.fillStyle = "#ddd";
+ctx.fillRect(0, 0, 400, 300);
+ctx.fillStyle = "#c00";
+ctx.fillRect(200, 100, 40, 40);
+pad.addEventListener("click", (event) => {
+  const rect = pad.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const hit = x >= 200 && x < 240 && y >= 100 && y < 140;
+  document.getElementById("result").textContent = hit ? "canvas-hit" : "canvas-miss";
+});
+</script>

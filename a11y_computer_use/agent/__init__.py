@@ -19,6 +19,7 @@ from a11y_computer_use.agent.reference import (
     system_prompt,
     tool_specs,
 )
+from a11y_computer_use.agent.replay import load_skill, run_with_skill, skill_from_run
 from a11y_computer_use.agent.result import RunResult, StepRecord
 
 __all__ = [
@@ -33,8 +34,11 @@ __all__ = [
     "Step",
     "StepRecord",
     "compact_history",
+    "load_skill",
     "notes_block",
     "run_task",
+    "run_with_skill",
+    "skill_from_run",
     "system_prompt",
     "tool_schemas",
     "tool_specs",

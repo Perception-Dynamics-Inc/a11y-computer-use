@@ -16,8 +16,9 @@ privileges. PermissionStore is an action policy, not a tenant boundary.
 
 Native desktop workflows need exclusive ownership of their desktop session.
 Do not run multiple agents that type into the same display. Separate Linux
-sessions or boxes provide that ownership. Keep the opt-in AT-SPI event thread
-disabled unless you have separately validated it for your workload.
+sessions or boxes provide that ownership. The AT-SPI event thread is on by
+default on Linux when the typelib imports. Set ``A11Y_COMPUTER_USE_ATSPI_EVENTS=0``
+to run those calls inline.
 
 Use accessibility refs and `set_value` for bulk text. Implicit Linux typing
 verifies that a remembered editable belongs to the current frontmost app;
