@@ -522,3 +522,107 @@ def test_non_gtk4_negative_window_origin_keeps_pointer_click(monkeypatch, toolki
     driver.click(_element(Bounds(0, 524, 275, 34, 34)))
     assert clicks == [(541, 292)]
     assert button.pressed == []
+
+
+@pytest.mark.parametrize("role", ["AXTextField", "AXTextArea", "AXSearchField"])
+@pytest.mark.parametrize("focused", [True, False, None])
+def test_gtk4_text_click_requires_observed_focus(monkeypatch, role, focused) -> None:
+    """An entry's no-op activate cannot replace a pointer click or its evidence."""
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    _frame, field = _button(_App("GTK", "4.18.6"))
+    field.role = "text"
+    field.actions = ("activate",)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: field)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda _handle: None)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+    def unexpected_focus(_node):
+        pytest.fail("an explicit click must not be replaced with grab_focus")
+
+    monkeypatch.setattr(_atspi, "grab_focus", unexpected_focus)
+    observations = []
+
+    def focus(node):
+        assert node is field
+        assert clicks == [(881, 435)]
+        observations.append(node)
+        # Focus may arrive after the input call returns.
+        return focused if len(observations) > 1 else False
+
+    monkeypatch.setattr(_atspi, "_focus_on_target", focus)
+    element = _element(Bounds(0, 846, 413, 71, 44), role)
+    if focused is True:
+        assert driver.click(element) is None
+        assert len(observations) == 2
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.click(element)
+        assert exc.value.code is ErrorCode.FOCUS_LOST
+        assert exc.value.detail["outcome"] == "unconfirmed"
+    assert clicks == [(881, 435)]
+    assert field.pressed == []
+    assert driver._focused_editable is None
+
+
+@pytest.mark.parametrize("role", ["AXTextField", "AXTextArea", "AXSearchField"])
+def test_gtk4_text_click_refuses_untrusted_geometry_even_with_activate(monkeypatch, role) -> None:
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    _frame, field = _button(_App("GTK", "4.18.6"))
+    field.actions = ("activate",)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: field)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda _handle: None)
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda *_args: True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(_element(Bounds(0, 0, 0, 71, 44), role))
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["outcome"] == "refused"
+    assert field.pressed == []
+    assert clicks == []
+
+
+@pytest.mark.parametrize("role", ["alert", "dialog"])
+@pytest.mark.parametrize("kwargs", [{}, {"button": MouseButton.RIGHT}, {"count": 2}, {"modifiers": ("shift",)}])
+def test_gtk4_in_window_dialog_positive_box_refuses_click(monkeypatch, role, kwargs):
+    """#520: a recovered positive box can omit the AdwAlertDialog offset."""
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    frame, button = _button(_App("GTK", "4.18.6"), window=(377, 372, 156, 44))
+    dialog = _Node(role, "End sleep?", (0, 0, 400, 200), (200, 250, 400, 200),
+                   parent=frame, app=button.app)
+    panel = _Node("panel", "", (0, 0, 400, 100), (200, 350, 400, 100),
+                  parent=dialog, app=button.app)
+    button.parent = panel
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(_element(Bounds(0, 852, 447, 156, 44)), **kwargs)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+    assert exc.value.detail["outcome"] == "refused"
+    assert clicks == []
+    assert button.pressed == []
+
+
+@pytest.mark.parametrize("toolkit,version,nested", [
+    ("GTK", "3.24", True), ("Qt", "6.8", True), ("GTK", "", True),
+    ("GTK", "4.18.6", False),
+])
+def test_other_dialogs_keep_pointer_click(monkeypatch, toolkit, version, nested):
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    frame, button = _button(_App(toolkit, version))
+    dialog = _Node("dialog", "Confirm", (0, 0, 400, 200), (0, 0, 400, 200),
+                   parent=frame if nested else None, app=button.app)
+    button.parent = dialog
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    driver.click(_element(Bounds(0, 852, 447, 156, 44)))
+    assert clicks == [(930, 469)]
+    assert button.pressed == []
