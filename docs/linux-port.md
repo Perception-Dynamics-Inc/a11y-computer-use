@@ -235,3 +235,9 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+Kate's unnamed, childless filler directly left of a multiline editor is labelled
+`Kate editor gutter` when native bounds establish the shared edge and height.
+It remains opaque: AT-SPI does not expose individual line numbers, so this label
+supports finding the gutter, not targeting a particular line. Missing or ambiguous
+geometry leaves it unnamed. This recognition is covered by synthetic tests;
+Kate has not been live-verified for this change.

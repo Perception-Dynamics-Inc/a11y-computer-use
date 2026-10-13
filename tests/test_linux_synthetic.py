@@ -2913,6 +2913,43 @@ def _adopt(parent: _Acc, *children: _Acc) -> _Acc:
     return parent
 
 
+@pytest.mark.parametrize("case", ["gutter", "other_app", "dialog", "right", "missing_box", "children", "single_line", "named", "ambiguous"])
+def test_kate_gutter_label_uses_native_editor_context(monkeypatch, case):
+    """Only the unnamed Kate gutter gains a label; no line targets are invented."""
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    app = _Acc("application", name="kate" if case != "other_app" else "other")
+    frame = _Acc("dialog" if case == "dialog" else "frame", name="Document")
+    group = _Acc("panel", width=800, height=400)
+    gutter = _Acc("filler", width=40, height=400, name="Native gutter" if case == "named" else "")
+    editor = _Acc("text", width=760, height=400, states=() if case == "single_line" else ("MULTI_LINE",))
+    editor.component._rect.x = 40
+    if case == "right":
+        gutter.component._rect.x = 800
+    if case == "missing_box":
+        gutter.component = None
+    if case == "children":
+        _adopt(gutter, _Acc("label", name="1"))
+    siblings = [gutter, editor]
+    if case == "ambiguous":
+        second = _Acc("text", width=760, height=400, states=("MULTI_LINE",))
+        second.component._rect.x = 40
+        siblings.append(second)
+    _adopt(app, _adopt(frame, _adopt(group, *siblings)))
+    raw = _atspi.ATSPIAccessor().read(gutter)
+    assert raw.title == ("Native gutter" if case == "named" else "")
+    if case == "gutter":
+        assert raw.surface_name == "Kate editor gutter"
+        assert "individual lines cannot be targeted" in raw.note
+        assert raw.position == (0.0, 0.0)
+        assert raw.size == (40, 400)
+        opaque = observe._as_opaque_region(raw, [], 0)
+        assert opaque.role == "opaque_region"
+        assert opaque.title == "Kate editor gutter"
+    else:
+        assert raw.surface_name == ""
+
+
 class _ValueApi:
     @staticmethod
     def get_current_value(acc):

@@ -1209,6 +1209,52 @@ def _okular_thumbnail_surface(node) -> tuple[str, str]:
         parent = _parent_of(parent)
     return "", ""
 
+def _kate_gutter(node, position, size) -> bool:
+    """Recognize Kate's childless gutter beside an accessible text editor.
+
+    Use only native boxes and immediate siblings. Missing geometry or an
+    ambiguous editor leaves the filler unnamed; no line positions are inferred.
+    """
+    if position is None or size is None or _child_count(node) != 0:
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "kate":
+        return False
+    parent = _parent_of(node)
+    if parent is None or _frame_ancestor(node) is None:
+        return False
+    ancestor = parent
+    for _ in range(20):
+        if ancestor is None or _role_name(ancestor) == "dialog":
+            return False
+        if _role_name(ancestor) in {"frame", "window"}:
+            break
+        ancestor = _parent_of(ancestor)
+    else:
+        return False
+    count = _child_count(parent)
+    if not isinstance(count, int) or isinstance(count, bool) or not 0 < count <= 64:
+        return False
+    matches = 0
+    x, y = position
+    width, height = size
+    if width <= 0 or height <= width:
+        return False
+    for index in range(count):
+        sibling = _child_at(parent, index)
+        if sibling is None or _role_name(sibling) != "text":
+            continue
+        if not _state_has(sibling, "MULTI_LINE"):
+            continue
+        editor_pos, editor_size = _extents(sibling)
+        if editor_pos is None or editor_size is None:
+            continue
+        ex, ey = editor_pos
+        ew, eh = editor_size
+        if ew > width and abs(x + width - ex) <= 1 and abs(y - ey) <= 1 and abs(height - eh) <= 1:
+            matches += 1
+    return matches == 1
+
 
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
@@ -3400,6 +3446,15 @@ class ATSPIAccessor:
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            not surface_name
+            and role_str == "filler"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _kate_gutter(node, position, size)
+        ):
+            surface_name = "Kate editor gutter"
+            panel_note = "Line numbers are not exposed by AT-SPI; individual lines cannot be targeted here."
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
