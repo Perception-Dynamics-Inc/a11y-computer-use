@@ -276,10 +276,11 @@ class RawNode:
     #: macOS, Windows, GTK, and page content are unchanged. A childless group
     #: with this flag is the browser frame, not a page region.
     browser_chrome: bool = False
-    #: VTE only. The on-screen slice of ``value``, with a leading ellipsis
-    #: when characters sit above the widget. None on every other node, and
-    #: when the driver could not separate the screen from the buffer. The
-    #: snapshot shows this text; ``find`` still searches ``value``.
+    #: The on-screen slice of ``value``, with a leading ellipsis for VTE
+    #: when characters sit above the widget. GTK multiline editors also set
+    #: this slice, using an empty string when visibility cannot be read. The
+    #: snapshot shows this text; VTE searches ``value`` while GTK editors
+    #: search only this slice. An empty slice means visibility is unverified.
     screen_text: str | None = None
     #: A control the toolkit did not allocate, such as a notebook page tab
     #: while the tab bar is hidden. The snapshot keeps the name and does not
@@ -1302,7 +1303,8 @@ def find_elements(
         text: case-insensitive substring matched against an element's title or
             its full value (either may contain it). ``Element.value`` is capped
             at `_MAX_VALUE_CHARS` for the text the model reads; a snapshot built
-            here is still searched past that cap. A VTE terminal's snapshot
+            here is still searched past that cap. GTK editor values are limited
+            to ranges reported inside the viewport. A VTE terminal's snapshot
             value is the on-screen text, or the tail when that text is longer,
             with a leading ellipsis when older output was omitted. Find still
             searches the whole buffer, including text that has scrolled above
@@ -2653,9 +2655,10 @@ def _flatten(
             if raw_value != value:
                 full_values[ref] = raw_value
         else:
-            value = _clip(raw_value, _MAX_VALUE_CHARS)
-            if raw_value != value:
-                full_values[ref] = raw_value
+            source = node.raw.screen_text if node.raw.screen_text is not None else raw_value
+            value = _clip(source, _MAX_VALUE_CHARS)
+            if source != value:
+                full_values[ref] = source
     out.append(
         Element(
             ref=ref,
