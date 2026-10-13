@@ -3544,6 +3544,21 @@ class ATSPIAccessor:
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            role_str == "drawing area"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _child_count(node) == 0
+            and _parent_of(node)
+        ):
+            app = _application_ancestor(node)
+            if app is not None and _node_name(app).casefold() == "gnumeric":
+                surface_name = "Gnumeric drawing area"
+                panel_note = (
+                    "Cell content is not exposed by AT-SPI on this surface. "
+                    "The formula bar exposes only the active cell; inspect it to read "
+                    "that cell. Other cells require visual inspection."
+                )
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
