@@ -580,7 +580,10 @@ class Agent:
     def _loop(self, goal: str) -> Iterator[Event]:
         self._result = None
         started = time.perf_counter()
-        self._task_started_wall = time.time()
+        # One second of slack: the kernel stamps file times from a coarse
+        # clock that can trail time.time(). A file written before the task
+        # started still fails the check.
+        self._task_started_wall = time.time() - 1.0
         self._steps: list[StepRecord] = []
         self._conditions: list[dict] = []
         self._messages: list[Message] = []
@@ -1328,9 +1331,10 @@ class Agent:
         })
         raw_conditions = list(action.args.get("conditions") or [])
         structural = file_evidence_error(self._goal, raw_conditions)
+        started_wall = getattr(self, "_task_started_wall", None)
         checked = check_conditions(
             raw_conditions, snap, self._goal,
-            written_after=self._task_started_wall if goal_writes_a_file(self._goal) else None,
+            written_after=started_wall if goal_writes_a_file(self._goal) else None,
         )
         self._conditions = checked
         ok = structural is None and all(item["ok"] for item in checked)
