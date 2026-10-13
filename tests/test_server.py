@@ -2045,7 +2045,7 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=15, budget_s=15)
     assert "ITEM-180" in out
@@ -2120,7 +2120,7 @@ def test_scroll_to_find_uses_in_page_find_on_a_short_overflow_list(monkeypatch) 
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
     assert "ITEM-020" in out
@@ -2361,14 +2361,14 @@ def test_scroll_to_find_re_reads_until_the_page_frame_returns(monkeypatch) -> No
             state["latched"] += 1
             state["poison"] = False
             state["stale"] = 2
-            assert app == "com.a"
+            assert app == "com.google.Chrome"
 
     rt = server.Runtime.__new__(server.Runtime)
     rt.driver = _D()
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
     assert "ITEM-020" in out
@@ -2421,7 +2421,7 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
     monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(server.time, "sleep", sleep)
 
@@ -2433,7 +2433,7 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     assert "container: AXGroup ref=e2" in out
     assert "last_rows: none" in out
     assert "scroll_position: unknown" in out
-    assert latched == ["com.a"]
+    assert latched == ["com.google.Chrome"]
     assert scrolled == []
     assert clock["t"] < 1015.0
 
@@ -2491,7 +2491,7 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     rt._run_gated = lambda action, app, execute, **kw: execute()
     rt._require_permission = lambda *args, **kwargs: None
     rt._recheck_target = lambda *args: None
-    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
 
     out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=15)
     assert out.startswith("not found after")
