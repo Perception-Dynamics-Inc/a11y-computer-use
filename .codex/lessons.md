@@ -28,12 +28,20 @@
 - 2026-10-14 (PR #535): When merging AT-SPI naming fallbacks, retain independent role-specific rules together. Relation-derived GTK menu labels must pass through the same rich-text normalization as native names; cover quoted attribute delimiters in the relation-label regression too.
 - 2026-10-14 (#446 repair): A post-commit pause inside the AT-SPI event-thread callback cannot process the editor-removal event. Commit in one driver operation, pause on the caller, then verify in the next operation; keep the existing pause bound.
 
+- 2026-10-14 (#501 repair): Xournal++ zoom uses `log(percent / 100 - 0.20753)` and requires both raw Value and displayed percent read-back. In isolated Chrome live tests, a D-Bus keyring prompt can steal keyboard focus; reproduce with CI's window manager and prevent unrelated credential prompts in the temporary desktop session before diagnosing an input regression.
 - 2026-10-14 (#578): GTK 4 masked Gtk.Entry can expose neither password role nor protected state nor visibility metadata. Positive-offset Text reads after an empty sentinel must stay private to boolean write verification; publishing them leaks secrets even when is_secure is false.
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
 
 - 2026-10-14 (PR #549 repair): When merging adjacent app-specific surface labels, retain each app recognizer and avoid overwriting an already recognized surface with an unrelated fallback. Run both applications' synthetic snapshot tests after resolving the conflict.
 - 2026-10-14 (#464 repair): When combining Calc commit fixes, marshal the editor commit and individual native reads to the event thread, but keep both the post-commit pause and the grid verification loop on the caller. Regression tests should assert that events can run between operations as well as that native reads retain thread ownership.
+- 2026-10-14 (#478): Kate’s painted gutter has no accessible line labels. Scope its contextual name to native editor siblings and retain the opaque-region limitation; never infer line targets from the strip’s bounds. When merging surface-label branches, keep each application’s recognition condition independent.
+- 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.
 
+- 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
 
 - 2026-10-14 (PR #549 merge repair): A reachable AT-SPI bus can enable desktop live fixtures even without a display. Run those fixtures under Xvfb with a working window manager; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS. Verify the window manager starts before diagnosing app-activation failures as code regressions.
+
+- 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
+
+- 2026-10-14 (PR #549 repair): A supplied worktree can lag its tracking branch even when its files are clean. Fetch and preserve the current remote PR head before merging main, so a plain repair push retains prior repair commits.

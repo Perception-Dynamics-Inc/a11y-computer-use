@@ -4,6 +4,8 @@
 
 **Status:** implemented; partially live-verified in CI. `tests/test_linux_live.py` (5 tests, `5 passed` on run 33436980587 at 3b331ba, `ubuntu-latest` under Xvfb + `dbus-run-session` + `at-spi-bus-launcher`) covers the driver name, an AT-SPI snapshot of a real GTK3 window, an a11y button press via `do_action`, a11y text entry via `EditableText`, and the `org.a11y.Status` flip. Coordinate click/drag/scroll, key chords, capture, `wait_for`, and `set_value` are implemented. Clipboard bytes (CR, CRLF, NUL, non-text, and invalid UTF-8) and the EWMH window verbs are live-checked under openbox by `tests/test_linux_desktop_live.py` in the Linux CI job. The Wayland matrix below reflects a manual headless-sway run and is not CI-tested. `tests/test_linux_synthetic.py` (runs on any OS, no bus) covers the role vocabulary, accessor, chord parsing, and error paths; `tests/test_linux_live.py` (Linux-only, self-skips without a reachable bus) launches a real GTK3 window (`cuatestapp`), snapshots it through the shared pruning engine, focuses its entry via AT-SPI **without moving the cursor**, and types via AT-SPI `EditableText.insert_text` (XTEST keystrokes are only the fallback when no editable was focused through the driver). A `linux` CI job (`ubuntu-latest`) runs the bus-free tests on every push and the live AT-SPI run under Xvfb + a session/a11y bus (`xvfb-run` + `dbus-run-session` + `at-spi-bus-launcher --launch-immediately`). The live step self-skips if the a11y bus is unreachable, but on the current head it runs and passes (run 33436980587 on 3b331ba: `5 passed`), mirroring how `windows-latest` verifies the Windows backend.
 
+Xournal++ zoom sliders owned by `xournalpp` or `Xournal++` accept `150%`, `150 %`, and out-of-range bare numbers as percents when the current label and Value match the application's offset natural-log scale. Conversion uses `log(percent / 100 - 0.20753)` without step snapping. In-range bare numbers remain raw values. Percent writes require both the raw Value and the displayed percent to confirm; builds that change only the adjustment return `text_mismatch` without substituting clicks or keys. This path is covered by hermetic tests; live Xournal++ verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
@@ -255,6 +257,13 @@ to use in-document navigation. Single-line search fields keep their values.
 This conservative behavior is covered by synthetic tests; no live Kate run
 was performed for #477.
 
+Kate's unnamed, childless filler directly left of a multiline editor is labelled
+`Kate editor gutter` when native bounds establish the shared edge and height.
+It remains opaque: AT-SPI does not expose individual line numbers, so this label
+supports finding the gutter, not targeting a particular line. Missing or ambiguous
+geometry leaves it unnamed. This recognition is covered by synthetic tests;
+Kate has not been live-verified for this change.
+
 GTK grid buttons with empty or duplicated accessible names use the nearest
 sibling label to their left with overlapping vertical extents. Explicit
 `labelled-by` relations take precedence. Missing geometry or equally near
@@ -285,3 +294,18 @@ desktop-file Exec programs, and resolved launch arguments. Each refusal returns
 `exec_disabled` and writes an audit entry. Input to known app finders is also
 refused; a Python process hosting an ordinary GUI editor is not itself a
 terminal input target. These name-based checks are not a process sandbox.
+
+## gucharmap Character Table
+
+The reported GTK 3 Character Table exposes an unnamed drawing area with no
+AT-SPI children. The Linux driver labels it `gucharmap Character Table` and
+explains that its ref identifies the whole opaque table. It does not publish
+character cells, names, codepoints, or inferred glyph positions. `find` and
+`scroll_to_find` cannot target the painted characters; scrolling may change
+selection. A click on the table cannot confirm a requested character.
+
+Use `Search > Find` or the `Go` menu only as separate requested operations,
+then verify the selected codepoint and name in the statusbar or Character
+Details. A statusbar match describes the current selection, not a clickable
+character cell. Native drawing-area names, descriptions, and children take
+precedence over this fallback label.
