@@ -2420,6 +2420,12 @@ class LinuxDriver:
             x, y = int(revealed[0]), int(revealed[1])
         else:
             x, y = _point_of(target)
+        gtk4_text = (
+            isinstance(target, Element)
+            and target.role in {"AXTextField", "AXTextArea", "AXSearchField"}
+            and handle is not None
+            and self._run(lambda: bool(_atspi._gtk4_app(handle)))
+        )
         header_box_untrusted = handle is not None and self._run(
             lambda: _atspi.gtk4_window_origin_untrusted(handle)
         )
@@ -2429,7 +2435,9 @@ class LinuxDriver:
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
             # Header-bar controls expose click/press. Do not substitute an
             # unrelated action, or fall back to their known unreliable point.
-            activated = plain and self._run(
+            # GTK 4 entry 'activate' does not establish keyboard focus.
+            # Without reliable geometry an explicit click must be refused.
+            activated = plain and not gtk4_text and self._run(
                 lambda: _atspi._do_action_named(handle, frozenset({"click", "press"}))
                 if header_box_untrusted else _atspi.do_press(handle)
             )
@@ -2475,6 +2483,25 @@ class LinuxDriver:
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         self._note_pointer(x, y)
+        if gtk4_text and button is MouseButton.LEFT:
+            # Wait for the pointer event to be processed; never replace a
+            # missed click with grab_focus or a widget activation action.
+            for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
+                if self._run(lambda: _atspi._focus_on_target(handle)) is True:
+                    break
+                if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
+                    time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
+            else:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_LOST,
+                    f"click did not focus {target.ref} ({target.role})",
+                    detail={
+                        "ref": target.ref,
+                        "role": target.role,
+                        "reason": "focus_lost",
+                        "outcome": "unconfirmed",
+                    },
+                )
         # A double-click does not place the caret through the text
         # interface. When the pointer did land in this paragraph, the
         # following type inserts there. A miss leaves the caret elsewhere
