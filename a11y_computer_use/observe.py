@@ -283,7 +283,8 @@ class RawNode:
     screen_text: str | None = None
     #: A control the toolkit did not allocate, such as a notebook page tab
     #: while the tab bar is hidden. The snapshot keeps the name and does not
-    #: invent a box. Default false, so every other node is unchanged.
+    #: invent a box. Also used for visible Evince page text whose native
+    #: extents are unreliable. Default false on other nodes.
     unallocated: bool = False
     #: Linux only. A title read from somewhere else in the tree (the image
     #: label, or the frame title) for a surface that has no name of its own.

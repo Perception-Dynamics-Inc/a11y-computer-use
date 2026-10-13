@@ -10,3 +10,9 @@
 - 2026-10-13 (#537): Repeated AT-SPI `get_application` calls are expensive in Calc snapshots. Cache successful owner lookups within the existing operation-scoped getter cache; preserve retries for missing owners and invalidate on mutations. A getter can return a fresh GI wrapper, so toolkit attributes attached to that wrapper alone do not prevent repeated owner lookups.
 
 - For distro-installed native test libraries, use the package manager file list rather than a recursive glob of `/usr/lib`. Recursive glob follows SDK symlinks and can consume the entire live-suite CI timeout before the application starts. Preserve the live assertions and test the bounded discovery path.
+
+- 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
+
+- 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
+
+- 2026-10-13 (#464): Merging a browser-name gate with verified find support must retain both the native-viewer refusal and the driver capability probe; otherwise the query audit and focused-find-field checks become unreachable. Calc editor discovery must bypass the native child cache and invalidate operation-scoped child reads together on the event thread, restoring the default mask even when the read fails.

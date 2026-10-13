@@ -133,6 +133,26 @@ def on_event_thread() -> bool:
     return _thread is not None and threading.current_thread() is _thread
 
 
+def run(fn):
+    """Run ``fn`` on the event thread when that thread is inside ``event_main``.
+
+    A caller already on the thread runs inline, so a nested read cannot
+    deadlock the loop. A listener that was never started runs inline too:
+    a test that only reports ``listening()`` must not boot the loop.
+    libatspi is not safe from a second thread while the loop is up. A
+    child walk on the caller then segfaults inside ``event_main``.
+    """
+    thread = _thread
+    if (
+        thread is None
+        or not thread.is_alive()
+        or not _listening.is_set()
+        or on_event_thread()
+    ):
+        return fn()
+    return submit(fn)
+
+
 def ensure_started() -> bool:
     """Start the listener on a Linux display. False when it cannot run.
 

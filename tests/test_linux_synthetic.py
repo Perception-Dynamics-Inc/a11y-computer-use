@@ -99,6 +99,47 @@ def _atspi_actions(*names: str) -> tuple[str, ...]:
     return _atspi._action_names(_Acc())
 
 
+def test_meld_gutter_is_opaque_and_header_merge_controls_remain_addressable() -> None:
+    """Model the reported GTK tree, not the arrows painted inside its gutter.
+
+    The supported alternative documented in linux-port.md depends on retaining
+    the real named buttons and pane text without inventing gutter children.
+    """
+    commands = (
+        "Go to the next change",
+        "Go to the previous change",
+        "Push current change to the left",
+        "Push current change to the right",
+        "Delete change",
+    )
+    tree = _node(_atspi._ROLE["frame"], "left.txt : right.txt", children=(
+        *(_node(_atspi._ROLE["push button"], name,
+                actions=_atspi_actions("click"), pos=(float(i * 100), 0.0),
+                size=(90.0, 30.0)) for i, name in enumerate(commands)),
+        _node("AXTextArea", value="left text", pos=(0.0, 50.0), size=(500.0, 600.0)),
+        _node(_atspi._ROLE["drawing area"], pos=(500.0, 50.0), size=(50.0, 600.0)),
+        _node("AXTextArea", value="right text", pos=(550.0, 50.0), size=(500.0, 600.0)),
+    ))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="meld", pid=510, geometry=_geometry())
+
+    regions = observe.find_elements(snap, role="opaque_region")
+    assert len(regions) == 1
+    gutter = regions[0]
+    assert gutter.title == ""
+    assert gutter.bounds == Bounds(0, 500, 50, 50, 600)
+    assert not any(el.parent == gutter.ref for el in snap.elements)
+    buttons = observe.find_elements(snap, role="button")
+    assert {el.title for el in buttons} == set(commands)
+    assert all(el.clickable and el.ref for el in buttons)
+    assert {el.value for el in snap.elements if el.role == "AXTextArea"} == {
+        "left text", "right text",
+    }
+    rendered = observe.render_text(snap, mode="interactive")
+    assert f"{gutter.ref} opaque_region" in rendered
+    assert all(name in rendered for name in commands)
+
+
 def test_canvas_drawing_area_and_canvas_tag_read_as_a_canvas(monkeypatch) -> None:
     """AT-SPI canvas, GTK drawing area, and a ``<canvas>`` section are AXCanvas.
 
@@ -9971,6 +10012,47 @@ def test_sheet_editor_paragraph_is_the_in_progress_text(fake_atspi, monkeypatch)
     assert _atspi.sheet_editor_text("gedit") is None
 
 
+def test_sheet_editor_is_not_hidden_by_a_stale_child_cache(fake_atspi, monkeypatch) -> None:
+    """Synthetic tree. The cached children are the sheet without the editor.
+
+    ``get_child_at_index`` grows the panel only after the cache mask is
+    cleared. That is the read the grid uses to commit, and A1 stays empty
+    until it does. Not a live Calc document.
+    """
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Item"
+    panel = _Acc("panel", name="Cell C5")
+    _adopt(panel, paragraph)
+    table = _Acc("table", name="grid")
+    doc = _Acc("document spreadsheet", name="Sheet")
+    state = {"live": False}
+    cached = [table]
+    fresh = [table, panel]
+
+    def child_count():
+        return len(fresh if state["live"] else cached)
+
+    def child_at(index):
+        kids = fresh if state["live"] else cached
+        return kids[index]
+
+    doc.get_child_count = child_count
+    doc.get_child_at_index = child_at
+    app = _Acc("application", name="soffice")
+    masks = []
+
+    def set_cache_mask(mask) -> None:
+        masks.append(mask)
+        state["live"] = mask == 0
+
+    app.set_cache_mask = set_cache_mask
+    _adopt(app, doc)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: app)
+    assert _atspi.sheet_editor_text("soffice.bin") == "Item"
+    # The fake typelib has no Cache.UNDEFINED, so the cleared mask stays.
+    assert masks == [0]
+
+
 def test_type_into_calc_reads_the_editor_and_a_terminal_still_mismatches(
     fake_atspi, monkeypatch
 ) -> None:
@@ -12311,6 +12393,53 @@ def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake
     assert _atspi.target_vanished(cell) is False
 
 
+@pytest.mark.parametrize("effect", ["exclusive", "unchanged", "additive", "no_bounds"])
+@pytest.mark.parametrize("named", [True, False])
+def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named):
+    driver, icon, element, actions, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="image", actions=("activate",),
+    )
+    icon.name = "Cherry" if named else ""
+    previous = _Acc("image", states=("SELECTED",))
+    _adopt(_Acc("layered pane"), previous, icon)
+    _place_row(icon, 40, 60, 100, 20)
+    if effect == "no_bounds":
+        icon.component = None
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        if effect in {"exclusive", "additive"}:
+            icon.states.add("SELECTED")
+        if effect == "exclusive":
+            previous.states.discard("SELECTED")
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if effect == "exclusive":
+        assert driver.press_element(element) is True
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "selection_unchanged"
+    assert actions == []
+    assert events == [("raise", icon)] + (
+        [] if effect == "no_bounds" else [("click", 90, 70, "left", 1)]
+    )
+
+
+def test_icon_view_detection_excludes_other_images(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda acc: acc.toolkit)
+    icon = _Acc("image")
+    icon.toolkit = "gtk"
+    _adopt(_Acc("panel"), icon)
+    assert not _atspi.gtk_icon_view_item(icon)
+    _adopt(_Acc("layered pane"), icon)
+    assert _atspi.gtk_icon_view_item(icon)
+    icon.toolkit = "Chromium"
+    assert not _atspi.gtk_icon_view_item(icon)
+
+
 
 @pytest.mark.parametrize("name", [
     "xfce4-terminal", "gnome-terminal", "gnome-terminal-", "xterm", "konsole",
@@ -12475,3 +12604,149 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     alias.symlink_to(terminal)
     monkeypatch.setattr("shutil.which", lambda app: str(alias))
     assert LinuxDriver().terminal_target("console-alias", launch=True)
+
+
+def test_sheet_editor_refreshes_operation_cached_children(fake_atspi, monkeypatch):
+    """An editor created during a grid operation invalidates cached child reads."""
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Item"
+    panel = _Acc("panel", name="Cell C5")
+    _adopt(panel, paragraph)
+    table = _Acc("table", name="grid")
+    doc = _Acc("document spreadsheet", name="Sheet")
+    app = _Acc("application", name="soffice")
+    _adopt(app, doc)
+    state = {"live": False}
+    doc.get_child_count = lambda: 2 if state["live"] else 1
+    doc.get_child_at_index = lambda index: [table, panel][index]
+    app.set_cache_mask = lambda mask: state.update(live=mask == 0)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: app)
+    with _atspi.read_cache():
+        assert _atspi._child_count(doc) == 1
+        assert _atspi.sheet_editor_text("soffice.bin") == "Item"
+
+
+def test_sheet_editor_walk_does_not_spend_its_budget_on_toolbars(fake_atspi, monkeypatch):
+    """An uncached Calc toolbar must not hide the editor later in the window."""
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Item"
+    panel = _Acc("panel", name="Cell C5")
+    _adopt(panel, paragraph)
+    toolbar = _Acc("tool bar", name="Formatting")
+    _adopt(toolbar, *[_Acc("panel", name="") for _ in range(40)])
+    window = _Acc("frame", name="Calc")
+    _adopt(window, toolbar, panel)
+    # A small remaining budget models the menus and sidebar preceding this
+    # toolbar; the production bound remains unchanged.
+    assert _atspi._find_cell_editor(window, [4]) is panel
+
+
+def test_sheet_child_cache_restores_default_after_read_failure(fake_atspi, monkeypatch):
+    fake_atspi.Cache = _NS(NONE=0, UNDEFINED=128)
+    app = _Acc("application", name="soffice")
+    masks = []
+    app.set_cache_mask = masks.append
+
+    def fail():
+        assert masks == [0]
+        raise RuntimeError("read failed")
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        _atspi._without_child_cache(app, fail)
+    assert masks == [0, 128]
+
+
+def test_an_atspi_call_from_another_thread_runs_on_the_event_thread(monkeypatch) -> None:
+    """The listener is up. A getter from this thread is handed to it.
+
+    A live child walk beside ``event_main`` segfaults the event thread.
+    The call is not handed over when that thread was never started, so a
+    fake that only reports the listener stays inline.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    calls = []
+
+    def submit(fn, timeout=15.0):
+        calls.append(timeout)
+        return fn()
+
+    class Alive:
+        def is_alive(self) -> bool:
+            return True
+
+    node = type("Node", (), {"get_name": lambda self: "A1"})()
+    monkeypatch.setattr(_atspi_events, "submit", submit)
+    monkeypatch.setattr(_atspi_events, "_thread", Alive())
+    _atspi_events._listening.set()
+    try:
+        assert _atspi._node_name(node) == "A1"
+        assert calls == [15.0]
+        calls.clear()
+        monkeypatch.setattr(_atspi_events, "_thread", None)
+        assert _atspi._node_name(node) == "A1"
+        assert calls == []
+    finally:
+        _atspi_events._listening.clear()
+
+
+def test_sheet_child_cache_mask_and_walk_share_the_event_thread(fake_atspi, monkeypatch):
+    """The cache mask must cover a whole walk, including direct native calls."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    state = {"on_thread": False}
+    masks = []
+    fake_atspi.Cache = _NS(NONE=0, UNDEFINED=128)
+    app = _Acc("application", name="soffice")
+
+    def setter(mask):
+        assert state["on_thread"]
+        masks.append(mask)
+
+    def run(fn):
+        previous = state["on_thread"]
+        state["on_thread"] = True
+        try:
+            return fn()
+        finally:
+            state["on_thread"] = previous
+
+    def walk():
+        assert state["on_thread"]
+        assert masks == [0]
+        return "Item"
+
+    app.set_cache_mask = setter
+    monkeypatch.setattr(_atspi_events, "run", run)
+    assert _atspi._without_child_cache(app, walk) == "Item"
+    assert masks == [0, 128]
+
+
+def test_sheet_grid_walk_preserves_budget_after_editor_cache_refresh(fake_atspi, monkeypatch):
+    """Fresh toolbar children cannot exhaust the subsequent cell lookup."""
+    toolbar = _Acc("tool bar", name="Standard")
+    _adopt(toolbar, *[_Acc("panel", name="") for _ in range(40)])
+    status = _Acc("status bar", name="")
+    _adopt(status, *[_Acc("panel", name="") for _ in range(12)])
+    table = _Acc("table", name="Sheet Sheet1")
+    window = _Acc("frame", name="Calc")
+    _adopt(window, toolbar, status, table)
+    monkeypatch.setattr(_atspi, "_spreadsheet_table", lambda node: node is table)
+    assert _atspi._find_spreadsheet(window, [4]) is table
+
+
+def test_sheet_grid_commits_editor_before_reading_other_cells(monkeypatch):
+    """A pre-commit cell read can poison libatspi's connection with a timeout."""
+    calls = []
+    def commit(app):
+        calls.append("commit")
+        return True
+    def scan(app, origin, grid):
+        assert calls == ["commit"]
+        calls.append("scan")
+        return ("match", None)
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", commit)
+    monkeypatch.setattr(_atspi, "_scan_sheet_grid", scan)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+    assert _atspi.sheet_grid_check("soffice", "A1", "Item\tQ1") is None
+    assert calls == ["commit", "scan"]
