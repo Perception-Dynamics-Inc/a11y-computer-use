@@ -4696,6 +4696,18 @@ class Runtime:
             menu_note.append(self._dismiss_open_menu(app))
             if isinstance(act, Element):
                 self._refuse_vanished_target(act)
+                cover = self._cover_owner(act, app)
+                if cover and cover != "off_screen":
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{act.ref} is covered by {cover}",
+                        detail={
+                            "ref": act.ref, "role": act.role,
+                            "reason": "covered", "outcome": "refused",
+                            "next": ["foreground", "ref"],
+                            "evidence": f"the window is covered by {cover}",
+                        },
+                    )
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier
@@ -4735,8 +4747,8 @@ class Runtime:
                     },
                 )
             # Synthesized mouse events land on whatever window is under the
-            # point, so the hit-test runs right before them; an AXPress above
-            # addressed the element itself and needs no such guard (#11).
+            # point, so the app hit-test runs right before them. Ref targets
+            # also check window coverage before AX activation above.
             # A text ref uses the control's box, not the line-wide text box.
             self._recheck_target(app, act)
             self._guard_user(app)

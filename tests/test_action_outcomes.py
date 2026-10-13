@@ -273,6 +273,61 @@ def _runtime(tmp_path, driver: TreeDriver):
     return runtime
 
 
+@pytest.mark.parametrize("ref,front_id,covered", [
+    ("editor", 2, True),
+    ("preferences-control", 2, False),
+    ("editor", 1, False),
+])
+def test_linux_same_app_window_cover_before_ax_click(tmp_path, monkeypatch, ref, front_id, covered):
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = TreeDriver()
+    driver.elements = [
+        _element("main", "AXWindow", "Geany", bounds=Bounds(0, 0, 0, 800, 600)),
+        _element("editor", "AXTextArea", "Document", parent="main", editable=True,
+                 bounds=Bounds(0, 0, 0, 800, 600)),
+        _element("preferences", "AXDialog", "Preferences", bounds=Bounds(0, 100, 100, 600, 400)),
+        _element("preferences-control", "AXButton", "Close", parent="preferences",
+                 clickable=True, bounds=Bounds(0, 350, 280, 100, 40)),
+    ]
+    linux = LinuxDriver()
+    monkeypatch.setattr(linux, "_run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_gtk4_point_untrusted", lambda element, handle: False)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snap, target: target)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 4242)
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
+    monkeypatch.setattr(_atspi, "pid_of", lambda root: 4242)
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
+        False, "Geany" if handle == "editor" else "Preferences", 4242, (0, 0, 800, 600),
+    ))
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel",
+                        lambda **kw: 1 if kw["title"] == "Geany" else 2)
+    monkeypatch.setattr(_linux_system, "window_at_point", lambda x, y: {
+        "window_id": front_id, "title": "Preferences" if front_id == 2 else "Geany",
+    })
+    driver.occlusion = linux.occlusion
+
+    def press(element):
+        driver.calls.append(("press", element.ref))
+        return True  # AT-SPI claims success even for the covered textarea.
+
+    driver.press_element = press
+    runtime = _runtime(tmp_path, driver)
+    if covered:
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref)
+        assert caught.value.detail["reason"] == "covered"
+        assert caught.value.detail["outcome"] == "refused"
+        assert "Preferences" in caught.value.message
+        assert "clicked" not in caught.value.message
+        assert not driver.calls
+    else:
+        assert runtime.click(ref).startswith("clicked")
+        assert driver.calls == [("press", ref)]
+
+
 def test_action_result_equals_its_sentence() -> None:
     result = outcome.ActionResult(
         "typed 5 characters", outcome="confirmed", next=(), evidence="read back 'hello'",
