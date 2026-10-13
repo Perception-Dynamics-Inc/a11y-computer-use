@@ -87,6 +87,17 @@ def test_app_at_point_prefers_the_window_that_contains_the_point(fake_ewmh) -> N
     assert _linux_system.app_at_point_id(3000, 3000) is None
 
 
+def test_app_at_point_uses_wm_class_when_the_window_has_no_pid(monkeypatch) -> None:
+    """A Tk or Xt window has no comm. The hit-test names its WM_CLASS."""
+    win = _ClassWin(0x21, pid=0, instance="xmessage", klass="Xmessage", title="note")
+    _active_display(monkeypatch, [win], 0x21)
+    assert _linux_system.app_at_point_id(20, 20) == "xmessage"
+    assert _linux_system.pid_at_point(20, 20) is None
+    blank = _ClassWin(0x22, pid=0, instance="", klass="", title="blank")
+    _active_display(monkeypatch, [blank], 0x22)
+    assert _linux_system.app_at_point_id(20, 20) is None
+
+
 def test_topmost_window_wins_when_windows_overlap(monkeypatch) -> None:
     """Stacking order is bottom -> top; the hit-test must walk it top -> bottom."""
     below = _FakeXWin(0x30, 100, 100, 600, 400, pid=300)
@@ -312,6 +323,113 @@ def test_path_executable_is_spawned_directly(monkeypatch) -> None:
     assert calls == [["/usr/bin/mousepad"]]
 
 
+def test_display_name_finds_the_lower_case_program(monkeypatch) -> None:
+    """``Mousepad`` is the display name. PATH has ``mousepad`` only."""
+    def which(name):
+        return "/usr/bin/mousepad" if name == "mousepad" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("Mousepad")
+    assert calls == [["/usr/bin/mousepad"]]
+
+
+def _mousepad_desktop(path) -> None:
+    path.write_text(
+        "[Desktop Entry]\nType=Application\nName=Mousepad\n"
+        "GenericName=Text Editor\nExec=mousepad %F\nStartupWMClass=mousepad\n",
+        encoding="utf-8",
+    )
+
+
+def test_display_name_and_generic_name_launch_the_desktop_file(tmp_path, monkeypatch) -> None:
+    """With no PATH hit, ``Mousepad`` and ``Text Editor`` start that desktop file."""
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir(parents=True)
+    _mousepad_desktop(apps / "org.xfce.mousepad.desktop")
+
+    def which(name):
+        return "/usr/bin/gtk-launch" if name == "gtk-launch" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("Mousepad")
+    _linux_system.launch_app("Text Editor")
+    assert calls == [
+        ["/usr/bin/gtk-launch", "org.xfce.mousepad.desktop"],
+        ["/usr/bin/gtk-launch", "org.xfce.mousepad.desktop"],
+    ]
+    calls.clear()
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.launch_app("Not a Desktop App")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "not on PATH" in exc.value.message
+    assert calls == []
+
+
+def test_generic_name_exec_runs_when_gtk_launch_is_absent(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir(parents=True)
+    _mousepad_desktop(apps / "org.xfce.mousepad.desktop")
+
+    def which(name):
+        return "/usr/bin/mousepad" if name == "mousepad" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("Text Editor")
+    assert calls == [["/usr/bin/mousepad"]]
+
+
+def test_name_beats_an_earlier_generic_name_and_skips_hidden(tmp_path, monkeypatch) -> None:
+    """A hidden file and another app's GenericName do not steal ``Mousepad``."""
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    home = tmp_path / "xdg-home" / "applications"
+    system = tmp_path / "xdg-dirs" / "applications"
+    home.mkdir(parents=True)
+    system.mkdir(parents=True)
+    (home / "hidden-mousepad.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nHidden=true\nName=Mousepad\nExec=hidden-app\n",
+        encoding="utf-8",
+    )
+    (home / "org.example.Notes.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Notes\nGenericName=Mousepad\nExec=notes\n",
+        encoding="utf-8",
+    )
+    _mousepad_desktop(system / "org.xfce.mousepad.desktop")
+
+    def which(name):
+        return "/usr/bin/gtk-launch" if name == "gtk-launch" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("Mousepad")
+    assert calls == [["/usr/bin/gtk-launch", "org.xfce.mousepad.desktop"]]
+
+
+def test_module_argv_spawns_the_program_and_its_flag(monkeypatch) -> None:
+    def which(name):
+        return "/usr/bin/soffice" if name in {"soffice", "/usr/bin/soffice"} else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    handle = _linux_system.launch_app("soffice", argv=("soffice", "--calc"))
+    assert calls == [["/usr/bin/soffice", "--calc"]]
+    assert "soffice.bin" in handle["names"]
+    assert handle["is_launcher"] is False
+
+
+def test_module_argv_missing_program_is_not_spawned(monkeypatch) -> None:
+    monkeypatch.setattr(_linux_system.shutil, "which", lambda _name: None)
+    calls = _record_spawns(monkeypatch)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.launch_app("soffice", argv=("soffice", "--writer"))
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert calls == []
+
+
 def test_desktop_id_uses_gtk_launch(tmp_path, monkeypatch) -> None:
     _isolate_desktop_dirs(tmp_path, monkeypatch)
     apps = tmp_path / "xdg-home" / "applications"
@@ -425,6 +543,114 @@ def test_app_launch_of_a_missing_program_does_not_wait_for_a_window(tmp_path, mo
     # one that was already open. The missing program is not spawned and the
     # call does not poll until the launch timeout.
     assert calls == [] and waited == ["windows"]
+
+
+def test_granted_display_name_launches_and_an_ungranted_app_does_not(tmp_path, monkeypatch) -> None:
+    """``app launch "Mousepad"`` starts mousepad when that grant is held.
+
+    The same call with only ``gedit`` granted does not spawn. ``Text Editor``
+    is the desktop GenericName and follows the same gate.
+    """
+    from a11y_computer_use import safety, server
+
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir(parents=True)
+    _mousepad_desktop(apps / "org.xfce.mousepad.desktop")
+
+    def which(name):
+        if name == "mousepad":
+            return "/usr/bin/mousepad"
+        if name == "gtk-launch":
+            return "/usr/bin/gtk-launch"
+        return None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    launched = {"n": 0}
+
+    class _D:
+        resolves_apps = False
+        name = "linux"
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("shell", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def launch_app(self, ident, *, argv=None):
+            launched["n"] += 1
+            if argv:
+                return _linux_system.launch_app(ident, argv=argv)
+            return _linux_system.launch_app(ident)
+
+        def windows(self):
+            if not launched["n"]:
+                return []
+            return [{
+                "window_id": 1, "app": "mousepad",
+                "title": "Untitled 1 - Mousepad", "pid": 4,
+            }]
+
+    monkeypatch.setattr(
+        server, "_running_app",
+        lambda ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+    )
+
+    def runtime(name: str):
+        store = safety.PermissionStore(tmp_path / f"{name}.json")
+        rt = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / f"{name}-audit"), driver=_D(),
+        )
+        rt.APP_LAUNCH_WAIT_S = 1
+        monkeypatch.setattr(
+            rt, "_resolve_app",
+            lambda ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+        )
+        return rt, store
+
+    both, both_store = runtime("both")
+    both_store.set_tier("mousepad", safety.Tier.CLICK)
+    both_store.set_tier("Mousepad", safety.Tier.CLICK)
+    text = both.app("launch", "Mousepad")
+    assert calls == [["/usr/bin/mousepad"]]
+    assert "Untitled 1 - Mousepad" in text
+
+    calls.clear()
+    launched["n"] = 0
+    display, display_store = runtime("display")
+    display_store.set_tier("Mousepad", safety.Tier.CLICK)
+    text = display.app("launch", "Mousepad")
+    assert calls == [["/usr/bin/mousepad"]]
+    assert "Untitled 1 - Mousepad" in text
+
+    calls.clear()
+    launched["n"] = 0
+    editor, editor_store = runtime("editor")
+    editor_store.set_tier("mousepad", safety.Tier.CLICK)
+    text = editor.app("launch", "Text Editor")
+    assert calls == [["/usr/bin/mousepad"]]
+    assert "Untitled 1 - Mousepad" in text
+
+    calls.clear()
+    launched["n"] = 0
+    other, other_store = runtime("other")
+    other_store.set_tier("gedit", safety.Tier.CLICK)
+    with pytest.raises(server.ActionRefused) as refused:
+        other.app("launch", "Mousepad")
+    assert refused.value.decision.verdict is safety.Verdict.NEEDS_PERMISSION
+    assert refused.value.decision.app != "gedit"
+    assert calls == []
+
+    with pytest.raises(server.ActionRefused) as refused_editor:
+        other.app("launch", "Text Editor")
+    assert refused_editor.value.decision.verdict is safety.Verdict.NEEDS_PERMISSION
+    assert refused_editor.value.decision.app != "gedit"
+    assert calls == []
 
 
 def test_absolute_path_resolves_and_activates_the_basename(monkeypatch) -> None:
@@ -1090,3 +1316,120 @@ def test_client_origin_is_the_window_inside_the_matching_frame(monkeypatch) -> N
         0, 0, 1280, 773, title="notes.odt — LibreOffice Writer",
     ) == (0, 28)
     assert _linux_system.client_origin_for_outer_frame(40, 40, 200, 100, title="other") is None
+
+
+def _program_names(mapping: dict[int, str]):
+    """cmdline and exe basenames for fake pids. Both agree."""
+    def read(pid: int) -> str | None:
+        return mapping.get(int(pid))
+
+    return read
+
+
+def test_full_program_name_matches_a_grant_and_does_not_widen(monkeypatch, tmp_path) -> None:
+    """A 15-byte comm is not the grant key when cmdline names the program.
+
+    ``gnome-text-editor`` and ``gnome-text-editor-nightly`` both cut to
+    ``gnome-text-edit``. A grant for the editor covers that process only.
+    The cut name resolves to the editor when it is the only such process,
+    and resolves to neither program when both are running. ``text`` is not
+    the editor. chrome's short comm is unchanged.
+    """
+    from a11y_computer_use.safety import PermissionStore, Tier, check_action
+    from a11y_computer_use.schema import ObserveOp, ObserveVerb
+    from a11y_computer_use.server import _permission_app_id, refusal_text
+
+    class _Named(_FakeXWin):
+        def __init__(self, wid: int, pid: int, title: str):
+            super().__init__(wid, 0, 0, 800, 600, pid)
+            self.title = title
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_NAME":
+                return _NS(value=self.title.encode())
+            return super().get_full_property(atom, kind)
+
+    editor = _Named(0xA1, pid=41, title="Untitled 1")
+    nightly = _Named(0xA2, pid=42, title="Nightly")
+    chrome = _Named(0xA3, pid=7, title="Example - Google Chrome")
+
+    def show(wins, active):
+        _active_display(monkeypatch, wins, active)
+        monkeypatch.setattr(
+            _linux_system, "_comm_for_pid",
+            lambda pid: {41: "gnome-text-edit", 42: "gnome-text-edit", 7: "chrome"}.get(int(pid)),
+        )
+
+    names = {41: "gnome-text-editor", 42: "gnome-text-editor-nightly", 7: "chrome"}
+    read = _program_names(names)
+    monkeypatch.setattr(_linux_system, "_cmdline_basename", read)
+    monkeypatch.setattr(_linux_system, "_exe_basename", read)
+
+    show([editor], 0xA1)
+    assert _linux_system._identity_for_pid(41, "gnome-text-edit") == "gnome-text-editor"
+    assert _linux_system.resolve_app("gnome-text-editor") == "gnome-text-editor"
+    assert _linux_system.resolve_app("gnome-text-edit") == "gnome-text-editor"
+    assert _linux_system.resolve_app("text") == "text"
+    assert _linux_system.pids_matching("text") == set()
+    assert _linux_system.pids_matching("gnome-text-editor") == {41}
+    assert _linux_system.pids_matching("gnome-text-editor-nightly") == set()
+    assert _linux_system.frontmost_app_id() == "gnome-text-editor"
+    assert _linux_system.running_apps()[0]["bundle_id"] == "gnome-text-editor"
+    assert _linux_system.windows()[0]["app"] == "gnome-text-editor"
+    monkeypatch.setattr("a11y_computer_use.server.sys.platform", "linux")
+    assert _permission_app_id("gnome-text-editor") == "gnome-text-editor"
+
+    store = PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("gnome-text-editor", Tier.FULL)
+    decision = check_action(
+        ObserveOp(verb=ObserveVerb.SNAPSHOT, app="gnome-text-editor"),
+        _linux_system.resolve_app("gnome-text-editor"),
+        store=store,
+    )
+    assert decision.verdict.value == "allow"
+    assert decision.app == "gnome-text-editor"
+    refused = check_action(
+        ObserveOp(verb=ObserveVerb.SNAPSHOT, app="gnome-text-editor-nightly"),
+        "gnome-text-editor-nightly",
+        store=store,
+    )
+    assert refused.verdict.value == "needs_permission"
+    assert refused.app == "gnome-text-editor-nightly"
+    assert refused.reason.startswith("gnome-text-editor-nightly ")
+    hint = refusal_text(refused)
+    assert "grant_app(app='gnome-text-editor-nightly'" in hint
+    assert "grant_app(app='gnome-text-edit'" not in hint
+
+    show([editor, nightly], 0xA1)
+    assert _linux_system.resolve_app("gnome-text-editor") == "gnome-text-editor"
+    assert _linux_system.resolve_app("gnome-text-editor-nightly") == "gnome-text-editor-nightly"
+    assert _linux_system.resolve_app("gnome-text-edit") == "gnome-text-edit"
+    assert _linux_system.pids_matching("gnome-text-editor") == {41}
+    assert _linux_system.pids_matching("gnome-text-editor-nightly") == {42}
+    assert _linux_system.pids_matching("gnome-text-edit") == {41, 42}
+
+    show([chrome], 0xA3)
+    assert _linux_system.resolve_app("google-chrome") == "chrome"
+    assert _linux_system.resolve_app("chrome") == "chrome"
+
+
+def test_disagreeing_cmdline_and_exe_do_not_pick_a_program(monkeypatch) -> None:
+    """Two longer names for one comm stay the comm. Neither grant is implied."""
+    class _Named(_FakeXWin):
+        def __init__(self, wid: int, pid: int, title: str):
+            super().__init__(wid, 0, 0, 400, 300, pid)
+            self.title = title
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_NAME":
+                return _NS(value=self.title.encode())
+            return super().get_full_property(atom, kind)
+
+    win = _Named(0xB1, pid=55, title="Editor")
+    _active_display(monkeypatch, [win], 0xB1)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "gnome-text-edit")
+    monkeypatch.setattr(_linux_system, "_cmdline_basename", lambda pid: "gnome-text-editor")
+    monkeypatch.setattr(_linux_system, "_exe_basename", lambda pid: "gnome-text-editor-nightly")
+    assert _linux_system._identity_for_pid(55, "gnome-text-edit") == "gnome-text-edit"
+    assert _linux_system.resolve_app("gnome-text-editor") == "gnome-text-edit"
+    assert _linux_system.frontmost_app_id() == "gnome-text-edit"

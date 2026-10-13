@@ -24,6 +24,7 @@ from a11y_computer_use.schema import (
     Display,
     Element,
     ErrorCode,
+    Point,
     Scope,
     Snapshot,
 )
@@ -298,6 +299,27 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     assert outcome.judge(
         changed=True, requested="a", readback="hella", before_value="hell",
     )[0] == "confirmed"
+    replaced = outcome.judge(
+        changed=True,
+        requested="WORD",
+        readback="Hello WORD start",
+        before_value="Hello world start",
+        selection=(6, 11),
+    )
+    assert replaced == ("confirmed", "read back 'Hello WORD start'")
+    assert outcome.judge(
+        changed=True,
+        requested="WORD",
+        readback="Hello WORD start",
+        before_value="Hello world start",
+    )[0] == "partial"
+    assert outcome.judge(
+        changed=True,
+        requested="WORD",
+        readback="Hello WORD startSecond line",
+        before_value="Hello world start",
+        expected="Hello WORD startSecond line",
+    )[0] == "confirmed"
     assert outcome.judge(
         changed=True, requested="hello", readback="help", before_value="",
     )[0] == "partial"
@@ -314,6 +336,10 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     hidden = outcome.next_for_error("unsupported", {"reason": "not_showing"})
     assert hidden[0] == "foreground"
     assert outcome.next_for_error("secure_field", {}) == ()
+    assert outcome.next_for_error("focus_lost", {}) == ("ref", "cdp")
+    assert "keyboard" not in outcome.next_for_error(
+        "focus_lost", {"reason": "focus_lost", "outcome": "refused"},
+    )
     refused = outcome.refused_result(
         text="unsupported: e2 is not showing",
         code="unsupported",
@@ -374,6 +400,79 @@ def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path,
     landed = runtime.click("e4")
     assert landed.outcome == "confirmed"
     assert landed.evidence == "the caret is in the target paragraph"
+
+
+def test_side_pane_click_is_confirmed_only_when_the_location_changes(tmp_path, monkeypatch) -> None:
+    """Selecting the row is not confirmation. The location has to change."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    driver.name = "linux"
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        driver._replace("e5", title="selected")
+        return True
+
+    driver.press_element = press  # type: ignore[method-assign]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snapshot_id, ref: object() if ref == "e4" else None)
+    monkeypatch.setattr(_atspi, "navigating_folder_row", lambda handle: True)
+    monkeypatch.setattr(_atspi, "folder_location", lambda handle: "/home/ubuntu/")
+    monkeypatch.setattr(
+        _atspi, "folder_navigation_verdict",
+        lambda handle, before: ("partial", "the row was selected but the location did not change"),
+    )
+    runtime = _runtime(tmp_path, driver)
+    missed = runtime.click("e4")
+    assert missed.outcome == "partial"
+    assert missed.evidence == "the row was selected but the location did not change"
+    assert missed.outcome != "confirmed"
+
+    monkeypatch.setattr(
+        _atspi, "folder_navigation_verdict",
+        lambda handle, before: ("confirmed", "the location changed"),
+    )
+    driver._replace("e5", title="opened")
+    opened = runtime.click("e4")
+    assert opened.outcome == "confirmed"
+    assert opened.evidence == "the location changed"
+
+
+def test_canvas_click_stays_unverifiable_when_the_tree_changes(tmp_path, monkeypatch) -> None:
+    """Focus moving onto a canvas is not confirmation.
+
+    The accessibility tree cannot see the pixels. The outcome says so and
+    points at crop or a screenshot, even when the tree changed.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    driver.name = "linux"
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        driver._replace("e5", title="focused")
+        return True
+
+    driver.press_element = press  # type: ignore[method-assign]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snapshot_id, ref: object() if ref == "e4" else None)
+    monkeypatch.setattr(
+        _atspi, "opaque_click_verdict",
+        lambda handle: (
+            "unverifiable",
+            "accessibility cannot see inside this canvas or unnamed image, so the click is not confirmed; "
+            "verify with crop or a screenshot",
+        ),
+    )
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.click("e4")
+    assert result.startswith("clicked ")
+    assert result.outcome == "unverifiable"
+    assert result.outcome != "confirmed"
+    assert "crop" in result.evidence and "screenshot" in result.evidence
+    assert "changed" not in result.evidence
 
 
 def test_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
@@ -859,7 +958,11 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def test_agent_follows_next_after_a_hidden_ref(tmp_path) -> None:
+def test_hidden_ref_click_does_not_become_focus(tmp_path) -> None:
+    """A hidden ref stays that click. Focusing the app is not the same intent.
+
+    The error names the refusal. The model can ask for focus on a later turn.
+    """
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     runtime = FakeRuntime(elements)
 
@@ -893,18 +996,23 @@ def test_agent_follows_next_after_a_hidden_ref(tmp_path) -> None:
         runtime=runtime,
         trace_dir=tmp_path,
     )
-    assert ("app", {"action": "focus", "name": "demo"}) in runtime.calls
+    assert all(name != "app" for name, _params in runtime.calls)
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
     finished = next(
         event for event in events
         if event.type == "step_finished" and event.data.get("index") == 1
     )
-    assert finished.data["verified"] is True
-    assert finished.data["error"] is None
+    assert finished.data["verified"] is False
+    assert finished.data["error"] and "not showing" in finished.data["error"]
+    assert result.step_log[0].error and "not showing" in result.step_log[0].error
     assert result.status == "success"
 
 
 def test_agent_escalates_a_noop_and_counts_it_as_stuck(tmp_path) -> None:
-    save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
     clock = el("clock", "AXStaticText", "t0", parent="e1")
     elements = window(save, clock)
     runtime = FakeRuntime(elements)
@@ -958,6 +1066,127 @@ def test_agent_escalates_a_noop_and_counts_it_as_stuck(tmp_path) -> None:
     assert any(event.type == "stuck" and event.data["terminal"] is True for event in events)
 
 
+def _billing_tree(*, expanded: bool = False) -> list[Element]:
+    """Chrome's line box: the static text contains the button, and is wider than it."""
+    line = Bounds(0, 59, 151, 965, 22)
+    button = Bounds(0, 59, 153, 95, 20)
+    return [
+        _element("w", "AXWindow", "cuabilling", path=("AXWindow",), bounds=Bounds(0, 0, 0, 1000, 800)),
+        _element(
+            "page", "AXGroup", "cuabilling", parent="w",
+            path=("AXWindow", "AXGroup"), bounds=Bounds(0, 52, 133, 900, 700), focused=True,
+        ),
+        _element(
+            "line", "AXStaticText", "Billing section", parent="page",
+            path=("AXWindow", "AXGroup", "AXStaticText"), value="Billing section", bounds=line,
+        ),
+        _element(
+            "btn", "AXButton", "Billing section", parent="line",
+            path=("AXWindow", "AXGroup", "AXStaticText", "AXButton"),
+            clickable=True, expanded=expanded, bounds=button,
+        ),
+        _element(
+            "link", "AXLink", "Link text", parent="page",
+            path=("AXWindow", "AXGroup", "AXLink"), clickable=True,
+            bounds=Bounds(0, 139, 190, 58, 18),
+        ),
+        _element(
+            "linktext", "AXStaticText", "Link text", parent="link",
+            path=("AXWindow", "AXGroup", "AXLink", "AXStaticText"), value="Link text",
+            bounds=Bounds(0, 139, 190, 58, 18),
+        ),
+    ]
+
+
+def test_statictext_click_activates_the_button_inside_the_line(tmp_path) -> None:
+    """A line-wide static text is not the button. The click activates the button.
+
+    The text center sits past the button. Reporting ``clicked`` for that point
+    left the control collapsed. The button's expanded state has to change, and
+    a press that does not change it is not ``clicked``.
+    """
+    driver = TreeDriver()
+    driver.elements = _billing_tree()
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        if element.ref == "btn":
+            driver._replace("btn", expanded=True)
+            return True
+        if element.ref == "link":
+            driver._replace("link", title="Link text opened")
+            return True
+        return False
+
+    driver.press_element = press  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.click("line")
+    assert result.startswith("clicked line")
+    assert "activated btn" in result
+    assert result.outcome == "confirmed"
+    assert [call[1] for call in driver.calls if call[0] == "press"] == ["btn"]
+    assert all(call[0] != "click" for call in driver.calls)
+
+    link = runtime.click("linktext")
+    assert link.startswith("clicked linktext")
+    assert "activated link" in link
+    assert link.outcome == "confirmed"
+
+    driver.elements = _billing_tree()
+    runtime.desktop_snapshot(APP)
+
+    def press_without_effect(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        return element.ref == "btn"
+
+    driver.press_element = press_without_effect  # type: ignore[method-assign]
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.click("line")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_activated"
+    assert exc.value.detail["control"] == "btn"
+    assert not str(exc.value).startswith("clicked")
+
+
+def test_linux_text_click_points_at_the_button_not_the_line(tmp_path) -> None:
+    """On Linux a button ref is a pointer click. The text ref uses that box."""
+    driver = TreeDriver()
+    driver.name = "linux"
+    driver.elements = _billing_tree()
+
+    def click(target, **kwargs) -> None:
+        del kwargs
+        driver.calls.append(("click", getattr(target, "ref", None)))
+        if getattr(target, "ref", None) == "btn":
+            driver._replace("btn", expanded=True)
+
+    driver.click = click  # type: ignore[method-assign]
+    driver.press_element = lambda element: False  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.click("line")
+    assert result.outcome == "confirmed"
+    assert ("click", "btn") in driver.calls
+    assert ("click", "line") not in driver.calls
+
+
+def test_statictext_over_two_controls_is_not_clicked(tmp_path) -> None:
+    driver = TreeDriver()
+    driver.elements = _billing_tree() + [
+        _element(
+            "other", "AXButton", "Other", parent="line",
+            path=("AXWindow", "AXGroup", "AXStaticText", "AXButton"),
+            clickable=True, bounds=Bounds(0, 200, 153, 40, 20),
+        ),
+    ]
+    runtime = _runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.click("line")
+    assert exc.value.detail["reason"] == "ambiguous_control"
+    assert "btn" in exc.value.detail["controls"] and "other" in exc.value.detail["controls"]
+    assert driver.calls == []
+    assert not str(exc.value).startswith("clicked")
+
+
 def test_confirmed_outcome_verifies_without_a_digest_change(tmp_path) -> None:
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     runtime = FakeRuntime(elements)
@@ -985,3 +1214,153 @@ def test_confirmed_outcome_verifies_without_a_digest_change(tmp_path) -> None:
     assert agent._hints == {}
     assert result.status == "success"
     assert result.step_log[0].verified is True
+
+
+def _welcome_tree(*, expanded: bool = False, dialog: bool = True, cover: bool = True):
+    """A Search button and a welcome dialog that can sit over its center.
+
+    The button center is (100, 94). A covering dialog owns 30 lines, so the
+    dialog and those lines are 31 nodes.
+    """
+    search = _element(
+        "search", "AXButton", "Search (Ctrl+Shift+F)", parent="main",
+        path=("AXWindow", "AXButton"), clickable=True, expanded=expanded,
+        bounds=Bounds(0, 40, 80, 120, 28),
+    )
+    elements = [
+        _element(
+            "main", "AXWindow", "Visual Studio Code", path=("AXWindow",),
+            bounds=Bounds(0, 0, 0, 800, 600),
+        ),
+        search,
+        _element(
+            "page", "AXGroup", "Editor", parent="main", path=("AXWindow", "AXGroup"),
+            bounds=Bounds(0, 0, 120, 800, 480),
+        ),
+    ]
+    if dialog:
+        box = Bounds(0, 20, 40, 400, 300) if cover else Bounds(0, 500, 500, 80, 40)
+        elements.append(_element(
+            "welcome", "AXDialog", "Welcome", parent="main",
+            path=("AXWindow", "AXDialog"), bounds=box,
+        ))
+        for index in range(30):
+            elements.append(_element(
+                f"d{index}", "AXStaticText", f"line {index}", parent="welcome",
+                path=("AXWindow", "AXDialog", "AXStaticText"),
+                bounds=Bounds(0, 30, 50 + index, 200, 12),
+            ))
+    return elements
+
+
+def _snap(elements: list[Element]) -> Snapshot:
+    return Snapshot("snap", Scope.WINDOW, APP, 1, 0.0, (), tuple(elements))
+
+
+def test_occluded_click_effect_names_the_covering_dialog() -> None:
+    """Closing a dialog that covers Search is not a change to Search.
+
+    A dialog that does not contain the center, a target that expands, and a
+    button inside the dialog are ordinary effects.
+    """
+    covered = _welcome_tree()
+    search = next(item for item in covered if item.ref == "search")
+    opened = _welcome_tree(dialog=False)
+    assert outcome.occluded_click_effect(_snap(covered), _snap(opened), search) == (
+        "covered by 'Welcome'"
+    )
+    expanded = _welcome_tree(expanded=True, dialog=False)
+    assert outcome.occluded_click_effect(_snap(covered), _snap(expanded), search) is None
+    aside = _welcome_tree(cover=False)
+    assert outcome.occluded_click_effect(_snap(aside), _snap(opened), search) is None
+    assert outcome.occluded_click_effect(_snap(opened), _snap(covered), search) is None
+
+    dismiss = _element(
+        "dismiss", "AXButton", "Dismiss", parent="welcome",
+        path=("AXWindow", "AXDialog", "AXButton"), clickable=True,
+        bounds=Bounds(0, 40, 60, 80, 24),
+    )
+    before = _welcome_tree() + [dismiss]
+    assert outcome.occluded_click_effect(_snap(before), _snap(opened), dismiss) is None
+
+    untitled = _welcome_tree()
+    blank = next(item for item in untitled if item.ref == "welcome")
+    untitled = [dataclasses.replace(blank, title="") if item.ref == "welcome" else item for item in untitled]
+    assert outcome.occluded_click_effect(_snap(untitled), _snap(opened), search) == "covered by dialog"
+
+
+def test_covered_ref_click_is_not_clicked_and_the_point_stays(tmp_path) -> None:
+    """The pointer still hits Search. The welcome dialog is what changed.
+
+    An explicit x/y click is the same point. A button inside the dialog, a
+    button the dialog does not cover, and a Search click that expands Search
+    stay clicks.
+    """
+    driver = TreeDriver()
+    driver.name = "linux"
+    driver.elements = _welcome_tree()
+    sent: list = []
+
+    def without_welcome(elements: list[Element]) -> list[Element]:
+        return [
+            item for item in elements
+            if item.ref not in {"welcome", "dismiss"} and item.parent != "welcome"
+        ]
+
+    def click(target, **kwargs) -> None:
+        del kwargs
+        sent.append(target)
+        ref = getattr(target, "ref", None)
+        if ref == "search":
+            driver.elements = without_welcome(driver.elements)
+            if getattr(driver, "expand_search", False):
+                driver._replace("search", expanded=True)
+        elif ref == "dismiss" or getattr(target, "x", None) == 100:
+            driver.elements = without_welcome(driver.elements)
+
+    driver.click = click  # type: ignore[method-assign]
+    driver.press_element = lambda element: False  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    covered = runtime.click("search", verify=True)
+    assert covered.outcome == "suspected_noop"
+    assert covered.evidence == "covered by 'Welcome'"
+    assert not str(covered).startswith("clicked")
+    assert "did not reach the target" in covered
+    assert "+0 -31 ~0" in covered
+    assert sent[0].ref == "search"
+    assert (sent[0].bounds.x, sent[0].bounds.y, sent[0].bounds.width, sent[0].bounds.height) == (
+        40, 80, 120, 28,
+    )
+
+    driver.elements = _welcome_tree() + [
+        _element(
+            "dismiss", "AXButton", "Dismiss", parent="welcome",
+            path=("AXWindow", "AXDialog", "AXButton"), clickable=True,
+            bounds=Bounds(0, 40, 60, 80, 24),
+        ),
+    ]
+    runtime.desktop_snapshot(APP)
+    dismissed = runtime.click("dismiss")
+    assert str(dismissed).startswith("clicked dismiss")
+    assert dismissed.outcome == "confirmed"
+    assert sent[-1].ref == "dismiss"
+
+    driver.elements = _welcome_tree(cover=False)
+    runtime.desktop_snapshot(APP)
+    aside = runtime.click("search")
+    assert str(aside).startswith("clicked search")
+    assert aside.outcome == "confirmed"
+
+    driver.elements = _welcome_tree()
+    driver.expand_search = True
+    runtime.desktop_snapshot(APP)
+    reached = runtime.click("search")
+    assert str(reached).startswith("clicked search")
+    assert reached.outcome == "confirmed"
+    driver.expand_search = False
+
+    driver.elements = _welcome_tree()
+    runtime.desktop_snapshot(APP)
+    point = runtime.click(x=100, y=94)
+    assert str(point).startswith("clicked (100, 94)")
+    assert sent[-1] == Point(display_id=0, x=100, y=94)

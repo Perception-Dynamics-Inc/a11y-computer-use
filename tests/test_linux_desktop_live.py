@@ -419,3 +419,435 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
             dpy.close()
         except Exception:
             pass
+
+
+@requires_desktop
+def test_window_move_accepts_a_title_bar_point_and_rejects_bad_coordinates(tmp_path, monkeypatch) -> None:
+    """A client origin inside the title bar used to raise OverflowError.
+
+    The move stays that client point. A negative, a float, a bool, or a
+    pixel past the screen edge is ValueError and the window is not moved.
+    The last on-screen pixel is width-1 and height-1, the same bound as a click.
+    """
+    from Xlib import X, display
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dpy = display.Display()
+    screen = dpy.screen()
+    win = screen.root.create_window(
+        40, 60, 180, 90, 0, screen.root_depth, X.InputOutput, X.CopyFromParent,
+        background_pixel=screen.white_pixel, event_mask=0,
+    )
+    win.set_wm_name("a11y-move")
+    win.set_wm_class("a11ymove", "A11yMove")
+    win.map()
+    dpy.flush()
+    driver = LinuxDriver()
+
+    def row():
+        return next((item for item in driver.windows() if item["window_id"] == win.id), None)
+
+    try:
+        found = _until(row)
+        assert found is not None and found["app"] == "a11ymove", found
+        shown = driver.displays()
+        assert shown[0].width == screen.width_in_pixels
+        assert shown[0].height == screen.height_in_pixels
+        width, height = shown[0].width, shown[0].height
+        store = safety.PermissionStore(tmp_path / "p.json")
+        store.set_tier("a11ymove", safety.Tier.CLICK)
+        rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+        rt.window("move", window_id=win.id, x=120, y=90)
+        moved = _until(lambda: (current := row()) and current.get("bounds") and (
+            abs(current["bounds"]["x"] - 120) < 48 and abs(current["bounds"]["y"] - 90) < 48
+        ) and current)
+        assert moved, row()
+
+        rt.window("move", window_id=win.id, x=18, y=12)
+        parked = _until(lambda: (current := row()) and current.get("bounds") and (
+            abs(current["bounds"]["x"] - 18) < 48 and abs(current["bounds"]["y"] - 12) < 48
+        ) and current)
+        assert parked, row()
+
+        for kwargs in (
+            {"x": -1, "y": 12},
+            {"x": width, "y": 12},
+            {"x": 18, "y": height},
+            {"x": 10.2, "y": 12},
+            {"x": True, "y": 12},
+        ):
+            before = dict(row()["bounds"])
+            with pytest.raises(ValueError) as exc:
+                rt.window("move", window_id=win.id, **kwargs)
+            text = str(exc.value)
+            assert "OverflowError" not in text
+            assert "internal_error" not in text
+            if "x" in kwargs and kwargs["x"] == width:
+                assert f"valid x is 0..{width - 1}" in text
+                assert f"valid x is 0..{width}" not in text
+            if kwargs.get("y") == height:
+                assert f"y is 0..{height - 1}" in text
+                assert f"y is 0..{height}" not in text
+            again = row()
+            assert again["bounds"]["x"] == before["x"] and again["bounds"]["y"] == before["y"]
+
+        driver.move_window(win.id, 18, 12)
+        held = dict(row()["bounds"])
+        with pytest.raises(ValueError, match="window move"):
+            driver.move_window(win.id, -1, 12)
+        with pytest.raises(ValueError, match=rf"valid x is 0\.\.{width - 1}") as exc:
+            driver.move_window(win.id, width, 12)
+        assert f"valid x is 0..{width}" not in str(exc.value)
+        stayed = row()
+        assert stayed["bounds"]["x"] == held["x"] and stayed["bounds"]["y"] == held["y"]
+        assert abs(held["x"] - 18) < 48 and abs(held["y"] - 12) < 48
+    finally:
+        try:
+            dpy.close()
+        except Exception:
+            pass
+
+
+_HOLDER_SRC = r"""
+import os
+import time
+from Xlib import X, Xatom, display
+d = display.Display()
+screen = d.screen()
+win = screen.root.create_window(
+    20, 20, 80, 40, 1, screen.root_depth, X.InputOutput, X.CopyFromParent,
+)
+win.change_property(d.intern_atom("WM_NAME"), Xatom.STRING, 8, b"pidholder")
+win.change_property(d.intern_atom("WM_CLASS"), Xatom.STRING, 8, b"pidholder\0Pidholder\0")
+win.change_property(d.intern_atom("_NET_WM_PID"), Xatom.CARDINAL, 32, [os.getpid()])
+win.map()
+d.flush()
+while True:
+    time.sleep(1)
+"""
+
+
+def _button_point(window_id: int) -> tuple[int, int]:
+    """Screen center of xmessage's ok button, the small child near the bottom."""
+    from Xlib import display as xdisplay
+
+    d = xdisplay.Display()
+    try:
+        top = d.create_resource_object("window", int(window_id))
+        root = d.screen().root
+        best: tuple[int, int, int, int] | None = None
+        stack = [top]
+        while stack:
+            win = stack.pop()
+            try:
+                children = list(win.query_tree().children or [])
+            except Exception:
+                children = []
+            stack.extend(children)
+            if int(win.id) == int(window_id):
+                continue
+            box = _linux_box(root, win)
+            if box is None:
+                continue
+            x, y, w, h = box
+            if not (16 <= w <= 100 and 10 <= h <= 40):
+                continue
+            # The label is wide and sits above the button. The lowest modest
+            # child is the button.
+            rank = (y, -(w * h))
+            if best is None or rank > (best[0], best[1]):
+                best = (y, -(w * h), x + w // 2, y + h // 2)
+        if best is None:
+            raise AssertionError(f"xmessage {window_id} drew no button")
+        return best[2], best[3]
+    finally:
+        try:
+            d.close()
+        except Exception:
+            pass
+
+
+def _linux_box(root, win) -> tuple[int, int, int, int] | None:
+    try:
+        coords = root.translate_coords(win, 0, 0)
+        geom = win.get_geometry()
+        return int(coords.x), int(coords.y), int(geom.width), int(geom.height)
+    except Exception:
+        return None
+
+
+_STATUS_BAR_SRC = r"""
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib
+GLib.set_prgname("cuastatusbar")
+win = Gtk.Window(title="cuastatusbar")
+win.set_default_size(480, 200)
+win.move(80, 60)
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+label = Gtk.Label(label="picture")
+bar = Gtk.Statusbar()
+bar.push(bar.get_context_id("meta"), "img003-blue.png\t400 x 400\t2.8 kB\t100.0%")
+box.pack_start(label, True, True, 0)
+box.pack_end(bar, False, False, 0)
+win.add(box)
+win.connect("destroy", Gtk.main_quit)
+win.show_all()
+Gtk.main()
+"""
+
+
+def _stop_status_proc(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@requires_desktop
+def test_gtk_status_bar_snapshots_as_statusbar(tmp_path) -> None:
+    """A GTK status bar keeps the statusbar role. It is not a layout group."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    script = tmp_path / "cuastatusbar.py"
+    script.write_text(_STATUS_BAR_SRC)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    driver = LinuxDriver()
+    try:
+        def shot():
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuastatusbar")
+            except Exception:
+                return None
+            if any("img003-blue.png" in (el.title or "") for el in snap.elements):
+                return snap
+            return None
+
+        snap = _until(shot, timeout=15)
+        assert snap is not None, "the GTK status bar did not appear"
+        bars = [el for el in snap.elements if "img003-blue.png" in (el.title or "")]
+        assert bars, [(el.role, el.title) for el in snap.elements]
+        assert all(el.role == "AXStatusBar" for el in bars), [(el.role, el.title) for el in bars]
+        rendered = observe.render_text(snap, mode="full", include_bounds=True)
+        assert "statusbar" in rendered and "img003-blue.png" in rendered
+        assert 'group "img003-blue.png' not in rendered
+    finally:
+        _stop_status_proc(proc)
+
+
+@requires_desktop
+def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
+    """xmessage is mapped, has WM_CLASS, and publishes no _NET_WM_PID.
+
+    Another window that has a pid is focused. The unfiltered list still
+    names xmessage, with pid null, WM_CLASS, and bounds. ``app=`` for the
+    focused window does not include it. focus and raise target it, and a
+    coordinate click on its button closes it.
+    """
+    import json
+    import shutil
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = shutil.which("xmessage")
+    if not binary:
+        pytest.skip("xmessage is not installed")
+    if not shutil.which("xdotool"):
+        pytest.skip("xdotool is not installed")
+    holder_path = tmp_path / "pidholder.py"
+    holder_path.write_text(_HOLDER_SRC)
+    holder = subprocess.Popen(
+        [sys.executable, str(holder_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    proc = subprocess.Popen(
+        [binary, "-buttons", "ok", "-geometry", "+200+160", "-timeout", "90", "pidless-window-probe"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    driver = LinuxDriver()
+
+    def match():
+        for item in driver.windows():
+            if item.get("pid") not in (0, None):
+                continue
+            names = " ".join(
+                str(item.get(key) or "")
+                for key in ("app", "wm_class", "wm_class_class", "title")
+            ).lower()
+            if "xmessage" in names and item.get("on_screen") is True:
+                bounds = item.get("bounds") or {}
+                if bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
+                    return item
+        return None
+
+    def holder_row():
+        for item in driver.windows():
+            if item.get("pid") == holder.pid and item.get("on_screen") is True:
+                return item
+        return None
+
+    def activate(window_id: int) -> None:
+        subprocess.run(
+            ["xdotool", "windowactivate", "--sync", str(window_id)],
+            check=False, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    try:
+        found = _until(match)
+        assert found is not None, driver.windows()
+        holding = _until(holder_row)
+        assert holding is not None, driver.windows()
+
+        def other_focused():
+            activate(int(holding["window_id"]))
+            front = _linux_system.frontmost_app_id()
+            if not front:
+                return None
+            active = _linux_system.active_window() or {}
+            try:
+                if int(active.get("window_id") or 0) == int(holding["window_id"]):
+                    return front
+            except (TypeError, ValueError):
+                return None
+            return None
+
+        front = _until(other_focused)
+        assert front, (_linux_system.frontmost_app_id(), _linux_system.active_window())
+        store = safety.PermissionStore(tmp_path / "p.json")
+        rt = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+        )
+        listed = json.loads(rt.window("list"))
+        row = next(item for item in listed if item["window_id"] == found["window_id"])
+        assert row["pid"] is None
+        assert "xmessage" in str(row.get("wm_class") or "").lower()
+        assert "xmessage" in str(row.get("app") or row.get("wm_class") or "").lower()
+        assert row["on_screen"] is True
+        assert row["bounds"]["width"] > 0 and row["bounds"]["height"] > 0
+        assert holding["window_id"] not in {item["window_id"] for item in listed}
+
+        comm = front
+        rt.store.set_tier(comm, safety.Tier.READ)
+        filtered = json.loads(rt.window("list", app=comm))
+        assert holding["window_id"] in {item["window_id"] for item in filtered}
+        assert found["window_id"] not in {item["window_id"] for item in filtered}
+
+        rt.store.set_tier("xmessage", safety.Tier.CLICK)
+        named = json.loads(rt.window("list", app="xmessage"))
+        assert [item["window_id"] for item in named] == [found["window_id"]]
+        assert named[0]["pid"] is None and named[0]["bounds"]["width"] > 0
+
+        wid = int(found["window_id"])
+        raised = rt.window("raise", window_id=wid)
+        assert raised.startswith("raised window")
+        focused = rt.window("focus", window_id=wid)
+        assert focused.startswith("focused window")
+
+        def xmessage_active():
+            active = _linux_system.active_window() or {}
+            try:
+                if int(active.get("window_id") or 0) == wid:
+                    return active
+            except (TypeError, ValueError):
+                return None
+            return None
+
+        assert _until(xmessage_active), _linux_system.active_window()
+        click_x, click_y = _button_point(wid)
+        rt.click(x=click_x, y=click_y, display_id=0)
+
+        def closed():
+            if proc.poll() is None:
+                return None
+            for item in driver.windows():
+                if item.get("window_id") == wid:
+                    return None
+            return True
+
+        assert _until(closed, timeout=8), (proc.poll(), driver.windows())
+    finally:
+        for child in (proc, holder):
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+
+_FILE_CHOOSER_SRC = r"""
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib
+GLib.set_prgname("cuafilechooser")
+dialog = Gtk.FileChooserDialog(title="Open image", action=Gtk.FileChooserAction.OPEN)
+dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+dialog.add_button("_Open", Gtk.ResponseType.ACCEPT)
+dialog.set_default_size(640, 420)
+dialog.move(80, 60)
+dialog.connect("destroy", Gtk.main_quit)
+dialog.show_all()
+Gtk.main()
+"""
+
+
+def _stop_proc(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@requires_desktop
+def test_gtk_file_chooser_snapshots_as_dialog(tmp_path) -> None:
+    """A GTK file chooser is a dialog in the snapshot, including the nested widget."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    script = tmp_path / "cuafilechooser.py"
+    script.write_text(_FILE_CHOOSER_SRC)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    driver = LinuxDriver()
+    try:
+        def shot():
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuafilechooser")
+            except Exception:
+                return None
+            if any(el.title == "Open image" for el in snap.elements):
+                return snap
+            return None
+
+        snap = _until(shot, timeout=15)
+        assert snap is not None, "the GTK file chooser did not appear"
+        titled = [el for el in snap.elements if el.title in {"Open image", "File Chooser Widget"}]
+        assert titled, [(el.role, el.title) for el in snap.elements]
+        assert all(el.role == "AXDialog" for el in titled), [(el.role, el.title) for el in titled]
+        rendered = observe.render_text(snap, mode="full")
+        assert 'dialog "Open image"' in rendered
+        assert 'window "Open image"' not in rendered
+        if any(el.title == "File Chooser Widget" for el in snap.elements):
+            assert 'dialog "File Chooser Widget"' in rendered
+            assert 'window "File Chooser Widget"' not in rendered
+        assert any(el.role == "AXButton" and el.title in {"Cancel", "Open"} for el in snap.elements), rendered
+    finally:
+        _stop_proc(proc)

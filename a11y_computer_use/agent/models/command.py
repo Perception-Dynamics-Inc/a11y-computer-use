@@ -31,8 +31,24 @@ from a11y_computer_use.agent.models.base import (
     message_to_dict,
     model_turn_from_dict,
 )
+from a11y_computer_use.agent.models.sampling import codex_sampling, resolve_sampling
 
-__all__ = ["CommandModel", "command_argv"]
+__all__ = ["CommandModel", "command_argv", "is_codex_argv"]
+
+
+def is_codex_argv(argv: Sequence[str]) -> bool:
+    """True when argv[0] is the Codex CLI (``codex`` or ``codex.exe``).
+
+    A path is matched on its basename, case-insensitively. ``codex.py`` run
+    under the current interpreter is not the CLI: argv[0] is Python.
+    """
+    if not argv:
+        return False
+    # Split on both separators so a Windows path is recognized on any host.
+    base = str(argv[0]).replace("\\", "/").rsplit("/", 1)[-1]
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    return base.lower() == "codex"
 
 
 def command_argv(command: str | Sequence[str]) -> list[str]:
@@ -56,10 +72,34 @@ class CommandModel:
     name = "command"
     supports_images = True
 
-    def __init__(self, command: str | Sequence[str], *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        command: str | Sequence[str],
+        *,
+        timeout: float = 30.0,
+        temperature: float | None = None,
+        seed: int | None = None,
+    ) -> None:
         self.argv = command_argv(command)
         self.model = self.argv[0]
         self.timeout = timeout
+        # The stdin protocol is messages and tools only. The Codex CLI, when
+        # this command is that binary, also has no temperature or seed flag
+        # and no config.toml key for either (checked 2026-10-12). Neither
+        # value is added to argv or to stdin.
+        if is_codex_argv(self.argv):
+            # The trace names this provider separately from a generic command.
+            self.name = "codex"
+            self.sampling = codex_sampling(temperature=temperature, seed=seed)
+        else:
+            self.sampling = resolve_sampling(
+                temperature=temperature,
+                seed=seed,
+                supports_temperature=False,
+                supports_seed=False,
+                temperature_gap="the command protocol has no temperature field",
+                seed_gap="the command protocol has no seed field",
+            )
 
     def complete(
         self,

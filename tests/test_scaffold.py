@@ -45,15 +45,32 @@ def test_bounds_center_is_display_qualified() -> None:
     assert bounds.center == Point(display_id=7, x=60, y=45)
 
 
+def test_unknown_fields_message_names_the_keys() -> None:
+    from a11y_computer_use.schema import unknown_fields_message
+
+    assert unknown_fields_message({"text": "hi", "ref": "e1"}, {"text", "app", "ref"}) is None
+    assert unknown_fields_message({"zoom": 1}, {"text", "app", "ref"}) == (
+        "unknown field 'zoom'; expected app, ref, text"
+    )
+    assert unknown_fields_message({"note": "x", "zoom": 1}, {"app", "ref", "text"}) == (
+        "unknown fields 'note', 'zoom'; expected app, ref, text"
+    )
+    assert unknown_fields_message({"zoom": 1}, ()) == "unknown field 'zoom'; expected no fields"
+    assert unknown_fields_message("not a mapping", {"text"}) is None
+
+
 def test_error_codes_are_wire_stable() -> None:
     assert {code.value for code in ErrorCode} == {
         "stale_ref",
         "permission_denied_accessibility",
         "permission_denied_screen",
         "secure_field",
+        "exec_disabled",
         "focus_changed",
+        "focus_lost",
         "app_not_found",
         "timeout",
+        "app_not_responding",
         "busy",
         "closed",
         "confirmation_declined",

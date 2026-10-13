@@ -335,13 +335,18 @@ def test_drag_and_scroll_accept_o_refs(tmp_path, monkeypatch) -> None:
     driver = FakeDriver()
     rt = make_runtime(tmp_path, driver=driver)
     rt.screen_text()
-    assert rt.drag(start_ref="o1", end_ref="o3") == "dragged o1 (text 'Telegram') -> o3 (text 'Write a message...')"
+    out = rt.drag(start_ref="o1", end_ref="o3")
+    assert out == (
+        "dragged o1 (text 'Telegram') -> o3 (text 'Write a message...'); drop not confirmed"
+    )
+    assert out.outcome == "suspected_noop"
     start, end = driver.calls["drag"][0]
     assert isinstance(start, Point) and isinstance(end, Point)
     assert rt.scroll(ref="o2", dy=3).startswith("scrolled o2 (text 'Saved Messages') by")
 
 
-def test_empty_snapshot_escalates_to_ocr_lines_in_the_same_reply(tmp_path) -> None:
+def test_empty_snapshot_escalates_to_ocr_lines_in_the_same_reply(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     rt = make_runtime(tmp_path)
     text = rt.desktop_snapshot(APP)
     assert "no interactive elements were found" in text
@@ -371,7 +376,14 @@ def test_escalation_is_opt_out_and_never_captures_another_app(tmp_path, monkeypa
     assert "[ocr-" not in note and "OCR skipped rather than read the whole display" in note
 
 
-def test_escalation_reports_a_missing_screen_grant_instead_of_failing(tmp_path) -> None:
+def test_empty_snapshot_does_not_ocr_unless_asked(tmp_path) -> None:
+    text = make_runtime(tmp_path).desktop_snapshot(APP)
+    assert "no interactive elements were found" in text
+    assert "[ocr-" not in text
+
+
+def test_escalation_reports_a_missing_screen_grant_instead_of_failing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     class NoScreen(FakeDriver):
         def screenshot(self, display_id=None):
             raise ComputerUseError(ErrorCode.PERMISSION_DENIED_SCREEN, "no grant")

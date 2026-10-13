@@ -16,8 +16,20 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 
 `Agent.run(goal)` and `Agent.stream(goal)` drive this loop:
 
-1. Observe. `Runtime.desktop_snapshot` renders the pruned tree of the tracked
-   app, or the frontmost app before one has been launched or focused.
+1. Observe. The first observation of a window is `Runtime.desktop_snapshot`
+   of the tracked app, or the frontmost app before one has been launched or
+   focused: the pruned tree. On Linux that tree includes every showing
+   top-level window of the app. The active window is first, and its root
+   line is marked `(active)` when another window is showing. A token budget
+   is split across those windows; a window that does not fit its share ends
+   with `… N more`. A ref in a window that is not active raises that window
+   before the action. Later observations of that same window are a
+   diff of added, removed, and changed elements, plus the focused element
+   when it did not change. Refs from the latest full snapshot stay valid for
+   elements that are still there, including refs the diff does not repeat.
+   A different window, or `snapshot` with `mode=full`, sends the full tree
+   again. `mode=diff` repeats the changes. Text is fenced the same way as a
+   full snapshot.
 2. Pause if the tree shows a password field, a one-time-code field, a card
    field, or a captcha iframe. The result is `needs_human`. Nothing is typed.
 3. Ask the model for one turn. A turn is a list of tool calls. The loop runs
@@ -39,18 +51,54 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    error is `verified` false. A no-op or a tool error stops the rest of the
    turn. `shell` and `python` are verified by exit code 0, not by the
    snapshot.
-7. Recover. A tool error retries once with another element of the same role
-   and name, then sends Escape. A repeated no-op of the same action and
-   target is forced onto the next method: alternate ref, then a coordinate
-   click at the element's center, then the keyboard (Return, or `type` when
-   the action was entering text).
-8. Stuck. If the same snapshot digest appears three times in the recent
-   window, the loop emits a `stuck` event and tells the model to change
-   strategy. After `max_replans` of those prompts (default 2) the run fails
-   with `reason` `stuck`.
-9. Done. `done` must carry an answer and 1 to 3 conditions. The loop
+7. Recover. Escalation retries the same action, or switches method only
+   when the intent is the same target and payload. A click by ref may become
+   another element with the same role and name, a coordinate click on that
+   element, or Return when that element is focused. That Return is the click
+   the approval gate already judged. A `type` or `set_value` may be retyped
+   as the same text. A key is never replaced with a different key. A `type`
+   is never turned into a bare click. A `menu` is never turned into focus.
+   Escape is not sent as a backtrack. A missing or stale ref stays that
+   click and its error. The retry level is per action and per target: it
+   includes the chord, the typed text, and the menu path, so one no-op key
+   does not escalate a different key. The step result keeps the original
+   error next to any escalation outcome. If no same-intent method remains,
+   the loop stops escalating and reports that error.
+8. Stuck. A subgoal is the work since the last verified step. `stuck_steps`
+   (default 6) and `stuck_time_s` (default 120) bound one tactic of that
+   subgoal. When either budget runs out, the loop forces the next strategy
+   in a fixed order: the keyboard path, then the vision fallback, then a
+   re-plan. Each switch is one `strategy_switch` line in `trajectory.jsonl`.
+   A switch retries the same action or a same-intent method. It does not
+   change a key, turn typing into a click, turn a menu into focus, or
+   rewrite a click that already has `x` and `y`. When every switch has been
+   used and the budget runs out again, the run stops with `status` `stuck`,
+   a reason that names the subgoal and the switches, and evidence (steps
+   without progress, elapsed seconds, and the last action). That stop does
+   not wait for `max_time`. Separately, if the same snapshot digest appears
+   three times in the recent window, the loop emits a `stuck` event and
+   tells the model to change strategy. After `max_replans` of those prompts
+   (default 2) the run fails with `status` `failed` and `reason` `stuck`.
+9. Caps. `task_class` selects a step cap and a time cap. The baseline
+   classes (`browser`, `browser_table`, `browser_scroll`, `file_chooser`,
+   `desktop`, `canvas`) are 40 steps and 160 seconds. `desktop_multi_file`
+   is 75 steps and 300 seconds (40 steps scaled by 300/160). `auto`
+   classifies the goal's wording and does not choose a click target.
+   Omit the class and the caps stay 50 steps and 900 seconds. An explicit
+   `max_steps` or `max_time_s` overrides the class. The stuck budget and
+   the hard `max_time` deadline still apply inside those caps.
+10. Verify and finish. Once either cap has used 90 percent, and before the
+    hard cap, the loop gives the model one turn. The message says to check
+    the current screen and call `done` only if the goal already holds. That
+    turn does not derive a click from the goal text and does not substitute
+    an action with a different effect. A passing check is `done`. A failed
+    check ends `status` `failed` and `reason` `verify_failed: ...`, which
+    is not `done`.
+11. Done. `done` must carry an answer and 1 to 3 conditions. The loop
    re-checks them on a fresh snapshot before it accepts success. A failed
    check is rejected and the model continues, until a limit stops the run.
+   A failed check on the verify-and-finish turn does not continue: that
+   attempt is not reported as done.
    When the goal saves or creates a file, one condition has to be
    `file_exists`, and `contains` when the goal names the text. A window
    title is not accepted as proof the file was written. The rule is the
@@ -60,7 +108,8 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    the sheet XML. Those are zip files, and the raw bytes are not the check.
 
 `stream` yields `observation`, `plan`, `step_started`, `action`,
-`step_finished`, `needs_human`, `done`, `error`, and `stuck`. `cancel()` is
+`step_finished`, `needs_human`, `done`, `error`, `stuck`, and
+`verify_finish`. `cancel()` is
 safe to call from another thread; the run stops before the next action with
 `status` `cancelled` and `reason` `cancelled`.
 
@@ -96,17 +145,139 @@ constructs a real `Runtime` after applying `display`.
 
 `vision=True` attaches PNG crops of unnamed images, unknown widgets, and
 unnamed clickables (at most four), then a whole-window screenshot, when the
-tree says it has no interactive elements or contains those refs. The model
-can also call `crop(ref)` with optional `padding` and `scale`. Each image
-block is `{"type": "image", "path": "...", "mime": "image/png"}`. The library
-does not OCR or recognize the pixels. Opaque-region markers (drawn labels on
-the crop) are not implemented. A runtime with no `crop` method still receives
-the window screenshot.
+tree says it has no interactive elements or contains those refs. The same
+attachment runs without `vision=True` when the tree cannot name the target
+the model asked for. `find(text, role)`, `expand(ref)`, and `scroll_to_find`
+run first when a node is collapsed or the observation says a ref has more
+children (`e89 is collapsed; use expand(e89)`). After those looks, the
+picture is attached when that name or role is still missing twice, or when
+the match lies inside an `opaque_region` or canvas. A toolbar or any other
+named control does not keep the tree sufficient. An empty tree, or a tree
+that is only an opaque region, still attaches on the first look. A named
+control the model asked for that is present, such as a button named Ready,
+stays text. The crop is `crop(ref)` of a page-content opaque region: the
+deepest one, and the smallest at that depth. A browser-frame view that
+contains another opaque region, or that only duplicates an ancestor's box,
+is not the crop. Otherwise the loop attaches the window screenshot. Each image block
+is `{"type": "image", "path": "...", "mime": "image/png"}`. The model then
+clicks with `x` and `y` inside the region. Those coordinate clicks use the
+same approval gate and typed outcomes as a ref click. Words in the image are
+wrapped in an `<untrusted>` fence and are not instructions. The loop calls
+`a11y_computer_use.ocr.ocr` on the crop or the window screenshot and fences
+that text the same way, with `[x, y, width, height]` in screen pixels beside
+each line. `crop` itself includes those lines when an engine is installed.
+`ocr` reads a window screenshot, a `crop` result, or
+`(image, bounds)` and returns fenced `{text, bounds, confidence}` in screen
+pixels. Adjacent words are one item; RapidOCR detector lines are split into
+word boxes first. Each span also carries `words`, one plain-text box per
+input box. A missing engine (`unsupported`, reason `missing_dependency`) is
+skipped and is not an error. The loop does not install the `[ocr]` extra.
+`Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
+instruction) -> point or box`). It is off by default. The only local adapter
+is `HoloLocalGrounding` for `Hcompany/Holo-3.1-0.8B` on CPU, from the
+optional `[holo]` extra (`torch`, `torchvision`, and `transformers>=5.6,<5.20`). The loop
+does not construct it, does not download weights at import, and does not
+call a hosted model. The adapter puts the screenshot in the chat template
+as an image part, asks for `{"x","y"}` on a 0..1000 grid, and scales that
+point onto the image. It loads bfloat16 when that dtype runs, otherwise
+float16, stops generation on `}` with `max_new_tokens` 14 and the
+tokenizer EOS id, and caps torch at 4 threads. Weights are not vendored.
+A `+cpu` torch and the default PyPI torchvision wheel are different builds.
+Importing that wheel raises `RuntimeError: operator torchvision::nms does not exist`.
+The `[holo]` extra lists `torch`, `torchvision`, and `transformers`, and pip
+cannot choose a wheel index from that extra. Install torch and torchvision
+from the same index before the extra. For a CPU torch:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+```
+
+`HoloLocalGrounding.ground` turns that import or load failure into
+`GroundingUnavailable` and includes this command. It does not download a
+CUDA wheel.
+
+When the model clicks a ref that is not in the snapshot, the loop resolves
+that click only from the model's own call, before the payment, send, and
+confirm gates, so those gates see the resolved target:
+
+- An explicit `label`, with no `ref` and no `x`/`y`, matches an enabled
+  control whose title is that exact name (case-insensitive, internal
+  whitespace collapsed). One match becomes that ref. Zero matches, or more
+  than one, is an error and nothing is clicked. A shorter or longer title
+  is not a match.
+- A missing `ref` matches an enabled control with the same role and the
+  same exact name that ref had the last time it was in a snapshot. One
+  match becomes that ref, and the step records `resolved_from` plus the
+  same sentence on the tool result. Zero matches, or more than one, is a
+  `stale_ref` error. A ref that was never seen is left as that click so
+  the runtime can report `stale_ref`. The goal, the turn text, and a
+  negative clause are not names.
+
+A ref that is already in the tree is not rewritten. A click with `x` and
+`y` and no `ref` is that coordinate click. It is not moved onto a tree
+element, an OCR word, or a point from Holo. `double_click`, `right_click`,
+`middle_click`, `triple_click`, and `left_click` use the same rules. The
+name sets the button and count (`double_click` is a left click with count
+2, `right_click` is the right button). An `x`/`y` on any of them stays on
+that point. `scroll` at `x`/`y` stays that scroll. A name the loop does not
+know is an error and is not turned into a click on a word from the goal.
+`click` (and each of those gestures) with both a `ref` and `x` or `y` is
+`invalid_arguments` and is not sent. Worker threads
+(`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and
+`torch.set_num_threads` when torch is already imported) are capped at 4
+before fallback OCR and before a grounding suggestion. A pool already set
+lower is not raised. Torch is not imported by this step. A model with
+`supports_images` false stops as `needs_human` with `kind` `unsupported`
+instead of continuing without the picture. A runtime with no `crop` method
+still receives the window screenshot.
+
+Before a coordinate click is sent, the loop looks again. It crops a 640 by
+400 screen-pixel rectangle centred on the proposed point, clipped to the
+image, and shows that crop at 2× (an unclipped crop is a 1280 by 800 PNG
+whose screen bounds stay 640 by 400). A magenta crosshair marks the point.
+The verifier accepts it or returns another point in the crop. A reply that
+is not a point counts as accept. The click that is sent is still the
+model's `x` and `y`. Look-again does not move that point, does not snap it
+to a ref, and does not snap it to an OCR word. When the verifier's point is
+more than 40 screen pixels from the proposed point, the loop records
+`disagree` and looks again once at the full screenshot, at 1×. That second
+look may only confirm the first point. A verifier point within 8 screen
+pixels confirms it (`accept`): `refined` on that line is the model's point,
+and `distance` is how far the verifier was. The click is not moved onto the
+verifier's pixel. A second look farther than 8 screen pixels is
+`unconfirmed`. That result is not a new point, and the click stays the
+model's `x` and `y`. Adopting the farther point on a dense grid scored
+16/24. A distance of 40 on the crop does not open the full-screen look.
+When `grounding` is set, that local model is the
+verifier (`HoloLocalGrounding` or a test `ScriptedGrounding`). Otherwise the
+verifier is one short image turn on the main model, with no tools. The check
+does not call a hosted or paid grounding service. `Agent(..., look_again=False)`, or
+`A11Y_COMPUTER_USE_LOOK_AGAIN=0` when the argument is omitted, skips it.
+A model with `supports_images` false and no grounding model skips it too,
+and the trajectory records `skipped` `no_image_support`. A screenshot that
+cannot be decoded is the same kind of skip (`no_screenshot`); the original
+click still goes through the approval gate. The recorded snap names a tree
+element or a word box under the verifier's point when one is there. It is
+not applied. RapidOCR line boxes are not snap targets: only `word_results`
+is used, and a span that still contains whitespace is split by character
+count. A missing OCR engine does not fail the click. RapidOCR's ONNX
+intra-op and inter-op thread counts are 4, and `OMP_NUM_THREADS`,
+`MKL_NUM_THREADS`, and `OPENBLAS_NUM_THREADS` are capped at 4. The marked
+crop, the decision (`accept`, `refine`, `unavailable`, `skipped`,
+`disagree`, or `unconfirmed`), the distance, and the snap are lines in
+`trajectory.jsonl` (`kind` `look_again`) and on the step. A disagreement
+records the crop, then a second line for the full-screen look. The step
+keeps `accept` when that look is within 8 screen pixels and `unconfirmed`
+when it is farther. The click is the model's point either way.
+The coordinate click already passed the approval gate, the payment stop,
+and typed outcomes as the model's point. One crop check per coordinate
+click, plus the full-screen look only when that check disagrees by more
+than 40 pixels.
 
 ## CLI
 
 ```bash
-a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --model-timeout 120 --trace-dir /tmp/trace --json
+a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --stuck-steps 6 --stuck-time 120 --model-timeout 120 --temperature 0 --seed 0 --trace-dir /tmp/trace --json
 ```
 
 `--approve-policy deny` is the default: quit, close, send, delete, and
@@ -148,15 +319,16 @@ or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 
 | Field | Meaning |
 |---|---|
-| `status` | `success`, `failed`, `needs_human`, or `cancelled` |
+| `status` | `success`, `failed`, `stuck`, `timeout`, `needs_human`, or `cancelled` |
 | `answer` | The `done` answer, or `""` |
 | `steps` | Count of actions in `step_log` |
 | `elapsed_s` | Wall clock for the run |
-| `reason` | `done`, `max_steps`, `max_time`, `stuck`, `no_action`, `cancelled`, `error: ...`, or the human message |
+| `reason` | `done`, `max_steps`, `max_time`, `stuck`, `stuck: subgoal ...`, `verify_failed: ...`, `no_action`, `cancelled`, `error: ...`, or the human message |
 | `conditions` | `{condition, ok, detail}` from the last evidence check |
 | `needs_human` | `{kind, message, ref, window}` or null. `kind` is `login`, `captcha`, `2fa`, `payment`, or `other` |
 | `trace_dir` | Directory of the trace |
 | `step_log` | One object per action |
+| `evidence` | For `status` `stuck`, `{subgoal, switches, steps_without_progress, elapsed_s, last_action}`. For `status` `timeout`, `{limit_s, elapsed_s, where, action, abandoned}`. Otherwise null |
 
 Each `step_log` entry has `index`, `action`, `target` (`ref`, `role`, `name`
 from the snapshot the model acted on, before the action renumbered refs),
@@ -164,15 +336,64 @@ from the snapshot the model acted on, before the action renumbered refs),
 `error`, `verified`, `duration_s`, `skipped` (later calls in that turn that
 did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 
-Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
+Exit codes: `0` success, `1` failed, `stuck`, or `timeout` (including `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
+
+SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
+step. The cancel flag is checked again immediately before the next step is
+recorded, so a signal that arrives after that step was chosen does not start
+it. On Windows, Ctrl+C (`SIGINT`) and Ctrl+Break (`SIGBREAK`) do the same;
+`SIGTERM` there ends the process without a Python handler, so it is not a
+cooperative cancel. The handlers are installed before the agent is built and
+stay installed until the process exits, including through shutdown. A signal
+that arrives inside a blocking call (`sleep`, `select`, or a subprocess) still
+ends the run as `cancelled` when that call raises `InterruptedError` or
+`KeyboardInterrupt`. The trace write for the step is closed, and `--json`
+prints one object with `status` `cancelled` and `reason` `cancelled`. The
+process exits 3. A second cancel signal calls `os._exit(3)` and does not
+print a traceback. On Windows a `SetConsoleCtrlHandler` callback does that
+for the second Ctrl+C or Ctrl+Break, so the default console handler does not
+terminate the process with `STATUS_CONTROL_C_EXIT` (`0xC000013A`).
 
 `--model-timeout` is the limit for one model call, in seconds. The default is
 120. It is not the time left in `--max-time`. The loop checks the run budget
 before each step and again after the observation, before it calls the model.
 A model call that times out after that budget is already spent ends
-`reason` `max_time` (exit 1). A model timeout while the budget remains is
-`error: ModelError: ...` (exit 3).
+`reason` `max_time` with `status` `failed` (exit 1). A model timeout while the
+budget remains is `error: ModelError: ...` (exit 3). The model call is not
+cut short by `--max-time`; it keeps `--model-timeout`.
+
+`--task-class` selects the step and time caps for that kind of task.
+`auto` classifies the goal. The baseline classes are 40 steps and 160
+seconds. `desktop_multi_file` is 75 steps and 300 seconds. With no class,
+the caps stay 50 steps and 900 seconds. `--max-steps` and `--max-time`
+override the class when they are passed. The class does not choose a click
+target. Once either cap has used 90 percent, the model gets one
+verify-and-finish turn. A failed check on that turn is `verify_failed`,
+not `done`. The stuck budget and the hard `--max-time` deadline still
+apply. A `budget` line and a `verify_finish` line in `trajectory.jsonl`
+record the class and that turn.
+
+Each planner turn's observation starts with one budget line: the step
+index, the steps still allowed, and the seconds left of the cap in force,
+rounded half up to a whole second. When a task class is set, the line names
+that class. Those numbers are the caps in force, which are the class caps
+unless `--max-steps` or `--max-time` overrides them. At or below 20 percent
+of either cap, the next line is `budget low: if the goal is met, call done
+now with its checks`. The system prompt has one line that explains the
+header. Neither line is inside the untrusted fence. A `turn_budget` row in
+`trajectory.jsonl` records the same numbers for that request, and each step
+row copies them under `budget`. When a class is set, those rows also record
+`class_max_steps` and `class_max_time_s`. The look-again check is a separate
+image turn and does not carry this header.
+
+`--max-time` is a hard deadline for a driver or tool call. Each snapshot,
+screenshot, crop, and tool call runs on a worker. When the budget is spent
+and that call is still blocked, the loop abandons it and stops. It does not
+wait for Chrome, AT-SPI, or any other driver to return. The result is
+`status` `timeout`, `reason` `max_time`, and `evidence` with `limit_s`,
+`elapsed_s`, `where` (`tool`, `observe`, or `screenshot`), `action`, and
+`abandoned: true`. That return is within a few seconds of the limit.
 
 `--display :N` sets `$DISPLAY` for the process before the runtime is created.
 The SDK equivalent is `Agent(display=":N")`.
@@ -235,7 +456,7 @@ a11y-agent serve --host 127.0.0.1 --port 8765 --token "$TOKEN"
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| `POST` | `/runs` | `{goal, model, display, limits, allowed_domains, blocked_domains, allow_exec}` | `202 {"id"}`. `409` when that display already has an active run |
+| `POST` | `/runs` | `{goal, model, display, limits, allowed_domains, blocked_domains, allow_exec, allow_payments}` | `202 {"id"}`. `409` when that display already has an active run |
 | `GET` | `/runs/{id}` | | The same fields as `a11y-agent run --json`. `status` is `running` until the run finishes. `pending_approvals` is present only while an approval is waiting |
 | `GET` | `/runs/{id}/events` | | `text/event-stream`. Each event is `id`, `event` (the type), and `data` (`seq`, `type`, `data`). The stream replays, then stays open until the run finishes, then closes |
 | `POST` | `/runs/{id}/cancel` | | `202 {"id", "cancel": true}` |
@@ -243,9 +464,13 @@ a11y-agent serve --host 127.0.0.1 --port 8765 --token "$TOKEN"
 | `GET` | `/runs/{id}/trace` | | `{"trajectory", "files"}`. `trajectory` is the JSONL with UI text fenced |
 | `GET` | `/runs/{id}/trace/{name}` | | One file from that directory (a screenshot, for example). Names that contain a slash or `..` are `404` |
 
-`limits` is `{"max_steps", "max_time_s"}`. `allowed_domains` and
+`limits` is `{"max_steps", "max_time_s", "model_timeout_s", "stuck_steps", "stuck_time_s", "task_class"}`. `task_class` may be `auto`. Omit `max_steps` and `max_time_s` to use the class caps. Passing either one overrides the class. `allowed_domains` and
 `blocked_domains` are lists of strings or one comma-separated string. Both
-are forwarded to `Agent`. `allow_exec` defaults to false.
+are forwarded to `Agent`. `allow_exec` defaults to false. A field that is
+not in that body, including a key inside `limits`, is `400` with
+`invalid_arguments` and does not start a run. A cancel body with any field,
+or an approve body with any field other than `approve`, is the same error
+and does not cancel or answer.
 
 One run may be active per display. An omitted display shares the `default`
 slot. A second `POST /runs` for that display returns `409` with `run_id` of
@@ -258,9 +483,10 @@ item carry `approval_id`, the action `name`, `args` with secrets redacted,
 `target` is `role`, `name`, `window`, `url` when the page has one, and
 `reason`. The name, window, URL, and argument `summary` are trimmed and
 fenced. Role and reason are not. `POST /runs` accepts `allow_payments`
-(default false). While it is false, a payment click finishes the run as
+(default false), and optional `temperature` and `seed` (defaults 0 and 0
+where the provider can send them). While `allow_payments` is false, a payment click finishes the run as
 `needs_human` and does not emit `approval_required`. The agent MCP
-`run_goal` takes the same flag, and `get_run`'s `pending_approvals` is the
+`run_goal` takes the same flag and the same `temperature` and `seed` fields, and `get_run`'s `pending_approvals` is the
 object `approve` answers. `approve: false`, a timeout, or a cancel denies
 the action. The agent is constructed with an approve hook, so the CLI
 `--auto-deny` default does not apply to these runs: a risky action waits
@@ -299,9 +525,42 @@ text starts with `409`. This does not add or remove tools on
 
 ## Actions
 
-`click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `app`
+`click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `find`,
+`expand`, `scroll_to_find`, `choose_file`, `snapshot`, `app`
 (`launch`, `focus`, `quit`, `list`), `window` (`list`, `raise`, `focus`,
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
+
+`snapshot` takes optional `mode`. `full` (the default) redraws the current
+window and keeps the refs of elements that are still there. `diff` repeats
+the changes since the last observation the model was shown. A different
+window is always the full tree.
+
+`find` takes `text` and/or `role` (optional `editable`, `clickable`, `scope`)
+and calls the runtime `find` on the tracked app. It searches the whole
+document tree, not only the on-screen or budgeted nodes: on Linux a match
+inside a table that starts below the viewport is scrolled into the snapshot,
+and the ref is that cell rather than only the table that contains it.
+`scroll_to_find` takes `text` and/or `role` and scrolls until that element
+is on screen. `expand` takes `ref`. A collapsed node, or a menu or tree, is
+pressed first. The result is the next contiguous page of that node's own
+children, including children that do not fit on screen. The following
+`expand` of that node resumes at the exact index where the previous page
+ended, so a later listed name cannot skip the hole in front of it. Use these
+before a coordinate click when the observation names a collapsed node or
+`… N more` children.
+
+`choose_file` takes an absolute `path` and an optional `action` of `open`
+(the default) or `save`. The file chooser is already open (GTK, Qt, or
+Chrome). The macro presses Ctrl+L, types that path once, and presses Return.
+When the location entry is in the tree and the typed text is not the path,
+one `set_value` writes it. Return is not pressed until the entry reads the
+path back. The call succeeds only when the dialog has closed and the file
+name shows outside the dialog. A dialog that stays open, a dialog that
+closes without the file, and a check that cannot be read are failures, not
+success. `open` requires the file to exist. `save` requires a file name and
+the file need not exist yet. In a file chooser, always use `choose_file`;
+never navigate folders. This is an agent action. It does not call the
+desktop `file_dialog` tool, which stays unsupported on Linux.
 
 `shell` and `python` are added to the model's tool list only when the agent
 is constructed with `allow_exec=True` or the CLI is passed `--allow-exec`.
@@ -356,8 +615,14 @@ directory):
   the model (truncated with `…[truncated N chars]` when it is huge), model
   name, request metadata, response text and tool calls, the action that ran,
   result, error, `verified`, recovery notes, a screenshot path, `skipped`,
-  and `turn_stop`.
+  and `turn_stop`. The first line is `kind` `sampling`: the temperature and
+  seed that were sent, or `null` and a `notes` entry when that provider
+  cannot send the field. Each step repeats the same object under
+  `model.sampling`.
 - `steps.jsonl` — the same records as `step_log`.
+- `events.jsonl` — one line when a step starts (`kind` `step_started`,
+  `index`, `action`), flushed before that step's tool call blocks.
+  `steps.jsonl` is still written only when the step finishes.
 - `exec-audit.jsonl` — one JSON line per exec attempt, appended and never
   rewritten. Each line has `timestamp`, `command`, `cwd`, `exit_code`,
   `output` (already truncated), `truncated`, `approval` (`approved`,
@@ -429,12 +694,54 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - needs_human for a password field, an OTP field, a card field, a captcha
   iframe, and `ask_human`
 - evidence-checked done, including a rejected condition and `file_exists`
-- stuck method changes (alternate ref, coordinate click, keyboard) and
-  failure with `reason` `stuck` after repeated screens
-- stale-ref recovery that sends Escape and then completes
+- stuck method changes stay on the same intent (alternate ref, coordinate
+  click of that element, Return only for a focused click) and failure with
+  `reason` `stuck` after repeated screens
+- a subgoal stuck budget switches keyboard, then vision, then re-plan, records
+  each switch in the trace, keeps an explicit `x`/`y` click, and stops with
+  `status` `stuck` before `max_time`
+- a task class sets the step and time caps. `desktop_multi_file` is 75 steps
+  and 300 seconds. An explicit cap overrides the class. The stuck budget
+  still stops inside that cap. At 90 percent of either cap the loop gives
+  one verify-and-finish turn. A passing check is `done`. A failed check is
+  `verify_failed` and is not `done`. That turn does not click a word from
+  the goal and does not replace a key or a `type` with a different action
+  (`tests/test_agent_core.py`). Each planner turn starts with the budget
+  line. A fake clock and a scripted model check the step index, the steps
+  left, the rounded seconds, the 20 percent hint, a task class and its
+  caps, and that screen text containing `budget:` stays inside the fence
+  (`tests/test_agent_core.py`). A live scripted run against the GTK fixture
+  reports `done` only when the window title matches, and its clicks do not
+  target a word named in the goal (`tests/test_agent_live.py`). That file
+  skips when the process has no Linux display, the same gate as the other
+  scripted agent runs. The Linux live job provides the display.
+- a tool call that never returns is abandoned at `max_time`. The run ends
+  with `status` `timeout`, `reason` `max_time`, and evidence, within a second
+  of the limit (`tests/test_agent_core.py`)
+- a missing ref stays a click error and does not send Escape or Return
+- a no-op key does not turn the next chord into Return, a failed `type` does
+  not become a click, and a failed `menu` does not become focus
 - trajectory redaction, screenshots, and the `--json` schema and exit codes
 - `vision=True` attaching element crops and then a window screenshot, and
   `display` setting `$DISPLAY`
+- the Holo parser scaling a 0..1000 `{"x","y"}` reply onto image pixels,
+  the chat template and the processor both receiving the image, and torch
+  threads staying at most 4 (`tests/test_grounding.py`). A processor load
+  that fails because torchvision is missing names that package. An import
+  or a processor load that raises `RuntimeError: operator torchvision::nms
+  does not exist` is `GroundingUnavailable` and names the CPU index
+  (`pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision`).
+  Those tests mock the stack. They do not download weights.
+- click resolution (`tests/test_vision_order.py`): a missing ref is not
+  chosen from the goal, including "Do not click Archive"; an explicit
+  `x`/`y` stays on that point, including a `double_click` that must not
+  move onto a control named Upload; `right_click`, `middle_click`,
+  `triple_click`, `left_click`, and `scroll` at `x`/`y` stay on that point;
+  `ref` together with `x`/`y` is `invalid_arguments`; a missing ref resolves
+  only to the same role and exact name it last had; an ambiguous or inexact
+  name is an error. Word boxes, the 200 by 40 snap helper, and the thread
+  cap of 4 are still checked. No weights are downloaded. The 11 October
+  2026 figures of 42 of 47 and 29 of 47 are not a measurement of this resolver.
 - `crop` returning an image block on the tool message, and a failed crop
   staying a crop (no coordinate click, no Escape)
 - untrusted fences: wrapping, escaping a forged closing tag, and the
@@ -460,8 +767,9 @@ default port skip the test.
 
 Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 
-- GTK save, wrong-step recovery, stuck Ping, Chrome form, needs_human pages,
-  and CLI `--json` exit codes
+- GTK save, wrong-step recovery, stuck Ping, a verify-and-finish turn that
+  is `done` only when the window title matches, Chrome form, needs_human
+  pages, and CLI `--json` exit codes
 - one GTK turn that sets the note, the path, and the format, then saves
 - exec with `allow_exec` writing a file, and the same command denied by the
   approve hook
@@ -500,8 +808,16 @@ Not in this change:
   tested with recorded HTTP fixtures, not from this loop. The system prompt
   tells a real model that fenced text is data; the scripted tests do not
   measure whether an LLM would obey it.
-- No OCR. Element crops are `crop` and the vision hook. Opaque-region
-  markers are not implemented.
+- The loop calls `a11y_computer_use.ocr.ocr` and skips a missing engine.
+  Tests pass a stub. Element crops are `crop` and the vision fallback.
+  Words in an attached image, OCR lines, and a grounding suggestion are
+  fenced as untrusted screen data. Opaque-region markers drawn on the crop
+  are not implemented. No hosted grounding API is called.
+  `HoloLocalGrounding` loads only when the caller constructs it. The
+  `[holo]` extra is not installed by the test run.
+  Look-again is the later check described above: a 640 by 400 crop at 2×
+  before a coordinate click is sent. It verifies or records a different
+  point. It does not replace the model's `x`/`y` with another element.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.

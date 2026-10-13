@@ -110,6 +110,7 @@ from a11y_computer_use.schema import (
     clip_region_to_display,
     point_outside_display,
     unknown_display_message,
+    unknown_fields_message,
 )
 
 if TYPE_CHECKING:
@@ -128,6 +129,18 @@ MAX_WAIT_TIMEOUT_S = 60.0
 MAX_BATCH_STEPS = 100
 MAX_BATCH_DURATION_S = 60.0
 MAX_SCROLLS = 100
+# A hit in the same turn as the wheel can still be the pre-scroll tree.
+# A later read has to show the match inside the window. The pause is the
+# gap in which Chrome replaces that tree; a row that vanishes on the
+# second read has already left the viewport. A vanished name is scrolled
+# back toward, at most this many times, before the search gives up.
+_SCROLL_VERIFY_PAUSE_S = 0.15
+_SCROLL_VERIFY_BACKS = 3
+# ``budget_s`` is how long scroll_to_find may go without the on-screen
+# rows or the scroll offset changing. A step that changes either one
+# starts that clock again. This is the wall-clock ceiling even while
+# every step still moves the list.
+_SCROLL_FIND_HARD_S = 120.0
 
 _ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
 _ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
@@ -135,7 +148,7 @@ _TARGET_REQUIRED = "target an element ref, or both x and y coordinates"
 _ACT_STEP_FIELDS: dict[str, frozenset[str]] = {
     "click": frozenset({"do", "ref", "x", "y", "display_id", "button", "count", "modifiers"}),
     "hover": frozenset({"do", "ref", "x", "y", "display_id"}),
-    "type": frozenset({"do", "text"}),
+    "type": frozenset({"do", "text", "ref"}),
     "key": frozenset({"do", "chord", "modifiers"}),
     "scroll": frozenset({"do", "ref", "x", "y", "display_id", "dx", "dy", "unit", "into_view"}),
     "drag": frozenset({
@@ -160,6 +173,22 @@ def _optional_app_arg(app: object, tool: str) -> str | None:
     text = app.strip()
     if not text:
         raise ValueError(f"{tool} app must be a non-empty app id")
+    return text
+
+
+def _optional_ref_arg(ref: object, tool: str) -> str | None:
+    """None means the caller omitted ``ref``. A blank value is not a ref.
+
+    Callers map ``ValueError`` to ``invalid_arguments``. Nothing is typed
+    when this raises.
+    """
+    if ref is None:
+        return None
+    if not isinstance(ref, str):
+        raise ValueError(f"{tool} ref must be a non-empty element ref")
+    text = ref.strip()
+    if not text:
+        raise ValueError(f"{tool} ref must be a non-empty element ref")
     return text
 
 
@@ -484,17 +513,143 @@ def _linux_button_uses_pointer(driver, element: Element) -> bool:
         return False
     return True
 
+
+def _canvas_fallback_error(element: Element, *, unconfirmed: bool = False) -> ComputerUseError:
+    """A canvas-fallback click that must not be reported as a pointer success."""
+    title = f" {element.title!r}" if element.title else ""
+    if unconfirmed:
+        message = (
+            f"{element.ref} ({element.role}{title}) is inside a canvas "
+            "and the activation was not confirmed; no pointer click was sent"
+        )
+    else:
+        message = (
+            f"{element.ref} ({element.role}{title}) is inside a canvas "
+            "and was not activated; no pointer click was sent"
+        )
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        message,
+        detail={
+            "ref": element.ref,
+            "role": element.role,
+            "reason": "canvas_fallback",
+            "hint": (
+                "this control is fallback content inside a canvas and is not painted; "
+                "a coordinate click would land on the canvas"
+            ),
+        },
+    )
+
+
+_TEXT_CLICK_ROLES = frozenset({"AXStaticText", "AXHeading"})
+# A window or browser chrome node is not the control a label stands for.
+_TEXT_CLICK_SKIP_ROLES = frozenset({
+    "AXWindow", "AXDialog", "AXSheet", "AXDrawer", "AXScrollArea", "AXWebArea",
+    "AXToolbar", "AXMenuBar", "AXTabGroup", "AXScrollBar",
+})
+
+
+def _bounds_meet(a: "Bounds | None", b: "Bounds | None") -> bool:
+    """True when both boxes overlap, or either box is missing or empty.
+
+    A missing box is not evidence the nodes are apart. Chrome's line box and
+    the button inside it do overlap.
+    """
+    if a is None or b is None:
+        return True
+    if a.width <= 0 or a.height <= 0 or b.width <= 0 or b.height <= 0:
+        return True
+    return (
+        a.x < b.x + b.width
+        and b.x < a.x + a.width
+        and a.y < b.y + b.height
+        and b.y < a.y + a.height
+    )
+
+
+def _positive_box(element: Element) -> bool:
+    bounds = element.bounds
+    if bounds is None or bounds.width <= 1 or bounds.height <= 1:
+        return False
+    if bounds.x <= -2_000_000_000 or bounds.y <= -2_000_000_000:
+        return False
+    return True
+
+
+def text_click_control(elements, target: Element) -> Element | None:
+    """The control a non-clickable text ref stands for, or None.
+
+    Chrome lists ``<button>Billing section</button>`` as a line-wide static
+    text with the button as its child. The text's center is not on the
+    button, so a pointer click there reports success and does not activate
+    it. ``<button><span>Label</span></button>`` and a link put the static
+    text inside the control. Either shape has to activate that control.
+
+    A paragraph with no control returns None. More than one control under
+    the text is ambiguous: the click is not sent.
+    """
+    if target.clickable or target.editable or target.role not in _TEXT_CLICK_ROLES:
+        return None
+    by_ref = {el.ref: el for el in elements}
+    children: dict[str, list[Element]] = {}
+    for el in elements:
+        if el.parent:
+            children.setdefault(el.parent, []).append(el)
+    found: list[Element] = []
+    stack = list(children.get(target.ref, []))
+    while stack:
+        node = stack.pop()
+        if node.role in _TEXT_CLICK_SKIP_ROLES:
+            continue
+        if node.clickable and node.enabled and _bounds_meet(target.bounds, node.bounds):
+            found.append(node)
+            continue
+        stack.extend(children.get(node.ref, []))
+    if len(found) > 1:
+        shown = ", ".join(f"{el.ref} ({el.role} {el.title!r})" for el in found[:6])
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{target.ref} ({target.role}) covers more than one control ({shown}); "
+            "click one of those refs",
+            detail={
+                "ref": target.ref,
+                "role": target.role,
+                "reason": "ambiguous_control",
+                "controls": [el.ref for el in found[:8]],
+            },
+        )
+    if len(found) == 1:
+        return found[0]
+    parent_ref = target.parent
+    seen: set[str] = set()
+    while parent_ref and parent_ref not in seen:
+        seen.add(parent_ref)
+        parent = by_ref.get(parent_ref)
+        if parent is None:
+            break
+        if (
+            parent.role not in _TEXT_CLICK_SKIP_ROLES
+            and parent.clickable
+            and parent.enabled
+            and _bounds_meet(target.bounds, parent.bounds)
+        ):
+            return parent
+        parent_ref = parent.parent
+    return None
+
+
 #: Require explicit human confirmation before a plausibly irreversible action
 #: (see `safety.confirmation_prompt`). When on and the host offers no
 #: confirmation channel, such actions fail-safe (blocked) rather than firing
 #: unconfirmed. Set ``A11Y_COMPUTER_USE_CONFIRM=0`` to disable the gate entirely.
 CONFIRMATION_GATE = os.environ.get("A11Y_COMPUTER_USE_CONFIRM", "1") != "0"
 
-#: When a snapshot exposes no actionable element, run on-device OCR of the
-#: display right away and append the text lines as ``o`` refs, so the planner
-#: gets something to target in the same round-trip (`ocr.py`). Set
-#: ``A11Y_COMPUTER_USE_AUTO_OCR=0`` to keep snapshots pure.
-AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "1") != "0"
+#: Empty snapshots stay on the accessibility tree. On-device OCR of that
+#: snapshot is opt-in: set ``A11Y_COMPUTER_USE_AUTO_OCR=1`` to append ``o``
+#: refs in the same reply (`ocr.py`). ``screen_text`` and ``find(ocr=true)``
+#: are unchanged. ``crop`` still reads text in the crop.
+AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "0") == "1"
 
 #: Re-OCR the display when an ``o`` ref is acted on and re-resolve the ref by
 #: text near its old position (the OCR analogue of re-resolving an ``e`` ref
@@ -585,7 +740,10 @@ _PAGE_GROUP_ROLES = ("AXGroup", "AXWebArea")
 
 
 def _element_area(el) -> int:
-    return el.bounds.width * el.bounds.height
+    bounds = el.bounds
+    if bounds is None:
+        return 0
+    return bounds.width * bounds.height
 
 
 def _scroll_reference_area(snap) -> int:
@@ -648,7 +806,8 @@ def _scroll_anchor(snap):
     taller than the window is the document's content box: the wheel goes to
     the document group that contains it when that group is smaller than the
     window, and otherwise to the list. It does not go to Chrome's tab strip.
-    A menu smaller than the window is used only when the page has no list.
+    A standalone menu smaller than the window is used only when the page has
+    no list. Menubar and toolbar branches are not scrolling content.
     With no list, a titled group wins over a larger empty panel: that panel
     is Chrome's frame, and a wheel there does not move the document.
     None for an empty snapshot.
@@ -664,29 +823,43 @@ def _scroll_anchor(snap):
     def below_window(el) -> bool:
         return _element_area(el) < 0.9 * reference
 
-    areas = [el for el in snap.elements if el.role == "AXScrollArea"]
+    by_ref = {el.ref: el for el in snap.elements}
+
+    def content(el) -> bool:
+        seen = set()
+        while el is not None and el.ref not in seen:
+            seen.add(el.ref)
+            if el.role in ("AXMenuBar", "AXToolbar"):
+                return False
+            el = by_ref.get(el.parent)
+        return True
+
+    candidates = [el for el in snap.elements if content(el)]
+    if not candidates:
+        return None
+
+    areas = [el for el in candidates if el.role == "AXScrollArea"]
     if areas:
         return largest(areas)
 
-    lists = [el for el in snap.elements if el.role in _PAGE_LIST_ROLES]
+    lists = [el for el in candidates if el.role in _PAGE_LIST_ROLES]
     inner = [el for el in lists if below_window(el)]
     if inner:
         return largest(inner)
 
     if not lists:
-        menus = [el for el in snap.elements if el.role == "AXMenu" and below_window(el)]
+        menus = [el for el in candidates if el.role == "AXMenu" and below_window(el)]
         if menus:
             return largest(menus)
-        groups = [el for el in snap.elements if el.role == "AXGroup" and below_window(el)]
+        groups = [el for el in candidates if el.role == "AXGroup" and below_window(el)]
         if groups:
             titled = [el for el in groups if (el.title or "").strip()]
             return largest(titled or groups)
-        tabs = [el for el in snap.elements if el.role == "AXTabGroup" and below_window(el)]
+        tabs = [el for el in candidates if el.role == "AXTabGroup" and below_window(el)]
         if tabs:
             return largest(tabs)
-        return largest(snap.elements)
+        return largest(candidates)
 
-    by_ref = {el.ref: el for el in snap.elements}
     page = _page_group_ancestor(largest(lists), by_ref, below_window)
     if page is not None:
         return page
@@ -797,9 +970,11 @@ def _permission_app_id(identifier: str) -> str:
     """The id a grant is stored under.
 
     macOS: the installed bundle id when a display name matches one, else the
-    identifier. Windows: the identifier. Linux: the process comm of a running
-    window, so ``google-chrome`` and "Google Chrome" key as ``chrome``, the
-    same id ``snapshot`` gates on. An unmatched name is stored as given so a
+    identifier. Windows: the identifier. Linux: the full program name of a
+    running window when the kernel comm is that name's 15-byte cut, and the
+    process comm otherwise. ``gnome-text-editor`` stays ``gnome-text-editor``;
+    ``google-chrome`` and "Google Chrome" still key as ``chrome``, the same
+    id ``snapshot`` gates on. An unmatched name is stored as given so a
     grant can precede launch.
     """
     installed = _installed_bundle_id(identifier)
@@ -1109,6 +1284,33 @@ def _row_pid(row: dict) -> int | None:
     return pid or None
 
 
+def _visible_pidless_window(row: dict) -> bool:
+    """A mapped window whose process id was read and is absent.
+
+    Rows that omit ``pid`` are not this case. Hermetic lists leave the key
+    off, and those stay on the grant filter. A Tk or Xt window has no
+    ``_NET_WM_PID``. The row is keyed by WM_CLASS and has a positive bounds
+    box. Focus is not part of this check. A minimized window stays off this
+    path.
+    """
+    if "pid" not in row:
+        return False
+    if _row_pid(row) is not None:
+        return False
+    if row.get("on_screen") is False:
+        return False
+    wm_class = str(row.get("wm_class") or row.get("wm_class_class") or "").strip()
+    if not wm_class:
+        return False
+    bounds = row.get("bounds")
+    if not isinstance(bounds, dict):
+        return False
+    try:
+        return int(bounds.get("width") or 0) > 0 and int(bounds.get("height") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _linux_name_matches(identifier: str, *names: str) -> bool:
     """Whether any ``names`` entry is the app ``identifier`` names.
 
@@ -1246,10 +1448,14 @@ def _window_row(row: dict) -> dict:
     Rows that never set the flag are on the current Space's window list, so
     they are on screen. A minimized window that already says ``on_screen``
     false stays false, and its bounds stay whatever the driver reported.
+    A pid that was read as 0 is null: the window has no process id. A row
+    that omits the key stays without it.
     """
     out = dict(row)
     if "on_screen" not in out:
         out["on_screen"] = True
+    if "pid" in out:
+        out["pid"] = _row_pid(out)
     return out
 
 
@@ -1526,13 +1732,55 @@ def format_zoom(region: Bounds) -> str:
     )
 
 
-def format_crop(ref: str, region: Bounds, padding: int, scale: float, image_w: int, image_h: int) -> str:
-    """The text that accompanies a ref crop. It names the rectangle and the PNG."""
-    return (
+def format_crop(
+    ref: str,
+    region: Bounds,
+    padding: int,
+    scale: float,
+    image_w: int,
+    image_h: int,
+    *,
+    ocr_text: str | None = None,
+) -> str:
+    """The text that accompanies a ref crop. It names the rectangle and the PNG.
+
+    ``ocr_text`` is fenced OCR lines with screen bounds, from
+    `ocr.format_ocr_lines`. When it is missing, the sentence says no text
+    was read. That is also the result when no OCR engine is installed.
+    """
+    head = (
         f"crop of {ref} on display {region.display_id} at ({region.x}, {region.y}) "
         f"{region.width}x{region.height} (padding {padding}, scale {scale:g}); "
-        f"image {image_w}x{image_h} PNG. No text was read from these pixels."
+        f"image {image_w}x{image_h} PNG."
     )
+    if ocr_text:
+        return (
+            head
+            + "\nOCR text from the image, already fenced as untrusted:\n"
+            + ocr_text
+        )
+    return head + " No text was read from these pixels."
+
+
+def _crop_ocr_text(png: bytes, region: Bounds) -> str | None:
+    """Fenced OCR lines for a crop, or None when no engine can read it.
+
+    A missing ``[ocr]`` extra, a missing ``tesseract`` binary, and an engine
+    that fails all leave the crop image in place. The crop itself is not an
+    error. Linux OCR is RapidOCR from the optional extra, then the system
+    ``tesseract`` binary. No hosted service is called.
+    """
+    try:
+        from a11y_computer_use.ocr import format_ocr_lines, ocr
+    except ImportError:
+        return None
+    try:
+        spans = ocr((png, region))
+    except Exception:
+        # ComputerUseError (no engine), a bad PNG, or an engine that cannot
+        # load its models. The pixels are still returned.
+        return None
+    return format_ocr_lines(spans)
 
 
 def _crop_padding(padding: object) -> int:
@@ -1597,6 +1845,34 @@ def _box_on_image(png: bytes, region: Bounds, display) -> tuple[int, int, int, i
     return x, y, width, height
 
 
+def _tip_of_the_day(snap) -> object | None:
+    """The Tip of the Day dialog in ``snap``, or None."""
+    if snap is None:
+        return None
+    for el in getattr(snap, "elements", None) or []:
+        title = str(getattr(el, "title", "") or "")
+        if "tip of the day" not in title.lower():
+            continue
+        if getattr(el, "role", "") in {"AXDialog", "AXSheet", "AXWindow"}:
+            return el
+    return None
+
+
+def _tip_ok_button(snap) -> object | None:
+    """The OK or Close button of a snapshot that contains the tip dialog."""
+    buttons = []
+    for el in getattr(snap, "elements", None) or []:
+        if getattr(el, "role", "") != "AXButton":
+            continue
+        if str(getattr(el, "title", "") or "").strip().lower() not in {"ok", "close"}:
+            continue
+        buttons.append(el)
+    for el in buttons:
+        if getattr(el, "focused", False):
+            return el
+    return buttons[-1] if buttons else None
+
+
 def _same_app(owner: str, app: str) -> bool:
     if owner.casefold() == app.casefold():
         return True
@@ -1605,9 +1881,147 @@ def _same_app(owner: str, app: str) -> bool:
     return _comm_matches_identifier(app, owner) or _comm_matches_identifier(owner, app)
 
 
+def _path_is_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path)
+    except OSError:
+        return False
+
+
+def _path_is_dir(path: str) -> bool:
+    try:
+        return os.path.isdir(path)
+    except OSError:
+        return False
+
+
+def _drag_local_path(text: object) -> str | None:
+    """An absolute local path or ``file:`` URI, or None.
+
+    The filesystem root is not a folder a drop can target: a title of ``/``
+    would otherwise treat every short name as a child of the root.
+    """
+    import urllib.parse
+
+    raw = str(text or "").strip()
+    if not raw or any(ch in raw for ch in "\n\r\x00") or len(raw) > 4096:
+        return None
+    if raw.lower().startswith("file:"):
+        parsed = urllib.parse.urlparse(raw)
+        if parsed.scheme.lower() != "file" or parsed.netloc not in {"", "localhost"}:
+            return None
+        raw = urllib.parse.unquote(parsed.path or "")
+        # file:///C:/dir is parsed as /C:/dir. Drop the extra slash.
+        if os.name == "nt" and len(raw) >= 3 and raw[0] == "/" and raw[2] == ":":
+            raw = raw[1:]
+    if not os.path.isabs(raw):
+        return None
+    if os.path.dirname(raw) == raw:
+        return None
+    return raw
+
+
+def _drag_segment(text: object) -> str | None:
+    """A single path segment, such as a file or folder name."""
+    raw = str(text or "").strip()
+    if not raw or raw in {".", ".."} or "/" in raw or "\\" in raw or len(raw) > 255:
+        return None
+    return raw
+
+
+def _drag_source_name(start: object | None) -> str | None:
+    if start is None:
+        return None
+    for text in (getattr(start, "title", ""), getattr(start, "value", "") or ""):
+        path = _drag_local_path(text)
+        if path is not None:
+            name = os.path.basename(path.rstrip("/"))
+            if name not in {"", ".", ".."}:
+                return name
+    return _drag_segment(getattr(start, "title", "")) or _drag_segment(getattr(start, "value", "") or "")
+
+
+def _drag_directories(snap: object | None) -> list[str]:
+    found: list[str] = []
+    if snap is None:
+        return found
+    for el in getattr(snap, "elements", ()) or ():
+        for text in (getattr(el, "title", ""), getattr(el, "value", "") or ""):
+            path = _drag_local_path(text)
+            if path is not None and path not in found and _path_is_dir(path):
+                found.append(path)
+    return found
+
+
+def _drag_target_folder(snap: object | None, end: object | None) -> str | None:
+    """The directory the drop is aimed at, when the tree names one."""
+    if end is None:
+        return None
+    for text in (getattr(end, "title", ""), getattr(end, "value", "") or ""):
+        path = _drag_local_path(text)
+        if path is not None and _path_is_dir(path):
+            return path
+    name = _drag_segment(getattr(end, "title", "")) or _drag_segment(getattr(end, "value", "") or "")
+    if name is None:
+        return None
+    for parent in _drag_directories(snap):
+        child = os.path.join(parent, name)
+        if _path_is_dir(child):
+            return child
+    return None
+
+
+def _drag_dest_file(snap: object | None, start: object | None, end: object | None) -> str | None:
+    """``folder/filename`` when both ends resolve, else None.
+
+    The file is not required to exist yet. The caller records that and
+    checks again after the stroke.
+    """
+    folder = _drag_target_folder(snap, end)
+    name = _drag_source_name(start)
+    if folder is None or name is None:
+        return None
+    return os.path.join(folder, name)
+
+
 # ---------------------------------------------------------------------------
 # Runtime: the transport-free execution core
 # ---------------------------------------------------------------------------
+
+
+def _descendant_titles(snap: Snapshot, ref: str) -> set[str]:
+    """Titles of ``ref``'s descendants, not ``ref`` itself."""
+    children: dict[str | None, list] = {}
+    for element in snap.elements:
+        children.setdefault(element.parent, []).append(element)
+    titles: set[str] = set()
+    stack = list(children.get(ref, ()))
+    while stack:
+        element = stack.pop()
+        if element.title:
+            titles.add(element.title)
+        stack.extend(children.get(element.ref, ()))
+    return titles
+
+
+def _snapshot_text_wake():
+    """Wake for a snapshot-text wait, or None when AT-SPI events are off.
+
+    The callable blocks until a structural accessibility event or the given
+    seconds. A caret blink does not finish the wait. None keeps the poll sleep.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.enabled():
+        return None
+
+    def wake(seconds: float) -> bool:
+        found = _atspi_events.wait_for_structural(
+            _atspi_events.current_seq(), timeout=seconds,
+        )
+        return found is not None
+
+    return wake
 
 
 class Runtime:
@@ -1651,12 +2065,15 @@ class Runtime:
         fence_untrusted: bool | None = None,
         allowed_domains: str | object | None = None,
         blocked_domains: str | object | None = None,
+        allow_exec: bool = False,
     ) -> None:
         self._operation_lock = RLock()
         self._tool_depth = 0
         self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        #: Terminal GUI input requires the same opt-in as agent execution.
+        self.allow_exec = allow_exec
         #: The OS backend. Every platform op (observe/act/capture) routes through
         #: it, so the Runtime is OS-agnostic; defaults to the current platform.
         self.driver = driver if driver is not None else drivers.get_driver()
@@ -1974,7 +2391,7 @@ class Runtime:
             return None
         try:
             rows = self.driver.running_apps()
-        except (ComputerUseError, AttributeError, OSError):
+        except (ComputerUseError, NotImplementedError, AttributeError, OSError):
             return None
         for row in rows or []:
             if not isinstance(row, dict):
@@ -2065,6 +2482,37 @@ class Runtime:
 
     # -- gate + audit -------------------------------------------------------
 
+    def _reject_terminal(self, action, app: str, *, audit: bool = True, input_target=None) -> None:
+        """Audit and refuse terminal actions when execution is disabled."""
+        launch = isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH
+        if self.allow_exec or not (launch or isinstance(action, (TypeText, KeyChord))):
+            return
+        check = getattr(self.driver, "terminal_target", None)
+        if check is None:
+            return
+        try:
+            terminal = check(app, input_target or getattr(action, "target", None), launch=launch)
+        except ComputerUseError as exc:
+            if audit:
+                self.audit.record_action(
+                    action, app=app, decision=safety.check_action(action, app, store=self.store),
+                    result=exc.code.value, secure=exc.code is ErrorCode.SECURE_FIELD,
+                )
+            raise
+        if not terminal:
+            return
+        if audit:
+            self.audit.record_action(
+                action, app=app, decision=safety.check_action(action, app, store=self.store),
+                result=ErrorCode.EXEC_DISABLED.value,
+                metrics={"security_violation": "exec_disabled"},
+            )
+        raise ComputerUseError(
+            ErrorCode.EXEC_DISABLED,
+            "terminal launch or input requires allow_exec",
+            detail={"app": app, "security_violation": "exec_disabled"},
+        )
+
     def _require_permission(self, action, app: str, *, secure: bool = False) -> safety.Decision:
         """Read the current grant and audit a refusal before any input."""
         decision = safety.check_action(action, app, store=self.store)
@@ -2083,7 +2531,8 @@ class Runtime:
         return safety.window_title(snap, element)
 
     def _run_gated(
-        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None
+        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
+        input_target=None,
     ):
         """check_action → confirm → recheck → execute → audit, for EVERY action.
 
@@ -2098,9 +2547,12 @@ class Runtime:
         errors are all audited before they propagate; a SECURE_FIELD failure
         forces redaction of injectable params. A disallowed browser origin
         raises `domain_blocked` before the grant check.
+        ``input_target`` carries the addressed element for text actions,
+        whose schema intentionally contains only the text, to the exec gate.
         """
         if self._domain_applies(action):
             self._reject_domain(action, app=app)
+        self._reject_terminal(action, app, input_target=input_target)
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
@@ -2127,6 +2579,7 @@ class Runtime:
                     decision = self._require_permission(action, app, secure=secure)
             if recheck is not None:
                 recheck(app)
+            self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             duration_ms = (time.perf_counter() - started) * 1000.0
@@ -2137,6 +2590,8 @@ class Runtime:
                 decision=decision,
                 result=exc.code.value,
                 secure=secure or exc.code is ErrorCode.SECURE_FIELD,
+                metrics={"security_violation": "exec_disabled"}
+                if exc.code is ErrorCode.EXEC_DISABLED else None,
             )
             raise
         # cu-meter: per-action latency + (for text results) size/token estimate,
@@ -2154,6 +2609,9 @@ class Runtime:
     # How long to watch a live Linux pid after an action. A click handler that
     # quits on the next main-loop turn is still alive when the call returns.
     _PROCESS_SETTLE_S = 0.3
+    # A file drop can land on the next main-loop turn. Only a drag that
+    # resolved a target folder waits, and only until the file appears.
+    _DRAG_DROP_SETTLE_S = 0.4
 
     def _freeze(self, snap: "Snapshot") -> dict:
         """Fingerprints of ``snap``, taken now so a later in-place edit cannot move them."""
@@ -2293,6 +2751,38 @@ class Runtime:
             return focused[0]
         return next((el for el in snap.elements if el.focused), None)
 
+    def _drawing_type_verdict(
+        self, app: str | None, requested: str | None,
+    ) -> tuple[str, str] | None:
+        """Confirmed or unverified for an Impress or Draw frame, else None.
+
+        The snapshot's focused node is the empty presentation container.
+        The frame's paragraphs are the read-back. An empty container that
+        could not be read is unverified, not a mismatch: a mismatch makes
+        the caller type the same text again.
+        """
+        driver = self.driver
+        unverified = bool(getattr(driver, "_type_unverified", False))
+        state = getattr(driver, "_drawing_type_state", None)
+        before = getattr(driver, "_drawing_type_before", None)
+        if not unverified and before is None and state in (None, "skip"):
+            return None
+        better = None
+        if requested and getattr(driver, "name", None) == "linux":
+            from a11y_computer_use.drivers import _atspi
+
+            better = _atspi.drawing_frame_outcome_text(
+                app or "", requested, before if isinstance(before, str) else None,
+            )
+        driver._type_unverified = False
+        driver._drawing_type_before = None
+        driver._drawing_type_state = None
+        if isinstance(better, str):
+            return "confirmed", f"read back {better!r}"
+        if unverified:
+            return "unverifiable", "unverified"
+        return None
+
     def _judge_mutation(
         self,
         app: str | None,
@@ -2304,7 +2794,14 @@ class Runtime:
         previous: str | None = None,
         key_focus: bool = False,
         focus_before: tuple | None = None,
+        selection: tuple[int, int] | None = None,
+        cover_click: bool = False,
     ) -> tuple[str, str]:
+        drawing = self._drawing_type_verdict(app, requested)
+        if drawing is not None:
+            if self._process_died(before):
+                return "partial", "the target process exited after the action"
+            return drawing
         died = self._process_died(before)
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
@@ -2349,13 +2846,76 @@ class Runtime:
                     handle = None
                     if anchor is not None:
                         handle = observe.ax_handle_for(anchor.snapshot_id, anchor.ref)
-                    better = _atspi.sheet_outcome_text(app or "", requested, handle)
+                    if handle is None and element is not None:
+                        # A Draw shape paragraph's title contains its text, so
+                        # the post-write snapshot does not match the old title.
+                        # The ref's accessible is still the paragraph.
+                        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+                    origin = getattr(self.driver, "_sheet_type_origin", None)
+                    grid_confirmed = isinstance(origin, str) and bool(origin) and bool(requested)
+                    if grid_confirmed:
+                        # type_text left this set only after every typed cell matched.
+                        self.driver._sheet_type_origin = None
+                        readback = requested
+                    better = None if grid_confirmed else _atspi.sheet_outcome_text(
+                        app or "", requested, handle,
+                    )
                     if better is None and handle is not None:
                         better = _atspi.writer_cell_outcome_text(requested, handle)
+                    if better is None and handle is not None:
+                        better = _atspi.writer_document_outcome_text(requested, handle)
+                    if better is None and handle is not None:
+                        better = _atspi.drawing_paragraph_shown(handle)
                     if better is not None:
                         readback = better
             if readback is None:
                 readable = False
+        # Chrome's contenteditable often publishes the new characters after
+        # type has already returned. One snapshot can still be the pre-type
+        # text, and the outcome is then a false suspected_noop.
+        stale_read = isinstance(before_value, str) and readback == before_value
+        if before_value is None and readback in (None, ""):
+            stale_read = True
+        if (
+            requested
+            and not died
+            and getattr(self.driver, "name", None) == "linux"
+            and stale_read
+        ):
+            def _pause_for_ui() -> None:
+                # Same 0.05s bound. When the AT-SPI listener is up, a state
+                # or text event wakes the read instead of sleeping the whole gap.
+                from a11y_computer_use.drivers import _atspi_events
+
+                if _atspi_events.listening():
+                    _atspi_events.wait_for_event(_atspi_events.current_seq(), timeout=0.05)
+                    return
+                time.sleep(0.05)
+
+            for _attempt in range(8):
+                _pause_for_ui()
+                later = self._reread(app, scope)
+                if later is None:
+                    break
+                if element is not None:
+                    fresh_anchor = self._element_like(element, later)
+                else:
+                    fresh_anchor = self._focused_editable(later)
+                if fresh_anchor is None:
+                    continue
+                fresh = "" if fresh_anchor.value is None else str(fresh_anchor.value)
+                after = later
+                readback = fresh
+                anchor = fresh_anchor
+                if fresh != before_value:
+                    break
+        type_expected = None
+        if getattr(self.driver, "name", None) == "linux":
+            found = getattr(self.driver, "_type_expected", None)
+            if isinstance(found, str):
+                type_expected = found
+            if hasattr(self.driver, "_type_expected"):
+                self.driver._type_expected = None
         self._remember_baseline(after)
         judged, evidence = outcome.judge(
             changed=changed,
@@ -2364,9 +2924,24 @@ class Runtime:
             before_value=before_value,
             process_died=died,
             readable=readable if requested is None else readback is not None or not died,
+            selection=selection,
+            expected=type_expected,
         )
         if focus_note and judged == "confirmed" and evidence == "the accessibility state changed":
             evidence = focus_note
+        # A ref click is still delivered at the target's center. When that
+        # point is covered, the tree change belongs to the cover. The target
+        # itself did not change, so this is not confirmation.
+        if (
+            cover_click
+            and judged == "confirmed"
+            and element is not None
+            and before is not None
+            and after is not None
+        ):
+            cover = outcome.occluded_click_effect(before["snap"], after, element)
+            if cover:
+                return "suspected_noop", cover
         return judged, evidence
 
     def _key_focus_probe(self, app: str | None) -> tuple | None:
@@ -2393,6 +2968,77 @@ class Runtime:
             return None
         return found if isinstance(found, tuple) else None
 
+    def _active_type_selection(
+        self, app: str | None, previous: str | None,
+    ) -> tuple[int, int] | None:
+        """Selection offsets in ``previous``, read before the keys replace it.
+
+        None when the caret is collapsed, or the focused text is not the
+        snapshot value the offsets were counted in. The driver still records
+        the replacement it verified, and the outcome check uses that string.
+        """
+        if getattr(self.driver, "name", None) != "linux" or not app or not isinstance(previous, str):
+            return None
+        mapped = self._mapped_type_selection(app, previous)
+        if mapped is not None:
+            return mapped
+        found = self._key_focus_probe(app)
+        if not isinstance(found, tuple) or len(found) < 4:
+            return None
+        text, _caret, start, end = found[0], found[1], found[2], found[3]
+        if isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            return None
+        if isinstance(text, str) and outcome._type_field_text(text) != outcome._type_field_text(previous):
+            return None
+        if end > len(previous) and (
+            not isinstance(text, str) or end > len(outcome._type_field_text(text))
+        ):
+            return None
+        return (start, end)
+
+    def _mapped_type_selection(
+        self, app: str, previous: str,
+    ) -> tuple[int, int] | None:
+        """Selection in the read-back's coordinates, or None.
+
+        Raw AT-SPI offsets on a Chrome contenteditable count one object
+        character per paragraph. The word selected inside that paragraph is
+        the range typing replaces. None leaves the raw caret offsets.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.focused_type_selection(app)
+
+        try:
+            if callable(runner):
+                found = runner(read)
+            else:
+                found = read()
+        except Exception:
+            return None
+        if not isinstance(found, tuple) or len(found) != 2:
+            return None
+        text, span = found
+        if not isinstance(span, tuple) or len(span) != 2:
+            return None
+        start, end = span
+        if isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            return None
+        if isinstance(text, str) and outcome._type_field_text(text) != outcome._type_field_text(previous):
+            return None
+        if end > len(previous) and (
+            not isinstance(text, str) or end > len(outcome._type_field_text(text))
+        ):
+            return None
+        return (start, end)
+
     def _conclude(
         self,
         text: str,
@@ -2408,12 +3054,15 @@ class Runtime:
         verdict: tuple[str, str] | None = None,
         key_focus: bool = False,
         focus_before: tuple | None = None,
+        selection: tuple[int, int] | None = None,
+        cover_click: bool = False,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
-                key_focus=key_focus, focus_before=focus_before,
+                key_focus=key_focus, focus_before=focus_before, selection=selection,
+                cover_click=cover_click,
             )
         else:
             judged, evidence = verdict
@@ -2599,6 +3248,8 @@ class Runtime:
         gate against the issuing snapshot's app; raw points gate against the
         frontmost app and default to the driver's main display (so this path is
         platform-free: Linux/Windows/browser report 0, macOS `CGMainDisplayID`).
+        On Linux, a point whose frontmost app is unknown gates on the window
+        under the point (WM_CLASS when that window has no pid).
         ``kind`` names the calling tool in the audit row a failed resolution
         leaves behind.
         """
@@ -2612,7 +3263,18 @@ class Runtime:
             raise ValueError("target an element ref, or both x and y coordinates")
         if display_id is None:
             display_id = int(self.driver.main_display_id())  # through the seam, not Quartz
-        return Point(display_id=display_id, x=x, y=y), self._frontmost()
+        point = Point(display_id=display_id, x=x, y=y)
+        app = self._frontmost()
+        # A focused Tk or Xt window has no process id, so the frontmost name
+        # is "unknown". Gate the point on the window under it (its WM_CLASS)
+        # instead of asking for a grant of unknown.
+        if getattr(self.driver, "name", None) == "linux" and (
+            not str(app or "").strip() or app == "unknown"
+        ):
+            owner = _app_at_point(point)
+            if owner:
+                app = owner
+        return point, app
 
     # -- OCR refs (o1..oN) ----------------------------------------------------
 
@@ -2683,6 +3345,32 @@ class Runtime:
         if display_id is None:
             return
         self._display_named(display_id)
+
+    def _require_window_move_point(self, x: object, y: object) -> tuple[int, int]:
+        """Reject a move coordinate before any window lookup or client message.
+
+        ``x`` and ``y`` are integers. A bool is not an integer here, and a
+        float is not truncated: truncating would move the window to a
+        different point. When the driver can name display 0, the point has
+        to be one of its pixels (0..width-1, 0..height-1), the same range
+        as click. Otherwise it has to be a non-negative signed 32-bit
+        value. The window is not moved, and the coordinate is not clamped.
+        """
+        if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+            raise ValueError(f"window move x and y must be integers, got ({x!r}, {y!r})")
+        display = self._display_named(0)
+        if display is None:
+            limit = (1 << 31) - 1
+            if x < 0 or y < 0 or x > limit or y > limit:
+                raise ValueError(
+                    f"window move ({x}, {y}) is outside the signed screen range "
+                    f"(valid x and y are 0..{limit})"
+                )
+            return x, y
+        detail = point_outside_display(x, y, display, where="window move")
+        if detail is not None:
+            raise ValueError(detail)
+        return x, y
 
     def _require_point(self, x: object, y: object, display_id: int | None, *, where: str = "point") -> None:
         """Reject a coordinate outside the target display before any input."""
@@ -2943,6 +3631,9 @@ class Runtime:
             wins = self._app_windows(bundle)
             if wins:  # one window's own pixels: nothing covering it gets in (#12)
                 window_id, bounds = wins[0]
+            elif self._linux_listed_windows_miss_the_display(bundle):
+                # The union of an off-screen window is not this app's pixels.
+                bounds = None
             if bounds is None:
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED,
@@ -3043,10 +3734,91 @@ class Runtime:
         y1 = max(r.y + r.height for r in same)
         return Bounds(display_id=did, x=x0, y=y0, width=x1 - x0, height=y1 - y0)
 
+    def _linux_bounds_on_display(self, bounds: Bounds) -> bool | None:
+        """Whether ``bounds`` meets a Linux display.
+
+        None when this driver is not Linux, or when the display list cannot
+        be read. False only when a matching display is known and the rect
+        misses it.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        displays = getattr(self.driver, "displays", None)
+        if not callable(displays):
+            return None
+        try:
+            found = tuple(displays() or ())
+        except Exception:
+            return None
+        chosen = None
+        for display in found:
+            try:
+                if int(display.display_id) == int(bounds.display_id):
+                    chosen = display
+                    break
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if chosen is None:
+            return None
+        try:
+            width = int(chosen.width)
+            height = int(chosen.height)
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        if bounds.width <= 0 or bounds.height <= 0:
+            return False
+        if bounds.x + bounds.width <= 0 or bounds.y + bounds.height <= 0:
+            return False
+        if bounds.x >= width or bounds.y >= height:
+            return False
+        return True
+
+    def _linux_listed_windows_miss_the_display(self, bundle: str) -> bool:
+        """True when this Linux app is listed and every rect misses the display.
+
+        A failed window list is False, so a snapshot crop is left in place.
+        A minimized window has no rect and counts as missing the display.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return False
+        try:
+            rows = self.driver.windows()
+        except (ComputerUseError, NotImplementedError, OSError, AttributeError):
+            return False
+        matched = False
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            owner = str(row.get("bundle") or row.get("app") or "")
+            if owner != bundle and owner.lower() not in bundle.lower():
+                continue
+            matched = True
+            raw = row.get("bounds")
+            if not isinstance(raw, dict):
+                continue
+            try:
+                rect = Bounds(
+                    int(raw.get("display_id", 0)), int(raw["x"]), int(raw["y"]),
+                    int(raw["width"]), int(raw["height"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if self._linux_bounds_on_display(rect) is not False:
+                return False
+        return matched
+
     def _app_windows(self, bundle: str) -> list[tuple[int, Bounds]]:
         """(window_id, bounds) of ``bundle``'s ordinary windows on this Space,
         front to back, from the driver's window list. Empty when none or when
-        the driver has no window ids."""
+        the driver has no window ids.
+
+        Linux lists bottom to top and includes a mapped window that sits
+        past the edge of the screen. Those rows are reversed, and a rect
+        that misses a known display is left out, so index 0 is the front
+        on-screen window. macOS stays front to back.
+        """
         try:
             rows = self.driver.windows()
         except (ComputerUseError, NotImplementedError, OSError, AttributeError):
@@ -3059,10 +3831,15 @@ class Runtime:
             if not b or wid is None or (owner != bundle and owner.lower() not in bundle.lower()):
                 continue
             try:
-                out.append((int(wid), Bounds(int(b.get("display_id", 0)), int(b["x"]), int(b["y"]),
-                                             int(b["width"]), int(b["height"]))))
+                rect = Bounds(int(b.get("display_id", 0)), int(b["x"]), int(b["y"]),
+                              int(b["width"]), int(b["height"]))
             except (KeyError, TypeError, ValueError):
                 continue
+            if self._linux_bounds_on_display(rect) is False:
+                continue
+            out.append((int(wid), rect))
+        if getattr(self.driver, "name", None) == "linux":
+            out.reverse()
         if not out and sys.platform == "darwin" and getattr(self.driver, "window_png", None) is not None:
             out = _windows_all_spaces(bundle)  # a window on another Space still has pixels
         return out
@@ -3124,19 +3901,80 @@ class Runtime:
     def _dismiss_open_menu(self, app: str) -> str:
         """Close a menu left open in ``app`` so the next keystroke or click is not
         swallowed by menu tracking. Returns a note for the result, or "".
-        Never raises: backends without menu bars report no open menu."""
+
+        A driver with no menu bar reports no open menu. Escape is not sent
+        when it would land on a different window, such as a modal dialog
+        that does not contain the menu: the click or type is refused instead.
+        A close that fails is also refused, so the action does not continue
+        as if the menu had been dismissed.
+        """
         state_fn = getattr(self.driver, "menu_state", None)
         close_fn = getattr(self.driver, "menu_close", None)
         if state_fn is None or close_fn is None:
             return ""
         try:
             state = state_fn(app)
-            if not state or not state.get("open"):
-                return ""
-            path = close_fn(app) or state.get("path") or []
         except (ComputerUseError, NotImplementedError, OSError):
             return ""
+        if not state or not state.get("open"):
+            return ""
+        safe_fn = getattr(self.driver, "menu_escape_safe", None)
+        if callable(safe_fn):
+            try:
+                safe = safe_fn(app)
+            except Exception:
+                safe = True
+            if safe is False:
+                path = [str(part) for part in (state.get("path") or [])]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "a dialog is in front of the open menu; Escape was not sent",
+                    detail={
+                        "reason": "menu_dismiss_blocked",
+                        "outcome": "refused",
+                        "path": path,
+                        "next": ["ref"],
+                        "evidence": "Escape would dismiss the dialog, so the click was not sent",
+                    },
+                )
+        try:
+            path = close_fn(app) or state.get("path") or []
+        except ComputerUseError as exc:
+            exc.detail.setdefault("outcome", "refused")
+            exc.detail.setdefault("next", ["ref"])
+            raise
+        except (NotImplementedError, OSError):
+            return ""
         return f" (closed open menu {' > '.join(str(t) for t in path)} first)" if path else ""
+
+    def _refuse_vanished_target(self, element: Element) -> None:
+        """Refuse when ``element`` disappeared before the pointer or the keys.
+
+        The action has not been sent. A driver without this check, or a
+        target that is still there, returns. Success is not reported.
+        """
+        checker = getattr(self.driver, "target_vanished", None)
+        if not callable(checker):
+            return
+        try:
+            gone = checker(element)
+        except Exception:
+            return
+        if not gone:
+            return
+        title = f" {element.title!r}" if element.title else ""
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}{title}) vanished before the action; nothing was sent",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "target_vanished",
+                "outcome": "refused",
+                "next": ["ref"],
+                "evidence": f"{element.ref} was gone before the action, so nothing was sent",
+            },
+        )
 
     def _open_menu_header(self, app: str) -> str:
         """``open menu: File > Font`` for the snapshot header, or ""."""
@@ -3167,7 +4005,7 @@ class Runtime:
         best: Element | None = None
         for el in snap.elements:
             b = el.bounds
-            if b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
+            if b is None or b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
                 continue
             if b.x <= point.x < b.x + b.width and b.y <= point.y < b.y + b.height:
                 if best is None or b.width * b.height < best.bounds.width * best.bounds.height:
@@ -3197,6 +4035,60 @@ class Runtime:
                     "secure fields require human handoff",
                     detail={"ref": hit.ref, "role": hit.role},
                 )
+
+    def _recheck_scroll_target(self, app: str, target: Target) -> None:
+        """Hit-test a scroll before the wheel.
+
+        A disabled element is not hit-tested, so ``element_disabled`` still
+        wins. On Linux, a scroll area whose center lies on another window is
+        rechecked at another point inside its own box when that point
+        belongs to the snapshot's process. No such point rechecks the
+        center, and a foreign window there still raises ``focus_changed``.
+        """
+        if isinstance(target, Element) and not target.enabled:
+            return
+        point = self._linux_scroll_point(target)
+        if point is not None:
+            self._recheck_target(app, point)
+            return
+        self._recheck_target(app, target)
+
+    def _linux_scroll_point(self, target: Target) -> Point | None:
+        """An in-box point other than the center that belongs to the snapshot pid.
+
+        None on a non-Linux driver, a raw point, a missing pid, when the
+        center already matches, and when no candidate matches.
+        """
+        if getattr(self.driver, "name", None) != "linux" or not isinstance(target, Element):
+            return None
+        snap = self._current
+        pid = getattr(snap, "pid", None) if snap is not None else None
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return None
+        from a11y_computer_use.drivers import _linux_system
+        from a11y_computer_use.drivers._linux_scroll_anchor import recheck_point
+
+        screen = None
+        displays = getattr(self.driver, "displays", None)
+        if callable(displays):
+            try:
+                found = tuple(displays() or ())
+            except Exception:
+                found = ()
+            main = next((item for item in found if getattr(item, "is_main", False)), None)
+            chosen = main or (found[0] if found else None)
+            if chosen is not None:
+                try:
+                    screen = (int(chosen.width), int(chosen.height))
+                except (TypeError, ValueError):
+                    screen = None
+        found_point = recheck_point(
+            target.bounds, int(pid), _linux_system.pid_at_point, screen=screen,
+        )
+        if found_point is None:
+            return None
+        x, y = found_point
+        return Point(target.bounds.display_id, x, y)
 
     def _recheck_enabled_target(self, app: str, *targets: Target) -> None:
         """Hit-test before input, except when a target is already disabled.
@@ -3276,7 +4168,14 @@ class Runtime:
             if header:
                 first, _nl, rest = text.partition("\n")
                 text = f"{first}{header}\n{rest}" if rest else f"{first}{header}"
-            if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
+            # The custom-drawn note points at screen_text, whose default engine
+            # is macOS Vision. On Linux that note is a dead end: a frozen app
+            # is app_not_responding, and a genuinely empty tree stays silent.
+            # The Linux vision fallback is the ocr tool, not this hint.
+            if (
+                observe.interactive_count(snap) == 0
+                and getattr(self.driver, "name", None) != "linux"
+            ):
                 text = f"{text}\n\n{_VISION_HANDOFF_HINT}{self._auto_ocr_note(bundle, snap)}"
             if hasattr(self.driver, "webmcp_tools"):  # browser: the page's own tools as w refs
                 text = f"{text}{self._webmcp_block(bundle)}"
@@ -3300,9 +4199,11 @@ class Runtime:
         Takes a fresh snapshot (so the returned refs are live and actionable, and
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
-        `desktop_snapshot`. On Linux, a GTK table row whose name matches
-        ``text`` is scrolled into that snapshot when it is not already on
-        screen, and the ref is that on-screen cell."""
+        `desktop_snapshot`. On Linux, Chromium searches the whole document,
+        including a table that starts below the viewport, and scrolls the
+        matching cell into that snapshot. A GTK table seeks through the
+        Table interface, including a row that is not on screen. A cell
+        that stays off screen is reported with no bounds."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -3316,9 +4217,10 @@ class Runtime:
         _running, bundle = self._resolve_app(app)
 
         def execute() -> str:
-            # The Linux snapshot reads this once. A table row that matches
-            # ``text`` and is still off screen is scrolled into the tree
-            # before the pruner runs. Other drivers ignore the attribute.
+            # The Linux snapshot reads this once. The match is sought in the
+            # whole Chromium document, including a table that starts below
+            # the viewport, and that cell is scrolled into the tree before
+            # the pruner runs. Other drivers ignore the attribute.
             seek = text.strip() if isinstance(text, str) and text.strip() else None
             armed = hasattr(self.driver, "_table_seek")
             previous = getattr(self.driver, "_table_seek", None) if armed else None
@@ -3333,9 +4235,139 @@ class Runtime:
             matches = observe.find_elements(
                 snap, text=text, role=role, editable=editable, clickable=clickable
             )
-            return observe.render_matches(snap, matches)
+            return observe.render_matches(snap, matches, text=text)
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
+
+    def expanded_children(self, app: str, ref: str) -> str:
+        """The next page of ``ref``'s own children, contiguous with the last page.
+
+        A folded table lists the on-screen band and a ``… N more`` marker.
+        This returns the following child indexes of the node the caller
+        named, including children that sit below the viewport. The cursor
+        resumes at the exact end of that slice. Another call continues
+        with no gap. Drivers without an expand page return a full snapshot,
+        which is the previous listing.
+        """
+        app = _required_app_arg(app, "expanded_children")
+        snap = self._current
+        if snap is None or not any(el.ref == ref for el in snap.elements):
+            raise ValueError(f"not found: ref {ref} is not in the latest snapshot")
+        driver = self.driver
+        if not hasattr(driver, "_expand_page"):
+            return self.desktop_snapshot(app, mode="full")
+        armed = self._arm_expand_page(snap, ref)
+        if armed is None:
+            return observe.render_subtree(snap, ref) + "\nno further children"
+        key, start, limit = armed
+        try:
+            self.desktop_snapshot(app, mode="full")
+        finally:
+            driver._expand_page = None
+        fresh = self._current
+        if fresh is None:
+            return "expand failed: no snapshot"
+        cursors = getattr(driver, "_expand_cursors", None)
+        if isinstance(cursors, dict):
+            cursors[key] = start + limit
+        found = self._ref_for_expand_key(fresh, key)
+        if found is None:
+            return observe.render_text(fresh)
+        return observe.render_subtree(fresh, found)
+
+    def _arm_expand_page(self, snap: Snapshot, ref: str) -> tuple | None:
+        """Point the next Linux snapshot at the next page of ``ref``.
+
+        None when that node has no child past the ones already listed.
+        """
+        target = self._expand_target(snap, ref)
+        if target is None:
+            return None
+        element, handle = target
+        titles = _descendant_titles(snap, element.ref)
+        cursors = getattr(self.driver, "_expand_cursors", {})
+        from a11y_computer_use.drivers import _atspi
+
+        def read() -> tuple:
+            names = _atspi.child_labels(handle)
+            key = _atspi._frame_cache_key(handle)
+            count = _atspi._child_count(handle)
+            total = int(count) if isinstance(count, int) and not isinstance(count, bool) else len(names)
+            cursor = int(cursors.get(key, 0)) if isinstance(cursors, dict) else 0
+            start = observe.expand_start_index(names, titles, cursor)
+            return key, start, total
+
+        key, start, total = self.driver._run(read)
+        if start >= total:
+            return None
+        limit = observe.MAX_CHILDREN
+        self.driver._expand_page = (key, start, limit)
+        return (key, start, limit)
+
+    def _expand_target(self, snap: Snapshot, ref: str) -> tuple | None:
+        """``(element, handle)`` for ``ref`` itself.
+
+        The node the caller named is paged, including a document whose
+        off-screen paragraphs were dropped and so have no fold count. A
+        descendant is used only when ``ref`` has no live handle.
+        """
+        element = next(el for el in snap.elements if el.ref == ref)
+        children: dict[str | None, list] = {}
+        for item in snap.elements:
+            children.setdefault(item.parent, []).append(item)
+        descendants: list = []
+        stack = list(children.get(ref, ()))
+        while stack:
+            item = stack.pop()
+            descendants.append(item)
+            stack.extend(children.get(item.ref, ()))
+        folded = dict(observe.folded_children(snap))
+
+        def paired(item):
+            handle = observe.ax_handle_for(snap.snapshot_id, item.ref)
+            if handle is None:
+                return None
+            return item, handle
+
+        own = paired(element)
+        if own is not None:
+            return own
+        best: tuple[int, object, object] | None = None
+        for item in descendants:
+            count = folded.get(item.ref, 0)
+            if count <= 0:
+                continue
+            found = paired(item)
+            if found is None:
+                continue
+            if best is None or count > best[0]:
+                best = (count, found[0], found[1])
+        if best is not None:
+            return best[1], best[2]
+        return None
+
+    def _ref_for_expand_key(self, snap: Snapshot, key: object) -> str | None:
+        """The ref in ``snap`` whose live node is ``key``."""
+        from a11y_computer_use.drivers import _atspi
+
+        handles = [
+            (el.ref, observe.ax_handle_for(snap.snapshot_id, el.ref))
+            for el in snap.elements
+        ]
+        handles = [(ref, handle) for ref, handle in handles if handle is not None]
+        if not handles:
+            return None
+
+        def match() -> str | None:
+            for ref, handle in handles:
+                if _atspi._frame_cache_key(handle) == key:
+                    return ref
+            return None
+
+        runner = getattr(self.driver, "_run", None)
+        if runner is None:
+            return match()
+        return runner(match)
 
     @_serialized
     def screenshot(
@@ -3405,8 +4437,10 @@ class Runtime:
         """PNG of ``ref``'s on-screen bounds, plus those bounds.
 
         ``padding`` grows the rect on every side before it is clipped to the
-        display. ``scale`` sizes the PNG (1 keeps the cropped pixels). The
-        pixels are not read. An element that misses the display, or whose
+        display. ``scale`` sizes the PNG (1 keeps the cropped pixels). When
+        an OCR engine is installed, the text includes each word and its
+        screen bounds. A missing engine says no text was read. An element
+        that misses the display, or whose
         center belongs to another window, raises ``not_visible``. A ref the
         page has scrolled off screen is the same outcome (reason
         ``off_screen``): the node is still valid, and the error names
@@ -3427,6 +4461,12 @@ class Runtime:
         from a11y_computer_use import capture
 
         bounds = element.bounds
+        if bounds is None:
+            raise ComputerUseError(
+                ErrorCode.NOT_VISIBLE,
+                f"{ref} is off-screen: the ref has no bounds",
+                detail={"ref": ref, "reason": "off_screen"},
+            )
         if bounds.width < 1 or bounds.height < 1:
             raise _not_visible(ref, "off_screen", bounds, "the ref has no on-screen size")
         display = self._display_for_bounds(bounds)
@@ -3467,7 +4507,10 @@ class Runtime:
             png=png, width=width, height=height,
             source_width=region.width, source_height=region.height,
         )
-        return format_crop(ref, region, padding, scale, width, height), scaled
+        return format_crop(
+            ref, region, padding, scale, width, height,
+            ocr_text=_crop_ocr_text(png, region),
+        ), scaled
 
     def _display_for_bounds(self, bounds: Bounds):
         found = self._known_displays()
@@ -3681,53 +4724,230 @@ class Runtime:
         before = self._capture()
 
         menu_note: list[str] = []
+        # A non-clickable text ref that stands for a button or link. The
+        # click lands on that control. Empty when the ref is the control.
+        activated: list[Element] = []
+        # Fallback content inside a canvas. A pointer click lands on the canvas.
+        canvas_fallback: list[Element] = []
+        # A hidden notebook tab has a name and no box. A pointer click at an
+        # invented point would land on the page or the menu.
+        unbound: list[Element] = []
 
         def execute() -> None:
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
+            if isinstance(target, Element) and target.bounds is None:
+                unbound.append(target)
+                return
+            act: Target = target
+            if isinstance(target, Element) and self._current is not None:
+                proxy = text_click_control(self._current.elements, target)
+                if proxy is not None:
+                    self._refuse_disabled(proxy, verb="click")
+                    self._refuse_secure(proxy)
+                    act = proxy
+                    activated.append(proxy)
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
-                self._recheck_target(app, target)
+                self._recheck_target(app, act)
             menu_note.append(self._dismiss_open_menu(app))
+            if isinstance(act, Element):
+                self._refuse_vanished_target(act)
+            # Content nested in a <canvas> is not painted. A Linux button with
+            # a box would otherwise take the pointer path and hit the canvas.
+            # Activate the node. A right-click, double-click, or modifier
+            # would still be a pointer hit, so those are refused.
+            in_canvas = isinstance(act, Element) and self._canvas_fallback_target(act)
+            if in_canvas and isinstance(act, Element):
+                canvas_fallback.append(act)
+                if parsed_button is not MouseButton.LEFT or count != 1 or mods:
+                    raise _canvas_fallback_error(act)
+                if self.driver.press_element(act):
+                    return
+                raise _canvas_fallback_error(act)
             # AX activation (no cursor movement) is only meaningful for a plain
             # left single-click on a resolved element; anything with a button,
             # count, or modifier semantics goes through synthesized mouse events.
-            if (
+            plain = (
                 PREFER_AX_ACTIONS
-                and isinstance(target, Element)
+                and isinstance(act, Element)
                 and parsed_button is MouseButton.LEFT
                 and count == 1
                 and not mods
-                and not _linux_button_uses_pointer(self.driver, target)
-                and self.driver.press_element(target)
-            ):
+                and not _linux_button_uses_pointer(self.driver, act)
+            )
+            if plain and self.driver.press_element(act):
                 return  # activated via AX — the user's cursor never moved
+            if activated and isinstance(act, Element) and not _positive_box(act):
+                control = activated[0]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{target.ref} ({target.role}) has no click action, and "
+                    f"{control.ref} ({control.role} {control.title!r}) was not activated",
+                    detail={
+                        "ref": getattr(target, "ref", None),
+                        "role": getattr(target, "role", None),
+                        "reason": "not_activated",
+                        "control": control.ref,
+                    },
+                )
             # Synthesized mouse events land on whatever window is under the
             # point, so the hit-test runs right before them; an AXPress above
             # addressed the element itself and needs no such guard (#11).
-            self._recheck_target(app, target)
+            # A text ref uses the control's box, not the line-wide text box.
+            self._recheck_target(app, act)
             self._guard_user(app)
-            self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
+            self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
+        address = self._sheet_address_for_click(target, x, y)
+        # Read the folder location before the click. A side-pane selection
+        # changes the row and leaves this text where it was.
+        nav_before = None
+        if isinstance(target, Element):
+            nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
-        msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
+        if unbound:
+            el = unbound[0]
+            title = f" {el.title!r}" if el.title else ""
+            return self._conclude(
+                f"{el.ref} ({el.role}{title}) is hidden and has no bounds; no click was sent",
+                tool="click",
+                app=app,
+                before=before,
+                element=el,
+                had_ref=ref is not None,
+                verdict=("suspected_noop", "not_actionable"),
+            )
+        control_note = ""
+        if activated:
+            control = activated[0]
+            control_note = f" (activated {control.ref} {control.role} {control.title!r})"
+        msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
+        outline_note = (
+            isinstance(target, Element)
+            and not activated
+            and count == 1
+            and parsed_button is MouseButton.LEFT
+            and not mods
+            and target.note == "activates on double-click"
+        )
+        if outline_note:
+            # The click stayed a single click. The row opens on a double-click.
+            msg = f"{msg} (activates on double-click)"
         effect = self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
+        judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
         verdict = None
-        if isinstance(target, Element):
+        if isinstance(target, Element) and not activated:
             verdict = self._paragraph_click_verdict(target)
-        return self._conclude(
+            if verdict is None and nav_before is not None:
+                verdict = self._folder_navigation_verdict(target, nav_before)
+            if verdict is None:
+                verdict = self._opaque_click_verdict(target)
+        if verdict is None and address and not activated:
+            verdict = self._sheet_click_verdict(app, address)
+        if verdict is None and outline_note:
+            verdict = ("partial", "the row was selected and activates on double-click")
+        result = self._conclude(
             text, tool="click", app=app, before=before,
-            element=target if isinstance(target, Element) else None,
+            element=judged_element,
             had_ref=ref is not None,
             verdict=verdict,
+            cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
+        # The pointer still hit the target's center. A cover that changed
+        # while the target did not is not a click on the target.
+        if (
+            isinstance(result, outcome.ActionResult)
+            and result.outcome == "suspected_noop"
+            and result.evidence.startswith("covered by ")
+            and isinstance(target, Element)
+            and not activated
+        ):
+            msg = (
+                f"{self._label(ref, target)} did not reach the target; "
+                f"{result.evidence}{''.join(menu_note)}"
+            )
+            text = f"{msg}\n\neffect: {effect}" if effect else msg
+            result = outcome.ActionResult(
+                text, outcome=result.outcome, next=result.next, evidence=result.evidence,
+            )
+        # The text ref has no action of its own. "clicked" is only true when
+        # the control it stands for actually changed.
+        if activated and result.outcome == "suspected_noop":
+            control = activated[0]
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{getattr(target, 'ref', ref)} ({getattr(target, 'role', 'text')}) "
+                f"click did not activate {control.ref} ({control.role} {control.title!r})",
+                detail={
+                    "ref": getattr(target, "ref", ref),
+                    "role": getattr(target, "role", None),
+                    "reason": "not_activated",
+                    "control": control.ref,
+                },
+            )
+        # The action ran and the tree did not change. Reporting "clicked"
+        # would hide a handler that never ran. No pointer was sent.
+        if canvas_fallback and result.outcome == "suspected_noop":
+            raise _canvas_fallback_error(canvas_fallback[0], unconfirmed=True)
+        return result
+
+    def _sheet_address_for_click(self, target: Target, x: int | None, y: int | None) -> str | None:
+        """The Calc address this click is aimed at, or None.
+
+        A cell ref uses its title. A coordinate click uses the cell whose
+        published box contains the point. The address is taken before the
+        pointer moves.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if isinstance(target, Element):
+            if target.role != "AXCell":
+                return None
+            return _atspi.sheet_address(target.title)
+        snap = getattr(self, "_current", None)
+        if snap is None or x is None or y is None:
+            return None
+        found: list[Element] = []
+        for el in snap.elements:
+            if el.role != "AXCell" or el.bounds is None:
+                continue
+            if _atspi.sheet_address(el.title) is None:
+                continue
+            box = el.bounds
+            if box.x <= x < box.x + box.width and box.y <= y < box.y + box.height:
+                found.append(el)
+        if not found:
+            return None
+        found.sort(key=lambda el: el.bounds.width * el.bounds.height)
+        return _atspi.sheet_address(found[0].title)
+
+    def _sheet_click_verdict(self, app: str, address: str) -> tuple[str, str] | None:
+        """Selected-cell check for a Calc click. None off Linux and off a sheet."""
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.sheet_click_verdict(app, address)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
 
     def _paragraph_click_verdict(self, element: Element) -> tuple[str, str] | None:
-        """Caret check for a LibreOffice paragraph click. None for every other target.
+        """Caret or text-edit check for a LibreOffice click. None otherwise.
 
         A pointer click on Writer text moves focus, so the accessibility
         state changes even when the caret lands in the paragraph above.
-        That state change is not confirmation.
+        That state change is not confirmation. An Impress or Draw frame is
+        confirmed only when a focused editable paragraph or the caret is
+        inside it.
         """
         if getattr(self.driver, "name", None) != "linux":
             return None
@@ -3741,6 +4961,114 @@ class Runtime:
 
         def read():
             return _atspi.paragraph_click_verdict(handle)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
+
+    def _navigating_row_location(self, element: Element) -> str | None:
+        """The folder location before a click that should open a place.
+
+        None when this row only selects, or the driver is not Linux. The
+        text is the location entry or the path bar.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            if not _atspi.navigating_folder_row(handle):
+                return None
+            return _atspi.folder_location(handle)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
+
+    def _folder_navigation_verdict(self, element: Element, before: str) -> tuple[str, str] | None:
+        """Location check for a side-pane or navigating row. None off Linux.
+
+        Confirmed only when the location entry or the path bar changed.
+        A row that was only selected is partial.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.folder_navigation_verdict(handle, before)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
+
+    def _canvas_fallback_target(self, element: Element) -> bool:
+        """True when ``element`` is Chromium content nested inside a canvas.
+
+        The canvas element itself is false, so a click on it stays a center
+        pointer click. GTK drawing areas are false. A missing handle is false
+        so a stale ref stays a stale ref.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return False
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        runner = getattr(self.driver, "_run", None)
+
+        def read() -> bool:
+            return bool(_atspi.canvas_fallback_content(handle))
+
+        try:
+            if callable(runner):
+                return bool(runner(read))
+            return read()
+        except Exception:
+            return False
+
+    def _opaque_click_verdict(self, element: Element) -> tuple[str, str] | None:
+        """Unverifiable for a canvas or an unnamed image. None for every other target.
+
+        A click on those pixels can move focus, and that accessibility
+        change is not proof the click landed in the drawing. The result
+        says to check a crop or a screenshot instead of reporting confirmed.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.opaque_click_verdict(handle)
 
         try:
             if callable(runner):
@@ -4008,6 +5336,7 @@ class Runtime:
         base = before["snap"] if before else None
         focused_field = self._focused_editable(base)
         previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
+        selection = self._active_type_selection(bundle, previous)
         count = self._run_gated(action, bundle, execute)
         where = f" into {bundle}"
         if focused:
@@ -4015,6 +5344,7 @@ class Runtime:
         return self._conclude(
             f"typed {count} characters{where}{''.join(note)}",
             tool="type", app=bundle, before=before, requested=text, previous=previous,
+            selection=selection,
         )
 
     def _linux_key(self, chord: str, identifier: str) -> str:
@@ -4040,9 +5370,133 @@ class Runtime:
             key_focus=True, focus_before=focus_before,
         )
 
+    def _type_target_error(self, element: Element) -> ComputerUseError | None:
+        """Refuse a ref that cannot take text. None when it can.
+
+        A paragraph, button, or document is not a type target, except an
+        Impress or Draw paragraph the snapshot marks edit. Raising here
+        happens before focus and before any keystroke.
+        """
+        if element.editable:
+            return None
+        from a11y_computer_use.observe import _EDITABLE_ROLES
+
+        if element.role in _EDITABLE_ROLES:
+            return None
+        title = f" {element.title!r}" if element.title else ""
+        return ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}{title}) is not editable",
+            detail={"ref": element.ref, "role": element.role, "reason": "not_editable"},
+        )
+
+    def _focus_lost_type(self, element: Element) -> ComputerUseError:
+        """Focus did not land on ``element``. No keystrokes were sent."""
+        return ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            f"focus is not confirmed on {element.ref}; nothing was typed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "evidence": "focus did not land on the target, so no keystrokes were sent",
+            },
+        )
+
+    def _deliver_type_at_ref(self, element: Element, text: str) -> int:
+        """Focus ``element``, confirm it, then type. A miss types nothing.
+
+        A driver with ``type_into`` does both and reads that element back.
+        Any other driver must confirm focus before ``type_text`` runs, so
+        keystrokes cannot fall into whatever already had the caret.
+        """
+        typer = getattr(self.driver, "type_into", None)
+        if callable(typer):
+            typed = typer(element, text)
+        else:
+            focuser = getattr(self.driver, "focus_for_type", None)
+            if not callable(focuser) or focuser(element) is not True:
+                raise self._focus_lost_type(element)
+            typed = self.driver.type_text(text)
+        if isinstance(typed, int) and not isinstance(typed, bool):
+            return typed
+        return len(text)
+
+    def _type_at_ref(self, text: str, ref: str, app: str | None) -> str:
+        """Type ``text`` into ``ref`` only after focus is confirmed on it.
+
+        Resolution is the same path click and set_value use, so a replaced
+        process is ``stale_ref`` with reason ``app_restarted`` and nothing is
+        typed. The outcome read-back is this element, not the field that
+        happened to be focused before the call.
+        """
+        snap, live = self._resolve(ref, "typetext")
+        element_app = (snap.app or "").strip()
+        if app is not None and element_app and not (
+            _same_window_app(app, element_app) or _same_window_app(element_app, app)
+        ):
+            raise ValueError(
+                f"type ref {ref} belongs to {element_app!r}, not {app!r}"
+            )
+        gate = element_app or app or self._frontmost()
+        refused = self._type_target_error(live)
+        if refused is not None:
+            raise refused
+        before = self._capture(gate)
+        if before is not None and getattr(snap, "scope", None) is not None:
+            before = {**before, "scope": snap.scope}
+        previous = "" if live.value is None else str(live.value)
+        cover = self._cover_owner(live, gate)
+        if cover and cover != "off_screen":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{ref} is covered by {cover}",
+                detail={
+                    "ref": ref,
+                    "role": live.role,
+                    "reason": "covered",
+                    "outcome": "refused",
+                    "next": ["foreground", "ref"],
+                    "evidence": f"the window is covered by {cover}",
+                },
+            )
+        if live.secure:
+            self._record_failure(
+                "typetext", app=gate, params={"ref": ref, "role": live.role},
+                result=ErrorCode.SECURE_FIELD.value,
+            )
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "refusing to type into a secure field; secrets are entered by the human",
+                detail={"ref": ref, "role": live.role},
+            )
+        action = TypeText(text=text)
+        note: list[str] = []
+
+        def execute() -> int:
+            self._reject_domain(Click(target=live), app=gate)
+            self._refuse_disabled(live, verb="type")
+            self._guard_user(gate)
+            note.append(self._dismiss_open_menu(gate))
+            self._refuse_vanished_target(live)
+            return self._deliver_type_at_ref(live, text)
+
+        count = self._run_gated(action, gate, execute, input_target=live)
+        shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        return self._conclude(
+            f"typed {shown} characters into {ref}{''.join(note)}",
+            tool="type", app=gate, before=before, element=live, requested=text,
+            had_ref=True, previous=previous,
+        )
+
     @_serialized
-    def type_text(self, text: str, app: str | None = None) -> str:
+    def type_text(self, text: str, app: str | None = None, ref: str | None = None) -> str:
         app = _optional_app_arg(app, "type")
+        ref = _optional_ref_arg(ref, "type")
+        if ref is not None:
+            return self._type_at_ref(text, ref, app)
         addressed = self._linux_addressed_app(app)
         if addressed is not None:
             return self._linux_type_text(text, addressed)
@@ -4053,6 +5507,12 @@ class Runtime:
         base = before["snap"] if before else self._current
         focused = self._focused_editable(base)
         previous = None if focused is None or focused.value is None else str(focused.value)
+        # Do not probe the frontmost app here. That probe is the focus
+        # recheck inside the gate, and an extra call consumes it.
+        current_app = getattr(getattr(self, "_current", None), "app", None)
+        selection = self._active_type_selection(
+            target[0] if target is not None else current_app, previous,
+        )
         if target is not None:
             bundle, pid = target
 
@@ -4069,6 +5529,7 @@ class Runtime:
                 f"typed {count} characters into {bundle} "
                 "(addressed to its process; nothing was activated)",
                 tool="type", app=bundle, before=before, requested=text, previous=previous,
+                selection=selection,
             )
         front = self._frontmost()
 
@@ -4084,6 +5545,7 @@ class Runtime:
         return self._conclude(
             f"typed {count} characters{''.join(note)}",
             tool="type", app=front, before=before, requested=text, previous=previous,
+            selection=selection,
         )
 
     def _validate_chord(self, chord: str) -> None:
@@ -4212,7 +5674,7 @@ class Runtime:
             action,
             app,
             execute,
-            recheck=lambda gated, target=target: self._recheck_enabled_target(gated, target),
+            recheck=lambda gated, target=target: self._recheck_scroll_target(gated, target),
         )
         if into_view:
             text = f"scrolled {self._label(ref, target)} into view"
@@ -4250,6 +5712,13 @@ class Runtime:
             self._guard_user(start_app)
             self.driver.drag(start, end, path=waypoints)
 
+        before = self._capture(start_app)
+        before_snap = before.get("snap") if isinstance(before, dict) else None
+        start_el = start if isinstance(start, Element) else outcome.element_at_point(before_snap, start)
+        end_el = end if isinstance(end, Element) else outcome.element_at_point(before_snap, end)
+        dest = _drag_dest_file(before_snap, start_el, end_el)
+        existed = _path_is_file(dest) if dest is not None else None
+
         self._run_gated(
             action,
             start_app,
@@ -4258,8 +5727,37 @@ class Runtime:
                 gated, *items
             ),
         )
+        scope = getattr(before_snap, "scope", None) or Scope.WINDOW
+        after = self._reread(start_app, scope)
+        file_landed = None
+        if dest is not None and existed is not None:
+            file_landed = self._drag_file_landed(dest, existed)
+        verdict = outcome.drag_drop_verdict(
+            before_snap, after, start_el, end_el, file_landed=file_landed,
+        )
         via = f" via {len(waypoints)} waypoints" if waypoints else ""
-        return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
+        text = f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
+        if verdict[0] != "confirmed":
+            text += "; drop not confirmed"
+        return self._conclude(
+            text, tool="drag", app=start_app, before=before,
+            element=start_el if isinstance(start_el, Element) else None,
+            had_ref=start_ref is not None or end_ref is not None,
+            verdict=verdict,
+        )
+
+    def _drag_file_landed(self, dest: str, existed: bool) -> bool:
+        """True when ``dest`` is a file now and was not before the drag."""
+        if existed:
+            return False
+        if _path_is_file(dest):
+            return True
+        deadline = time.monotonic() + max(0.0, float(self._DRAG_DROP_SETTLE_S))
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            if _path_is_file(dest):
+                return True
+        return False
 
     def _drag_path(self, path: list | None, start: Target, display_id: int | None) -> tuple[Point, ...]:
         """Turn ``[[x, y], ...]`` into display-qualified waypoints on the start's display.
@@ -4328,7 +5826,7 @@ class Runtime:
         Step shapes (key ``do`` selects the action):
           {"do":"click","ref":"e5"}  (+ button, count, modifiers, or x/y/display_id)
           {"do":"hover","ref":"e5"}  (or x/y/display_id; no button)
-          {"do":"type","text":"..."}
+          {"do":"type","text":"..."}  (optional "ref" focuses that element first)
           {"do":"key","chord":"cmd+s"}  (modifiers: ["ctrl"] folds into the chord)
           {"do":"scroll","ref":"e3","dy":5}  (+ dx, unit, into_view, or x/y)
           {"do":"drag","start_ref":"e1","end_ref":"e2"}
@@ -4412,6 +5910,10 @@ class Runtime:
             detail = _ref_or_point_error(step, "ref", "x", "y", _TARGET_REQUIRED)
         elif do == "type":
             detail = _required_str_error(step, "text")
+            if detail is None and step.get("ref") is not None:
+                ref = step.get("ref")
+                if not isinstance(ref, str) or not ref.strip():
+                    detail = "'ref' must be a non-empty string"
         elif do == "key":
             detail = self._key_step_error(step)
         elif do == "scroll":
@@ -4461,6 +5963,11 @@ class Runtime:
         if do == "hover":
             return self.hover(step.get("x"), step.get("y"), step.get("display_id"), step.get("ref"))
         if do == "type":
+            # Omit ref when the step has none. Callers that replace type_text
+            # with a one-argument stub keep working, and a present ref still
+            # focuses that element before any text is entered.
+            if step.get("ref"):
+                return self.type_text(step["text"], ref=step["ref"])
             return self.type_text(step["text"])
         if do == "key":
             return self.key(_folded_key_chord(step))
@@ -4545,6 +6052,22 @@ class Runtime:
                     f"the value {value!r} did not land on {ref}",
                     detail={"ref": ref, "role": live.role, "reason": "text_mismatch"},
                 )
+            # Linux set_value raises when the write fails. False means there
+            # is no accessible whose focus can be confirmed, so do not type
+            # into whatever currently has the caret.
+            if getattr(self.driver, "name", None) == "linux":
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_LOST,
+                    f"focus is not confirmed on {ref}; nothing was typed",
+                    detail={
+                        "ref": ref,
+                        "role": live.role,
+                        "reason": "focus_lost",
+                        "outcome": "refused",
+                        "next": ["ref", "cdp"],
+                        "evidence": "the keyboard fallback did not run because focus was not on the target",
+                    },
+                )
             self.driver.press_element(live)  # fallback: focus then synthesize typing
             pid = observe.element_pid(live) if getattr(self.driver, "background_input", False) else None
             if pid:
@@ -4553,7 +6076,7 @@ class Runtime:
             self._recheck_target(app, live)  # HID typing: the classic guard, right before injection
             self.driver.type_text(value)
 
-        self._run_gated(action, app, execute)
+        self._run_gated(action, app, execute, input_target=live)
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
         return self._conclude(
@@ -4566,7 +6089,7 @@ class Runtime:
     @_serialized
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
                        direction: str = "down", max_scrolls: int = 6, scope: str = "window",
-                       ref: str | None = None) -> str:
+                       ref: str | None = None, budget_s: float | None = None) -> str:
         """Scroll a view until an element matching text/role enters it, then
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
@@ -4578,14 +6101,67 @@ class Runtime:
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
-        (``page_unchanged``) is not the end of the search while the other
-        direction has not been tried: the search comes back one line at a
-        time. If that direction does not move either, the still-page error
-        stands. The still grab does not install a new head. A scroll that
-        moved the pixels while the in-scroll row read was still the old head
-        (``rows_stale``) is not the end of the search either: the page did
-        move, and the next iteration snapshots the tree again instead of
-        aborting or turning around."""
+        (``page_unchanged``) is tried once more in that same direction: the
+        on-screen rows are often still the pre-scroll tree. A second still
+        page is not the end of the search while the other direction has not
+        been tried. The return uses the same line count, not one line. One
+        line from the bottom of a long list never reaches an early row, and
+        the one-line bar step is what falls through to a track click and
+        jumps over that row. Five lines stays inside the rows already on
+        screen, so the return still overlaps. If the return does not move
+        either, the still-page error stands. The still grab does not
+        install a new head. A document wheel that does not move the page
+        (``surface=document``) is the end of that document. The same
+        direction is tried once more. A second still document is not found:
+        the search does not turn around, so the page stays at the end, and
+        the still-page error is not raised. A scroll that moved the pixels
+        while the in-scroll row read was still the old head (``rows_stale``)
+        is not the end of the search either: the page did move, and the next
+        iteration snapshots the tree again instead of aborting or turning
+        around.
+
+        The snapshot taken in the same turn as the wheel can still be the
+        pre-scroll tree: the row is named at its old position after the
+        page has moved past it. A hit is returned only when a later
+        snapshot still shows that match and its center lies inside the
+        window. Otherwise the search scrolls back toward the row and
+        checks again. The ref and the bounds are from that confirming
+        snapshot, not from the pre-scroll one.
+
+        The search stops after ``budget_s`` seconds with no progress (15
+        by default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). A step
+        that shows different on-screen rows, or that changes the
+        container's scroll offset, starts that clock again. The search
+        also stops at 120 seconds from the start. ``budget_s`` of 0 stops
+        before any scroll. The note names the scroll container, its
+        scroll position, and the last rows on screen. A document, a
+        table, or a list is tried with Ctrl+F first, including an
+        overflow list shorter than the window. A miss keeps the wheel.
+        After Ctrl+F, Chrome is latched and the tree is read again until
+        the page frame is back. The find bar and an empty cached frame
+        are not wheeled.
+        A paginated or virtualized table that already fits in the window
+        then steps with Page Down. A table that still runs past the
+        window keeps the wheel, so the last rows can come on screen.
+        ``page_unchanged`` is used only when that container's scroll
+        offset was read and did not move.
+
+        A large GTK table is searched once through its Table interface
+        before those steps. The matching cell is brought in with AT-SPI
+        scroll_to or by setting the vertical bar from the row index. That
+        counts as one scroll when the cell was off screen. When the name
+        is not a cell in that table, each following step moves the
+        vertical bar by one viewport of painted rows. Chromium, Firefox,
+        and a short table keep the five-line wheel.
+
+        While the name is not in the tree, the step stays five lines. On
+        a document that is one burst of wheel notches, about a viewport.
+        Once a document names the match and the center is just outside
+        the window, the next steps are one notch, so the search does not
+        jump another viewport past the row. A match more than one window
+        away keeps the five-line burst. A list or scroll area keeps the
+        five-line correction: one line there is the track click, and the
+        walk back to an early row needs the five-line step."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -4595,6 +6171,15 @@ class Runtime:
             raise ValueError("scope must be 'window' or 'app'")
         if isinstance(max_scrolls, bool) or not isinstance(max_scrolls, int) or not 0 <= max_scrolls <= MAX_SCROLLS:
             raise ValueError(f"max_scrolls must be an integer between 0 and {MAX_SCROLLS}")
+        if budget_s is None:
+            raw_budget = os.environ.get("A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S", "15")
+            try:
+                budget_s = float(raw_budget)
+            except ValueError:
+                budget_s = 15.0
+        if isinstance(budget_s, bool) or not isinstance(budget_s, (int, float)) or not 0 <= float(budget_s) <= 120:
+            raise ValueError("budget_s must be a number of seconds from 0 to 120")
+        budget_s = float(budget_s)
         self.driver.ensure_trusted()
         _running, bundle = self._resolve_app(app)
         pinned = self._anchor_audited(ref, "scroll") if ref is not None else None
@@ -4611,16 +6196,493 @@ class Runtime:
         def rows_stale(exc: ComputerUseError) -> bool:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "rows_stale"
 
+        def viewport_box(snap: Snapshot) -> tuple[int, int, int, int] | None:
+            """Window rectangle, or the main display when the snapshot has no window."""
+            windows = [
+                el for el in snap.elements
+                if el.role in ("AXWindow", "AXSheet", "AXDialog")
+                and el.bounds.width > 40 and el.bounds.height > 40
+            ]
+            if windows:
+                box = max(windows, key=lambda el: el.bounds.width * el.bounds.height).bounds
+                return (box.x, box.y, box.x + box.width, box.y + box.height)
+            if not snap.displays:
+                return None
+            display = next((item for item in snap.displays if item.is_main), snap.displays[0])
+            return (0, 0, display.width, display.height)
+
+        def on_screen(el: Element, snap: Snapshot) -> bool:
+            """True when ``el``'s center sits inside the window.
+
+            A row the page has parked above the viewport can still carry the
+            y it had before the wheel. Overlapping the top edge is not enough:
+            the center has to be inside the window.
+            """
+            bounds = el.bounds
+            if bounds is None or bounds.width < 1 or bounds.height < 1:
+                return False
+            box = viewport_box(snap)
+            if box is None:
+                return True
+            left, top, right, bottom = box
+            center_x = bounds.x + bounds.width / 2
+            center_y = bounds.y + bounds.height / 2
+            return left <= center_x < right and top <= center_y < bottom
+
+        def visible_matches(snap: Snapshot) -> list[Element]:
+            return [
+                el for el in observe.find_elements(snap, text=text, role=role)
+                if on_screen(el, snap)
+            ]
+
+        def place_of(snap: Snapshot) -> str:
+            """Where the match sits relative to the window.
+
+            ``visible`` is a center inside the window. ``above`` and ``below``
+            are a match whose center is outside that window. ``missing`` is
+            no match in this snapshot. A document table keeps rows that have
+            already left the viewport, so a name in the tree is not a hit.
+            """
+            found = observe.find_elements(snap, text=text, role=role)
+            located = [el for el in found if el.bounds is not None]
+            if not located:
+                return "missing"
+            if any(on_screen(el, snap) for el in located):
+                return "visible"
+            box = viewport_box(snap)
+            if box is None:
+                return "visible"
+            _left, top, _right, bottom = box
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in located)
+            if center_y < top:
+                return "above"
+            if center_y >= bottom:
+                return "below"
+            return "visible"
+
+        def confirming_snapshot(scrolls_issued: int) -> tuple[str, str | None]:
+            """``(found, text)`` when a later snapshot still shows the match.
+
+            The read in the same turn as the wheel can be the pre-scroll
+            tree. A second read that drops the match, or moves its center
+            out of the window, is not a hit. ``above`` / ``below`` /
+            ``missing`` tell the caller which way to scroll.
+            """
+            fresh = self.driver.snapshot(Scope(scope), bundle)
+            self._current = fresh
+            kind = place_of(fresh)
+            if kind != "visible":
+                return kind, None
+            time.sleep(_SCROLL_VERIFY_PAUSE_S)
+            later = self.driver.snapshot(Scope(scope), bundle)
+            self._current = later
+            kind = place_of(later)
+            if kind != "visible":
+                return kind, None
+            visible = visible_matches(later)
+            return "found", (
+                f"found after {scrolls_issued} scroll(s):\n"
+                f"{observe.render_matches(later, visible)}"
+            )
+
+        def document_anchor(anchor: Element | None) -> bool:
+            """A body-scroll document, not a list or scroll area.
+
+            Five notches on that group are about a viewport. A list's
+            five-line step is about five rows and has to stay five: one
+            line is the track click, and the walk back to an early row
+            does not fit in the budget.
+            """
+            return anchor is not None and anchor.role in ("AXGroup", "AXWebArea")
+
+        def match_is_far(snap: Snapshot) -> bool:
+            """True when the named row sits more than one window away.
+
+            A document inch is for a row just outside the window. A row
+            many viewports below never arrives one line at a time, so
+            the search keeps the five-line burst until the row is close.
+            """
+            found = observe.find_elements(snap, text=text, role=role)
+            box = viewport_box(snap)
+            if not found or box is None:
+                return False
+            _left, top, _right, bottom = box
+            height = bottom - top
+            if height < 1:
+                return False
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in found)
+            if center_y < top:
+                return (top - center_y) > height
+            if center_y >= bottom:
+                return (center_y - bottom) > height
+            return False
+
         def execute() -> str:
-            # Several lines per step can jump past the target. On the 0.4.17
-            # retest the search reached ITEM-193 and stopped on page_unchanged
-            # while ITEM-180 had never been shown. One still page in this
-            # direction turns the search around, one line at a time. A second
-            # still page means both ends have been reached.
+            # Several lines per step can pass the target and stop at the end
+            # of the list. On the 0.4.17 retest the search reached ITEM-193
+            # and stopped on page_unchanged while ITEM-180 had never been
+            # shown. One still page can be the tree lagging the paint, so
+            # that step is repeated. A second still page turns the search
+            # around by the same line count. Coming back one line at a time
+            # does not reach an early row, and that one-line step is the one
+            # a track click replaces with a page. A second still page in the
+            # return direction means both ends have been reached.
             step = dy
             issued = 0
             turned = False
+            stalls = 0
+            backs = 0
+            # Set once the document has named the target. Later steps on
+            # that document stay one notch, including a pass where the
+            # name has dropped out of the tree again. A list never sets
+            # this: its correction stays five lines.
+            seen_document = False
             limit = max_scrolls
+            started = time.monotonic()
+            stall_deadline = started + budget_s
+            hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
+            page_mode = True
+            # A document table that began below the window has reached the
+            # end once its box sits inside the window. Page Down is for a
+            # table that fit from the start. Using it after the document
+            # scroll spends another pair of snapshots and misses the short
+            # page's time bound.
+            document_ran_past = False
+            find_tried = False
+            table_jumped = False
+            frame_latched = False
+            frame_waits = 0
+            same_rows = 0
+            previous_rows: tuple[str, ...] | None = None
+            last_anchor: Element | None = None
+            progress_rows: tuple[str, ...] | None = None
+            progress_offset = "unset"
+            progress_seen = False
+
+            def row_names(shot: Snapshot, anchor: Element | None = None) -> tuple[str, ...]:
+                under: set[str] = set()
+                if anchor is not None:
+                    children: dict[str, list[str]] = {}
+                    for el in shot.elements:
+                        if el.parent:
+                            children.setdefault(el.parent, []).append(el.ref)
+                    stack = [anchor.ref]
+                    while stack:
+                        ref = stack.pop()
+                        if ref in under:
+                            continue
+                        under.add(ref)
+                        stack.extend(children.get(ref, ()))
+                names: list[str] = []
+                for el in shot.elements:
+                    title = (el.title or "").strip()
+                    if not title or not on_screen(el, shot):
+                        continue
+                    listed = el.role in ("AXCell", "AXRow", "AXListItem")
+                    in_list = (
+                        anchor is not None
+                        and el.ref in under
+                        and el.ref != anchor.ref
+                        and el.role == "AXStaticText"
+                    )
+                    if not listed and not in_list:
+                        continue
+                    if not names or names[-1] != title:
+                        names.append(title)
+                return tuple(names)
+
+            def note_progress(shot: Snapshot, anchor: Element | None) -> None:
+                """Start the no-progress clock again when the list actually moves."""
+                nonlocal stall_deadline, progress_rows, progress_offset, progress_seen
+                names = row_names(shot, anchor)
+                if not progress_seen:
+                    progress_rows = names
+                    progress_seen = True
+                    return
+                rows_moved = names != progress_rows
+                offset_moved = False
+                if rows_moved:
+                    progress_rows = names
+                else:
+                    offset = read_offset(anchor)
+                    # The first unchanged read is the baseline. A later
+                    # read counts only when the bar value actually moves.
+                    if progress_offset == "unset":
+                        if offset != "unknown":
+                            progress_offset = offset
+                    else:
+                        offset_moved = offset != "unknown" and offset != progress_offset
+                        if offset != "unknown":
+                            progress_offset = offset
+                if budget_s > 0 and (rows_moved or offset_moved):
+                    stall_deadline = time.monotonic() + budget_s
+
+            def expired_cap() -> float | None:
+                """The cap that has run out, or None while the search may continue.
+
+                ``budget_s`` is only the no-progress cap. The hard ceiling
+                applies while rows or the offset keep changing. A zero
+                budget is already spent, and it is not reported as the
+                hard ceiling.
+                """
+                now = time.monotonic()
+                if budget_s <= 0:
+                    return budget_s if now >= stall_deadline else None
+                if now >= hard_deadline:
+                    return _SCROLL_FIND_HARD_S
+                if now >= stall_deadline:
+                    return budget_s
+                return None
+
+            def table_runs_past(shot: Snapshot, anchor: Element | None) -> bool:
+                """True when a table's box still extends below the window."""
+                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                    return False
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                return anchor.bounds.y + anchor.bounds.height > box[3] + 8
+
+            def prefers_page_step(shot: Snapshot, anchor: Element | None) -> bool:
+                """A paginated or virtualized table that already fits the window.
+
+                A Next link is pagination when the table does not run past
+                the window. A table that fits and has its own bar is
+                virtualized. A table that still extends below the window
+                is a document scroll: the wheel brings the last rows up.
+                A body-scroll list is neither, and keeps the wheel.
+                """
+                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                    return False
+                if not callable(getattr(self.driver, "key_chord", None)):
+                    return False
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                _left, top, _right, bottom = box
+                if anchor.bounds.y + anchor.bounds.height > bottom + 8:
+                    return False
+                for el in shot.elements:
+                    title = (el.title or "").strip().casefold()
+                    if el.role in ("AXLink", "AXButton") and title in {"next", "next page", "older"}:
+                        return True
+                if not any(el.role == "AXScrollBar" for el in shot.elements):
+                    return False
+                if anchor.bounds.height >= (bottom - top) - 8:
+                    return False
+                visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
+                return visible <= 80
+
+            def wants_in_page_find(_shot: Snapshot, anchor: Element | None) -> bool:
+                """Ctrl+F once before the wheel, for a document, a table, or a list.
+
+                An overflow list uses find first, including one shorter than
+                the window. A five-line wheel there is about five rows, and
+                the walk back to an early row does not fit in a no-progress
+                budget. A miss falls through to the wheel. A tall list, the
+                document group, or a scroll area is the same find.
+                """
+                if not text or "\n" in text or len(text) > 80 or anchor is None:
+                    return False
+                if not callable(getattr(self.driver, "key_chord", None)):
+                    return False
+                if not callable(getattr(self.driver, "type_text", None)):
+                    return False
+                if anchor.role in ("AXTable", "AXGrid", "AXOutline", "AXList", "AXScrollArea"):
+                    return True
+                if document_anchor(anchor):
+                    return True
+                return False
+
+            def read_offset(anchor: Element | None) -> str:
+                fn = getattr(self.driver, "scroll_offset", None)
+                if anchor is None or not callable(fn):
+                    return "unknown"
+                try:
+                    value = fn(anchor)
+                except Exception:
+                    return "unknown"
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return "unknown"
+                return f"{float(value):g}"
+
+            def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
+                           budget_cap: float | None = None) -> str:
+                names = row_names(shot, anchor)
+                tail = ", ".join(names[-8:]) if names else "none"
+                if anchor is None:
+                    container = "unknown"
+                else:
+                    title = f" {(anchor.title or '').strip()!r}" if (anchor.title or "").strip() else ""
+                    container = f"{anchor.role}{title} ref={anchor.ref}"
+                shown_budget = budget_s if budget_cap is None else budget_cap
+                why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
+                return (
+                    f"not found after {count} scroll(s){why}: "
+                    f"no element matches text={text!r} role={role!r}\n"
+                    f"container: {container}\n"
+                    f"scroll_position: {read_offset(anchor)}\n"
+                    f"last_rows: {tail}"
+                )
+
+            def page_frame_missing(shot: Snapshot, anchor: Element | None) -> bool:
+                """True for the find bar or an empty cached Chrome frame.
+
+                A page that already names rows is the frame to search, even
+                while the find bar is still closing. An untitled group with
+                no on-screen rows is the cached frame. Wheeling it does not
+                move the page.
+                """
+                if row_names(shot, anchor):
+                    return False
+                if anchor is not None and (anchor.title or "").strip():
+                    if not (anchor.title or "").lstrip().lower().startswith("find in page"):
+                        return False
+                for el in shot.elements:
+                    title = el.title or ""
+                    folded = title.lstrip().lower()
+                    if title == "Close find bar" or folded.startswith("find in page"):
+                        return True
+                    if title == "Find" and el.role in {"AXTextField", "AXSearchField", "AXTextArea"}:
+                        return True
+                if anchor is None or anchor.role not in {"AXGroup", "AXWebArea"}:
+                    return False
+                return True
+
+            def latch_once() -> bool:
+                """Record Chrome once so the next snapshot drops the find cache.
+
+                False when this driver has no latch. A failed latch is not
+                retried.
+                """
+                nonlocal frame_latched
+                if frame_latched:
+                    return True
+                latch = getattr(self.driver, "latch_chromium_find", None)
+                if not callable(latch):
+                    return False
+                try:
+                    latch(bundle)
+                except Exception:
+                    return False
+                frame_latched = True
+                return True
+
+            def restore_page_frame() -> bool:
+                """Re-read until the page frame is back.
+
+                False when this driver has no latch, or the page did not
+                return within the reads. The current snapshot is the page
+                when True. The latch itself is the caller's: the confirming
+                read is the one cache clear, and this loop runs only when
+                that read is still the find bar or an empty frame.
+                """
+                if not latch_once():
+                    return False
+                for _ in range(6):
+                    fresh = self.driver.snapshot(Scope(scope), bundle)
+                    self._current = fresh
+                    if not page_frame_missing(fresh, _scroll_anchor(fresh)):
+                        return True
+                    time.sleep(0.12)
+                return False
+
+            def try_in_page_find(anchor: Element) -> str | None:
+                """Ctrl+F once. The match is returned only when a later snapshot shows it.
+
+                Escape closes the find bar before that snapshot, so the ref
+                is the page. The Chrome process is latched and the tree is
+                read again until that page frame is back. A miss does not
+                count as a scroll.
+                """
+                if not text or "\n" in text or len(text) > 80:
+                    return None
+                if not callable(getattr(self.driver, "type_text", None)):
+                    return None
+                try:
+                    self.driver.key_chord("ctrl+f")
+                    self.driver.type_text(text)
+                    self.driver.key_chord("Return")
+                    time.sleep(0.2)
+                except Exception:
+                    try:
+                        self.driver.key_chord("Escape")
+                    except Exception:
+                        pass
+                    return None
+                try:
+                    self.driver.key_chord("Escape")
+                except Exception:
+                    pass
+                # The confirming read is the cache clear. A short page that
+                # does not name the target stops there. Another snapshot and
+                # a pause miss the 12s bound. A tall table, or a row that is
+                # already in the tree but off screen, gets one more read.
+                latch_once()
+                kind, verified = confirming_snapshot(issued + 1)
+                if kind == "found":
+                    return verified
+                if ready_anchor() is None:
+                    if restore_page_frame():
+                        kind, verified = confirming_snapshot(issued + 1)
+                        if kind == "found":
+                            return verified
+                elif kind in {"above", "below"} or content_is_tall(self._current):
+                    time.sleep(0.2)
+                    kind, verified = confirming_snapshot(issued + 1)
+                    if kind == "found":
+                        return verified
+                return None
+
+            def content_is_tall(shot: Snapshot) -> bool:
+                """A table or list more than two windows tall.
+
+                Find on that page can scroll the row in before the tree
+                names it. A table that only sticks out past the window does
+                not need the extra read.
+                """
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                height = box[3] - box[1]
+                if height < 1:
+                    return False
+                return any(
+                    el.role in ("AXTable", "AXGrid", "AXOutline", "AXList")
+                    and el.bounds.height > height * 2
+                    for el in shot.elements
+                )
+
+            def pinned_anchor(shot: Snapshot) -> Element | None:
+                """The pinned container in ``shot``.
+
+                A ref string is the slot in one snapshot. After the document
+                moves, that slot can be a cell. The unchanged-row check
+                follows the table that was pinned, using the fresh bounds.
+                The wheel still resolves once through the driver, so a
+                search records one resolution per scroll.
+                """
+                try:
+                    return observe.rematch_ref(pinned[0], ref, shot)
+                except (KeyError, ComputerUseError):
+                    try:
+                        return shot.element(ref)
+                    except KeyError:
+                        return None
+
+            def ready_anchor() -> Element | None:
+                """The page anchor after Ctrl+F, when that frame is back."""
+                fresh = self._current
+                if fresh is None:
+                    return None
+                if pinned is not None:
+                    found_anchor = pinned_anchor(fresh)
+                else:
+                    found_anchor = _scroll_anchor(fresh)
+                if found_anchor is None or page_frame_missing(fresh, found_anchor):
+                    return None
+                return found_anchor
+
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
                 self._current = snap
@@ -4630,21 +6692,271 @@ class Runtime:
                         "the pinned scroll ref belongs to a different app; re-observe the requested app",
                         detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
                     )
+                if pinned is not None:
+                    anchor_now = pinned_anchor(snap)
+                else:
+                    anchor_now = _scroll_anchor(snap)
+                if anchor_now is not None:
+                    last_anchor = anchor_now
+                if table_runs_past(snap, last_anchor):
+                    document_ran_past = True
+                note_progress(snap, last_anchor)
+                cap = expired_cap()
+                if cap is not None and (issued > 0 or budget_s <= 0):
+                    return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
+                if last_anchor is not None and last_anchor.role in ("AXTable", "AXGrid"):
+                    seen = row_names(snap)
+                    if issued > 0 and previous_rows is not None and seen == previous_rows:
+                        same_rows += 1
+                        if same_rows >= 2:
+                            return unfinished(issued, snap, last_anchor, budget_hit=False)
+                    else:
+                        same_rows = 0
+                    previous_rows = seen
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
-                    return f"found after {issued} scroll(s):\n{observe.render_matches(snap, matches)}"
+                    shown = visible_matches(snap)
+                    if shown and issued == 0:
+                        # Ctrl+F can land the row before a wheel is counted.
+                        # The report is still one step, not a row that was
+                        # already on screen.
+                        count = 1 if find_tried else 0
+                        return (
+                            f"found after {count} scroll(s):\n"
+                            f"{observe.render_matches(snap, shown)}"
+                        )
+                    if issued == 0:
+                        # The document already names the row, off screen.
+                        # A five-notch burst here jumps about a viewport
+                        # past it. One notch moves toward the row. A list
+                        # falls through and keeps the requested five lines.
+                        anchor = (
+                            self.driver.resolve_ref(pinned[0], ref, live=snap)
+                            if pinned is not None else _scroll_anchor(snap)
+                        )
+                        if anchor is not None and document_anchor(anchor):
+                            if issued >= limit:
+                                break
+                            kind = place_of(snap)
+                            # One notch only when the row is already close.
+                            # A far row stays on the viewport burst.
+                            lines = 1 if not match_is_far(snap) else abs(dy)
+                            if lines == 1:
+                                seen_document = True
+                            if kind == "above":
+                                recover = -lines
+                            elif kind == "below":
+                                recover = lines
+                            else:
+                                recover = -lines if dy < 0 else lines
+                            step = recover
+                            try:
+                                self._run_gated(
+                                    Scroll(target=anchor, dy=recover), bundle,
+                                    partial(inject_scroll, anchor, recover),
+                                    recheck=partial(self._recheck_target, target=anchor),
+                                )
+                            except ComputerUseError as exc:
+                                if rows_stale(exc):
+                                    issued += 1
+                                    stalls = 0
+                                    continue
+                                if page_unchanged(exc):
+                                    break
+                                raise
+                            issued += 1
+                            stalls = 0
+                            continue
+                    if issued > 0:
+                        # The naming snapshot can be the tree from before this
+                        # wheel. Return a ref only when a later snapshot still
+                        # has the match inside the window.
+                        kind, verified = confirming_snapshot(issued)
+                        if kind == "found" and verified is not None:
+                            return verified
+                        if issued >= limit:
+                            break
+                        anchor = (
+                            self.driver.resolve_ref(pinned[0], ref, live=self._current)
+                            if pinned is not None else _scroll_anchor(self._current)
+                        )
+                        if anchor is None:
+                            break
+                        # A document's five-line step is about a viewport.
+                        # Once the name is in the tree, one notch walks onto
+                        # the row instead of jumping past it. A list keeps
+                        # five lines.
+                        lines = abs(dy)
+                        if document_anchor(anchor):
+                            if match_is_far(self._current):
+                                lines = abs(dy)
+                            else:
+                                lines = 1
+                                seen_document = True
+                        if kind == "above":
+                            recover = -lines
+                        elif kind == "below":
+                            recover = lines
+                        else:
+                            # The row left the tree. The last step went past it.
+                            backs += 1
+                            # One notch is a few rows. Walking back a viewport
+                            # takes more than the three coarse reversals.
+                            back_limit = (
+                                max(_SCROLL_VERIFY_BACKS, abs(dy) * 2)
+                                if lines == 1 else _SCROLL_VERIFY_BACKS
+                            )
+                            if backs > back_limit:
+                                break
+                            # The first miss reverses the search. A document
+                            # that has already stepped toward the row keeps
+                            # that one-notch direction: flipping it would
+                            # walk away from a row that was above the window.
+                            # A list still reverses each time, which is the
+                            # five-line return.
+                            already_toward = lines == 1 and abs(step) == 1 and step != dy
+                            if lines == 1 and (backs > 1 or already_toward):
+                                recover = lines if step > 0 else -lines
+                            else:
+                                recover = -lines if step > 0 else lines
+                        step = recover
+                        try:
+                            self._run_gated(
+                                Scroll(target=anchor, dy=recover), bundle,
+                                partial(inject_scroll, anchor, recover),
+                                recheck=partial(self._recheck_target, target=anchor),
+                            )
+                        except ComputerUseError as exc:
+                            if rows_stale(exc):
+                                issued += 1
+                                stalls = 0
+                                continue
+                            if page_unchanged(exc):
+                                break
+                            raise
+                        issued += 1
+                        stalls = 0
+                        continue
+                cap = expired_cap()
+                if cap is not None:
+                    return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
+                if (
+                    document_ran_past
+                    and issued > 0
+                    and last_anchor is not None
+                    and last_anchor.role in ("AXTable", "AXGrid", "AXOutline")
+                    and not table_runs_past(snap, last_anchor)
+                ):
+                    return unfinished(issued, snap, last_anchor, budget_hit=False)
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
                           if pinned is not None else _scroll_anchor(snap))
                 if anchor is None:
                     break
+                # The name was on a document and then left the tree. Keep
+                # the one-notch step so the next wheel does not jump a
+                # viewport past the row again. A list stays on ``step``.
+                wheel = step
+                if document_anchor(anchor) and match_is_far(snap):
+                    wheel = abs(dy) if step > 0 else -abs(dy)
+                elif seen_document and document_anchor(anchor):
+                    wheel = 1 if step > 0 else -1
+                last_anchor = anchor
+                if (
+                    not table_jumped
+                    and text
+                    and callable(getattr(self.driver, "reveal_table_match", None))
+                ):
+                    # One index jump. A 10k GTK tree moves about a dozen
+                    # rows per five-line wheel, so the scroll budget ends
+                    # near the top. A cell already on screen is not counted.
+                    table_jumped = True
+                    jumped = self.driver.reveal_table_match(bundle, text)
+                    if isinstance(jumped, tuple) and len(jumped) == 2 and (jumped[0] or jumped[1]):
+                        if jumped[0]:
+                            issued += 1
+                            stalls = 0
+                        continue
+                if not find_tried and wants_in_page_find(snap, anchor):
+                    find_tried = True
+                    found = try_in_page_find(anchor)
+                    if found:
+                        return found
+                    # The anchor above was chosen before Ctrl+F. Wheel the
+                    # page frame from the read that followed it. An empty
+                    # cache is not that frame.
+                    ready = ready_anchor()
+                    if ready is None:
+                        continue
+                    snap = self._current
+                    anchor = ready
+                    last_anchor = ready
+                if page_mode and prefers_page_step(snap, anchor):
+                    if not find_tried:
+                        find_tried = True
+                        found = try_in_page_find(anchor)
+                        if found:
+                            return found
+                        ready = ready_anchor()
+                        if ready is None:
+                            continue
+                        snap = self._current
+                        anchor = ready
+                        last_anchor = ready
+                    before_names = row_names(snap)
+                    before_pos = read_offset(anchor)
+                    chord = "pagedown" if wheel > 0 else "pageup"
+                    try:
+                        self.driver.key_chord(chord)
+                    except Exception:
+                        page_mode = False
+                    else:
+                        time.sleep(0.15)
+                        issued += 1
+                        fresh = self.driver.snapshot(Scope(scope), bundle)
+                        self._current = fresh
+                        after_pos = read_offset(anchor)
+                        moved = row_names(fresh) != before_names or (
+                            before_pos != "unknown" and after_pos != before_pos
+                        )
+                        if moved:
+                            stalls = 0
+                            previous_rows = row_names(fresh)
+                            same_rows = 0
+                            continue
+                        stalls += 1
+                        if stalls < 2:
+                            continue
+                        # The page key did not move this container. The wheel
+                        # is the fallback, not another unchanged report.
+                        page_mode = False
+                        stalls = 0
+                        continue
+                # The find bar or an empty cached frame is not a scroll target.
+                # A few re-reads wait for the page. The search does not spend
+                # the whole budget on that frame, and it does not wheel it.
+                if page_frame_missing(snap, anchor) and callable(
+                    getattr(self.driver, "latch_chromium_find", None)
+                ):
+                    frame_waits += 1
+                    if frame_waits <= 4:
+                        restore_page_frame()
+                        continue
+                    return unfinished(issued, snap, anchor, budget_hit=False)
+                # A large GTK table pages its own bar. The five-line wheel
+                # stays for Chromium and for a table this driver cannot page.
+                page_scroll = getattr(self.driver, "scroll_viewport_page", None)
+                if callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
+                    issued += 1
+                    stalls = 0
+                    continue
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:
                     self._run_gated(
-                        Scroll(target=anchor, dy=step), bundle,
-                        partial(inject_scroll, anchor, step),
+                        Scroll(target=anchor, dy=wheel), bundle,
+                        partial(inject_scroll, anchor, wheel),
                         recheck=partial(self._recheck_target, target=anchor),
                     )
                 except ComputerUseError as exc:
@@ -4653,18 +6965,34 @@ class Runtime:
                         # call was still the previous head. Snapshot again
                         # instead of aborting or reversing.
                         issued += 1
+                        stalls = 0
                         continue
                     if not page_unchanged(exc):
                         raise
                     issued += 1
+                    stalls += 1
+                    if stalls == 1:
+                        # The rows can still be the pre-scroll tree. One more
+                        # step in this direction before turning or stopping.
+                        # The last budgeted step still gets that retry.
+                        if issued >= limit:
+                            limit = issued + 1
+                        continue
+                    stalls = 0
+                    if exc.detail.get("surface") == "document":
+                        # The document did not move. The name was never on
+                        # this page. Turning around would leave the end and
+                        # then raise page_unchanged. Stay here.
+                        break
                     if turned:
                         raise
                     turned = True
-                    step = -1 if step > 0 else 1
+                    step = -abs(dy) if step > 0 else abs(dy)
                     limit = issued + max_scrolls
                     continue
                 issued += 1
-            return f"not found after {issued} scroll(s): no element matches text={text!r} role={role!r}"
+                stalls = 0
+            return unfinished(issued, self._current, last_anchor, budget_hit=False)
 
         # Each injected scroll has its own receipt, including those that
         # complete before a later iteration fails; the outer row is observation.
@@ -4676,6 +7004,11 @@ class Runtime:
     #: need well over 20 s. Override with A11Y_COMPUTER_USE_LAUNCH_WAIT_S.
     APP_LAUNCH_WAIT_S = float(os.environ.get("A11Y_COMPUTER_USE_LAUNCH_WAIT_S", "60"))
     APP_FOCUS_WAIT_S = 5.0
+    #: After a Calc, Writer, or Impress window exists, LibreOffice can still
+    #: publish the Start Center title ``LibreOffice 24.2`` for a moment, or
+    #: list that frame beside the document. This is how long launch keeps
+    #: looking for the module title before reporting the title it has.
+    OFFICE_DOCUMENT_WAIT_S = 15.0
 
     def _list_gate_key(self) -> str:
         """The app `app list` is gated against. The list reveals app identities
@@ -4695,7 +7028,10 @@ class Runtime:
             return front
         try:
             rows = self.driver.running_apps()
-        except ComputerUseError:
+        except (ComputerUseError, NotImplementedError):
+            # No rows, including a backend that has not implemented the list.
+            # The list call itself refuses instead of crashing; see
+            # ``_running_app_rows``.
             rows = []
         from a11y_computer_use.app_identity import matching_stored_key
 
@@ -4705,6 +7041,36 @@ class Runtime:
             if matched:
                 return matched
         return trusted[0]
+
+    def _running_app_rows(self) -> list:
+        """Running-app rows. An unimplemented backend is a refusal, not a crash.
+
+        ``WindowsDriver.running_apps`` still raises ``NotImplementedError``.
+        Once any grant exists, ``app list`` is allowed through the gate and
+        that exception used to become ``internal_error`` on the wire. A
+        platform without an app-list backend returns refusal text instead.
+        """
+        try:
+            rows = self.driver.running_apps()
+        except NotImplementedError as exc:
+            front = "unknown"
+            try:
+                front = self._frontmost() or "unknown"
+            except Exception:  # noqa: BLE001 - the refusal still has to be returned
+                front = "unknown"
+            raise ActionRefused(
+                safety.Decision(
+                    verdict=safety.Verdict.NEEDS_PERMISSION,
+                    app=front,
+                    required=safety.Tier.READ,
+                    granted=None,
+                    reason=(
+                        "listing running apps is not implemented on this "
+                        "platform's backend yet"
+                    ),
+                )
+            ) from exc
+        return list(rows or [])
 
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
         needle = identifier.lower()
@@ -4954,13 +7320,163 @@ class Runtime:
                 return False
             time.sleep(self.FOCUS_POLL_S)
 
-    def _prepare_launch(self, name: str) -> tuple[str, str]:
-        """``(launch_name, gate_key)`` for an OS ``app launch``.
+    def _office_module_launch(self, name: str, launch_name: str, argv: tuple[str, ...] | None) -> bool:
+        """True when this launch starts LibreOffice or one of its modules."""
+        from a11y_computer_use.drivers import _atspi
+
+        if _atspi.libreoffice_app(name) or _atspi.libreoffice_app(launch_name):
+            return True
+        bases = {
+            os.path.basename(name or ""),
+            os.path.basename(launch_name or ""),
+        }
+        if bases & {"localc", "lowriter", "loimpress"}:
+            return True
+        return bool(argv and any(part in {"--calc", "--writer", "--impress"} for part in argv))
+
+    def _office_snapshot(self, app: str):
+        """A window snapshot of this LibreOffice launch, or None."""
+        if not callable(getattr(self.driver, "snapshot", None)):
+            return None
+        seen: list[str] = []
+        for candidate in (app, "soffice", "soffice.bin", "LibreOffice"):
+            if not candidate or candidate in seen:
+                continue
+            seen.append(candidate)
+            try:
+                snap = self.driver.snapshot(Scope.WINDOW, candidate)
+            except ComputerUseError:
+                continue
+            if snap is not None and getattr(snap, "elements", None):
+                return snap
+        return None
+
+    def _dismiss_libreoffice_tip(
+        self, name: str, launch_name: str, argv: tuple[str, ...] | None, window_title: str,
+    ) -> str | None:
+        """Press OK on a Tip of the Day dialog so the document is usable.
+
+        A fresh profile shows that dialog on top of the sheet. The launch
+        reports the dialog title when the dialog was there and the OK press
+        closed it. A launch with no such dialog returns None.
+        """
+        if not self._office_module_launch(name, launch_name, argv):
+            return None
+        if not callable(getattr(self.driver, "press_element", None)):
+            return None
+        document = any(word in (window_title or "").lower() for word in ("calc", "writer", "impress"))
+        dismissed: str | None = None
+        looked = False
+        while True:
+            snap = self._office_snapshot(launch_name or name)
+            dialog = _tip_of_the_day(snap)
+            if dialog is not None:
+                button = _tip_ok_button(snap)
+                if button is None:
+                    return dismissed
+                try:
+                    pressed = self.driver.press_element(button)
+                except ComputerUseError:
+                    return dismissed
+                if not pressed and callable(getattr(self.driver, "key_chord", None)):
+                    try:
+                        self.driver.key_chord("return")
+                    except ComputerUseError:
+                        return dismissed
+                dismissed = str(getattr(dialog, "title", "") or "Tip of the Day")
+                time.sleep(0.4)
+                snap = self._office_snapshot(launch_name or name)
+                if _tip_of_the_day(snap) is None:
+                    return dismissed
+                return None
+            if dismissed is not None or not document or looked:
+                return dismissed
+            looked = True
+            time.sleep(0.4)
+
+    def _document_window_title(self, fallback: str) -> str:
+        """A Calc, Writer, or Impress window title, when one is open."""
+        try:
+            rows = list(self.driver.windows() or [])
+        except (ComputerUseError, AttributeError):
+            return fallback
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "")
+            if any(word in title for word in ("Calc", "Writer", "Impress")):
+                return title
+        return fallback
+
+    def _office_module_word(
+        self, name: str, launch_name: str, argv: tuple[str, ...] | None,
+    ) -> str | None:
+        """``Calc``, ``Writer``, or ``Impress`` for a module launch.
+
+        A bare ``libreoffice`` or ``soffice`` launch has no module word. Its
+        Start Center title is the first window and is reported as is.
+        ``localc`` does not contain the letters ``calc``.
+        """
+        pieces: set[str] = set()
+        for part in (name, launch_name, *(argv or ())):
+            if not part:
+                continue
+            text = str(part).lower()
+            pieces.add(text)
+            pieces.add(os.path.basename(text))
+            for bit in text.replace("\\", "/").split("/"):
+                for token in bit.replace("_", " ").replace("-", " ").split():
+                    if token:
+                        pieces.add(token)
+        if "loimpress" in pieces or "impress" in pieces or "--impress" in pieces:
+            return "Impress"
+        if "lowriter" in pieces or "writer" in pieces or "--writer" in pieces:
+            return "Writer"
+        if "localc" in pieces or "calc" in pieces or "--calc" in pieces:
+            return "Calc"
+        return None
+
+    def _window_title_containing(self, word: str) -> str | None:
+        """The first window title that contains ``word``, or None."""
+        try:
+            rows = list(self.driver.windows() or [])
+        except (ComputerUseError, AttributeError):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "")
+            if word in title:
+                return title
+        return None
+
+    def _wait_office_document_title(self, word: str, fallback: str, timeout_s: float) -> str:
+        """Poll until a window title names ``word``, else return ``fallback``.
+
+        The first frame of ``soffice --calc`` is often ``LibreOffice 24.2``.
+        The document window, or that same frame once it is retitled, is
+        ``Untitled 1 - LibreOffice Calc``. A launch that never opens the
+        module keeps the Start Center title.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            found = self._window_title_containing(word)
+            if found:
+                return found
+            if time.monotonic() >= deadline:
+                return fallback
+            time.sleep(0.25)
+
+    def _prepare_launch(self, name: str) -> tuple[str, str, tuple[str, ...] | None]:
+        """``(launch_name, gate_key, argv)`` for an OS ``app launch``.
 
         A grant for ``thunar`` covers ``Files``, and the process started is
-        ``thunar``. A name that is not installed, not running, and not granted
-        is ``app_not_found`` listing the granted names. It is not a permission
-        refusal for the raw string.
+        ``thunar``. A Calc, Writer, or Impress label starts that module
+        (``localc`` or ``soffice --calc``, and the same for writer and
+        impress) while the grant stays the soffice alias. A name that is not
+        installed, not running, and not granted is ``app_not_found`` listing
+        the granted names. It is not a permission refusal for the raw string.
+        ``argv`` is None when the launch is the program name alone.
         """
         from a11y_computer_use.app_identity import normalize, resolve_launch
 
@@ -4981,7 +7497,7 @@ class Runtime:
             if callable(listing):
                 try:
                     rows = list(listing() or [])
-                except ComputerUseError:
+                except (ComputerUseError, NotImplementedError):
                     rows = []
             for row in rows:
                 if not isinstance(row, dict):
@@ -5005,7 +7521,7 @@ class Runtime:
                 f"no application matches {name!r}; granted apps: {shown}",
                 detail={"app": name, "granted": list(granted)},
             )
-        return resolved.launch_name, resolved.gate_key
+        return resolved.launch_name, resolved.gate_key, resolved.argv
 
     @_serialized
     def app(self, action: str, name: str | None = None, activate: bool | None = None) -> str:
@@ -5015,7 +7531,7 @@ class Runtime:
         # to come to the front, so the next observation sees a ready app.
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
-            rows = self._run_gated(AppOp(verb=verb), self._list_gate_key(), self.driver.running_apps)
+            rows = self._run_gated(AppOp(verb=verb), self._list_gate_key(), self._running_app_rows)
             return self._conclude(
                 json.dumps(rows), tool="app",
                 verdict=("confirmed", f"listed {len(rows)} apps"),
@@ -5023,13 +7539,31 @@ class Runtime:
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
+            self._reject_terminal(AppOp(verb=verb, app=name), name)
+            # macOS can start an app behind the current one (`open -g`).
+            # Other drivers ignore `activate` and still launch, which reports
+            # success for a request they did not perform.
+            if activate is False and not getattr(self.driver, "background_input", False):
+                platform = str(getattr(self.driver, "name", None) or "this driver")
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"app launch activate=false is not supported on {platform}; "
+                    "the app was not launched",
+                    detail={
+                        "driver": platform,
+                        "reason": "activate_unsupported",
+                        "hint": "omit activate to launch on this driver",
+                    },
+                )
             if name and looks_like_url(name):
                 self._reject_domain(destination=name)
             if self._resolves_apps():
                 gate_key = self._frontmost()  # browser: launch == navigate the bound tab
                 launch_name = name
+                launch_argv = None
             else:
-                launch_name, gate_key = self._prepare_launch(name)
+                launch_name, gate_key, launch_argv = self._prepare_launch(name)
+                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
 
             def launch() -> str | None:
                 before: list = []
@@ -5046,11 +7580,21 @@ class Runtime:
                         row.get("window_id"): str(row.get("title") or "")
                         for row in rows if isinstance(row, dict)
                     }
+                extra: dict = {}
+                if launch_argv:
+                    import inspect
+
+                    try:
+                        accepts_argv = "argv" in inspect.signature(self.driver.launch_app).parameters
+                    except (TypeError, ValueError):
+                        accepts_argv = False
+                    if accepts_argv:
+                        extra["argv"] = launch_argv
                 if getattr(self.driver, "background_input", False):
                     handle = self.driver.launch_app(launch_name, activate=activate if activate is not None
-                                           else FOCUS_MODE != "background")
+                                           else FOCUS_MODE != "background", **extra)
                 else:
-                    handle = self.driver.launch_app(launch_name)
+                    handle = self.driver.launch_app(launch_name, **extra)
                 # A Linux launch returns a process handle. macOS and Windows
                 # return None, and the wait keeps its previous success string
                 # when no window appears. The ids from before the spawn keep a
@@ -5073,10 +7617,25 @@ class Runtime:
                     f"launched {name}; no window appeared within {self.APP_LAUNCH_WAIT_S:.0f}s",
                     tool="app", verdict=("partial", "no window appeared"),
                 )
-            return self._conclude(
-                f"launched {name}; first window: {title!r}", tool="app",
-                verdict=("confirmed", f"first window {title!r} appeared"),
-            )
+            module = self._office_module_word(name, launch_name, launch_argv)
+            if module and module not in (title or ""):
+                title = self._wait_office_document_title(
+                    module, title or "", self.OFFICE_DOCUMENT_WAIT_S,
+                )
+            tip = self._dismiss_libreoffice_tip(name, launch_name, launch_argv, title or "")
+            if tip and "tip of the day" in (title or "").lower():
+                title = self._document_window_title(title)
+            elif module and module not in (title or ""):
+                # The sheet title can land when the tip dialog closes.
+                settled = self._window_title_containing(module)
+                if settled:
+                    title = settled
+            text = f"launched {name}; first window: {title!r}"
+            detail = f"first window {title!r} appeared"
+            if tip:
+                text += f"; dismissed {tip!r}"
+                detail += f"; dismissed {tip!r}"
+            return self._conclude(text, tool="app", verdict=("confirmed", detail))
         if verb is AppVerb.QUIT:
             _running, bundle = self._resolve_app(name)
 
@@ -5094,7 +7653,7 @@ class Runtime:
                 try:
                     running = [r for r in self.driver.running_apps()
                                if self._app_matches(r, name, bundle)]
-                except ComputerUseError:
+                except (ComputerUseError, NotImplementedError):
                     running = []
                 if not running:
                     return f"quit {bundle}"
@@ -5169,19 +7728,31 @@ class Runtime:
         if self._resolves_apps():
             return None
         try:
-            rows = self.driver.windows()
+            rows = list(self.driver.windows())
         except (ComputerUseError, AttributeError, NotImplementedError):
             return None
+        if getattr(self.driver, "name", None) == "linux":
+            rows.reverse()
         for row in rows:
             if not self._app_matches(row, name, bundle):
                 continue
             b = row.get("bounds") or {}
             if not b:
+                if getattr(self.driver, "name", None) == "linux":
+                    continue
                 return None
             try:
                 centre = Point(int(b["display_id"]), int(b["x"] + b["width"] / 2), int(b["y"] + b["height"] / 2))
             except (KeyError, TypeError, ValueError):
+                if getattr(self.driver, "name", None) == "linux":
+                    continue
                 return None
+            try:
+                rect = Bounds(centre.display_id, int(b["x"]), int(b["y"]), int(b["width"]), int(b["height"]))
+            except (KeyError, TypeError, ValueError):
+                rect = None
+            if rect is not None and self._linux_bounds_on_display(rect) is False:
+                continue
             owner = _app_at_point(centre)
             return owner if owner and owner != bundle else None
         return None
@@ -5306,20 +7877,54 @@ class Runtime:
                     verdict=("confirmed", f"listed {len(rows)} windows"),
                 )
             front = self._frontmost()
-            if not str(front or "").strip() or front == "unknown":
-                listed = self._list_windows_without_focus()
-                try:
-                    count = len(json.loads(listed))
-                except json.JSONDecodeError:
-                    count = 0
-                return self._conclude(
-                    listed, tool="window", verdict=("confirmed", f"listed {count} windows"),
+            focused = bool(str(front or "").strip()) and front != "unknown"
+            if focused:
+                decision = safety.check_action(
+                    WindowOp(verb=verb), front, store=self.store,
                 )
-            rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
-            shown = [_window_row(r) for r in rows]
+                if decision.allowed:
+                    # The focused app's read grant still returns every window.
+                    # Pid-less rows are in that list; they are not conditional
+                    # on the focused window itself having no process id.
+                    rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
+                    shown = [_window_row(r) for r in rows]
+                    return self._conclude(
+                        json.dumps(shown), tool="window",
+                        verdict=("confirmed", f"listed {len(shown)} windows"),
+                    )
+                # The focused app is not granted, so this does not become a
+                # list of every other grant. Mapped windows with no pid are
+                # still included. With none of those, the focused app's
+                # permission refusal stands.
+                pidless = [
+                    row for row in (_window_row(item) for item in self.driver.windows())
+                    if _visible_pidless_window(row)
+                ]
+                if not pidless:
+                    self._require_permission(WindowOp(verb=verb), front)
+                listed = json.dumps(pidless)
+                return self._conclude(
+                    listed, tool="window",
+                    verdict=("confirmed", f"listed {len(pidless)} windows"),
+                )
+            listed = self._list_granted_and_pidless_windows()
+            if listed is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "no focused window; an unfiltered window list includes windows "
+                    "whose app has a read grant, and visible windows with no process id. "
+                    "None of the open windows qualify",
+                    detail={
+                        "reason": "no_focused_window",
+                        "hint": "Pass app= to list one app, or grant read on an app that owns a window.",
+                    },
+                )
+            try:
+                count = len(json.loads(listed))
+            except json.JSONDecodeError:
+                count = 0
             return self._conclude(
-                json.dumps(shown), tool="window",
-                verdict=("confirmed", f"listed {len(shown)} windows"),
+                listed, tool="window", verdict=("confirmed", f"listed {count} windows"),
             )
         platform = str(getattr(self.driver, "name", None) or "this platform")
         method_name = _WINDOW_METHODS.get(verb)
@@ -5338,6 +7943,10 @@ class Runtime:
             raise ValueError("window resize requires width and height")
         if verb is WindowVerb.RESIZE and (int(width) < 1 or int(height) < 1):
             raise ValueError("window resize requires a positive width and height")
+        if verb is WindowVerb.MOVE:
+            # Before the owner lookup and the grant: a bad coordinate is not
+            # an audited move, and it is not clamped onto the screen.
+            x, y = self._require_window_move_point(x, y)
         # The owner is the grant key. An empty name is not a grant target:
         # asking the user to grant "" is the bug this rejects.
         owner = self.driver.window_owner(int(window_id))
@@ -5353,14 +7962,14 @@ class Runtime:
                     "hint": "There is no app name for this window, so there is nothing to grant.",
                 },
             )
-        position = Point(display_id=0, x=int(x), y=int(y)) if verb is WindowVerb.MOVE else None
+        position = Point(display_id=0, x=x, y=y) if verb is WindowVerb.MOVE else None
         size = (int(width), int(height)) if verb is WindowVerb.RESIZE else None
         op = WindowOp(verb=verb, window_id=int(window_id), position=position, size=size)
 
         def act() -> None:
             self._guard_user(owner_name)
             if verb is WindowVerb.MOVE:
-                method(int(window_id), int(x), int(y))
+                method(int(window_id), x, y)
             elif verb is WindowVerb.RESIZE:
                 method(int(window_id), int(width), int(height))
             else:
@@ -5368,7 +7977,7 @@ class Runtime:
 
         self._run_gated(op, owner_name, act)
         if verb is WindowVerb.MOVE:
-            text = f"moved window {window_id} to ({int(x)}, {int(y)}) ({owner_name})"
+            text = f"moved window {window_id} to ({x}, {y}) ({owner_name})"
         elif verb is WindowVerb.RESIZE:
             text = f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
         else:
@@ -5438,45 +8047,55 @@ class Runtime:
             return "suspected_noop", f"window {window_id} is still showing"
         if verb is WindowVerb.MAXIMIZE:
             return "unverifiable", f"window {window_id} does not report maximized"
+        if verb in (WindowVerb.RAISE, WindowVerb.FOCUS):
+            if match.get("on_screen") is False:
+                return "suspected_noop", f"window {window_id} is not on screen"
+            if bounds:
+                try:
+                    rect = Bounds(
+                        int(bounds.get("display_id", 0)), int(bounds["x"]), int(bounds["y"]),
+                        int(bounds["width"]), int(bounds["height"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    rect = None
+                if rect is not None and self._linux_bounds_on_display(rect) is False:
+                    return "suspected_noop", f"window {window_id} is outside the display"
         return "confirmed", f"window {window_id} is still listed"
 
-    def _list_windows_without_focus(self) -> str:
-        """Unfiltered ``window list`` when nothing is focused.
+    def _list_granted_and_pidless_windows(self) -> str | None:
+        """Granted owners, plus mapped windows that have no process id.
 
-        Gating that call on the frontmost name asked for a grant of
-        ``unknown``. Return the windows whose owners already have a read
-        grant. A desktop with no windows is an empty list. Open windows and
-        no such grant is `unsupported` with reason ``no_focused_window``.
+        A Tk or Xt window is keyed by WM_CLASS and keeps its bounds. It is
+        included whether or not another window is focused. A minimized
+        pid-less window is included only when its app already has a read
+        grant. ``[]`` when the desktop has no windows. None when windows are
+        open and none of them qualify.
         """
         raw = [_window_row(row) for row in self.driver.windows()]
         kept: list[dict] = []
         audited: set[str] = set()
         for row in raw:
             owner = str(row.get("bundle") or row.get("app") or "").strip()
-            if not owner:
+            pidless = _visible_pidless_window(row)
+            if not owner and not pidless:
                 continue
-            decision = safety.check_action(
-                WindowOp(verb=WindowVerb.LIST), owner, store=self.store,
+            decision = (
+                safety.check_action(WindowOp(verb=WindowVerb.LIST), owner, store=self.store)
+                if owner else None
             )
-            if not decision.allowed:
+            if decision is not None and decision.allowed:
+                kept.append(row)
+                if owner not in audited:
+                    audited.add(owner)
+                    self.audit.record_action(
+                        WindowOp(verb=WindowVerb.LIST), app=owner, decision=decision, result="ok",
+                    )
                 continue
-            kept.append(row)
-            if owner not in audited:
-                audited.add(owner)
-                self.audit.record_action(
-                    WindowOp(verb=WindowVerb.LIST), app=owner, decision=decision, result="ok",
-                )
+            if pidless:
+                kept.append(row)
         if kept or not raw:
             return json.dumps(kept)
-        raise ComputerUseError(
-            ErrorCode.UNSUPPORTED,
-            "no focused window; an unfiltered window list includes only windows "
-            "whose app has a read grant, and none of the open windows do",
-            detail={
-                "reason": "no_focused_window",
-                "hint": "Pass app= to list one app, or grant read on an app that owns a window.",
-            },
-        )
+        return None
 
     @_serialized
     def clipboard(self, action: str, text: str | None = None) -> str:
@@ -5569,10 +8188,20 @@ class Runtime:
             _running, app = self._resolve_app(app)
         gated_app = app or self._context_app()
         checker = self._checker()
+        stop = getattr(self, "_agent_stop", None)
+        on_interrupt = getattr(self, "_agent_interrupt", None)
+        wake = _snapshot_text_wake() if kind == "snapshot_text" else None
         return self._run_gated(
             ObserveOp(verb=ObserveVerb.WAIT_UNTIL, app=gated_app),
             gated_app,
-            lambda: json.dumps(checker.wait(condition, timeout_s=timeout_s, poll_s=poll_s)),
+            lambda: json.dumps(checker.wait(
+                condition,
+                timeout_s=timeout_s,
+                poll_s=poll_s,
+                stop=stop if callable(stop) else None,
+                on_interrupt=on_interrupt if callable(on_interrupt) else None,
+                wake=wake,
+            )),
         )
 
     # -- named dispatch (the agent loop, CLI `run-once`) ------------------------
@@ -5595,8 +8224,10 @@ class Runtime:
         (``(PNG bytes, clipped Bounds)``).
         ``confirm`` is the human-confirmation callback threaded into ``click``
         and ``act``; without one, plausibly irreversible actions fail safe.
-        Unknown names raise ``ValueError``; the tools themselves raise
-        `ComputerUseError` / `ActionRefused` exactly as under the MCP server.
+        Unknown names raise ``ValueError``. An argument the tool does not
+        declare raises ``ValueError`` naming that field before the tool runs,
+        so no input is sent. The tools themselves raise `ComputerUseError` /
+        `ActionRefused` exactly as under the MCP server.
         """
         methods: dict[str, Callable] = {
             "desktop_snapshot": self.desktop_snapshot,
@@ -5629,7 +8260,13 @@ class Runtime:
         }
         if tool not in methods:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
-        return methods[tool](**params)  # type: ignore[arg-type]
+        method = methods[tool]
+        allowed = accepted_keywords(method)
+        if allowed is not None:
+            message = unknown_fields_message(params, allowed)
+            if message is not None:
+                raise ValueError(message)
+        return method(**params)  # type: ignore[arg-type]
 
     @_serialized
     def dispatch(self, tool: str, params: dict[str, object]) -> str:
@@ -5649,6 +8286,86 @@ class Runtime:
         return self.call_tool(tool, params)
 
 
+def accepted_keywords(fn: Callable) -> set[str] | None:
+    """Names ``fn(**params)`` accepts.
+
+    ``None`` means the callable takes ``**kwargs`` (or its signature cannot
+    be read), so there is no closed set to check. Keywords already bound on
+    a ``partial``, such as ``confirm``, are not accepted again. ``self`` is
+    not a tool argument.
+    """
+    import inspect
+
+    bound: set[str] = set()
+    seen: object = fn
+    while isinstance(seen, partial):
+        bound.update(seen.keywords or {})
+        seen = seen.func
+    try:
+        signature = inspect.signature(seen)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    names: set[str] = set()
+    for name, param in signature.parameters.items():
+        if name == "self" or name in bound:
+            continue
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return None
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        names.add(name)
+    return names
+
+
+def seal_mcp_tools(server: object) -> None:
+    """Reject unknown tool arguments and publish a closed input schema.
+
+    FastMCP's argument model ignores extra keys, so an undeclared argument
+    used to be dropped and the tool still ran. Each tool's
+    model forbids extras, its published schema sets ``additionalProperties``
+    to false, and validation raises ``invalid_arguments`` naming the unknown
+    keys before the tool function runs. ``Tool.run`` wraps that exception, so
+    the message includes the ``invalid_arguments`` prefix the client matches.
+    """
+    from pydantic import ConfigDict
+
+    manager = getattr(server, "_tool_manager", None)
+    if manager is None:
+        return
+    for tool in manager.list_tools():
+        model = tool.fn_metadata.arg_model
+        model.model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+        model.model_rebuild(force=True)
+        parameters = dict(tool.parameters)
+        parameters["additionalProperties"] = False
+        tool.parameters = parameters
+        allowed = {
+            field.alias or field_name
+            for field_name, field in model.model_fields.items()
+        }
+        original = tool.fn_metadata.call_fn_with_arg_validation
+        tool_name = tool.name
+
+        async def _reject_unknown(
+            fn,
+            fn_is_async,
+            arguments_to_validate,
+            arguments_to_pass_directly,
+            *,
+            _original=original,
+            _name=tool_name,
+            _allowed=frozenset(allowed),
+        ):
+            message = unknown_fields_message(arguments_to_validate, _allowed)
+            if message is not None:
+                raise ValueError(f"invalid_arguments: {_name}: {message}")
+            return await _original(
+                fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly,
+            )
+
+        object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", _reject_unknown)
+
+
 # ---------------------------------------------------------------------------
 # MCP wiring
 # ---------------------------------------------------------------------------
@@ -5658,6 +8375,10 @@ _INSTRUCTIONS = (
     "Call desktop_snapshot first and act on "
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
     "snapshot — a stale_ref error means the UI changed, re-observe; if its reason is "
+    "app_restarted the process that issued the ref has quit and nothing was written to "
+    "whatever replaced it, so re-snapshot instead of reusing the ref. type may take "
+    "ref: that element is focused and text is entered only after focus is confirmed "
+    "on it; unconfirmed focus is focus_lost and types nothing. If its reason is "
     "title_changed the list reordered under the ref and the candidates name the element now at "
     "that position: find(text=...) or scroll_to_find the target again, never click the slot. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
@@ -5665,8 +8386,10 @@ _INSTRUCTIONS = (
     "actionable elements (custom-drawn apps such as Telegram or After Effects), "
     "call screen_text: on-device OCR returns text lines as refs o1..oN and "
     "click(ref='o7') lands on that text, so you never guess coordinates. "
-    "crop(ref='e14') returns a PNG of that element's on-screen bounds and does "
-    "not read the pixels; padding and scale are optional, and an off-screen or "
+    "crop(ref='e14') returns a PNG of that element's on-screen bounds. When an "
+    "OCR engine is installed the text lists each word with [x, y, width, height] "
+    "in screen pixels, fenced as untrusted; otherwise it says no text was read. "
+    "padding and scale are optional, and an off-screen or "
     "covered ref is not_visible. Actions are "
     "gated by per-app permission tiers (read/click/full, keyed by bundle id); "
     "needs_permission/deny results must be resolved by the human user. For "
@@ -5680,7 +8403,9 @@ _INSTRUCTIONS = (
     "COEXIST: the user keeps working while you act. Ref clicks, set_value, menu, file_dialog, and "
     "type/key with app=<the app you observed> never activate anything; app focus and coordinate "
     "clicks pull the user's screen to the app, so avoid them unless a coordinate click is the "
-    "only way (then say so). Launch with activate=false. "
+    "only way (then say so). On macOS, launch with activate=false. On Linux, "
+    "Windows, and the browser driver, omit activate: activate=false is "
+    "unsupported and the app is not launched. "
     "GRANTS: on macOS the host app needs the Accessibility (and, for screenshots, Screen "
     "Recording) grant; a permission_denied_* error already opened the system dialog and the "
     "settings pane: tell the user which app to switch on, then call request_permission(kind), "
@@ -5971,8 +8696,13 @@ def build_server(
         """Capture a pruned accessibility-tree snapshot of one app as indented
         text with element refs (e1, e2, ...). Refs are valid ONLY against this
         latest snapshot: act on them promptly and re-observe after the UI
-        changes (a stale_ref error means the tree moved). scope='window'
-        covers the frontmost window, 'app' all windows.
+        changes (a stale_ref error means the tree moved). A ref from a process
+        that has since quit is stale_ref with reason app_restarted and is not
+        applied to the new process. scope='window' covers the frontmost
+        window. On Linux it also includes every other showing top-level
+        window of that app: the active window is first and its root line is
+        marked (active), and a ref in another window raises that window
+        before the action. scope='app' is the application tree.
 
         mode='full' (default) returns the complete pruned tree. mode='interactive'
         returns the same snapshot cut down to what you can act on (buttons,
@@ -5984,8 +8714,10 @@ def build_server(
         ONLY what changed since your last snapshot of this app (added / removed /
         changed elements), rendered in the view you last asked for; use it to
         re-observe after an action, and read '(no change)' as 'the action had no
-        visible effect'. budget=N caps the reply at about N tokens (the tail is
-        replaced by a marker counting the omitted elements). include_bounds=true
+        visible effect'. budget=N caps the reply at about N tokens. One window
+        replaces the tail with a marker counting the omitted element lines.
+        Several windows share that budget, and a window past its share ends
+        with '… N more'. include_bounds=true
         prints geometry on every line. Tier 'read' for the scoped app. Needs the
         Accessibility permission (see `a11y_computer_use doctor`)."""
         return await run(runtime.desktop_snapshot, app, scope, mode, budget, include_bounds)
@@ -6003,7 +8735,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches); role =
+        (text past the 200 characters kept on the element still matches). A
+        terminal's shown value is the on-screen text; a match only in the
+        scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
         'checkbox', 'link'); editable/clickable = keep only elements with that
         capability. Give at least one filter. Returns each match's ref, role,
@@ -6062,8 +8796,11 @@ def build_server(
         """Return a PNG of one element's on-screen bounds from the latest
         desktop_snapshot, plus the text naming that rectangle. padding grows
         the rect on every side (0..512) before clipping it to the display.
-        scale sizes the PNG (1 keeps the cropped pixels; at most 8). The
-        library does not OCR or recognize the pixels. Works for AT-SPI and CDP
+        scale sizes the PNG (1 keeps the cropped pixels; at most 8). When an
+        OCR engine is installed (the optional [ocr] extra's RapidOCR, else
+        the system tesseract binary), the text includes each word, fenced,
+        with [x, y, width, height] in screen pixels. A missing engine says
+        no text was read and is not an error. Works for AT-SPI and CDP
         refs, including a control inside a cross-origin iframe whose box is in
         the top document. An element that misses the display, or whose center
         is covered by another window, is not_visible and no image is returned.
@@ -6133,8 +8870,32 @@ def build_server(
         On Linux a Qt table cell is clicked at its center. That click is
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
-        reported as success. A click on a LibreOffice text paragraph is
-        confirmed only when the caret is in that paragraph."""
+        reported as success. A click on a LibreOffice Writer paragraph is
+        confirmed only when the caret is in that paragraph. A click on an
+        Impress or Draw shape or text frame, or a paragraph inside one, is
+        a pointer click at the element's center. When that click does not
+        enter text editing, a double-click follows. It is confirmed only
+        when a focused editable paragraph or the caret is inside the frame.
+        A click on a file-manager side pane, or on a tree or list row whose
+        activation opens a folder, is that row's own activation: a pointer
+        click at the row, or the activate action, or Return on the selected
+        row, only when that is how the row opens. It is confirmed only when
+        the location entry or the path bar changed. A row that was only
+        selected is partial.
+        A click aimed at
+        a Calc cell is confirmed only when the selected cell address, the
+        Name Box, is that cell. A different cell is partial.         A click on a
+        canvas or an unnamed image is unverifiable: accessibility cannot
+        see those pixels, so a tree change is not confirmation. The evidence
+        says to verify with crop or a screenshot. A ref whose center is
+        inside another window, dialog, sheet, or popup is still clicked at
+        that center. When the only change is that cover and the target
+        itself does not change, the result does not say clicked: outcome is
+        suspected_noop and the evidence names the cover. A control nested inside a
+        canvas is fallback content and is not painted: it is activated by
+        its accessible action or a DOM click on that node, not by a pointer
+        click, which would land on the canvas. When that activation cannot
+        be done or confirmed, the result is an error."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.
@@ -6163,32 +8924,65 @@ def build_server(
         return await run(runtime.hover, x, y, display_id, ref)
 
     @server.tool(name="type")
-    async def type_text(text: str, app: str | None = None) -> CallToolResult:
+    async def type_text(
+        text: str, app: str | None = None, ref: str | None = None,
+    ) -> CallToolResult:
         """Type literal text into the focused element (clipboard-paste path
-        for long text). With app=<bundle id or name> on macOS the keystrokes
-        are addressed to that app's process: it need not be frontmost, nothing
-        is activated, and the user's screen stays where it is. On Linux, app=
-        resolves that app's window from the EWMH list and the AT-SPI
-        application, focuses it when it is not already active, checks that it
-        became the active window, and then types. A window that cannot be
-        focused is focus_changed. An app with no window is app_not_found. The
-        call is not reported as macOS-only. Without app: the frontmost app.
-        On Linux, text goes in at the caret and replaces a selection, including
-        after a coordinate click that did not remember a ref: the focused
-        editable is looked up and inserted with the same helper. A CRLF is one
-        newline; the reported count is the number of characters the field read
-        back, and a mismatch is an error rather than success. LibreOffice Calc
-        is confirmed from the open cell editor or the selected cell's text.
-        That editor is not a password field. A sheet that does not show the
-        characters is a mismatch. Chrome's address
-        bar is polled until the URL is visible or the bar settles on its own
-        string; a settled rewrite is not a mismatch. The find bar already
-        showing exactly that query is a match. An empty app is
-        invalid_arguments. Gated at tier 'full' against the target app; refuses
-        with secure_field when a password field has focus — secrets are typed
-        by the human, never by this tool. The text is unchanged. Structured
-        content adds outcome, next, and evidence."""
-        return _publish(await run(runtime.type_text, text, app, _outcome=True, _tool="type"))
+        for long text). Optional ref is an element from the latest
+        desktop_snapshot. When ref is set, it is resolved the same way click
+        and set_value resolve a ref (a replaced process is stale_ref with
+        reason app_restarted), that element is focused, and focus has to be
+        read back on it before any text is entered. If focus cannot be
+        confirmed, the result is focus_lost and nothing is typed, so
+        keystrokes cannot land in a different field. The outcome read-back
+        is that element. An Impress or Draw shape paragraph whose snapshot
+        says edit is a type target: focus is that paragraph or its shape,
+        then EditableText inserts at the caret. A browser paragraph is not
+        a type target. Without ref: the focused element. An undeclared
+        argument is invalid_arguments and no text is sent. With app=<bundle
+        id or name> on macOS the keystrokes are addressed to that app's
+        process: it need not be frontmost, nothing is activated, and the
+        user's screen stays where it is. On Linux, app= resolves that app's
+        window from the EWMH list and the AT-SPI application, focuses it
+        when it is not already active, checks that it became the active
+        window, and then types. A window that cannot be focused is
+        focus_changed. An app with no window is app_not_found. The call is
+        not reported as macOS-only. Without app and without ref: the
+        frontmost app. On Linux, text goes in at the caret and replaces a
+        selection, including after a coordinate click that did not remember
+        a ref: the focused editable is looked up and inserted with the same
+        helper. A CRLF is one newline; the reported count is the number of
+        characters the field read back, and a mismatch is an error rather
+        than success.         LibreOffice Calc is confirmed from the open cell
+        editor or the selected cell's text. A tab or newline grid is read
+        back from every cell it touched, starting at the cell that was
+        active before typing. The read waits until those cells publish
+        their committed values; a cell that is still missing is not a
+        mismatch yet. An editor left open on the last cell is committed
+        with Return so the other cells publish. The caret is then left on
+        the cell Enter moves to: the column where the grid started, on
+        the row after the last typed row. It is not left on the last cell
+        the read-back opened, so the next type does not replace that cell.
+        The first cell that differs is the mismatch. A missing or extra
+        character is still a mismatch. That editor is not a password
+        field. A sheet that does not show the characters is a mismatch.
+        Chrome's address bar is polled until the URL is visible or the bar
+        settles on its own string; a settled rewrite is not a mismatch. The
+        find bar already showing exactly that query is a match. An empty
+        app, or an empty ref, is invalid_arguments. A ref that belongs to a
+        different app than app= is invalid_arguments and nothing is typed.
+        Gated at tier 'full' against the target app; refuses with
+        secure_field when a password field has focus or the ref is a secure
+        field — secrets are typed by the human, never by this tool. The
+        text is unchanged. In a LibreOffice Writer document a newline is
+        Return, a new paragraph; U+2028 stays a line break. Line breaks
+        where paragraphs were requested are not confirmed. In a Chrome
+        contenteditable a newline matches a paragraph or block boundary in
+        the read-back. Missing or extra characters are still a mismatch.
+        Structured content adds outcome, next, and evidence."""
+        return _publish(await run(
+            runtime.type_text, text, app, ref, _outcome=True, _tool="type",
+        ))
 
     @server.tool(name="key")
     async def key(chord: str, app: str | None = None) -> CallToolResult:
@@ -6254,7 +9048,7 @@ def build_server(
         end_y: int | None = None,
         display_id: int | None = None,
         path: list[list[int]] | None = None,
-    ) -> str:
+    ) -> CallToolResult:
         """Press at the start target, move, and release at the end target.
         Each target is an element ref from the latest snapshot or an x/y
         point in physical pixels. Every coordinate, including each `path`
@@ -6263,9 +9057,18 @@ def build_server(
         input. An unknown display_id is invalid_arguments and names the valid
         ids. `path` waypoints share the start's display. The pointer passes
         through them with the button held: one call paints a whole curve on a
-        canvas or draws a lasso. Gated at tier 'click' against the app under
-        the start target."""
-        return await run(runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y, display_id, path)
+        canvas or draws a lasso. On Linux the stroke pauses once it has
+        passed the GTK drag threshold and rests on the target before
+        release, so a short drag can drop. The result is confirmed when the
+        dragged item changes order or moves relative to the target, or when
+        the file is in the target folder afterwards. Otherwise the text says
+        the drop was not confirmed. A selection change is not a drop. Gated
+        at tier 'click' against the app under the start target. Structured
+        content adds outcome, next, and evidence."""
+        return _publish(await run(
+            runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y,
+            display_id, path, _outcome=True, _tool="drag",
+        ))
 
     @server.tool(name="wait_for")
     async def wait_for(ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:
@@ -6297,7 +9100,7 @@ def build_server(
         Supported steps:
           {"do":"click","ref":"e5"}  (or "x"/"y"; + "button","count","modifiers")
           {"do":"hover","ref":"e5"}  (or "x"/"y"; no button)
-          {"do":"type","text":"..."}
+          {"do":"type","text":"..."}  (optional "ref" focuses that element first)
           {"do":"key","chord":"cmd+s"}  (or "chord":"a","modifiers":["ctrl"])
           {"do":"scroll","ref":"e3","dy":5}  (+ "into_view")
           {"do":"drag","start_ref":"e1","end_ref":"e2"}
@@ -6324,13 +9127,28 @@ def build_server(
         and that call sends no keystrokes, clicks, or focus changes. A Firefox
         paragraph, document, or select is not an editable entry, even when
         AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
-        before any select-all. A select is still set as a combo. A Chrome or
-        Firefox contenteditable section stays editable. A combo or
+        before any select-all. An Impress slide or Draw page paragraph that
+        has both STATE_EDITABLE and EditableText is an entry. The snapshot
+        marks it edit, and set_value replaces that paragraph through
+        EditableText and reads the text back. No select-all is sent. A
+        browser paragraph stays refused. A select is still set as a combo. A Chrome or
+        Firefox contenteditable section stays editable. A Firefox contenteditable
+        with STATE_EDITABLE and a text interface is a text field, or a textarea
+        when it is multi-line. set_value on that control succeeds only when the
+        read-back matches. If EditableText does not stick, focus is confirmed
+        and the same key path type(ref) uses types the value; unconfirmed focus
+        types nothing. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists
-        them. A spin button, slider, or other Value control is set through that
+        them.         A spin button, slider, or other Value control is set through that
         interface; a number outside the minimum and maximum is invalid_arguments
-        and includes both. A Chrome date, time, or month segment is typed, and
+        and includes both. A control whose text is a percent and whose Value
+        is log2 of that percent accepts ``50%``, and a bare number outside
+        the Value range, as that percent. A bare number inside the Value
+        range stays on that scale. A percent the control cannot represent
+        names the percent range and the Value scale. A percent literal on a
+        control whose text and Value do not agree is refused, and the Value
+        range is named. No keystrokes are sent for that conversion. A Chrome date, time, or month segment is typed, and
         the read-back is that segment's displayed text, not the Value float.
         An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success. Gated at tier 'full';
@@ -6344,7 +9162,7 @@ def build_server(
     async def scroll_to_find(
         app: str, text: str | None = None, role: str | None = None,
         direction: str = "down", max_scrolls: int = 6, scope: str = "window",
-        ref: str | None = None,
+        ref: str | None = None, budget_s: float | None = None,
     ) -> str:
         """Scroll a scrollable view until an element matching text and/or role
         comes into view, then return its ref — for a target that isn't in the
@@ -6352,13 +9170,40 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. A wheel that does not move the page
-        (page_unchanged) does not end the search while the other direction has
-        not been tried and the target has not been shown; that return pass is
-        one line at a time. If the other direction does not move either, the
-        still-page error stands. A scroll that moved the page but reported
-        rows_stale does not end the search and does not reverse: the next
-        pass snapshots the tree again. Pass ref to wheel over a specific
+        matching ref(s) or a not-found note. budget_s is how long the
+        search may go without the on-screen rows or the scroll offset
+        changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
+        A step that changes either one starts that clock again. The search
+        also stops at 120 seconds. It reports the container, its scroll
+        position, and the last rows seen. A document, a table, or a list
+        is searched with Ctrl+F first, including an overflow list shorter
+        than the window. After Ctrl+F, Chrome is latched and the tree is
+        read again until the page frame is back. The find bar and an
+        empty cached frame are not wheeled. A paginated
+        or virtualized table that already fits in the window then uses
+        Page Down before the wheel. A table that still runs past the
+        window keeps the wheel. A large GTK table is searched once
+        through its row index before that wheel, and a miss there steps
+        the vertical bar by one viewport. page_unchanged is raised only when that
+        container's scroll offset was read and did not move. The ref is from a snapshot taken
+        after the scroll settles, and only when that match's center is inside
+        the window. A name that disappears on the re-read was the pre-scroll
+        tree; the search scrolls back toward the row and checks again instead
+        of returning that stale ref.         While the name is not in the tree the
+        step stays five lines: on a document that is one burst of wheel
+        notches, about a viewport. Once a document names the match and the
+        center is just outside the window, the next steps are one notch.
+        A match more than one window away keeps that burst. A list keeps
+        the five-line correction. A wheel that does not move the page
+        (page_unchanged) is repeated once: the tree can still be the pre-scroll
+        rows. A second still page does not end the search while the other
+        direction has not been tried and the target has not been shown. The
+        return pass uses the same line count, so an early row above the
+        current window is reached without a one-line crawl or a page jump.
+        If the other direction does not move either, the still-page error
+        stands. A scroll that moved the page but reported rows_stale does
+        not end the search and does not reverse: the next pass snapshots
+        the tree again. Pass ref to wheel over a specific
         scrolling element (the list itself); otherwise the anchor is the
         overflow list, or the document on a body-scroll page, not the
         window's tab strip. Gated at tier 'click' (it scrolls).
@@ -6366,7 +9211,9 @@ def build_server(
         refreshed under the ref, and the row at that position is now another
         one), call find(text=...) or scroll_to_find again and act on the ref it
         returns; never click the old slot."""
-        return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref)
+        return await run(
+            runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref, budget_s,
+        )
 
     @server.tool(name="app")
     async def app(action: str, name: str | None = None, activate: bool | None = None) -> CallToolResult:
@@ -6386,10 +9233,12 @@ def build_server(
         launcher such as gtk-launch exiting 0 is not the app exiting.
         'quit' sends the quit chord and reports a save-changes dialog (an
         AT-SPI dialog or alert, or a dialog window) instead of "still running".
-        It does not click Discard. activate=false starts it
+        It does not click Discard. On macOS, activate=false starts it
         behind the current app so the user's screen and Space stay put (the
         default in background focus mode); refs, set_value, menus, and
-        type/key with app=... all work without focus. 'focus' brings it to the
+        type/key with app=... all work without focus. On Linux, Windows, and
+        the browser driver, activate=false is unsupported and the app is not
+        launched; omit activate. 'focus' brings it to the
         front and waits until it is frontmost: this switches the user's screen,
         so use it only when they should see the app or when coordinate clicks
         are unavoidable. 'quit' sends the quit chord and reports whether a
@@ -6411,11 +9260,19 @@ def build_server(
         whose app id equals X, case-insensitive, and is gated against X (tier
         read) instead of the frontmost app. An empty app is invalid_arguments.
         A window with no app id never matches a filter. An app that is not
-        running returns an empty list. With no focused window, an unfiltered
-        list returns only windows whose app already has a read grant. When
-        windows are open and none of them are granted, the error is
-        unsupported with reason no_focused_window. It does not ask for a
-        grant of 'unknown'. A minimized window (iconic or hidden) has
+        running returns an empty list. An unfiltered list returns every
+        window when the focused app already has a read grant. It also
+        includes mapped top-level windows that have no process id, whether
+        or not any window is focused. Those rows are keyed by WM_CLASS,
+        carry bounds, and report pid null (the driver read _NET_WM_PID as
+        absent; a row that omits pid is unchanged). A minimized window with
+        no pid is included only when its app has a grant, unless the focused
+        app's grant returns the whole list. When nothing is focused and no
+        window qualifies, the error is unsupported with reason
+        no_focused_window. It does not ask for a grant of 'unknown'. When a
+        focused app is not granted, the list is those pid-less windows only.
+        If there are none, the error is that app's permission refusal, not a
+        list of other grants. A minimized window (iconic or hidden) has
         on_screen false. bounds are {display_id, x, y, width, height} in that
         display's physical pixels — the same space click/scroll/drag take —
         or null when the driver has no rect (a minimized Linux window). On
@@ -6423,7 +9280,12 @@ def build_server(
         not the outer frame. A move to (100, 80) lists the client at
         (100, 80). raise, focus, minimize, maximize, move, resize, and close
         are gated at tier 'click' against the owning app, the same grant as
-        raise. move requires x and y; resize requires width and height. On
+        raise. move requires x and y, both integers on the display
+        (0..width-1 and 0..height-1, the same pixels as click). A float, a
+        bool, a negative, or a point past that edge is invalid_arguments
+        and the window is not moved; the coordinate is not clamped. A point
+        inside the title bar is still that point: the frame origin is sent
+        as a signed coordinate. resize requires width and height. On
         Linux X11 those verbs send EWMH or ICCCM client messages. A backend
         that cannot perform a verb returns unsupported and names the platform.
         A window whose owner cannot be identified returns unsupported with
@@ -6460,13 +9322,19 @@ def build_server(
         'File > Export > Add to Render Queue' (case-insensitive, trailing
         ellipsis ignored, unique prefixes accepted). action='list' returns the
         items of the menu at path as JSON (title, enabled, shortcut, submenu,
-        checked); omit path to list the top-level menus. action='state' reports
+        checked, mnemonic); omit path to list the top-level menus. mnemonic is
+        the underlined letter, or null when the item has none. action='state' reports
         whether a menu is open and its path; action='close' dismisses it.
         click and type close an open menu first and say so. key does not:
         the chord is delivered to the open menu. alt+letter while a menu is
         open switches to the top-level menu with that mnemonic. On Linux, close sends Escape and errors if the menu is
-        still open, and a listed shortcut is the accelerator (a tagged chord
-        or a bare key such as F11) rather than the Alt mnemonic letter. Destructive labels (Delete, Move to Trash, Discard) ask the
+        still open, and a listed shortcut is the accelerator field (a tagged chord
+        or a bare key such as F11). A mnemonic with no accelerator is null there
+        and is reported as mnemonic. A Chromium or Electron bar entry is a push
+        button; pressing it opens the popup, including when that popup is a
+        separate window. An item name that ends with its accelerator
+        (New Note Ctrl+N) also matches the name with that suffix removed, and
+        an exact title still wins. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
         (AT-SPI menu bar). Windows and the browser return unsupported. The text
@@ -6491,8 +9359,13 @@ def build_server(
         are not driven, and the call does not report focus_changed. Open the
         chooser, then set_value or type into the
         location or name field shown in the snapshot (Ctrl+L focuses the
-        location bar in a GTK 3 chooser). Windows and the browser also return
-        unsupported."""
+        location bar in a GTK 3 chooser). Return then activates that
+        chooser's Open or Save button through its accessibility action,
+        after scrolling or resizing the button on screen, and checks that
+        the dialog closed and the app shows the file. Chrome's chooser has
+        no accessibility button: Return fits the window and clicks Open, and
+        the page's file input has to show the file. Windows and the
+        browser also return unsupported."""
         return await run(runtime.file_dialog, action, path, app)
 
     @server.tool(name="notes")
@@ -6684,6 +9557,7 @@ def build_server(
             return await run(runtime.webmcp, app, action, name, arguments,
                              confirm=_confirmer_for(server.get_context()))
 
+    seal_mcp_tools(server)
     return server
 
 

@@ -100,7 +100,7 @@ class _Node:
         return True
 
     def get_selection_iface(self):
-        if self.role in {"combo box", "list box", "table", "tree table"}:
+        if self.role in {"combo box", "list box", "table", "tree table", "tree"}:
             return self
         return None
 
@@ -406,6 +406,12 @@ def test_firefox_select_uses_keys_when_the_option_action_does_not_land(monkeypat
     for item in items:
         item.do_action = lambda index, node=item: miss(index, node)
 
+    def grab_focus() -> bool:
+        combo.states.add("FOCUSED")
+        return True
+
+    combo.grab_focus = grab_focus
+
     def press(chord: str) -> None:
         keys.append(chord)
         if chord != "Down":
@@ -547,6 +553,444 @@ def test_chrome_select_closes_the_popup_when_the_option_does_not_land(monkeypatc
     assert "collapse" in select.action_log
 
 
+def _select_option(name, *, selected=False):
+    """A Chrome menu item whose click selects it and leaves the popup open."""
+    node = _Node(
+        "menu item", name, actions=["click"],
+        states={"SELECTED"} if selected else set(),
+    )
+    node.toolkit = "Chromium"
+
+    def do_action(index, option=node):
+        option.action_log.append(option.actions[index])
+        root = option
+        while root.parent is not None:
+            root = root.parent
+
+        def walk(current):
+            if current.role == "menu item":
+                if current is option:
+                    current.states.add("SELECTED")
+                else:
+                    current.states.discard("SELECTED")
+            for child in current.children:
+                walk(child)
+
+        walk(root)
+        return True
+
+    node.do_action = do_action
+    return node
+
+
+def _optgroup_select(*, expanded=True):
+    """A Chromium select whose options sit under optgroup labels."""
+    apple = _select_option("Apple", selected=True)
+    cherry = _select_option("Cherry")
+    banana = _select_option("Banana")
+    lemon = _select_option("Lemon")
+    # Chrome exposes an optgroup as a panel named with the group's label.
+    red = _Node("panel", "Red", children=[apple, cherry])
+    yellow = _Node("panel", "Yellow", children=[banana, lemon])
+    menu = _Node("menu", "", children=[red, yellow])
+    states = {"EXPANDABLE", "ENABLED", "EXPANDED"} if expanded else {"EXPANDABLE", "ENABLED"}
+    select = _Node(
+        "combo box", "Fruit", text="\ufffc", children=[menu],
+        actions=["press", "collapse"], states=states,
+    )
+    select.toolkit = "Chromium"
+    for node in (red, yellow, menu):
+        node.toolkit = "Chromium"
+    return select, apple, lemon
+
+
+def test_chrome_optgroup_option_click_closes_the_popup(monkeypatch) -> None:
+    """A ref click that selects the option also collapses the select.
+
+    Collapse closes it, so Escape is not sent. The option stays selected.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    select, apple, lemon = _optgroup_select()
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, lemon)
+    element = _element("e8", "AXMenuItem", "Lemon", clickable=True)
+    assert driver.press_element(element) is True
+    assert lemon.action_log == ["click"]
+    assert "SELECTED" in lemon.states
+    assert "SELECTED" not in apple.states
+    assert "EXPANDED" not in select.states
+    assert "collapse" in select.action_log
+    assert keys == []
+    assert ATSPIAccessor().read(select).value == "Lemon"
+
+
+def test_chrome_optgroup_option_click_escapes_only_while_the_popup_stays_open(monkeypatch) -> None:
+    """Escape runs only when collapse left the select expanded.
+
+    A click that already collapsed the popup sends no key. A popup that
+    stays expanded after Escape is popup_open, not a successful click.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    closed, _apple, lemon = _optgroup_select(expanded=False)
+
+    def already_closed(index, option=lemon):
+        option.action_log.append(option.actions[index])
+        option.states.add("SELECTED")
+        return True
+
+    lemon.do_action = already_closed
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, lemon)
+    element = _element("e8", "AXMenuItem", "Lemon", clickable=True)
+    assert driver.press_element(element) is True
+    assert keys == []
+    assert "collapse" not in closed.action_log
+
+    stuck, _apple, lemon = _optgroup_select()
+
+    def ignore(index, node=stuck):
+        node.action_log.append(node.actions[index])
+        return True
+
+    stuck.do_action = ignore
+    keys.clear()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: lemon)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "popup_open"
+    assert "still open" in exc.value.message
+    assert "Lemon" in exc.value.message
+    assert keys == ["Escape", "Escape", "Escape", "Escape"]
+    assert "EXPANDED" in stuck.states
+    assert lemon.action_log == ["click"]
+
+
+def test_chrome_menu_item_outside_a_select_does_not_send_escape(monkeypatch) -> None:
+    """An application menu item is not a select option."""
+    from a11y_computer_use.drivers import _linux_input
+
+    item = _Node("menu item", "Save", actions=["click"])
+    item.toolkit = "Chromium"
+    menu = _Node("menu", "File", children=[item])
+    _Node("menu bar", "", children=[menu])
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, item)
+    element = _element("e3", "AXMenuItem", "Save", clickable=True)
+    assert driver.press_element(element) is True
+    assert item.action_log == ["click"]
+    assert keys == []
+
+
+def _gtk_combo_tree(*, open_menu: bool):
+    """A GTK combo whose popup window is ACTIVE and whose menu stays under the combo."""
+    item_states = {"SHOWING", "VISIBLE", "ENABLED"} if open_menu else {"VISIBLE", "ENABLED"}
+    none = _Node("menu item", "None", states=set(item_states) | {"SELECTED"}, actions=["click"])
+    classic = _Node("menu item", "Classic", states=set(item_states), actions=["click"])
+    cobalt = _Node(
+        "menu item", "Cobalt", states=set(item_states), actions=["click"],
+        x=40, y=110, w=120, h=28,
+    )
+    menu_states = {"SHOWING", "VISIBLE", "ENABLED"} if open_menu else {"ENABLED"}
+    menu_box = (40, 80, 120, 90) if open_menu else (-2147483648, -2147483648, 1, 1)
+    menu = _Node("menu", "", states=menu_states, children=[none, classic, cobalt],
+                 x=menu_box[0], y=menu_box[1], w=menu_box[2], h=menu_box[3])
+    combo = _Node(
+        "combo box", "Color", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[menu], actions=["press"], x=40, y=40, w=120, h=34,
+    )
+    dialog = _Node(
+        "dialog", "Preferences", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[combo], x=20, y=20, w=300, h=220,
+    )
+    frame = _Node(
+        "frame", "Editor", states={"SHOWING", "VISIBLE", "ENABLED"},
+        x=10, y=10, w=400, h=300,
+    )
+    window = _Node(
+        "window", "", states={"SHOWING", "VISIBLE", "ACTIVE", "ENABLED"},
+        children=[menu], x=40, y=80, w=120, h=90,
+    )
+    # The window lists the same menu. Its parent stays the combo.
+    menu.parent = combo
+    app = _Node("application", "mousepad", children=[frame, dialog, window])
+    for node in (none, classic, cobalt, menu, combo, dialog, frame, window, app):
+        node.toolkit = "gtk"
+    return app, dialog, frame, window, combo, menu, cobalt
+
+
+def _screen():
+    from a11y_computer_use.schema import Display
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    return (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+
+
+def test_gtk_combo_popup_stays_under_the_combo(monkeypatch) -> None:
+    """The ACTIVE popup window is not the snapshot root.
+
+    The menu items keep their names and the selected state, nested under
+    the combo, and the combo reports expanded. The same items are not
+    listed again from the popup window.
+    """
+    from a11y_computer_use.schema import Scope
+
+    app, dialog, _frame, window, combo, _menu, _cobalt = _gtk_combo_tree(open_menu=True)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    picked = _atspi._preferred_window(
+        app.children, lambda frame: "ACTIVE" in frame.states,
+    )
+    assert picked is dialog
+    assert _atspi._combo_owning_popup(window) is combo
+    assert _atspi._combo_owning_popup(dialog) is None
+    snap = observe.build_snapshot(
+        dialog, ATSPIAccessor(), scope=Scope.WINDOW, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    by_ref = {el.ref: el for el in snap.elements}
+    box = next(el for el in snap.elements if el.role == "AXComboBox" and el.title == "Color")
+    assert box.expanded is True
+    cobalt = next(el for el in snap.elements if el.role == "AXMenuItem" and el.title == "Cobalt")
+    chosen = next(el for el in snap.elements if el.role == "AXMenuItem" and el.title == "None")
+    assert chosen.selected is True
+    assert cobalt.selected is False
+    ancestor = cobalt
+    while ancestor.parent is not None and ancestor.ref != box.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == box.ref
+    rendered = observe.render_text(snap)
+    assert "expanded" in rendered.split('combobox "Color"')[1].splitlines()[0]
+    assert 'menuitem "Cobalt"' in rendered
+    whole = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    assert [el.title for el in whole.elements if el.role == "AXMenuItem" and el.title == "Cobalt"] == ["Cobalt"]
+    assert not any(el.role == "AXWindow" and not el.title for el in whole.elements)
+
+    _app, closed, _frame, _window, _combo, _menu, _cobalt = _gtk_combo_tree(open_menu=False)
+    collapsed = observe.build_snapshot(
+        closed, ATSPIAccessor(), scope=Scope.WINDOW, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    box = next(el for el in collapsed.elements if el.role == "AXComboBox")
+    assert box.expanded is False
+    assert not any(el.role == "AXMenuItem" for el in collapsed.elements)
+    assert "collapsed" in observe.render_text(collapsed)
+
+
+def _gtk_popup_menu(names, *, showing=True, selected=None, role="menu", title=""):
+    """Fake menu. ``showing`` marks the menu and its items SHOWING."""
+    states = {"ENABLED", "SENSITIVE"}
+    if showing:
+        states |= {"SHOWING", "VISIBLE"}
+    items = []
+    for name in names:
+        item_states = {"ENABLED", "SENSITIVE", "VISIBLE"}
+        if showing:
+            item_states.add("SHOWING")
+        if name == selected:
+            item_states.add("SELECTED")
+        items.append(_Node(
+            "menu item", name, states=item_states, actions=["click"],
+            x=40, y=80, w=160, h=24,
+        ))
+    return _Node(
+        role, title, states=states, children=items,
+        x=40, y=80, w=160, h=24 * max(len(names), 1),
+    )
+
+
+def _stamp_gtk(nodes) -> None:
+    for node in nodes:
+        node.toolkit = "gtk"
+
+
+def test_separate_gtk_combo_popup_is_not_listed_twice(monkeypatch) -> None:
+    """The same open options are not listed again as an application menu.
+
+    The combo keeps a SHOWING menu. A second menu under the application,
+    and an untitled window whose own menu is not parented to the combo,
+    repeat those titles. Both are the popup. A context menu and a named
+    File menu stay. These nodes are fakes. A Chromium menu is not a GTK
+    combo popup.
+    """
+    from a11y_computer_use.schema import Scope
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    sizes = ("Very Small", "Smaller", "Small", "Normal", "Large", "Larger", "Very Large")
+    nested = _gtk_popup_menu(sizes, selected="Large")
+    duplicate = _gtk_popup_menu(sizes, selected="Large")
+    context = _gtk_popup_menu(("Cut", "Copy", "Paste"))
+    file_menu = _gtk_popup_menu(("New", "Open"), title="File")
+    combo = _Node(
+        "combo box", "Large", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[nested], actions=["press"], x=40, y=40, w=160, h=34,
+    )
+    dialog = _Node(
+        "dialog", "Application Finder", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[combo], x=20, y=20, w=420, h=320,
+    )
+    frame = _Node(
+        "frame", "Application Finder", states={"SHOWING", "VISIBLE", "ENABLED"},
+        x=10, y=10, w=640, h=480,
+    )
+    app = _Node(
+        "application", "xfce4-appfinder",
+        children=[frame, dialog, duplicate, context, file_menu],
+    )
+    _stamp_gtk([
+        nested, duplicate, context, file_menu, combo, dialog, frame, app,
+        *nested.children, *duplicate.children, *context.children, *file_menu.children,
+    ])
+    assert _atspi._combo_owning_popup(duplicate) is combo
+    assert _atspi._combo_owning_popup(context) is None
+    assert _atspi._combo_owning_popup(file_menu) is None
+    snap = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="xfce4-appfinder", pid=None,
+        geometry=_screen(),
+    )
+    titles = [el.title for el in snap.elements if el.role == "AXMenuItem"]
+    assert titles.count("Very Small") == 1
+    assert titles.count("Very Large") == 1
+    assert [title for title in titles if title in {"Cut", "Copy", "Paste", "New", "Open"}] == [
+        "Cut", "Copy", "Paste", "New", "Open",
+    ]
+    by_ref = {el.ref: el for el in snap.elements}
+    small = next(el for el in snap.elements if el.role == "AXMenuItem" and el.title == "Very Small")
+    box = next(el for el in snap.elements if el.role == "AXComboBox")
+    ancestor = small
+    while ancestor.parent is not None and ancestor.ref != box.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == box.ref
+
+    popup_items = _gtk_popup_menu(sizes, selected="Large")
+    popup_menu = popup_items
+    window = _Node(
+        "window", "", states={"SHOWING", "VISIBLE", "ACTIVE", "ENABLED"},
+        children=[popup_menu], x=40, y=80, w=180, h=200,
+    )
+    owned = _gtk_popup_menu(sizes, selected="Large")
+    other = _Node(
+        "combo box", "Large", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[owned], actions=["press"], x=40, y=40, w=160, h=34,
+    )
+    prefs = _Node(
+        "dialog", "Preferences", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[other], x=20, y=20, w=420, h=320,
+    )
+    editor = _Node(
+        "frame", "Editor", states={"SHOWING", "VISIBLE", "ENABLED"},
+        x=10, y=10, w=640, h=480,
+    )
+    mousepad = _Node("application", "mousepad", children=[editor, prefs, window])
+    _stamp_gtk([
+        popup_menu, window, owned, other, prefs, editor, mousepad,
+        *popup_menu.children, *owned.children,
+    ])
+    assert popup_menu.parent is window
+    assert _atspi._combo_owning_popup(window) is other
+    picked = _atspi._preferred_window(
+        mousepad.children, lambda frame: "ACTIVE" in frame.states,
+    )
+    assert picked is prefs
+    whole = observe.build_snapshot(
+        mousepad, ATSPIAccessor(), scope=Scope.APP, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    assert [el.title for el in whole.elements if el.role == "AXMenuItem" and el.title == "Large"].count(
+        "Large"
+    ) == 1
+    assert not any(el.role == "AXWindow" and not el.title for el in whole.elements)
+
+    chrome_menu = _gtk_popup_menu(sizes, selected="Large")
+    chrome_nested = _gtk_popup_menu(sizes, selected="Large")
+    chrome_combo = _Node(
+        "combo box", "Large", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[chrome_nested], actions=["press"], x=40, y=40, w=160, h=34,
+    )
+    chrome_frame = _Node(
+        "frame", "Chrome", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[chrome_combo], x=10, y=10, w=640, h=480,
+    )
+    chrome = _Node(
+        "application", "Google Chrome", children=[chrome_frame, chrome_menu],
+    )
+    for node in (
+        chrome_menu, chrome_nested, chrome_combo, chrome_frame, chrome,
+        *chrome_menu.children, *chrome_nested.children,
+    ):
+        node.toolkit = "chrome"
+    assert _atspi._combo_owning_popup(chrome_menu) is None
+    chrome_snap = observe.build_snapshot(
+        chrome, ATSPIAccessor(), scope=Scope.APP, app="Google Chrome", pid=None,
+        geometry=_screen(),
+    )
+    assert [el.title for el in chrome_snap.elements if el.role == "AXMenuItem"].count("Very Small") == 2
+
+
+def test_gtk_combo_option_click_closes_the_popup(monkeypatch) -> None:
+    """A ref click on a GTK option collapses the combo and sends no Escape.
+
+    A popup that stays open is popup_open. A menu-bar item is not a combo
+    option, so it does not send Escape either.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    _app, _dialog, _frame, _window, combo, menu, cobalt = _gtk_combo_tree(open_menu=True)
+
+    def choose(index, option=cobalt, popup=menu):
+        option.action_log.append(option.actions[index])
+        for child in popup.children:
+            child.states.discard("SELECTED")
+        option.states.add("SELECTED")
+        popup.states.discard("SHOWING")
+        popup.states.discard("VISIBLE")
+        return True
+
+    cobalt.do_action = choose
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, cobalt)
+    element = _element("e8", "AXMenuItem", "Cobalt", clickable=True)
+    assert driver.press_element(element) is True
+    assert cobalt.action_log == ["click"]
+    assert "SELECTED" in cobalt.states
+    assert keys == []
+    assert ATSPIAccessor().read(combo).expanded is False
+
+    _app, _dialog, _frame, _window, stuck, menu, cobalt = _gtk_combo_tree(open_menu=True)
+
+    def ignore(index, option=cobalt):
+        option.action_log.append(option.actions[index])
+        return True
+
+    cobalt.do_action = ignore
+    stuck.do_action = ignore
+    keys.clear()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cobalt)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "popup_open"
+    assert "Cobalt" in exc.value.message
+    assert keys == ["Escape", "Escape", "Escape", "Escape"]
+
+    item = _Node("menu item", "Save", actions=["click"])
+    item.toolkit = "gtk"
+    bar_menu = _Node("menu", "File", children=[item])
+    bar_menu.toolkit = "gtk"
+    _Node("menu bar", "", children=[bar_menu]).toolkit = "gtk"
+    keys.clear()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: item)
+    assert driver.press_element(_element("e3", "AXMenuItem", "Save", clickable=True)) is True
+    assert keys == []
+    assert item.action_log == ["click"]
+
+
 def test_spin_button_uses_the_value_interface_and_rejects_out_of_range(monkeypatch) -> None:
     spin = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
     driver = _driver(monkeypatch, spin)
@@ -639,10 +1083,13 @@ def test_empty_chrome_number_is_typed_and_zero_is_not_a_false_success(monkeypatc
 
     def type_text(text, _node=number):
         typed.append(text)
-        _node.text = text
+        _node.text = (_node.text or "") + text
+
+    def click_center(node) -> None:
+        node.states.add("FOCUSED")
 
     monkeypatch.setattr(_atspi, "_type_string", type_text)
-    monkeypatch.setattr(_atspi, "_click_center", lambda _node: None)
+    monkeypatch.setattr(_atspi, "_click_center", click_center)
     field = _element("e9", "AXTextField", "Guests", editable=True)
     assert driver.set_value(field, "0") is True
     assert number.text == "0"
@@ -686,6 +1133,7 @@ def test_chrome_number_without_editable_text_is_cleared_by_a_click_and_keys(monk
 
     def click(x, y, **_kwargs):
         clicked.append((x, y))
+        number.states.add("FOCUSED")
 
     def press_chord(chord: str) -> None:
         chords.append(chord)
@@ -704,6 +1152,133 @@ def test_chrome_number_without_editable_text_is_cleared_by_a_click_and_keys(monk
     assert number.text == ""
     assert clicked
     assert chords[:3] == ["ctrl+a", "backspace", "delete"]
+
+
+def _number_and_name(number_states=()):
+    """A Count spin button and a Name entry under one document."""
+    name = _Node(
+        "entry", "Name", text="Ayşe café ₸",
+        attrs={"tag": "input", "id": "name", "text-input-type": "text"},
+    )
+    number = _Node(
+        "spin button", "Count", text="", value=0.0, minimum=0.0, maximum=100.0,
+        states=set(number_states),
+        attrs={"tag": "input", "text-input-type": "number", "id": "count"},
+    )
+    _Node("document web", "form", children=[name, number])
+    return name, number
+
+
+def test_number_set_value_types_nothing_when_focus_is_elsewhere(monkeypatch) -> None:
+    """Focus stays on Name. The digits are not sent, and Name is unchanged."""
+    name, number = _number_and_name()
+    name.states.add("FOCUSED")
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        name.text += text
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_click_center", lambda _node: None)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(number, "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "keyboard" not in exc.value.detail["next"]
+    assert typed == []
+    assert name.text == "Ayşe café ₸"
+    assert number.text == ""
+
+
+def test_number_set_value_stops_when_focus_moves_mid_write(monkeypatch) -> None:
+    """The first digit lands in Count. Focus then moves. The next digit is not sent."""
+    name, number = _number_and_name({"FOCUSED"})
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        if "FOCUSED" not in number.states:
+            name.text += text
+            return
+        number.text += text
+        number.states.discard("FOCUSED")
+        name.states.add("FOCUSED")
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_click_center", lambda node: node.states.add("FOCUSED"))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(number, "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["outcome"] == "refused"
+    assert typed == ["1"]
+    assert number.text == "1"
+    assert name.text == "Ayşe café ₸"
+
+
+def test_failed_set_value_reports_focus_lost_when_another_field_changes(monkeypatch) -> None:
+    """Keys that land in Name are not reported as a plain text_mismatch."""
+    name, number = _number_and_name({"FOCUSED"})
+
+    def type_string(text: str) -> None:
+        name.text += text
+
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_click_center", lambda node: node.states.add("FOCUSED"))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    driver = _driver(monkeypatch, number)
+    field = _element("e9", "AXTextField", "Count", editable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(field, "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert exc.value.detail["outcome"] == "refused"
+    assert exc.value.detail["changed_fields"]
+    assert name.text == "Ayşe café ₸12"
+    assert number.text == ""
+
+
+def test_linux_runtime_does_not_type_when_focus_cannot_be_confirmed() -> None:
+    """A Linux set_value that returns False must not fall through to type_text."""
+    from a11y_computer_use import server
+
+    element = _element("e9", "AXTextField", "Count", editable=True)
+    snap = type("S", (), {"app": "chrome", "scope": None})()
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime._resolve = lambda ref, kind: (snap, element)
+    runtime._run_gated = lambda action, app, execute, **_kwargs: execute()
+    runtime._refuse_disabled = lambda target, verb="": None
+    calls: list[str] = []
+
+    class _Driver:
+        name = "linux"
+
+        def set_value(self, _element, _value):
+            return False
+
+        def press_element(self, _element):
+            calls.append("press")
+            return True
+
+        def type_text(self, text, pid=None):
+            calls.append(text)
+
+    runtime.driver = _Driver()
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.set_value("e9", "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["outcome"] == "refused"
+    assert calls == []
 
 
 def test_slider_set_value_uses_the_value_interface(monkeypatch) -> None:
@@ -760,6 +1335,337 @@ def test_tree_row_click_uses_the_center_when_selection_does_not(monkeypatch) -> 
     assert driver.press_element(element) is True
     assert "SELECTED" in target.states
     assert target.action_log == []
+
+
+def _treeitem(name, *, expanded=False, checked=None, actions=("click",)):
+    """An ARIA treeitem row. The tree exposes Selection. The item does not select."""
+    states = {"EXPANDABLE", "SELECTABLE", "ENABLED", "SENSITIVE", "SHOWING"}
+    if expanded:
+        states.add("EXPANDED")
+    if checked is not None:
+        states.add("CHECKABLE")
+        if checked:
+            states.add("CHECKED")
+    item = _Node("tree item", name, states=states, actions=list(actions))
+    tree = _Node("tree", "Files", children=[item])
+    tree.select_fails = True
+    return tree, item
+
+
+def test_aria_treeitem_click_waits_for_expanded_and_does_not_click_again(monkeypatch) -> None:
+    """The click action flips the node a beat later. A second click is not sent.
+
+    Chrome returns from the click action while the treeitem is still
+    collapsed, then publishes EXPANDED. The selection does not move. A
+    pointer click at the center would run the handler again and collapse it.
+    """
+    _tree, item = _treeitem("Folder A")
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        item.armed = True
+        return True
+
+    def sleep(_seconds, _node=item):
+        if getattr(_node, "armed", False) and "EXPANDED" not in _node.states:
+            _node.states.add("EXPANDED")
+
+    item.do_action = do_action
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    clicks: list[str] = []
+
+    def click(element, **_kwargs):
+        clicks.append(element.ref)
+        if "EXPANDED" in item.states:
+            item.states.discard("EXPANDED")
+        else:
+            item.states.add("EXPANDED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Folder A", clickable=True)
+    assert driver.press_element(element) is True
+    assert "EXPANDED" in item.states
+    assert "SELECTED" not in item.states
+    assert item.action_log == ["click"]
+    assert clicks == []
+
+
+def test_aria_treeitem_collapse_is_one_activation(monkeypatch) -> None:
+    """A click on an open treeitem leaves it collapsed. The pointer is not used."""
+    _tree, item = _treeitem("Folder A", expanded=True)
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        item.states.discard("EXPANDED")
+        return True
+
+    item.do_action = do_action
+    clicks: list[str] = []
+    driver.click = lambda element, **_kwargs: clicks.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Folder A", clickable=True)
+    assert driver.press_element(element) is True
+    assert "EXPANDED" not in item.states
+    assert item.action_log == ["click"]
+    assert clicks == []
+
+
+def test_aria_treeitem_click_that_changes_nothing_does_not_click_again(monkeypatch) -> None:
+    """A toggle row whose click action changes nothing is not clicked twice."""
+    _tree, item = _treeitem("Folder A")
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        return True
+
+    item.do_action = do_action
+    clicks: list[str] = []
+    driver.click = lambda element, **_kwargs: clicks.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Folder A", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert item.action_log == ["click"]
+    assert clicks == []
+    assert "EXPANDED" not in item.states
+
+
+def test_checkable_row_click_toggles_once(monkeypatch) -> None:
+    """A checkable row's click sets CHECKED. A second click is not sent."""
+    states = {"CHECKABLE", "SELECTABLE", "ENABLED"}
+    item = _Node("table cell", "Agree", states=states, actions=["click"])
+    table = _Node("table", "Rows", children=[item])
+    table.select_fails = True
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        item.states.add("CHECKED")
+        return True
+
+    item.do_action = do_action
+    clicks: list[str] = []
+    driver.click = lambda element, **_kwargs: clicks.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Agree", clickable=True)
+    assert driver.press_element(element) is True
+    assert "CHECKED" in item.states
+    assert "SELECTED" not in item.states
+    assert item.action_log == ["click"]
+    assert clicks == []
+
+
+def test_expandable_gtk_cell_still_uses_the_center_when_selection_does_not(monkeypatch) -> None:
+    """A GTK cell's expand action is not a click. The center click still selects."""
+    _table_node, rows = _table()
+    _table_node.select_fails = True
+    target = rows[2]
+    target.states.add("EXPANDABLE")
+    driver = _driver(monkeypatch, target)
+    clicks: list[str] = []
+
+    def click(element, **_kwargs):
+        clicks.append(element.ref)
+        target.states.add("SELECTED")
+        rows[1].states.discard("SELECTED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e19", "AXGroup", "Row C", clickable=True, y=70)
+    assert driver.press_element(element) is True
+    assert "SELECTED" in target.states
+    assert target.action_log == []
+    assert clicks == ["e19"]
+
+
+def _window(entry_text, body, *, crumb=None):
+    """A frame whose toolbar is a location entry or one path-bar button."""
+    if crumb is not None:
+        bar_child = crumb
+    else:
+        bar_child = _Node("entry", "", text=entry_text)
+    toolbar = _Node("tool bar", "", children=[bar_child])
+    panel = _Node("panel", "", children=[toolbar, body])
+    return _Node("frame", "Files", children=[panel]), bar_child
+
+
+def _side_place(entry_text="/home/ubuntu/"):
+    """A Thunar shortcut cell outside the folder view, with a location entry."""
+    place = _Node(
+        "table cell", "File System",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED", "SENSITIVE", "SHOWING"},
+        x=100, y=200, w=130, h=24,
+    )
+    row = _Node(
+        "table cell", "", children=[place],
+        actions=["expand or contract", "edit", "activate"],
+    )
+    table = _Node("table", "", children=[row])
+    scroll = _Node("scroll pane", "", children=[table])
+    filler = _Node("filler", "", children=[scroll])
+    split = _Node("split pane", "", children=[filler])
+    frame, entry = _window(entry_text, split)
+    return place, entry, frame
+
+
+def test_side_pane_click_uses_the_pointer_and_not_activate(monkeypatch) -> None:
+    """A shortcut cell opens on a pointer click. Selection and activate do not.
+
+    The cell's first actions are expand and edit. activate reports success
+    and leaves the folder. The click is the row's center.
+    """
+    place, entry, _frame = _side_place()
+    driver = _driver(monkeypatch, place)
+    clicked = []
+
+    def click(element, **_kwargs):
+        clicked.append((element.ref, element.bounds.x, element.bounds.y))
+        entry.text = "/"
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e33", "AXCell", "File System", clickable=True, x=100, y=200, w=130, h=24)
+    assert _atspi.navigation_gesture(place) == "pointer"
+    assert driver.press_element(element) is True
+    assert clicked == [("e33", 100, 200)]
+    assert place.action_log == []
+    assert "SELECTED" not in place.states
+    assert entry.text == "/"
+
+
+def test_location_entry_nested_under_a_wide_toolbar_is_the_place() -> None:
+    """Thunar nests the location entry under a toolbar of many empty panels.
+
+    The entry is panel, panel, filler, then a text field, and that panel is
+    not one of the first few toolbar children. The walk has to reach it.
+    """
+    entry = _Node("text", "", text="/home/ubuntu/")
+    nested = _Node("panel", "", children=[
+        _Node("panel", "", children=[
+            _Node("filler", "", children=[entry]),
+        ]),
+    ])
+    slots = []
+    for index in range(18):
+        if index == 14:
+            slots.append(nested)
+        else:
+            slots.append(_Node("panel", "", children=[
+                _Node("push button", "Back" if index == 0 else ""),
+            ]))
+    toolbar = _Node("tool bar", "", children=slots)
+    place = _Node(
+        "table cell", "File System",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED"},
+    )
+    table = _Node("table", "", children=[place])
+    split = _Node("split pane", "", children=[table])
+    panel = _Node("panel", "", children=[toolbar, split])
+    frame = _Node("frame", "ubuntu - Thunar", children=[panel])
+    assert _atspi.folder_place(place) == ("/home/ubuntu/", "location")
+    assert _atspi.navigating_folder_row(place) is True
+    del frame
+
+
+def test_folder_view_row_still_selects(monkeypatch) -> None:
+    """A file row inside the view tab is selected. It is not opened."""
+    file_cell = _Node(
+        "table cell", "adduser",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED", "SENSITIVE"},
+    )
+    file_table = _Node("table", "", children=[file_cell])
+    view = _Node("page tab list", "", children=[file_table])
+    split = _Node("split pane", "", children=[view])
+    _frame, entry = _window("/usr/share/doc/", split)
+    driver = _driver(monkeypatch, file_cell)
+    clicked = []
+    driver.click = lambda element, **_kwargs: clicked.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e47", "AXCell", "adduser", clickable=True)
+    assert _atspi.navigation_gesture(file_cell) is None
+    assert driver.press_element(element) is True
+    assert clicked == []
+    assert file_cell.action_log == []
+    assert "SELECTED" in file_cell.states
+    assert entry.text == "/usr/share/doc/"
+
+
+def test_tree_row_with_its_own_activate_action_uses_that_action(monkeypatch) -> None:
+    """A tree row whose only action is activate opens through that action.
+
+    Expand and edit are not present, so activate is the row's own
+    activation. The pointer is not sent.
+    """
+    item = _Node("tree item", "Documents", actions=["activate"], states={"ENABLED"})
+    tree = _Node("tree", "Folders", children=[item])
+    frame, entry = _window("/home/ubuntu/", tree)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        entry.text = "/home/ubuntu/Documents"
+        return True
+
+    item.do_action = do_action
+    driver = _driver(monkeypatch, item)
+    clicked = []
+    driver.click = lambda element, **_kwargs: clicked.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Documents", clickable=True)
+    assert _atspi.navigation_gesture(item) == "activate"
+    assert driver.press_element(element) is True
+    assert item.action_log == ["activate"]
+    assert clicked == []
+    assert entry.text == "/home/ubuntu/Documents"
+    del frame
+
+
+def test_return_opens_a_navigating_row_that_has_no_box(monkeypatch) -> None:
+    """Return is the activation only when the row has no box and no activate."""
+    from a11y_computer_use.drivers import _linux_input
+
+    item = _Node("tree item", "Remote", actions=[], states={"ENABLED"}, w=0, h=0)
+    tree = _Node("tree", "Folders", children=[item])
+    _frame, _entry = _window("/home/ubuntu/", tree)
+    driver = _driver(monkeypatch, item)
+    keys = []
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda key: keys.append(key))
+    element = _element("e9", "AXRow", "Remote", clickable=True, w=0, h=0)
+    assert _atspi.navigation_gesture(item) == "return"
+    assert driver.press_element(element) is True
+    assert keys == ["Return"]
+    assert "SELECTED" in item.states
+
+
+def test_path_bar_change_confirms_and_a_selected_row_does_not(monkeypatch) -> None:
+    """The path bar is the location when there is no entry.
+
+    A different crumb confirms. The same crumb is partial, even if the
+    row became selected.
+    """
+    crumb = _Node("push button", "ubuntu", states={"CHECKED"})
+    place = _Node(
+        "table cell", "File System",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED"},
+    )
+    row = _Node("table cell", "", children=[place])
+    table = _Node("table", "", children=[row])
+    split = _Node("split pane", "", children=[table])
+    frame, _button = _window("", split, crumb=crumb)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi, "_FOLDER_LOCATION_WAIT_S", 0)
+    assert _atspi.folder_place(place) == ("ubuntu", "path bar")
+    crumb.name = "File System"
+    assert _atspi.folder_navigation_verdict(place, "ubuntu") == (
+        "confirmed", "the path bar changed",
+    )
+    crumb.name = "ubuntu"
+    assert _atspi.folder_navigation_verdict(place, "ubuntu") == (
+        "partial", "the row was selected but the location did not change",
+    )
+    del frame
 
 
 def test_tree_row_click_errors_when_the_selection_stays_put(monkeypatch) -> None:
@@ -869,6 +1775,206 @@ def test_chrome_list_option_click_still_selects(monkeypatch) -> None:
     assert driver.press_element(element) is True
     assert "SELECTED" in cherry.states
     assert cherry.action_log == ["click"]
+
+
+class _Relation:
+    def __init__(self, kind, targets):
+        self.kind = kind
+        self.targets = list(targets)
+
+    def get_relation_type(self):
+        return self.kind
+
+    def get_n_targets(self):
+        return len(self.targets)
+
+    def get_target(self, index):
+        return self.targets[index]
+
+
+def _aria_city(*, toolkit="Chromium", nest=False):
+    """An ARIA combobox and its listbox. ``nest`` hangs the list off the input."""
+    city = _Node(
+        "entry", "City", text="",
+        states={"EXPANDABLE", "EXPANDED", "ENABLED", "EDITABLE", "FOCUSABLE", "SENSITIVE"},
+        attrs={"xml-roles": "combobox", "tag": "input", "id": "city"},
+    )
+    berlin = _Node("list item", "Berlin", actions=["click"])
+    bern = _Node("list item", "Bern", actions=["click"])
+    box = _Node(
+        "list box", "cities", children=[berlin, bern],
+        attrs={"xml-roles": "listbox", "tag": "ul", "id": "lb"},
+    )
+    box.toolkit = toolkit
+    if nest:
+        city.children.append(box)
+        box.parent = city
+        box.get_relation_set = lambda: []
+    else:
+        box.get_relation_set = lambda: [_Relation("controlled_by", [city])]
+    return city, box, berlin, bern
+
+
+def _close_on(city, box, option, *, text=None, name=None, collapse=True, selected_attr=False):
+    """The option handler: set the input, and drop the row when the list closes."""
+
+    def click(_element, **_kwargs):
+        if text is not None:
+            city.text = text
+        if name is not None:
+            city.name = name
+        if selected_attr:
+            option.attrs["aria-selected"] = "true"
+        if collapse:
+            city.states.discard("EXPANDED")
+            option.states.add("DEFUNCT")
+            option.parent = None
+            box.children = [child for child in box.children if child is not option]
+
+    return click
+
+
+def test_aria_combobox_option_click_reports_success_when_the_list_closes(monkeypatch) -> None:
+    """The row disappears. The combobox value is the selection."""
+    city, box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, text="Bern")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.text == "Bern"
+    assert "EXPANDED" not in city.states
+    assert "SELECTED" not in bern.states
+    assert "DEFUNCT" in bern.states
+
+
+def test_aria_combobox_option_nested_under_the_input_reports_success(monkeypatch) -> None:
+    """The list is a child of the combobox, with no controls relation."""
+    city, box, _berlin, bern = _aria_city(nest=True)
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, text="Bern")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.text == "Bern"
+
+
+def test_aria_combobox_option_click_confirms_from_aria_selected(monkeypatch) -> None:
+    """aria-selected is the commit when the input text does not change."""
+    city, _box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+
+    def click(_element, **_kwargs):
+        bern.attrs["aria-selected"] = "true"
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert "SELECTED" not in bern.states
+    assert city.text == ""
+    assert bern.attrs["aria-selected"] == "true"
+
+
+def test_aria_combobox_option_click_confirms_when_the_popup_collapses_onto_the_value(monkeypatch) -> None:
+    """The input already shows the option. Closing the popup is the change."""
+    city, box, _berlin, bern = _aria_city()
+    city.text = "Bern"
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, collapse=True)  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.text == "Bern"
+    assert "EXPANDED" not in city.states
+
+
+def test_aria_combobox_option_click_confirms_when_the_name_becomes_the_option(monkeypatch) -> None:
+    """Some trees publish the current item as the accessible name."""
+    city, box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, name="Bern")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.name == "Bern"
+    assert city.text == ""
+
+
+def test_aria_combobox_option_click_that_changes_nothing_is_unsupported(monkeypatch) -> None:
+    """A click that leaves the value, the name, and the popup alone is a failure."""
+    city, _box, berlin, bern = _aria_city()
+    berlin.states.add("SELECTED")
+    driver = _driver(monkeypatch, bern)
+    driver.click = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert city.text == ""
+    assert city.name == "City"
+    assert "EXPANDED" in city.states
+    assert "SELECTED" not in bern.states
+    assert "SELECTED" in berlin.states
+
+
+def test_aria_combobox_option_click_that_picks_a_different_value_is_unsupported(monkeypatch) -> None:
+    """Closing the list onto another city is not a selection of this option."""
+    city, box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, text="Berlin")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert city.text == "Berlin"
+    assert "SELECTED" not in bern.states
+
+
+def test_aria_combobox_option_action_that_closes_the_list_does_not_click_again(monkeypatch) -> None:
+    """A non-Chromium list action that commits the combobox is success.
+
+    The row never becomes SELECTED. A second pointer click is not sent.
+    """
+    city, box, _berlin, bern = _aria_city(toolkit="")
+    box.select_fails = True
+
+    def do_action(index, _node=bern):
+        _node.action_log.append(_node.actions[index])
+        city.text = "Bern"
+        city.states.discard("EXPANDED")
+        _node.states.add("DEFUNCT")
+        _node.parent = None
+        return True
+
+    bern.do_action = do_action
+    driver = _driver(monkeypatch, bern)
+    pointer: list[str] = []
+    driver.click = lambda *_args, **_kwargs: pointer.append("click")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert bern.action_log == ["click"]
+    assert pointer == []
+    assert city.text == "Bern"
+    assert "SELECTED" not in bern.states
+
+
+def test_aria_combobox_option_action_that_changes_nothing_is_unsupported(monkeypatch) -> None:
+    """The same action path reports failure when the combobox stays put."""
+    city, box, _berlin, bern = _aria_city(toolkit="")
+    box.select_fails = True
+
+    def do_action(index, _node=bern):
+        _node.action_log.append(_node.actions[index])
+        return True
+
+    bern.do_action = do_action
+    driver = _driver(monkeypatch, bern)
+    driver.click = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert city.text == ""
+    assert "EXPANDED" in city.states
+    assert "SELECTED" not in bern.states
+    assert bern.action_log == ["click"]
 
 
 def test_chrome_snapshot_reports_selected_text_pressed_and_empty_number(monkeypatch) -> None:
@@ -1069,17 +2175,25 @@ def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> 
     """
     monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
     monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
     monkeypatch.setattr(_atspi, "_click_center", lambda _acc: None)
     typed: list[str] = []
+    segments: list = []
+
+    def grab_focus(acc) -> bool:
+        acc.states.add("FOCUSED")
+        return True
 
     def type_string(text):
         typed.append(text)
-        if text == "03":
-            month.attrs["valuetext"] = "March"
-        elif text == "17":
-            day.attrs["valuetext"] = text
+        for seg in segments:
+            if "FOCUSED" in seg.states:
+                seg.buf = getattr(seg, "buf", "") + text
+                if seg.buf == "03":
+                    seg.attrs["valuetext"] = "March"
+                elif seg.buf == "17":
+                    seg.attrs["valuetext"] = "17"
 
+    monkeypatch.setattr(_atspi, "grab_focus", grab_focus)
     monkeypatch.setattr(_atspi, "_type_string", type_string)
 
     _editor, year = _date_segment("Year Date of birth", "1994")
@@ -1091,13 +2205,15 @@ def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> 
     assert typed == []
 
     _blank_editor, day = _date_segment("Day Date of birth", "0", value=0.0)
+    segments.append(day)
     assert ATSPIAccessor().read(day).value is None
     assert _atspi.set_text(day, "17") is True
-    assert typed == ["17"]
+    assert "".join(typed) == "17"
     assert ATSPIAccessor().read(day).value == "17"
     assert day.value == 0.0
 
     _month_editor, month = _date_segment("Month Month", "0", kind="month", value=0.0)
+    segments.append(month)
     assert _atspi.set_text(month, "03") is True
     assert month.attrs["valuetext"] == "March"
     assert ATSPIAccessor().read(month).value == "March"
@@ -1120,3 +2236,58 @@ def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> 
     gtk.toolkit = "GTK"
     assert _atspi.control_kind(gtk) == "value"
     assert ATSPIAccessor().read(gtk).value == "5"
+    assert ATSPIAccessor().read(gtk).role == "AXTextField"
+
+
+def test_chrome_aria_spinbutton_reports_role_and_value_not_an_edit_field(monkeypatch) -> None:
+    """A custom role=spinbutton is a spinbutton with its value, not a text field.
+
+    valuetext wins over the Value float. Minimum and maximum are part of the
+    value when the range is real. An ``<input type=number>`` stays a text
+    field whose value is the text, with no range suffix. set_value still
+    refuses: the Value interface does not move a widget the page owns.
+    """
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    guests = _Node(
+        "spin button", "Guests", text="", value=3.0, minimum=0.0, maximum=10.0,
+        states=("FOCUSABLE", "ENABLED", "SENSITIVE"),
+        attrs={"tag": "div", "xml-roles": "spinbutton", "valuetext": "3 guests"},
+    )
+    guests.toolkit = "Chromium"
+    guests.hold_value = True
+    raw = ATSPIAccessor().read(guests)
+    assert raw.role == "AXSpinButton"
+    assert raw.value == "3 guests (min 0, max 10)"
+    assert raw.editable is False
+    _clickable, editable, _secure = observe._flags(raw)
+    assert editable is False
+    line = observe._render_line(Element(
+        "e30", raw.role, "Guests", str(raw.value), Bounds(0, 10, 10, 40, 24), "snap",
+        editable=editable,
+    ), bounds=False)
+    assert line == 'e30 spinbutton "Guests" ="3 guests (min 0, max 10)"'
+    assert "(edit)" not in line
+    assert "AXSpinButton" in observe._INTERACTIVE_ROLES
+
+    plain = _Node(
+        "spin button", "Plain", text="", value=6.0, minimum=1.0, maximum=9.0,
+        attrs={"tag": "div", "xml-roles": "spinbutton"},
+    )
+    plain.toolkit = "Chromium"
+    assert ATSPIAccessor().read(plain).value == "6 (min 1, max 9)"
+
+    number = _Node(
+        "spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0,
+        states=("EDITABLE", "FOCUSABLE", "ENABLED", "SENSITIVE"),
+        attrs={"tag": "input", "text-input-type": "number", "valuetext": "3"},
+    )
+    number.toolkit = "Chromium"
+    native = ATSPIAccessor().read(number)
+    assert native.role == "AXTextField"
+    assert native.value == "3"
+    assert observe._flags(native)[1] is True
+
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(guests, "9")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert guests.value == 3.0

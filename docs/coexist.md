@@ -31,7 +31,16 @@ it when it is not already the active window, check that the focus held, and
 then send the input. A window that cannot be focused is `focus_changed`. An
 app with no window is `app_not_found`. The error does not say the call is
 macOS-only. An empty `app` is `invalid_arguments` on every tool that accepts
-the argument.
+the argument. `app launch` with `activate=false` is unsupported on Linux,
+Windows, and the browser driver: the app is not launched. Omit `activate`.
+macOS honours the flag with `open -g`.
+
+`type` also takes an optional `ref`. The ref is resolved the same way `click`
+and `set_value` resolve one, including `stale_ref` when the process instance
+was replaced (`app_restarted`). The call then focuses that element and types
+only after focus reads back on it. If focus cannot be confirmed, the result
+is `focus_lost` and nothing is typed. The outcome read-back is the target
+element, not whichever field already had the caret.
 
 ## What still needs the app in front
 

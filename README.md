@@ -20,7 +20,7 @@ Computer use for AI agents that clicks real UI elements instead of guessed pixel
 
 ```bash
 uvx a11y-computer-use doctor            # try it, no install
-pip install a11y-computer-use           # extras: [browser] [windows] [linux]
+pip install a11y-computer-use           # extras: [browser] [windows] [linux] [ocr] [holo]
 ```
 
 ### Linux

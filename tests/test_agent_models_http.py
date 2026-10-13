@@ -447,6 +447,8 @@ def test_make_model_posts_through_mock_transport(monkeypatch: pytest.MonkeyPatch
     assert captured["url"] == "https://api.x.ai/v1/chat/completions"
     assert captured["auth"] == "Bearer test-xai-key"
     assert captured["body"]["model"] == "grok-4"
+    assert captured["body"]["temperature"] == 0.0
+    assert captured["body"]["seed"] == 0
 
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     turn = make_model("ollama:llama3.1").complete([Message("user", "hi")], [])
@@ -454,27 +456,69 @@ def test_make_model_posts_through_mock_transport(monkeypatch: pytest.MonkeyPatch
     assert captured["url"] == "http://127.0.0.1:11434/v1/chat/completions"
     assert captured["auth"] is None
     assert captured["body"]["model"] == "llama3.1"
+    assert captured["body"]["temperature"] == 0.0
+    assert captured["body"]["seed"] == 0
 
     monkeypatch.setenv("VLLM_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setenv("VLLM_API_KEY", "test-vllm-key")
     make_model("vllm:local").complete([Message("user", "hi")], [])
     assert captured["url"] == "http://127.0.0.1:8000/v1/chat/completions"
     assert captured["auth"] == "Bearer test-vllm-key"
+    assert captured["body"]["temperature"] == 0.0
+    assert captured["body"]["seed"] == 0
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     make_model("anthropic:claude-sonnet-4-5").complete([Message("user", "hi")], [])
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["x-api-key"] == "test-anthropic-key"
     assert captured["body"]["model"] == "claude-sonnet-4-5"
+    assert captured["body"]["temperature"] == 0.0
+    assert "seed" not in captured["body"]
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     make_model("gemini:gemini-2.5-flash").complete([Message("user", "hi")], [])
     assert captured["url"].endswith("/models/gemini-2.5-flash:generateContent")
     assert captured["goog"] == "test-gemini-key"
     assert "test-gemini-key" not in captured["url"]
+    assert captured["body"]["generationConfig"] == {"temperature": 0.0, "seed": 0}
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.test/v1")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     make_model("anthropic:claude-sonnet-4-5").complete([Message("user", "hi")], [])
     assert captured["url"] == "https://example.test/v1/messages"
     assert captured["x-api-key"] is None
+
+
+def test_sampling_overrides_are_sent_only_when_the_provider_allows_them():
+    openai_fix = _load("openai")
+    handler, captured = _record(openai_fix["text_response"])
+    with _client(handler) as client:
+        model = _openai(client, temperature=0.3, seed=9)
+        model.complete([Message("user", "hi")], [])
+    assert captured["body"]["temperature"] == 0.3
+    assert captured["body"]["seed"] == 9
+    assert model.sampling.notes == ()
+    assert model.sampling.trace() == {"temperature": 0.3, "seed": 9}
+
+    anthropic_fix = _load("anthropic")
+    handler, captured = _record(anthropic_fix["text_response"])
+    with _client(handler) as client:
+        model = _anthropic(client, temperature=0, seed=5)
+        model.complete([Message("user", "hi")], [])
+    assert captured["body"]["temperature"] == 0.0
+    assert "seed" not in captured["body"]
+    assert model.sampling.temperature == 0.0
+    assert model.sampling.seed is None
+    assert model.sampling.notes == (
+        "seed 5 was not sent: the Anthropic Messages API has no seed parameter",
+    )
+
+    gemini_fix = _load("gemini")
+    handler, captured = _record(gemini_fix["text_response"])
+    with _client(handler) as client:
+        model = _gemini(client, temperature=0.1, seed=4)
+        model.complete([Message("user", "hi")], [])
+    assert captured["body"]["generationConfig"] == {"temperature": 0.1, "seed": 4}
+
+    with pytest.raises(ModelError, match="temperature"):
+        _openai(httpx.Client(), temperature=True)

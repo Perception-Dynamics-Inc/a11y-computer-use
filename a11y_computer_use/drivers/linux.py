@@ -39,6 +39,25 @@ from a11y_computer_use.schema import (
 )
 
 
+def _hint_pid(app: str) -> int | None:
+    """The only X11 pid for ``app``, or None when the name is not unique.
+
+    Used when AT-SPI's own pid read does not answer. A missing display is
+    None, the same as no match.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        pids = _linux_system.pids_matching(app)
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
+        return None
+    if len(pids) == 1:
+        return next(iter(pids))
+    return None
+
+
 def _resolved_app(identifier: str) -> str:
     """The app id app list would show for ``identifier``.
 
@@ -54,9 +73,19 @@ def _resolved_app(identifier: str) -> str:
 
 def _point_of(target: Target) -> tuple[int, int]:
     """Screen (x, y) for a coordinate action: a Point directly, else an
-    Element's center. AT-SPI SCREEN coords == our physical-pixel space (scale 1)."""
+    Element's center. AT-SPI SCREEN coords == our physical-pixel space (scale 1).
+
+    An element with no box is not a pointer target. Callers that already
+    returned a typed no-op do not reach this.
+    """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
+    if target.bounds is None:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{target.ref} ({target.role}) has no bounds; no pointer click was sent",
+            detail={"ref": target.ref, "role": target.role, "reason": "not_actionable"},
+        )
     return int(target.bounds.center.x), int(target.bounds.center.y)
 
 
@@ -96,6 +125,36 @@ def _wheel_point(target: Target) -> tuple[int, int]:
     if right <= left or bottom <= top:
         return cx, cy
     return (left + right) // 2, (top + bottom) // 2
+
+
+def _anchor_scroll_point(target: Target, handle, x: int, y: int) -> tuple[int, int] | None:
+    """A point inside ``target`` whose window pid is ``handle``'s, or None.
+
+    The center of a scroll area can sit on another window. The wheel moves
+    to another point inside the same box when that point belongs to this
+    process. None leaves ``(x, y)`` unchanged, including when no point
+    matches: that is not reported as a scroll. A Chromium list does not
+    call this; its row point is already chosen.
+    """
+    if handle is None or not isinstance(target, Element):
+        return None
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers._linux_scroll_anchor import point_for_pid
+
+    pid = _atspi.pid_of(handle)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    width, height = _screen_span()
+    screen = (width, height) if width > 0 and height > 0 else None
+    try:
+        found = point_for_pid(
+            target.bounds, pid, _linux_system.pid_at_point, screen=screen,
+        )
+    except Exception:
+        return None
+    if found is None or found == (int(x), int(y)):
+        return None
+    return found
 
 
 def _clip_box_to_screen(box: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
@@ -310,6 +369,221 @@ def _cdp_scroll_pixels(x: int, y: int, *, dx: int, dy: int) -> bool:
     return abs(after - before) >= 1.0
 
 
+def _merge_click_box(atspi_box, dom: dict | None) -> tuple[float, float, float, float] | None:
+    """Screen box for a canvas or image click.
+
+    A positive AT-SPI width and height is the whole box. A zero AT-SPI size
+    keeps that origin when it is away from the screen corner and takes the
+    DOM width and height. Otherwise the DOM rectangle is the screen box.
+    """
+    if atspi_box is not None and float(atspi_box[2]) > 0 and float(atspi_box[3]) > 0:
+        return (
+            float(atspi_box[0]), float(atspi_box[1]),
+            float(atspi_box[2]), float(atspi_box[3]),
+        )
+    if not isinstance(dom, dict):
+        return None
+    try:
+        width = float(dom["width"])
+        height = float(dom["height"])
+        screen_x = float(dom["screenX"])
+        screen_y = float(dom["screenY"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    if atspi_box is not None and (abs(float(atspi_box[0])) > 1 or abs(float(atspi_box[1])) > 1):
+        return (float(atspi_box[0]), float(atspi_box[1]), width, height)
+    return (screen_x, screen_y, width, height)
+
+
+def _dom_click_box(info: dict) -> dict | None:
+    """DOM box of a Chrome node, in physical pixels, or None.
+
+    Used when AT-SPI reports a zero size. The page is a DevTools target of
+    the process that owns the node. The node is the DOM id, then the
+    aria-label, then the only element of that tag.
+    """
+    pid = info.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    port = _debug_port_for_pid(pid)
+    if port is None:
+        return None
+    import json
+
+    spec = {
+        "id": str(info.get("element_id") or ""),
+        "label": str(info.get("label") or ""),
+        "tag": str(info.get("tag") or ""),
+    }
+    expression = (
+        "(() => {"
+        f" const spec = {json.dumps(spec)};"
+        " const find = () => {"
+        "  if (spec.id) { const byId = document.getElementById(spec.id); if (byId) return byId; }"
+        "  if (spec.label) {"
+        "   const nodes = document.querySelectorAll(spec.tag || '*');"
+        "   for (const node of nodes) {"
+        "    if ((node.getAttribute('aria-label') || '') === spec.label) return node;"
+        "   }"
+        "  }"
+        "  if (spec.tag) {"
+        "   const all = document.getElementsByTagName(spec.tag);"
+        "   if (all.length === 1) return all[0];"
+        "  }"
+        "  return null;"
+        " };"
+        " const el = find();"
+        " if (!el) return null;"
+        " const r = el.getBoundingClientRect();"
+        " const dpr = window.devicePixelRatio || 1;"
+        " const topInset = Math.max(0, window.outerHeight - window.innerHeight);"
+        " return {"
+        "  width: r.width * dpr,"
+        "  height: r.height * dpr,"
+        "  screenX: window.screenX * dpr + r.left * dpr,"
+        "  screenY: window.screenY * dpr + topInset * dpr + r.top * dpr"
+        " };"
+        "})()"
+    )
+    try:
+        from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+
+        pages = page_targets(f"http://127.0.0.1:{port}")
+    except Exception:
+        return None
+    for page in pages:
+        ws = page.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            transport = connect(str(ws), timeout=3.0)
+            session = CDPSession(transport, default_timeout=3.0)
+            try:
+                reply = session.call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                )
+            finally:
+                transport.close()
+        except Exception:
+            continue
+        value = (reply.get("result") or {}).get("value")
+        if not isinstance(value, dict):
+            continue
+        try:
+            if float(value.get("width") or 0) > 0 and float(value.get("height") or 0) > 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _dom_activate_canvas_fallback(info: dict) -> bool:
+    """Click the DOM node for canvas fallback content. False when it cannot.
+
+    The node has to be inside a ``<canvas>`` and must not be the canvas
+    itself. ``element.click()`` runs the control's handler. A coordinate
+    click is not sent: the canvas is what is painted at that box.
+    """
+    pid = info.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    port = _debug_port_for_pid(pid)
+    if port is None:
+        return False
+    import json
+
+    spec = {
+        "id": str(info.get("element_id") or ""),
+        "label": str(info.get("label") or ""),
+        "tag": str(info.get("tag") or ""),
+    }
+    expression = (
+        "(() => {"
+        f" const spec = {json.dumps(spec)};"
+        " const insideCanvas = (node) => {"
+        "  if (!node || String(node.tagName || '').toUpperCase() === 'CANVAS') return false;"
+        "  let parent = node.parentElement;"
+        "  while (parent) {"
+        "   if (String(parent.tagName || '').toUpperCase() === 'CANVAS') return true;"
+        "   parent = parent.parentElement;"
+        "  }"
+        "  return false;"
+        " };"
+        " const find = () => {"
+        "  if (spec.id) {"
+        "   const byId = document.getElementById(spec.id);"
+        "   if (insideCanvas(byId)) return byId;"
+        "  }"
+        "  if (spec.label) {"
+        "   const nodes = document.querySelectorAll(spec.tag || '*');"
+        "   for (const node of nodes) {"
+        "    if (!insideCanvas(node)) continue;"
+        "    const label = node.getAttribute('aria-label') || '';"
+        "    const text = (node.textContent || '').trim();"
+        "    if (label === spec.label || text === spec.label) return node;"
+        "   }"
+        "  }"
+        "  if (spec.tag) {"
+        "   const all = [];"
+        "   for (const node of document.getElementsByTagName(spec.tag)) {"
+        "    if (insideCanvas(node)) all.push(node);"
+        "   }"
+        "   if (all.length === 1) return all[0];"
+        "  }"
+        "  return null;"
+        " };"
+        " const el = find();"
+        " if (!el || typeof el.click !== 'function') return false;"
+        " el.click();"
+        " return true;"
+        "})()"
+    )
+    try:
+        from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+
+        pages = page_targets(f"http://127.0.0.1:{port}")
+    except Exception:
+        return False
+    for page in pages:
+        ws = page.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            transport = connect(str(ws), timeout=3.0)
+            session = CDPSession(transport, default_timeout=3.0)
+            try:
+                reply = session.call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                )
+            finally:
+                transport.close()
+        except Exception:
+            continue
+        if (reply.get("result") or {}).get("value") is True:
+            return True
+    return False
+
+
+def _coordinate_click_box(info: dict, bounds: Bounds) -> tuple[float, float, float, float] | None:
+    """Full screen box. AT-SPI size wins; a zero size uses the DOM box."""
+    atspi_box = info.get("box")
+    if atspi_box is not None and float(atspi_box[2]) > 0 and float(atspi_box[3]) > 0:
+        return (
+            float(atspi_box[0]), float(atspi_box[1]),
+            float(atspi_box[2]), float(atspi_box[3]),
+        )
+    merged = _merge_click_box(atspi_box, _dom_click_box(info))
+    if merged is not None:
+        return merged
+    if bounds.width > 1 and bounds.height > 1:
+        return (float(bounds.x), float(bounds.y), float(bounds.width), float(bounds.height))
+    return None
+
+
 def _on_screen_name(node) -> str | None:
     """The node's name when its box meets the top of the screen, else None.
 
@@ -329,53 +603,199 @@ def _on_screen_name(node) -> str | None:
     return name
 
 
+# A document's own name, and a list's accessible name, do not move when the
+# page scrolls. The rows inside do. The browser frame's buttons do not.
+_SCROLL_DESCEND_ROLES = frozenset({
+    "document web", "document frame", "internal frame", "scroll pane",
+    "list", "table", "tree", "tree table", "panel", "grouping", "section",
+    "landmark", "filler", "form", "scroll view", "viewport", "layered pane",
+})
+_SCROLL_FRAME_ROLES = frozenset({
+    "frame", "window", "application", "desktop frame", "menu bar",
+})
+_ROW_LIST_ROLES = frozenset({"list", "table", "tree", "tree table"})
+# One name per row. A table cell's siblings (the value, the button) are not
+# extra rows: six of those filled the sample after two rows, so a two-row
+# twitch looked like the viewport and the next burst jumped over the target.
+_ROW_ROLES = frozenset({
+    "table row", "row", "list item", "tree item", "list box item",
+})
+
+
+def _above_viewport(node) -> bool:
+    """True when ``node``'s box sits entirely above the screen."""
+    from a11y_computer_use.drivers import _atspi
+
+    _name, pos, size = None, *_atspi._extents(node)
+    if pos is None:
+        return False
+    top = int(pos[1])
+    height = int(size[1]) if size is not None else 0
+    return top + max(height, 0) < 0
+
+
+def _first_visible_row(node, count: int) -> int:
+    """Index of the first child that is not parked above the viewport.
+
+    List children stay in order, including the rows already scrolled off
+    the top. A binary search finds that boundary. Reading only the first
+    80 dropped the head once the page had moved past them.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    lo, hi = 0, max(0, count - 1)
+    first = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        child = _atspi._child_at(node, mid)
+        if child is not None and _above_viewport(child):
+            first = mid + 1
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return min(first, max(0, count - 1))
+
+
+def _row_label(node) -> str | None:
+    """The row's own name, or the first cell's, not every cell in the row."""
+    from a11y_computer_use.drivers import _atspi
+
+    def accept(name: str | None) -> str | None:
+        if name and not _atspi._is_list_marker(name):
+            return name
+        return None
+
+    own = accept(_on_screen_name(node))
+    if own:
+        return own
+    count = _atspi._raw_child_count(node)
+    count = count if isinstance(count, int) and count > 0 else 0
+    for index in range(min(count, 4)):
+        child = _atspi._child_at(node, index)
+        if child is None:
+            continue
+        label = accept(_on_screen_name(child))
+        if label:
+            return label
+        nested = _atspi._raw_child_count(child)
+        nested = nested if isinstance(nested, int) and nested > 0 else 0
+        for inner in range(min(nested, 2)):
+            text = _atspi._child_at(child, inner)
+            if text is None:
+                continue
+            label = accept(_on_screen_name(text))
+            if label:
+                return label
+    return None
+
+
+def _scan_row_children(node, role: str, name: str, count: int, depth: int, walk, found: list[str], limit: int) -> None:
+    """On-screen rows of a list, starting at the first visible child."""
+    from a11y_computer_use.drivers import _atspi
+
+    del role, name
+    index = _first_visible_row(node, count) if count > limit else 0
+    examined = 0
+    while index < count and examined < limit * 4 and len(found) < limit:
+        child = _atspi._child_at(node, index)
+        examined += 1
+        if child is not None:
+            walk(child, depth + 1)
+        index += 1
+
+
 def _showing_names(handle, limit: int = 6) -> tuple[str, ...]:
-    """On-screen names under ``handle``.
+    """On-screen row names under ``handle``.
 
     Chrome's document keeps the old static texts for a fraction of a second
-    after the wheel. The marker is the names at or below the top of the
-    screen, not the rows the scroll has already parked above it. The root's
-    own title stays, so the row names are what change.
+    after the wheel. The marker is the row names at or below the top of the
+    screen, not the rows the scroll has already parked above it, and not the
+    list's own name. A titled list (``aria-label``) used to be the whole
+    sample, so the wait never saw the rows move and ran out the clock.
+    Window buttons are not rows. A bullet marker is not a row. A table
+    contributes one name per row, the first cell, so the sample is six
+    rows and not two.
     """
     from a11y_computer_use.drivers import _atspi
 
     found: list[str] = []
-    own = _on_screen_name(handle)
-    if own:
-        found.append(own)
-    count = _atspi._raw_child_count(handle)
-    count = count if isinstance(count, int) and count > 0 else 0
-    for index in range(min(count, 100)):
-        if len(found) >= limit:
-            break
-        child = _atspi._child_at(handle, index)
-        if child is None:
-            continue
-        name = _on_screen_name(child)
-        if name:
-            found.append(name)
-            continue
-        # A row is often an unnamed group whose text is the one child.
-        nested = _atspi._raw_child_count(child)
-        nested = nested if isinstance(nested, int) and nested > 0 else 0
-        for inner in range(min(nested, 4)):
-            text = _atspi._child_at(child, inner)
-            if text is None:
-                continue
-            name = _on_screen_name(text)
-            if name:
+
+    def walk(node, depth: int) -> None:
+        if node is None or len(found) >= limit or depth > 8:
+            return
+        role = _atspi._role_name(node)
+        if role in _ROW_ROLES:
+            label = _row_label(node)
+            if label:
+                found.append(label)
+            return
+        name = _on_screen_name(node)
+        descend = (
+            depth == 0
+            or role in _SCROLL_DESCEND_ROLES
+            or not name
+        )
+        if not descend:
+            if name and not _atspi._is_list_marker(name):
                 found.append(name)
-                break
+            return
+        count = _atspi._raw_child_count(node)
+        count = count if isinstance(count, int) and count > 0 else 0
+        if role in _ROW_LIST_ROLES and count > 0:
+            _scan_row_children(node, role, name or "", count, depth, walk, found, limit)
+            return
+        # A document's list is the marker. The file infobar is a sibling
+        # and its names do not move. Walk the list first.
+        span = min(count, 24)
+        children = []
+        for index in range(span):
+            child = _atspi._child_at(node, index)
+            if child is not None:
+                children.append(child)
+        lists = [child for child in children if _atspi._role_name(child) in _ROW_LIST_ROLES]
+        others = [child for child in children if child not in lists]
+        before = len(found)
+        for child in lists:
+            if len(found) >= limit:
+                return
+            walk(child, depth + 1)
+        if lists and len(found) > before:
+            return
+        for child in others:
+            if len(found) >= limit:
+                return
+            walk(child, depth + 1)
+        if (
+            depth and len(found) == before and count == 0
+            and name and not _atspi._is_list_marker(name)
+        ):
+            found.append(name)
+
+    walk(handle, 0)
     return tuple(found)
 
 
+def _refresh_shown_names(run, handle) -> tuple[str, ...]:
+    """On-screen row names after dropping libatspi's child cache.
+
+    The cache answers ``get_child_at_index`` with the pre-wheel rows. A
+    poll that does not clear it waits out the deadline on names that
+    cannot change.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    run(lambda node=handle: _atspi._invalidate_tree_cache(node))
+    return run(lambda node=handle: _showing_names(node))
+
+
 def _settle_shown_names(run, handle) -> None:
-    """Wait until a live Chromium document's on-screen names leave the pre-scroll set.
+    """Wait until a live Chromium document's on-screen rows leave the pre-scroll set.
 
     The wheel returns before AT-SPI does. A search that snapshots immediately
     still sees the old rows and scrolls again, so the target goes by between
-    reads. A test double has no GObject pointer and is not waited on. Give
-    up at 0.9s; a tree that never changes is not spun on.
+    reads. A test double has no GObject pointer and is not waited on. The
+    read is the rows, and it returns when those names change. Give up at
+    0.9s; a tree that never changes is not spun on.
     """
     from a11y_computer_use.drivers import _atspi
 
@@ -393,10 +813,299 @@ def _settle_shown_names(run, handle) -> None:
     while time.monotonic() < deadline:
         time.sleep(0.05)
         try:
-            after = run(lambda: _showing_names(handle))
+            after = _refresh_shown_names(run, handle)
         except Exception:
             return
         if after and after != before:
+            return
+
+
+def _strip_shared_names(
+    before: tuple[str, ...], after: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Drop a shared prefix, such as the document title, from both samples."""
+    shared = 0
+    while shared < len(before) and shared < len(after) and before[shared] == after[shared]:
+        shared += 1
+    return before[shared:], after[shared:]
+
+
+def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: int) -> int:
+    """How far the on-screen head moved, in names. Positive is later names.
+
+    A shared prefix, such as the document title, is ignored. The new head
+    at index ``k`` of what remains of ``before`` is a move of ``k`` toward
+    the end. The old head at index ``k`` of ``after`` is a move of ``k``
+    toward the start. No shared name is a move of at least the whole
+    remaining sample, in the direction ``sign`` asked for.
+    """
+    before, after = _strip_shared_names(before, after)
+    # A document title stays at the front of both samples. The rows after
+    # it are the move. Nothing left on one side means the head did not move.
+    if not before or not after:
+        return 0
+    if after[0] in before:
+        return before.index(after[0])
+    if before[0] in after:
+        return -after.index(before[0])
+    return sign * len(before)
+
+
+def _row_marker(names: tuple[str, ...]) -> bool:
+    """True when ``names`` includes a content row, not only window chrome.
+
+    Row labels on the pages this wait is for carry a digit (``ITEM-001``,
+    ``TICKET-0040``, ``ROW-0300``). The list's accessible name and the file
+    infobar do not. A sample of only those does not show whether the page
+    moved.
+    """
+    return any(any(ch.isdigit() for ch in name) for name in names)
+
+
+def _names_parted(before: tuple[str, ...], after: tuple[str, ...]) -> bool:
+    """True when the new head has left the old sample.
+
+    A five-notch burst that moves about a viewport does this: the rows
+    that were on screen are gone, and the advance is at least the whole
+    sample. A burst that collapsed to one row still names that row inside
+    the old sample, so this is false and the step can be topped up.
+    """
+    before, after = _strip_shared_names(before, after)
+    if not before or not after:
+        return False
+    return after[0] not in before and before[0] not in after
+
+
+def _name_source(run, handle):
+    """A node whose on-screen row names still describe the document after a wheel.
+
+    The anchor is often one cell. That cell leaves the tree as soon as the
+    page moves, so its names cannot say whether the step was one row or a
+    whole viewport. An ancestor that lists several rows stays. The browser
+    frame does not: its Minimize, Maximize, and Close names never move, and
+    waiting on them runs out the clock on every step.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    def blocked(node) -> bool:
+        try:
+            role = run(lambda acc=node: _atspi._role_name(acc))
+        except Exception:
+            return False
+        return role in _SCROLL_FRAME_ROLES
+
+    source = handle
+    try:
+        before = run(lambda: _showing_names(handle))
+    except Exception:
+        return handle, ()
+    if len(before) >= 4 or blocked(handle):
+        return handle, before
+    current = handle
+    for _ in range(8):
+        try:
+            parent = run(lambda node=current: _atspi._parent_of(node))
+        except Exception:
+            break
+        if parent is None or blocked(parent):
+            break
+        current = parent
+        try:
+            names = run(lambda node=current: _showing_names(node))
+        except Exception:
+            break
+        if len(names) > len(before):
+            source, before = current, names
+        if len(before) >= 4:
+            break
+    return source, before
+
+
+def _offset_did_not_move(before: float | None, after: float | None) -> bool | None:
+    """Whether a container's scroll offset stayed put.
+
+    True only when both reads exist and match. False when they differ.
+    None when either read is missing, which is not proof the page was
+    unchanged.
+    """
+    if before is None or after is None:
+        return None
+    return abs(float(after) - float(before)) < 0.5
+
+
+def _document_did_not_move(dx: int, dy: int, offset: float | None = None) -> ComputerUseError:
+    """The document wheel ran and the on-screen rows stayed put.
+
+    ``surface=document`` tells ``scroll_to_find`` this is the end of the
+    page. A list that did not move does not set it, and still turns around.
+    """
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the document did not move after the wheel scroll",
+        detail={
+            "reason": "page_unchanged",
+            "surface": "document",
+            "unit": "lines",
+            "dx": int(dx),
+            "dy": int(dy),
+            "scroll_position": offset,
+        },
+    )
+
+
+def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> None:
+    """Wheel a document by the requested notches, then wait until the tree says so.
+
+    Chrome's document is a group, so this is the notch path, not the list
+    bar. One notch moves several rows. Sending them one at a time, and
+    stopping once the head had moved by about ``|dy|`` names, made each
+    ``scroll_to_find`` step about four rows and about two seconds. The
+    step sends the requested notches together, which is about a viewport,
+    and returns as soon as the on-screen head shows that move. The last
+    notch of a five-notch request is not sent: on short rows it lands
+    past the rows that were on screen, and the next snapshot skips them.
+
+    A burst can collapse into one row on a busy runner. When the head
+    then settles still inside the old sample and short of ``|dy|`` names,
+    more notches go out one at a time until the head has moved by about
+    that many names, or a notch leaves the names unchanged. A head that
+    has already left the sample took the viewport step; more notches are
+    not added on top of it. A burst whose rows never change raises
+    ``page_unchanged`` with ``surface=document``: the page is at its end.
+    """
+    from a11y_computer_use.drivers import _atspi, _linux_input
+
+    wanted = abs(int(dy))
+    sign = 1 if int(dy) > 0 else -1
+
+    def plain() -> None:
+        _linux_input.scroll(x, y, dx=dx, dy=dy)
+        if handle is not None:
+            _settle_shown_names(run, handle)
+
+    if handle is None or wanted == 0:
+        _linux_input.scroll(x, y, dx=dx, dy=dy)
+        return
+    try:
+        if not run(lambda: hasattr(handle, "__gpointer__")):
+            plain()
+            return
+        if not run(lambda: _atspi._chromium_app(handle)):
+            plain()
+            return
+    except Exception:
+        plain()
+        return
+    source, before = _name_source(run, handle)
+    if len(before) < 2:
+        plain()
+        return
+    try:
+        before_offset = run(lambda node=source: _atspi.scroll_offset(node))
+    except Exception:
+        before_offset = None
+
+    def measure() -> tuple[tuple[str, ...], int]:
+        after = _refresh_shown_names(run, source)
+        return after, _shown_name_advance(before, after, sign)
+
+    # Five notches clear a viewport of tall rows and then a couple more
+    # of short ones, so the next snapshot starts below the previous tail
+    # and the row in that gap is never shown. Four notches are the burst.
+    # On short rows those four can still clear the sample. The search
+    # then wheels back until one of the old rows is on screen again.
+    burst = wanted - 1 if wanted >= 5 else wanted
+    # The whole request goes out together. A tree that publishes that
+    # viewport inside this window — the same 0.9s ``_settle_shown_names``
+    # uses — is not given extra notches.
+    _linux_input.scroll(x, y, dx=dx, dy=sign * burst)
+    moved = 0
+    changed = False
+    stable = 0
+    polls = 0
+    last: int | None = None
+    after = before
+    deadline = time.monotonic() + 0.9
+    while True:
+        try:
+            after, nxt = measure()
+        except Exception:
+            return
+        if abs(nxt) >= burst or _names_parted(before, after):
+            # A read that lost the rows (the list label, or the file
+            # infobar) is not the viewport landing. Keep polling.
+            if _row_marker(before) and not _row_marker(after):
+                pass
+            else:
+                if (
+                    _names_parted(before, after)
+                    and _row_marker(before)
+                    and _row_marker(after)
+                ):
+                    # The burst cleared the sample. One notch back brings
+                    # the previous tail on screen, so the next snapshot
+                    # still contains the row this step would have skipped.
+                    # A sample that stays apart stops after ``burst``
+                    # reverse notches.
+                    for _back in range(burst):
+                        _linux_input.scroll(x, y, dy=-sign)
+                        try:
+                            after = _refresh_shown_names(run, source)
+                        except Exception:
+                            return
+                        if not _names_parted(before, after):
+                            return
+                return
+        moved = nxt
+        if after != before:
+            changed = True
+        if moved == last:
+            stable += 1
+        else:
+            stable = 0
+            last = moved
+        # A one-row twitch can sit still for two polls while the rest of
+        # the burst is still arriving. Topping up then stacks another
+        # notch on a viewport and the next snapshot skips a band of rows.
+        # Eight polls is about 0.4s, long enough for the burst to land. A
+        # burst that is still short then is the collapsed step.
+        polls += 1
+        if stable >= 2 and changed and polls >= 8:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    # No measurable move, or the head already left the sample. The burst
+    # is the step. A sample that never changed is the end of the document
+    # only when the container's scroll offset also stayed put. A missing
+    # offset is not that proof. A short move still inside the old sample
+    # is the collapsed burst: top it up.
+    if not changed:
+        try:
+            after_offset = run(lambda node=source: _atspi.scroll_offset(node))
+        except Exception:
+            after_offset = None
+        if _offset_did_not_move(before_offset, after_offset) is True:
+            raise _document_did_not_move(dx, dy, before_offset)
+        return
+    if not (0 < abs(moved) < burst) or _names_parted(before, after):
+        return
+    for _extra in range(wanted * 2):
+        _linux_input.scroll(x, y, dy=sign)
+        saw = False
+        for _ in range(8):
+            try:
+                after, nxt = measure()
+            except Exception:
+                return
+            if abs(nxt) >= burst or _names_parted(before, after):
+                return
+            if nxt != moved:
+                moved = nxt
+                saw = True
+                break
+            time.sleep(0.05)
+        if not saw:
             return
 
 
@@ -435,12 +1144,13 @@ def _accepts_text(element: Element) -> bool:
     """True when the snapshot says ``set_value`` may write ``element``.
 
     The snapshot sets ``editable`` from a text-field role, or from an AT-SPI
-    editable entry (not a paragraph, document, or combo). A synthetic element
-    can name an editable role without that flag; the role set is the one the
-    pruner uses. A menu, static text, button, or combo is not in it unless
-    the snapshot flag is set. A combo is written earlier, through its own
-    items. A live handle that is not an editable entry is refused even when
-    this flag is set, before any select-all.
+    editable entry. A browser paragraph, document, or combo is not an entry.
+    An Impress or Draw paragraph with ``STATE_EDITABLE`` and EditableText is.
+    A synthetic element can name an editable role without that flag; the role
+    set is the one the pruner uses. A menu, static text, button, or combo is
+    not in it unless the snapshot flag is set. A combo is written earlier,
+    through its own items. A live handle that is not an editable entry is
+    refused even when this flag is set, before any select-all.
     """
     if element.editable:
         return True
@@ -505,23 +1215,60 @@ class LinuxDriver:
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
+        # Final field text when type replaced an active selection. The
+        # outcome check confirms that string instead of an append.
+        self._type_expected: str | None = None
+        # Impress or Draw frame text from before a type, and whether that
+        # frame could be read. The outcome judge consumes these once.
+        self._drawing_type_before: str | None = None
+        self._drawing_type_state: str | None = None
+        self._type_unverified: bool = False
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
-        # ``find`` sets this around one snapshot so a GTK table row that is
-        # still off screen can be scrolled into the tree. A plain snapshot
-        # leaves it empty and does not move the view.
+        # ``find`` sets this around one snapshot so a GTK or Chromium table
+        # row that is still off screen can be scrolled into the tree. A
+        # plain snapshot leaves it empty and does not move the view.
         self._table_seek: str | None = None
+        # ``(atspi key, start, limit)`` for one snapshot. expand sets it so
+        # that node lists its next page of children instead of the band the
+        # last snapshot already showed. Cleared after the snapshot.
+        self._expand_page: tuple | None = None
+        # How far expand has already paged each node, keyed by AT-SPI path.
+        self._expand_cursors: dict[object, int] = {}
 
     def _run(self, fn):
-        """Run an AT-SPI (libatspi) op inline, or — when the event cache is opted
-        in (A11Y_COMPUTER_USE_ATSPI_EVENTS=1) — on the shared a11y thread so libatspi's
-        read cache is trusted (~1.8x faster snapshots) and stays single-threaded.
+        """Run an AT-SPI (libatspi) op inline, or on the shared a11y thread when
+        the event cache is on (Linux default if the typelib imports;
+        ``A11Y_COMPUTER_USE_ATSPI_EVENTS=0`` forces inline) so libatspi's
+        read cache is trusted and stays single-threaded.
         Only libatspi ops go through here; XTEST input uses a separate X
-        connection and is unaffected."""
-        from a11y_computer_use.drivers import _atspi_events
+        connection and is unaffected.
 
-        return _atspi_events.submit(fn) if _atspi_events.enabled() else fn()
+        A dropped accessibility bus reconnects once. The outermost call retries,
+        so a snapshot walks the tree again instead of reusing a disposed node.
+
+        The call caches duplicate stable getters for its duration. The cache
+        is entered on the thread that runs ``fn``, and a mutator drops it.
+        """
+        from a11y_computer_use.drivers import _atspi, _atspi_events, _dbus_guard
+
+        def once():
+            def wrapped():
+                with _atspi.read_cache():
+                    return fn()
+
+            # The cache opt-in routes every call. A wait that has started the
+            # listener does too: libatspi is not safe to use from this thread
+            # and from the GLib loop at the same time. A call that is already
+            # on the event thread runs inline so a nested read cannot deadlock.
+            # The getter cache is entered on the thread that runs ``fn``.
+            marshalled = _atspi_events.enabled() or _atspi_events.listening()
+            if marshalled and not _atspi_events.on_event_thread():
+                return _atspi_events.submit(wrapped)
+            return wrapped()
+
+        return _dbus_guard.call_with_reconnect(once)
 
     # -- permissions --------------------------------------------------------
     def ensure_trusted(self) -> None:
@@ -559,22 +1306,131 @@ class LinuxDriver:
         comm from app list is the fallback, which is how ``LibreOffice``
         becomes ``soffice.bin``.
         """
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _actionable, _atspi
 
-        root = self._run(lambda name=app: _atspi.find_root(name, scope))
+        def lookup(name: str):
+            root = _atspi.find_root(name, scope)
+            # The listener turns the child cache on for the process. Drop it
+            # before the walk so a page that was never cached is still read.
+            if root is not None:
+                _actionable.refresh_cached_tree(root)
+            return root
+
+        root = self._run(lambda name=app: lookup(name))
         if root is not None:
             return app, root
         resolved = _resolved_app(app)
         if resolved != app:
-            root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+            root = self._run(lambda name=resolved: lookup(name))
             return resolved, root
         return app, None
 
     # -- observe (AT-SPI2) --------------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
+        """Pruned snapshot of ``app``.
+
+        If the accessibility bus drops while LibreOffice is registering, the
+        walk is retried once on a new connection. A second failure is a
+        retryable ``timeout`` with reason ``bus_disconnected``.
+
+        ``Scope.DISPLAY`` walks every application on the AT-SPI desktop. An
+        application that does not answer is omitted and the others are
+        returned. A stopped target of ``Scope.WINDOW`` or ``Scope.APP``
+        raises ``app_not_responding`` instead of an empty tree.
+
+        ``Scope.WINDOW`` includes every showing top-level window of the app.
+        The active window is first. One showing window stays a single tree.
+        """
+        from a11y_computer_use.drivers import _dbus_guard
+
+        if scope is Scope.DISPLAY:
+            return _dbus_guard.call_with_reconnect(self._snapshot_desktop)
+        return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
+
+    def _not_responding(self, app: str, exc: ComputerUseError) -> ComputerUseError:
+        """The caller's app name, with the pid the bus actually timed out on."""
+        pid = exc.detail.get("pid")
+        pid_text = f" (pid {pid})" if isinstance(pid, int) and pid > 0 else ""
+        detail = dict(exc.detail)
+        detail["app"] = app
+        detail["pid"] = pid if isinstance(pid, int) and pid > 0 else None
+        return ComputerUseError(
+            ErrorCode.APP_NOT_RESPONDING,
+            f"{app} did not answer accessibility queries{pid_text}",
+            detail=detail,
+        )
+
+    def _snapshot_desktop(self) -> Snapshot:
+        """One snapshot of every application that answers AT-SPI.
+
+        A frozen application is left out. When at least one other application
+        answers, its tree is in the result. When none answer, the error names
+        the failure instead of an empty success.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _actionable, _atspi
+
+        def _roots():
+            found = _atspi.desktop_application_roots()
+            for _name, root in found.ready:
+                _actionable.refresh_cached_tree(root)
+            return found
+
+        found = self._run(_roots)
+        if not found.ready:
+            if found.silent:
+                raise ComputerUseError(
+                    ErrorCode.APP_NOT_RESPONDING,
+                    "an application did not answer accessibility queries",
+                    detail={
+                        "app": None,
+                        "pid": None,
+                        "silent": found.silent,
+                        "hint": _atspi._APP_NOT_RESPONDING_HINT,
+                    },
+                )
+            return self._empty_display()
+        items = [
+            (name, None, lambda name=name, root=root: self._snapshot_root(name, root, Scope.APP))
+            for name, root in found.ready
+        ]
+        snaps = _atspi.collect_app_snapshots(items)
+        return observe.merge_snapshots(snaps)
+
+    def _empty_display(self) -> Snapshot:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
+        return observe.build_snapshot(
+            None,
+            _atspi.ATSPIAccessor(),
+            scope=Scope.DISPLAY,
+            app=None,
+            pid=None,
+            geometry=_atspi.primary_geometry(),
+        )
+
+    def _snapshot(self, scope: Scope, app: str) -> Snapshot:
+        try:
+            snap = self._snapshot_resolved(scope, app)
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.APP_NOT_RESPONDING and exc.detail.get("app") != app:
+                raise self._not_responding(app, exc) from exc
+            raise
+        # DOM values merge onto this tree only when the process opted into
+        # CDP. Bounds, refs, and a snapshot with no port stay as AT-SPI
+        # built them. Windows, menus, and native dialogs are untouched.
+        from a11y_computer_use.drivers import _cdp_forms
+
+        return _cdp_forms.overlay_snapshot(snap)
+
+    def _snapshot_resolved(self, scope: Scope, app: str) -> Snapshot:
+        from a11y_computer_use.drivers import _atspi
+
+        # A stopped process is already visible in /proc. Raising here skips
+        # the desktop scan, which otherwise spends a D-Bus timeout on every
+        # sibling before this app's own read fails.
+        _atspi.raise_if_app_stopped(app)
         # A name find_root already answers is the AT-SPI application. Two
         # Python windows share the comm python3; resolving that name to the
         # comm first would snapshot the other window. LibreOffice is the
@@ -583,10 +1439,11 @@ class LinuxDriver:
         resolved, root = self._root_for_snapshot(app, scope)
         # The X window is in app list and window list before the application
         # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
-        # the list still shows the app, or a LibreOffice process is up, and
-        # stop at ATSPI_REGISTER_WAIT_S. A name that is not listed does not
-        # wait. The missing gtk3 bridge is reported after that deadline, not
-        # during the registration gap.
+        # the list still shows the app, or a LibreOffice process in this
+        # session is up, and stop at ATSPI_REGISTER_WAIT_S. A name that is
+        # not listed does not wait, including a soffice process on another
+        # display. The missing gtk3 bridge is reported after that deadline,
+        # not during the registration gap.
         if root is None and (
             _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
         ):
@@ -625,20 +1482,137 @@ class LinuxDriver:
                 detail={"app": resolved},
             )
 
+        # WINDOW lists every showing sibling (a preferences dialog next to
+        # the editor). APP stays the application node. DISPLAY walks each
+        # application once and does not expand those siblings again.
+        return self._snapshot_root(
+            resolved, root, scope, caller=app, all_windows=scope is Scope.WINDOW,
+        )
+
+    def _snapshot_root(
+        self, app: str, root: object, scope: Scope, caller: str | None = None,
+        *, all_windows: bool = False,
+    ) -> Snapshot:
+        """Pruned snapshot of one already-resolved AT-SPI root.
+
+        Unanswered reads of this application raise ``app_not_responding``
+        with its name and pid. The budget starts here, after the desktop
+        scan, so a frozen sibling is not charged to ``app``.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
         def _do() -> Snapshot:
-            pid = _atspi.pid_of(root)
-            accessor = _atspi.ATSPIAccessor()
-            accessor.libreoffice = (
-                _atspi.libreoffice_app(resolved) or _atspi.libreoffice_app(app or "")
-            )
-            # Chromium lists: the rows are read from the list node this walk
-            # holds. A saved head on another wrapper is not the snapshot.
-            accessor.refresh_visible(root)
-            accessor._table_seek = self._table_seek
-            return observe.build_snapshot(
-                root, accessor, scope=scope, app=resolved, pid=pid,
-                geometry=_atspi.primary_geometry(),
-            )
+            hinted = _hint_pid(app)
+            with _atspi.app_reply_watch(app, hinted, root) as watch:
+                # A find bar or omnibox popup fills libatspi's child cache.
+                # Closing the bar and Reload leave that cache in place, so
+                # the next walk would keep the bar or an empty document.
+                # Drop it and use the frame that holds the selected tab.
+                # Until that bar has been snapshotted, this is ``root``.
+                walked = _atspi.chromium_snapshot_root(root)
+                pid = _atspi.pid_of(walked) or _atspi.pid_of(root) or hinted
+                if isinstance(pid, int) and pid > 0:
+                    watch.pid = pid
+                accessor = _atspi.ATSPIAccessor()
+                # ``app`` is the resolved comm when the caller said LibreOffice
+                # and the bus said soffice.bin. Either name marks the suite.
+                accessor.libreoffice = _atspi.libreoffice_app(app or "") or _atspi.libreoffice_app(
+                    caller or ""
+                )
+                # LibreOffice 25.2 reports content a title bar high until the
+                # first pointer event. A status-bar motion, then this walk,
+                # republishes those boxes. LibreOffice 24 already matches and
+                # is not moved, so its pointer inset and the placement cache
+                # stay as they were. Each window that is walked is settled.
+                listed = _atspi.snapshot_window_list(root) if all_windows else [walked]
+                if accessor.libreoffice:
+                    settled: set[int] = set()
+                    for item in (walked, *listed):
+                        mark = id(item)
+                        if mark in settled:
+                            continue
+                        settled.add(mark)
+                        _atspi.settle_libreoffice_geometry(item)
+                # A table that starts below the viewport is dropped before
+                # children() can seek it. Scroll the matching cell first, and
+                # only for Chromium: GTK tables seek inside their own walk.
+                # After the find bar, the page frame is ``walked``. Walk that
+                # frame before any sibling: a later Chrome root clears the
+                # client cache, and the page would come back as an untitled
+                # group with no rows.
+                seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
+                accessor._table_seek = self._table_seek
+                accessor._expand_page = self._expand_page
+                geometry = _atspi.primary_geometry()
+
+                def _walk(node: object) -> Snapshot:
+                    if seek and _atspi._chromium_app(node):
+                        _atspi.reveal_text_in_document(node, seek)
+                    accessor.refresh_visible(node)
+                    snap = observe.build_snapshot(
+                        node, accessor, scope=scope, app=app, pid=watch.pid,
+                        geometry=geometry,
+                    )
+                    # A GTK table cell find could not scroll on screen. Attach
+                    # it with the extents AT-SPI reported, which the pruner
+                    # drops when they miss the display. No box is invented.
+                    # Drain the list so the next window does not attach the
+                    # same cells again.
+                    pending = list(accessor._offscreen_seek)
+                    accessor._offscreen_seek.clear()
+                    if pending:
+                        specs = [(cell, accessor.read(cell), table) for cell, table in pending]
+                        snap = observe.attach_offscreen_matches(snap, specs)
+                    _atspi.note_browser_bar(node, snap.elements)
+                    return snap
+
+                page_snap = _walk(walked)
+                if not all_windows:
+                    return page_snap
+                page_key = _atspi._frame_cache_key(walked)
+                # One real window is the page already walked. Resolving that
+                # Chrome root again clears the client cache, and the next
+                # snapshot of a short page then misses the 12s bound.
+                extras: list[Snapshot] = []
+                seen = {page_key}
+                page_is_active = False
+                active_known = False
+                for item in listed:
+                    key = _atspi._frame_cache_key(item)
+                    if key in seen:
+                        if not active_known:
+                            page_is_active = True
+                            active_known = True
+                        continue
+                    chosen = item
+                    if _atspi._chromium_app(item):
+                        chosen = _atspi.chromium_snapshot_root(item)
+                        if _atspi._is_browser_bar_frame(chosen) or _atspi._sparse_untitled_chrome_frame(chosen):
+                            continue
+                        key = _atspi._frame_cache_key(chosen)
+                        if key in seen:
+                            if not active_known:
+                                page_is_active = True
+                                active_known = True
+                            continue
+                    seen.add(key)
+                    extra = _walk(chosen)
+                    extras.append(extra)
+                    if not active_known:
+                        active_known = True
+                if not extras:
+                    return page_snap
+                snaps = [page_snap, *extras] if page_is_active else [extras[0], page_snap, *extras[1:]]
+                merged = observe.merge_window_snapshots(
+                    snaps, scope=scope, app=app, pid=watch.pid,
+                )
+                # The per-window epochs were copied into the merge. Dropping
+                # them keeps one snapshot as one epoch, so a later click does
+                # not evict the handles the caller still holds.
+                for snap in snaps:
+                    observe.discard_epoch(snap.snapshot_id)
+                return merged
 
         return self._run(_do)
 
@@ -756,7 +1730,13 @@ class LinuxDriver:
         try:
             return observe.rematch_ref(snap, ref, live)
         except ComputerUseError as exc:
-            if exc.code is ErrorCode.STALE_REF:
+            # A quit-and-relaunched app, or a different document, must stay
+            # stale_ref. Searching the new tree for a hidden namesake would
+            # retarget the error onto the replacement.
+            if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") not in {
+                "app_restarted",
+                "document_changed",
+            }:
                 self._raise_if_hidden_alive(snap, ref)
             raise
 
@@ -834,7 +1814,7 @@ class LinuxDriver:
             found = self._run(lambda: _atspi.offscreen_extents(handle))
         except Exception:
             return None
-        if found is None:
+        if found is None or element.bounds is None:
             return None
         pos, size = found
         return Bounds(
@@ -867,6 +1847,46 @@ class LinuxDriver:
             return
         raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _raise_handle_window(self, handle) -> None:
+        """Raise the X window that owns ``handle`` when that window is not active.
+
+        A ref in a sibling dialog is acted on only after that dialog is
+        frontmost. No matching X window does not fail the action: the AT-SPI
+        action still runs. An already ACTIVE window is left alone. A window
+        that is already the EWMH active window is left alone too: Chrome's
+        page frame often lacks STATE_ACTIVE while the omnibox popup of that
+        same window has it, and raising the window focuses the address bar.
+        """
+        if handle is None or _on_wayland():
+            return
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        try:
+            target = self._run(lambda: _atspi.toplevel_raise_target(handle))
+        except Exception:
+            return
+        if target is None or target[0]:
+            return
+        _active, title, pid, extents = target
+        try:
+            window_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+        except Exception:
+            return
+        if window_id is None:
+            return
+        try:
+            current = _linux_system.active_window()
+        except Exception:
+            current = None
+        if current is not None and int(current.get("window_id") or 0) == int(window_id):
+            return
+        try:
+            self.raise_window(int(window_id))
+        except Exception:
+            return
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -874,17 +1894,34 @@ class LinuxDriver:
         self._focused_editable = None
         if element.secure:
             return False
+        # A checkbox or radio in a Chrome/Electron window that already
+        # exposes CDP is toggled in the DOM. No port keeps the AT-SPI action.
+        # The window title picks the tab the snapshot showed when Chrome has
+        # more than one page target.
+        from a11y_computer_use.drivers import _cdp_forms
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        pressed = _cdp_forms.press_checkable(
+            element,
+            window_title=self._dom_window_title(handle),
+            pids=self._dom_pids(handle),
+        )
+        if pressed is not None:
+            return pressed
         # A plain zero-size web wrapper can carry Chrome's click action and
         # still not be a target. press_element must not fire that action.
         if not element.clickable and not element.editable:
             return False
-        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
-        # A paragraph's activating action does not place the caret. The click
-        # path does, and confirming that click checks the caret afterwards.
+        self._raise_handle_window(handle)
+        # A Writer paragraph's action does not place the caret, and an
+        # Impress or Draw shape's action does not enter text edit. The click
+        # path does, and the outcome checks that result afterwards.
         if self._run(lambda: _atspi.is_libreoffice_text_paragraph(handle)):
+            return False
+        if self._run(lambda: _atspi.is_libreoffice_shape_text(handle)):
             return False
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
@@ -892,6 +1929,76 @@ class LinuxDriver:
             # grant real widget focus; EditableText does not need it).
             self._focused_editable = handle
             return self._run(lambda: _atspi.grab_focus(handle) or _atspi.do_press(handle) or True)
+        # Fallback content inside a <canvas> is in the tree and is not painted.
+        # A pointer click at its box lands on the canvas, so the control's
+        # handler never runs. Activate the accessible, then the DOM node.
+        # Neither path moves the pointer. Failure is an error, not a click.
+        if self._run(lambda: _atspi.canvas_fallback_content(handle)):
+            if self._run(lambda: _atspi.do_press(handle)):
+                return True
+            spec = self._run(lambda: _atspi.canvas_fallback_dom_spec(handle))
+            if spec and _dom_activate_canvas_fallback(spec):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role} {element.title!r}) is inside a canvas "
+                "and was not activated; no pointer click was sent",
+                detail={
+                    "ref": element.ref,
+                    "role": element.role,
+                    "reason": "canvas_fallback",
+                    "hint": (
+                        "this control is fallback content inside a canvas and is not painted; "
+                        "a coordinate click would land on the canvas"
+                    ),
+                },
+            )
+        # Chrome's click action on a canvas or image has no position, so the
+        # page sees offset 0,0. A pointer click uses the full AT-SPI box, or
+        # the DOM box when that size is 0, and lands on the center.
+        info = self._run(lambda: _atspi.coordinate_click_info(handle))
+        if info is not None:
+            box = _coordinate_click_box(info, element.bounds)
+            if box is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{element.ref} ({element.role}) has no on-screen size, so the click was not sent",
+                    detail={
+                        "ref": element.ref,
+                        "role": element.role,
+                        "reason": "click_without_coordinates",
+                        "hint": "AT-SPI reported no size and the DOM box was not available",
+                    },
+                )
+            if _on_wayland():
+                raise _wayland_input_error("click")
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.click(
+                int(round(box[0] + box[2] / 2)),
+                int(round(box[1] + box[3] / 2)),
+            )
+            return True
+        # GtkCellRendererToggle's accessible toggle can return True without
+        # emitting toggled. Selection is not evidence of a checkbox click.
+        if self._run(lambda: _atspi.gtk_toggle_cell(handle)):
+            bounds = element.bounds
+            width, height = _screen_span()
+            if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "toggle cell has no usable screen bounds")
+            left, top = max(0, bounds.x), max(0, bounds.y)
+            right, bottom = min(width, bounds.x + bounds.width), min(height, bounds.y + bounds.height)
+            if right <= left or bottom <= top:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "toggle cell has no on-screen bounds")
+            before = self._run(lambda: _atspi.checked_state(handle))
+            self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+            if self._run(lambda: _atspi.checked_state_flipped(handle, before)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the checked state",
+                detail={"ref": element.ref, "role": element.role, "reason": "checked_unchanged"},
+            )
         # A Qt grid cell's Toggle action adds the cell and leaves currentItem
         # where it was. Selection.select_child does the same on Qt 6.11. A
         # pointer click at the cell center selects only that cell and makes
@@ -906,6 +2013,22 @@ class LinuxDriver:
                 "and make it current",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # Qt's Toggle flips a button/item's state without clicked/triggered/
+        # itemClicked, so the application's handlers never run. Send one
+        # real click at the visible center, after raising the owning window
+        # above. With no usable screen box (or no X11 pointer input), keep
+        # the accessible action. Never Toggle after sending a pointer click.
+        if self._run(lambda: _atspi.qt_toggle_only_control(handle)):
+            bounds = element.bounds
+            if bounds is not None and bounds.width > 0 and bounds.height > 0 and not _on_wayland():
+                width, height = _screen_span()
+                left, top = max(0, bounds.x), max(0, bounds.y)
+                right = min(width, bounds.x + bounds.width)
+                bottom = min(height, bounds.y + bounds.height)
+                if right > left and bottom > top:
+                    self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+                    return True
+            return self._run(lambda: _atspi.do_press(handle))
         # A GTK tree cell's activate/expand action reports success and leaves
         # the selection where it was. Select through the parent's Selection
         # interface, or click the row's on-screen center, and require the
@@ -916,8 +2039,13 @@ class LinuxDriver:
         # row's center is what selects the row. Nothing is changed on the
         # accessibility tree before that click. If the click does not select
         # the row, the previous selection is put back.
+        # An ARIA combobox option's handler sets the input and closes the
+        # list. The row is gone, so it never becomes SELECTED. The combobox
+        # value, its name, aria-selected, or the collapsed text is the
+        # read-back. That reading is taken before the click.
         if self._run(lambda: _atspi.chromium_list_row(handle)):
             before = self._run(lambda: _atspi.selected_option_names(handle))
+            choice = self._run(lambda: _atspi.combobox_option_context(handle))
             bounds = element.bounds
             if bounds is not None and bounds.width > 0 and bounds.height > 0:
                 try:
@@ -926,17 +2054,54 @@ class LinuxDriver:
                     pass
                 if self._run(lambda: _atspi.row_becomes_selected(handle)):
                     return True
+                if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
+                    return True
             self._run(lambda: _atspi.restore_selection(handle, before))
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
                 f"{element.ref} ({element.role}) click did not change the selection",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # A side pane, or a tree or list row that opens a folder, is not
+        # selected into place. Selection only highlights the row. The row's
+        # own activation is a pointer click, or activate, or Return when
+        # that is the action that opens the folder. The outcome checks the
+        # location or path bar afterwards.
+        gesture = self._run(lambda: _atspi.navigation_gesture(handle))
+        if gesture:
+            self._open_folder_row(element, handle, gesture)
+            return True
+        # Read the toggle before the click action. Chrome publishes EXPANDED
+        # a beat after doAction("click") returns, and the selection does not
+        # move on a treeitem that has no aria-selected. A center click would
+        # run that handler again and collapse the node. The combobox reading
+        # is taken here too, before that action closes the list.
+        before_toggle = self._run(lambda: _atspi.row_toggle_state(handle))
+        choice = self._run(lambda: _atspi.combobox_option_context(handle))
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
-            return self._run(lambda: _atspi.do_press(handle))
+            pressed = self._run(lambda: _atspi.do_press(handle))
+            # A Chrome <select> option's click action changes the value and
+            # leaves the native popup open. Close it the way set_value does,
+            # and only when this item belongs to that select.
+            if pressed:
+                self._run(lambda: _atspi.finish_chrome_select_option_click(handle))
+                self._run(lambda: _atspi.finish_gtk_combo_option_click(handle))
+            return pressed
         if selected:
             return True
+        if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
+            return True
+        # Only a row whose click or toggle action already ran. A GTK expand
+        # action is not that, and still falls through to the center click.
+        if self._run(lambda: _atspi.row_toggle_blocks_pointer(handle)):
+            if self._run(lambda: _atspi.row_toggle_committed(before_toggle, handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the selection",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         bounds = element.bounds
         if bounds is not None and bounds.width > 0 and bounds.height > 0:
             try:
@@ -944,14 +2109,46 @@ class LinuxDriver:
             except ComputerUseError:
                 if self._run(lambda: _atspi.row_is_selected(handle)):
                     return True
+                if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
+                    return True
                 raise
             if self._run(lambda: _atspi.row_is_selected(handle)):
+                return True
+            if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
                 return True
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             f"{element.ref} ({element.role}) click did not change the selection",
             detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
         )
+
+    def _open_folder_row(self, element: Element, handle, gesture: str) -> None:
+        """Open a side-pane or navigating row by that row's own activation.
+
+        A pointer click is the single click that opens a shortcut cell.
+        ``activate`` runs only when that action is the row's activation, not
+        the expand or edit action ahead of it. Return is sent only when the
+        row has no box and no activate action. The caller checks that the
+        location or path bar changed.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if gesture == "activate":
+            self._run(lambda: _atspi.do_named_action(handle, "activate"))
+            return
+        if gesture == "return":
+            self._run(lambda: _atspi.select_contained_row(handle))
+            self._run(lambda: _atspi.grab_focus(handle))
+            if _on_wayland():
+                raise _wayland_input_error("click")
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.press_chord("Return")
+            return
+        bounds = element.bounds
+        if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+            return
+        self.click(element)
 
     def scroll_into_view(self, element: Element) -> bool:
         from a11y_computer_use import observe
@@ -962,6 +2159,40 @@ class LinuxDriver:
             return False
         return self._run(lambda: _atspi.scroll_to(handle))
 
+    def _refuse_changed_peers(self, handle, peers: dict, element: Element, exc: ComputerUseError) -> None:
+        """After a failed set_value, another field's text must be unchanged.
+
+        A ``text_mismatch`` that also changed a different field is reported as
+        ``focus_lost``. A ``focus_lost`` that already stopped the keys records
+        the fields that did change.
+        """
+        if handle is None or not peers:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
+        except Exception:
+            return
+        if not changed:
+            return
+        if exc.detail.get("reason") == "focus_lost":
+            exc.detail["changed_fields"] = changed[:8]
+            return
+        raise ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            "set_value stopped because another field changed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "changed_fields": changed[:8],
+                "evidence": "another field changed during set_value",
+            },
+        ) from exc
+
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -971,6 +2202,72 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is not None:
+            self._raise_handle_window(handle)
+        peers: dict = {}
+        if handle is not None:
+            try:
+                peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
+            except Exception:
+                peers = {}
+        try:
+            return self._apply_set_value(element, value, handle)
+        except ComputerUseError as exc:
+            self._refuse_changed_peers(handle, peers, element, exc)
+            raise
+
+    def _dom_window_title(self, handle) -> str:
+        """Chrome window title for a DOM write, or "" when it cannot be read."""
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None:
+            return ""
+        try:
+            title = self._run(lambda: _atspi.top_window_title(handle))
+        except Exception:
+            return ""
+        return title if isinstance(title, str) else ""
+
+    def _dom_pids(self, handle) -> tuple[int, ...]:
+        """Pids that may own this node's DevTools port.
+
+        The element records the application pid. A Chrome content node can
+        report a different pid than the browser process that bound the port.
+        Both are tried. An unreadable node contributes nothing.
+        """
+        if handle is None:
+            return ()
+        from a11y_computer_use.drivers import _atspi
+
+        def read() -> tuple[int, ...]:
+            app = _atspi._call_first(handle, ("get_application", "getApplication"))
+            found: list[int] = []
+            for acc in (handle, app):
+                pid = _atspi.pid_of(acc)
+                if isinstance(pid, int) and pid > 0 and pid not in found:
+                    found.append(pid)
+            return tuple(found)
+
+        try:
+            pids = self._run(read)
+        except Exception:
+            return ()
+        return pids if isinstance(pids, tuple) else ()
+
+    def _apply_set_value(self, element: Element, value: str, handle) -> bool:
+        from a11y_computer_use.drivers import _atspi, _cdp_forms
+
+        # Form controls on an opted-in Chrome or Electron window are written
+        # in the DOM. None keeps the AT-SPI writer, including GTK and a
+        # Chrome that was not started with a debugging port. The window
+        # title selects the tab when more than one page target is open.
+        dom = _cdp_forms.write_element(
+            element, value,
+            window_title=self._dom_window_title(handle),
+            pids=self._dom_pids(handle),
+        )
+        if dom is not None:
+            return dom
         if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
             # A Writer table cell is named like a Calc address, but typing
             # into it inserts a paragraph and the cell node reads back empty.
@@ -1004,12 +2301,13 @@ class LinuxDriver:
                         f"{element.ref} ({element.role}) has no Value interface",
                         detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
                     )
-        # A menu, heading, label, button, paragraph, or select is not a text
-        # target. Raising here is what stops the Runtime from focusing it and
-        # typing the value into whatever is frontmost. No key, click, or focus
-        # is sent. The snapshot flag is not enough: Firefox reports
+        # A menu, heading, label, button, browser paragraph, or select is not
+        # a text target. Raising here is what stops the Runtime from focusing
+        # it and typing the value into whatever is frontmost. No key, click,
+        # or focus is sent. The snapshot flag is not enough: Firefox reports
         # STATE_EDITABLE and EditableText on static nodes, and selecting one
-        # selects the page. The live node has to be an editable entry.
+        # selects the page. The live node has to be an editable entry. An
+        # Impress or Draw paragraph with that state and EditableText is one.
         if not _accepts_text(element):
             raise _not_editable(element)
         if handle is None:
@@ -1036,6 +2334,35 @@ class LinuxDriver:
         return True
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
+    def _pointer(self, x: int, y: int) -> tuple[int, int]:
+        """Screen point for an XTEST event.
+
+        Published LibreOffice bounds stay on the pixels. On 24.2 the hit
+        test sits one title bar above those pixels, so the event moves by
+        that inset. A point outside LibreOffice is unchanged.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            dx, dy = self._run(lambda: _atspi.libreoffice_pointer_shift(int(x), int(y)))
+        except Exception:
+            return int(x), int(y)
+        return int(x) + int(dx), int(y) + int(dy)
+
+    def _note_pointer(self, x: int, y: int) -> None:
+        """The pointer event at the published point has been sent.
+
+        LibreOffice 24.2 then republishes extents in hit-test space. Noting
+        the original point, not the shifted one, keeps the next event from
+        adding the title bar a second time.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            self._run(lambda: _atspi.note_libreoffice_pointer(int(x), int(y)))
+        except Exception:
+            return
+
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,
               dry_run: bool = False) -> object:
@@ -1052,10 +2379,64 @@ class LinuxDriver:
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
-        x, y = _point_of(target)
-        # A Writer paragraph click places the caret in that paragraph. The
-        # screen point is one title bar high, so a pointer click lands in
-        # the paragraph above and the following type confirms the miss.
+            self._raise_handle_window(handle)
+        revealed = None
+        if isinstance(target, Element) and handle is not None:
+            # An off-view table cell is scrolled, then clicked at its new
+            # center. A point target keeps the pixels it was given. A cell
+            # that stays outside the viewport is not clicked.
+            try:
+                revealed = self._run(lambda: _atspi.reveal_unpainted_table_click(handle))
+            except ComputerUseError:
+                raise
+            except Exception:
+                revealed = None
+        if revealed is not None:
+            x, y = int(revealed[0]), int(revealed[1])
+        else:
+            x, y = _point_of(target)
+        header_box_untrusted = handle is not None and self._run(
+            lambda: _atspi.gtk4_window_origin_untrusted(handle)
+        )
+        if isinstance(target, Element) and (
+            header_box_untrusted or self._gtk4_point_untrusted(target, handle)
+        ):
+            plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
+            # Header-bar controls expose click/press. Do not substitute an
+            # unrelated action, or fall back to their known unreliable point.
+            activated = plain and self._run(
+                lambda: _atspi._do_action_named(handle, frozenset({"click", "press"}))
+                if header_box_untrusted else _atspi.do_press(handle)
+            )
+            if activated:
+                return None
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{target.ref} ({target.role}) has no reliable screen bounds or successful activation action, "
+                "so the pointer click was not sent",
+                detail={
+                    "ref": target.ref,
+                    "role": target.role,
+                    "reason": "not_actionable",
+                    "outcome": "refused",
+                },
+            )
+        # A plain left click on an Impress or Draw shape or text frame is a
+        # pointer click at the element's center. A single click that does
+        # not enter text edit is followed by a double-click. Writer text
+        # stays on the caret shortcut below. A crop uses the published
+        # point as the pixel rectangle.
+        if (
+            handle is not None
+            and button is MouseButton.LEFT
+            and not modifiers
+            and self._run(lambda: _atspi.is_libreoffice_shape_text(handle))
+        ):
+            self._click_shape_text(handle, x, y, count)
+            return None
+        # A plain left single-click on a Writer paragraph places the caret
+        # in that paragraph. A double-click uses the published point, shifted
+        # onto the hit-test on LibreOffice 24.2.
         if (
             handle is not None
             and button is MouseButton.LEFT
@@ -1065,9 +2446,78 @@ class LinuxDriver:
         ):
             self._focused_editable = handle
             return None
+        px, py = self._pointer(x, y)
         with _linux_input.held(modifiers):
-            _linux_input.click(x, y, button=_BUTTON_NAME.get(button, "left"), count=count)
+            _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
+        self._note_pointer(x, y)
+        # A double-click does not place the caret through the text
+        # interface. When the pointer did land in this paragraph, the
+        # following type inserts there. A miss leaves the caret elsewhere
+        # and does not retarget the type.
+        if handle is not None and self._run(
+            lambda: _atspi.paragraph_click_verdict(handle)
+        ) == ("confirmed", "the caret is in the target paragraph"):
+            self._focused_editable = handle
         return None
+
+    def _gtk4_point_untrusted(self, target: Element, handle) -> bool:
+        """True when a pointer event at ``target`` would use a bogus GTK 4 box.
+
+        A positive box whose origin is not (0, 0) was recovered, or was never
+        the collapsed SCREEN point, and stays a real hit. A box still published
+        at (0, 0), or a degenerate box, is untrusted only when the live node
+        is GTK 4 and the X origin plus its WINDOW box is not that point. Other
+        toolkits keep the coordinate click they already had. No live node is
+        not this case.
+        """
+        if handle is None:
+            return False
+        from a11y_computer_use.drivers import _atspi
+
+        bounds = target.bounds
+        positive = bounds.width > 0 and bounds.height > 0
+        at_origin = bounds.x == 0 and bounds.y == 0
+        if positive and not at_origin:
+            return False
+        try:
+            if not positive:
+                return bool(self._run(lambda: _atspi._gtk4_app(handle)))
+            return bool(self._run(lambda: _atspi.published_origin_untrusted(handle)))
+        except Exception:
+            return False
+
+    def _click_shape_text(self, handle, x: int, y: int, count: int) -> None:
+        """Click the center of an Impress or Draw text frame, then enter edit.
+
+        The published center is shifted the same way a coordinate click is.
+        One click is enough when the frame starts editing. Otherwise a
+        double-click follows. The following type is aimed at this frame
+        only after that edit is visible.
+        """
+        from a11y_computer_use.drivers import _linux_input
+
+        px, py = self._pointer(x, y)
+        clicks = max(1, int(count))
+        _linux_input.click(px, py, count=clicks)
+        if clicks == 1 and not self._shape_text_ready(handle):
+            _linux_input.click(px, py, count=2)
+        self._note_pointer(x, y)
+        if self._shape_text_ready(handle):
+            self._focused_editable = handle
+
+    def _shape_text_ready(self, handle) -> bool:
+        """True once the frame shows a focused paragraph or a caret."""
+        from a11y_computer_use.drivers import _atspi
+
+        deadline = time.monotonic() + 0.6
+        while True:
+            try:
+                ready = bool(self._run(lambda: _atspi.shape_text_editing(handle)))
+            except Exception:
+                ready = False
+            if ready or time.monotonic() >= deadline:
+                return ready
+            time.sleep(0.05)
 
     def hover(self, target: Target, *, dry_run: bool = False) -> object:
         """Move the pointer onto ``target`` and deliver a hover. No button."""
@@ -1079,7 +2529,9 @@ class LinuxDriver:
 
         self._focused_editable = None
         x, y = _point_of(target)
-        _linux_input.hover(x, y)
+        px, py = self._pointer(x, y)
+        _linux_input.hover(px, py)
+        self._note_pointer(x, y)
         return None
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
@@ -1092,11 +2544,93 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         self._focused_editable = None
+        # One delta for the whole gesture. Noting after the first point
+        # would drop the inset from the end and the path.
         x1, y1 = _point_of(start)
+        sx, sy = self._pointer(x1, y1)
+        dx, dy = sx - int(x1), sy - int(y1)
         x2, y2 = _point_of(end)
-        _linux_input.drag(x1, y1, x2, y2, button=_BUTTON_NAME.get(button, "left"),
-                          path=[_point_of(p) for p in path])
+        moved = [(_point_of(p)[0] + dx, _point_of(p)[1] + dy) for p in path]
+        _linux_input.drag(
+            sx, sy, int(x2) + dx, int(y2) + dy,
+            button=_BUTTON_NAME.get(button, "left"), path=moved,
+        )
+        self._note_pointer(x1, y1)
         return None
+
+    def scroll_offset(self, target: Element) -> float | None:
+        """Vertical offset of the scroll container that holds ``target``.
+
+        None when that container has no readable bar.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        except Exception:
+            return None
+        if handle is None:
+            return None
+        try:
+            value = self._run(lambda: _atspi.scroll_offset(handle))
+        except Exception:
+            return None
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def reveal_table_match(self, app: str, text: str):
+        """Scroll a named cell of a large GTK table into view.
+
+        ``(moved, on_screen)`` when the table model contains ``text``.
+        ``moved`` is true when the cell was off screen and AT-SPI
+        ``scroll_to`` or the vertical bar's row index brought it on screen.
+        None when the app is not GTK or no cell contains ``text``. Chromium
+        keeps its own wheel. A line scroll does not come through here.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        def go():
+            root = _atspi.find_root(app, Scope.WINDOW)
+            if root is None:
+                return None
+            return _atspi.reveal_gtk_named_cell(root, text)
+
+        return self._run(go)
+
+    def scroll_viewport_page(self, target: Element, direction: int) -> bool:
+        """Page a large GTK table by one painted viewport. False otherwise.
+
+        ``direction`` is positive to go down. The vertical bar moves by the
+        painted row count. Chromium and a line-sized ``scroll`` stay on
+        the wheel.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if not isinstance(target, Element) or not direction:
+            return False
+        try:
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        except Exception:
+            return False
+        if handle is None:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.scroll_gtk_viewport_page(handle, int(direction))))
+        except Exception:
+            return False
+
+    def latch_chromium_find(self, app: str) -> bool:
+        """Remember this Chrome process before the post-find snapshot.
+
+        Ctrl+F closes the bar before that snapshot can see the Find field.
+        Without the pid, the next walk keeps the find frame or an empty
+        document, and a wheel on that frame does not move the page.
+        True when a Chrome pid was recorded.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        return bool(self._run(lambda: _atspi.latch_chromium_find(app)))
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
@@ -1174,7 +2708,14 @@ class LinuxDriver:
         Chrome document. When the window's process was started with
         ``--remote-debugging-port``, a line step is a DOM ``scrollBy`` of
         about 40 pixels per line, kept only when ``scrollTop`` changes.
-        Otherwise the wheel is sent as before.
+        Otherwise the requested notches are sent together. That burst is
+        about a viewport, and the call returns as soon as the on-screen
+        head shows it. One notch at a time, stopped at about ``|dy|``
+        names, made each step about four rows and about two seconds. On a
+        busy runner the same burst can collapse into one row; notches are
+        then added one at a time until the head has moved by about the
+        requested number of names. A head that has already left the
+        sampled names is not given those extra notches.
         ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back when a bar is exposed. GTK scrolled
         windows expose the value in pixels. A missing bar tries a CDP DOM
@@ -1203,6 +2744,7 @@ class LinuxDriver:
         handle = None
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._raise_handle_window(handle)
         container = None
         if handle is not None and (int(dx) or int(dy)):
             container = self._run(lambda: _atspi.list_container(handle))
@@ -1215,6 +2757,9 @@ class LinuxDriver:
             if point is not None:
                 x, y = point
         if container is None:
+            anchored = _anchor_scroll_point(target, handle, x, y)
+            if anchored is not None:
+                x, y = anchored
             # Chrome's document is a group, not a list, and a DevTools port
             # scrolls it. A GTK window has no port and keeps the notch.
             # Either way the Chromium tree trails the paint, so the search
@@ -1224,13 +2769,36 @@ class LinuxDriver:
                 dx=int(dx) * _PIXELS_PER_LINE,
                 dy=int(dy) * _PIXELS_PER_LINE,
             ):
-                _linux_input.scroll(x, y, dx=dx, dy=dy)
-            if handle is not None:
+                _wheel_chromium_document(self._run, handle, x, y, dx=int(dx), dy=int(dy))
+            elif handle is not None:
                 _settle_shown_names(self._run, handle)
             return None
         box = self._run(lambda: _atspi.list_screen_box(container))
         raw_box = box
         ancestor_box = self._run(lambda: _atspi.overflow_ancestor_box(container))
+        # A short body-scroll table is content, not a scrollport. It can
+        # fit on a tall screen and still run past the document, and after
+        # the page moves its top is above the document. The bar, the track,
+        # and a list-judged wheel do not move it, and that stall is reported
+        # as unchanged while the document can still scroll. Hover first so
+        # the wheel lands on the focused page.
+        if (
+            ancestor_box is None
+            and raw_box is not None
+            and int(dy)
+            and self._run(lambda: _atspi.scroll_container_kind(container)) == "document"
+        ):
+            display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
+            self.hover(Point(display_id, x, y))
+            if not _cdp_scroll_pixels(
+                x, y,
+                dx=int(dx) * _PIXELS_PER_LINE,
+                dy=int(dy) * _PIXELS_PER_LINE,
+            ):
+                _wheel_chromium_document(self._run, handle, x, y, dx=int(dx), dy=int(dy))
+            elif handle is not None:
+                _settle_shown_names(self._run, handle)
+            return None
         if ancestor_box is not None:
             painted = _clip_box_to_screen(ancestor_box)
             box = painted if painted is not None else ancestor_box
@@ -1240,6 +2808,10 @@ class LinuxDriver:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None
         display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
+        try:
+            offset_before = self._run(lambda: _atspi.scroll_offset(container))
+        except Exception:
+            offset_before = None
         still: dict[str, object] = {}
 
         def judge(mutate) -> bool:
@@ -1368,6 +2940,16 @@ class LinuxDriver:
                     "rows": list(shown[:8]),
                 },
             )
+        try:
+            offset_after = self._run(lambda: _atspi.scroll_offset(container))
+        except Exception:
+            offset_after = None
+        # A bar that moved is a scroll, even when the painted rows have not
+        # caught up. page_unchanged is only a bar that was read twice and
+        # stayed put. A list with no readable bar still uses the painted
+        # rows: that list is the scrollport, and there is no other offset.
+        if _offset_did_not_move(offset_before, offset_after) is False:
+            return None
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             "the rows on screen did not change after the wheel scroll",
@@ -1379,6 +2961,7 @@ class LinuxDriver:
                 "mean_abs": mean,
                 "samples": samples,
                 "box": list(box),
+                "scroll_position": offset_after if offset_after is not None else offset_before,
                 "rows": list(shown[:8]),
             },
         )
@@ -1392,6 +2975,7 @@ class LinuxDriver:
         handle = None
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._raise_handle_window(handle)
         x, y = _point_of(target)
 
         def do() -> bool:
@@ -1434,6 +3018,185 @@ class LinuxDriver:
             },
         )
 
+    def type_into(self, element: Element, text: str) -> int:
+        """Type ``text`` into ``element`` only after focus is confirmed on it.
+
+        ``grab_focus`` runs first. A later read has to show keyboard focus on
+        that accessible, or on a descendant inside it. Anything else raises
+        ``focus_lost`` and does not insert and does not send keystrokes, so
+        the characters cannot land in a different field. A confirmed field
+        is written through EditableText on that accessible. When that
+        interface is missing or leaves the field unchanged, keystrokes are
+        sent only while focus stays on it, and the read-back is that same
+        accessible.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        self._focused_editable = None
+        if element.secure:
+            raise _secure_focus_error("the requested ref is a password field")
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            raise self._focus_lost_on(element)
+        self._refuse_hidden(element, handle)
+        self._raise_handle_window(handle)
+        if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
+            raise _not_editable(element)
+        if self._run(lambda: _atspi.drawing_text_editable(handle)):
+            # The paragraph often has no Component. Focus lands on it or on
+            # the shape panel, and EditableText inserts on the paragraph.
+            # A paragraph that was not already editing reports caret 0. Move
+            # it to the end, including after the grab, so the insert appends.
+            # A paragraph that already has focus keeps the caret the user set.
+            editing = self._run(lambda: _atspi._state_has(handle, "FOCUSED"))
+            if not editing:
+                self._run(lambda: _atspi.place_drawing_caret_at_end(handle))
+            if not self._run(lambda: _atspi.focus_drawing_text(handle)):
+                raise self._focus_lost_on(element)
+            if not editing:
+                self._run(
+                    lambda: _atspi.place_drawing_caret_at_end(handle, ignore_focus=True)
+                )
+        else:
+            self._run(lambda: _atspi.grab_focus(handle))
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                raise self._focus_lost_on(element)
+        self._focused_editable = handle
+        peers: dict = {}
+        try:
+            peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
+        except Exception:
+            peers = {}
+        try:
+            count = self._type_confirmed_handle(handle, text)
+        except ComputerUseError as exc:
+            self._refuse_changed_peers(handle, peers, element, exc)
+            raise
+        self._raise_if_peers_changed(handle, peers, element)
+        return count
+
+    def _focus_lost_on(self, element: Element) -> ComputerUseError:
+        return ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            f"focus is not confirmed on {element.ref}; nothing was typed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "evidence": "focus did not land on the target, so no keystrokes were sent",
+            },
+        )
+
+    def _raise_if_peers_changed(self, handle, peers: dict, element: Element) -> None:
+        """After a type that reported success, another field must be unchanged."""
+        if handle is None or not peers:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
+        except Exception:
+            return
+        if not changed:
+            return
+        raise ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            "type stopped because another field changed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "changed_fields": changed[:8],
+                "evidence": "another field changed during type",
+            },
+        )
+
+    def _type_confirmed_handle(self, handle, text: str) -> int:
+        """Insert ``text`` into a handle whose focus was already confirmed."""
+        from a11y_computer_use.drivers import _atspi
+
+        text = text.replace("\r\n", "\n")
+        if not text:
+            return 0
+        # Writer keeps the lines in paragraph children. The document node's
+        # own text stays empty, so the read-back is those paragraphs,
+        # captured before the insert.
+        writer_doc = self._run(lambda: _atspi.writer_document_for(handle))
+        writer_before = ""
+        if writer_doc is not None:
+            writer_before = self._run(lambda: _atspi.writer_document_text(writer_doc)) or ""
+        before = self._run(lambda: _atspi._readable_text(handle))
+        try:
+            inserted = self._run(lambda: _atspi.insert_text(handle, text))
+        except ComputerUseError as exc:
+            detail = exc.detail or {}
+            if detail.get("reason") == "text_mismatch" and detail.get("unchanged"):
+                inserted = None
+            elif detail.get("reason") == "selection_not_replaced" and self._run(
+                lambda: _atspi.is_location_entry(handle)
+            ):
+                app_id, _pid = self.frontmost_app()
+                return self._replace_location_selection(handle, text, app_id)
+            else:
+                raise
+        if isinstance(inserted, int) and not isinstance(inserted, bool):
+            return inserted
+        if inserted:
+            return len(text)
+        if not self._run(lambda: _atspi._x11_keys_available()):
+            raise _wayland_input_error("type")
+        self._run(lambda: _atspi._type_into_target(handle, text))
+        chrome = bool(self._run(lambda: _atspi._chromium_app(handle)))
+        after = _atspi._poll_typed_text(
+            lambda: self._run(lambda: _atspi._readable_text(handle)),
+            before,
+            text,
+            chrome=chrome,
+        )
+        if _atspi._typed_visible(before, after, text, chrome=chrome):
+            if chrome:
+                # The outcome compares this string. A paragraph boundary is
+                # a newline here, so the judge does not require the same
+                # separator character the field stored.
+                self._type_expected = _atspi._field_text_for_type(after, text)
+            return len(text)
+        if writer_doc is not None:
+            shown = self._run(
+                lambda: _atspi.poll_writer_document(writer_doc, writer_before, text)
+            )
+            if _atspi._writer_typed_visible(writer_before, shown, text):
+                return len(text)
+            after = shown if shown is not None else after
+        raise _atspi._text_mismatch(
+            "text_mismatch",
+            f"the text read back does not contain {text!r}",
+            expected=text,
+            actual=after,
+        )
+
+    def _verify_remembered_editable(self, handle) -> str:
+        """Keep cached editable ownership checks ahead of terminal detection."""
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _linux_system
+
+        app_id, _pid = self.frontmost_app()
+        owner_pid = self._run(lambda: _atspi.pid_of(handle))
+        owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
+        if not owner or not app_id or owner != app_id:
+            self._focused_editable = None
+            raise ComputerUseError(
+                ErrorCode.FOCUS_CHANGED,
+                "the remembered editable does not belong to a verified frontmost app; "
+                "focus the intended field again or use set_value with its ref",
+                detail={"editable_app": owner, "frontmost_app": app_id},
+            )
+        return app_id
+
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.
@@ -1456,6 +3219,11 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._type_expected = None
+        self._sheet_type_origin = None
+        self._drawing_type_before = None
+        self._drawing_type_state = None
+        self._type_unverified = False
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -1463,19 +3231,7 @@ class LinuxDriver:
         if handle is not None and self._run(lambda: _atspi.is_secure(handle)):
             raise _secure_focus_error("AT-SPI role 'password text' on the focused editable")
         if handle is not None:
-            from a11y_computer_use.drivers import _linux_system
-
-            app_id, _pid = self.frontmost_app()
-            owner_pid = self._run(lambda: _atspi.pid_of(handle))
-            owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
-            if not owner or not app_id or owner != app_id:
-                self._focused_editable = None
-                raise ComputerUseError(
-                    ErrorCode.FOCUS_CHANGED,
-                    "the remembered editable does not belong to a verified frontmost app; "
-                    "focus the intended field again or use set_value with its ref",
-                    detail={"editable_app": owner, "frontmost_app": app_id},
-                )
+            app_id = self._verify_remembered_editable(handle)
         else:
             app_id, _pid = self.frontmost_app()
             if app_id:
@@ -1484,6 +3240,35 @@ class LinuxDriver:
                     raise _secure_focus_error(
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
+        if app_id:
+            # The find field latches this process even when the open bar is
+            # not in a snapshot. scroll_to_find types and closes it first.
+            self._run(lambda: _atspi.note_focused_find_bar(app_id))
+        if (
+            handle is not None
+            and ("\t" in text or "\n" in text)
+            and self._run(
+                lambda: _atspi.is_sheet_cell(handle) and not _atspi.writer_text_cell(handle)
+            )
+        ):
+            # Tab and Return leave the cell. insertText would keep the grid
+            # in this cell, and the read-back would only see that cell.
+            handle = None
+        if (
+            handle is not None
+            and "\n" in text
+            and self._run(lambda: _atspi.is_drawing_text_paragraph(handle))
+        ):
+            # Return starts the next paragraph in an Impress or Draw frame.
+            # insertText of the newline stays in this paragraph and drops the
+            # rest. The keys already do that split. The frame's paragraphs
+            # are the read-back.
+            handle = None
+        if app_id and _atspi.libreoffice_app(app_id):
+            status, shown = self._run(lambda: _atspi.drawing_focus_text(app_id))
+            if status != "skip":
+                self._drawing_type_state = status
+                self._drawing_type_before = "" if shown is None else shown
         if handle is not None:
             try:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))
@@ -1528,6 +3313,9 @@ class LinuxDriver:
             # take this branch.
             landed = self._run(lambda: _atspi.chromium_contenteditable_type(handle, text))
             if landed is True:
+                expected = getattr(_atspi.chromium_contenteditable_type, "last_expected", None)
+                if isinstance(expected, str):
+                    self._type_expected = expected
                 return len(text)
             if landed is False:
                 after = self._run(lambda: _atspi._readable_text(handle))
@@ -1562,15 +3350,118 @@ class LinuxDriver:
             # LibreOffice verifies against the open cell editor. Every other
             # app uses the focused node's text.
             before = self._typed_readback(app_id)
+        # A Writer document's own text is empty. The paragraphs are the
+        # read-back, taken before the keys so a later line is not missed.
+        writer_before = None
+        # Impress and Draw keep the document focused. Its text stays empty
+        # while the paragraph inside the text frame holds the characters.
+        # That paragraph is the read-back, captured before the keys.
+        shape_before = None
+        if app_id and location is None and bar_before is None and _atspi.libreoffice_app(app_id):
+            writer_before = self._run(lambda: _atspi.writer_type_before(app_id))
+            if writer_before is None:
+                shape_before = self._run(lambda: _atspi.focused_shape_edit_text(app_id))
+        # A contenteditable selection has to be read before the keys replace
+        # it. The expected result is that range replaced, not the old text
+        # with the typed string appended.
+        selection = None
+        editor_before = None
+        editor_selection = None
+        if location is None and bar_before is None and app_id and not _atspi.libreoffice_app(app_id):
+            def _spans():
+                # No AT-SPI binding (macOS and Windows hermetic runs) is not a
+                # selection. The key path still types. A missing bus is the same.
+                try:
+                    acc, truncated = _atspi._focused_node(app_id)
+                    focused_span = None
+                    if not truncated and acc is not None:
+                        focused_span = _atspi._selection_span(acc, before)
+                    editor = _atspi._focused_contenteditable(app_id)
+                    editor_text = _atspi._readable_text(editor) if editor is not None else None
+                    editor_span = (
+                        _atspi._selection_span(editor, editor_text) if editor is not None else None
+                    )
+                    return focused_span, editor_text, editor_span
+                except Exception:
+                    return None, None, None
+
+            selection, editor_before, editor_selection = self._run(_spans)
         # Chrome's omnibox drops the tail of a URL at the default key pace.
         # A contenteditable and a Calc cell keep that pace.
+        if (
+            app_id
+            and location is None
+            and bar_before is None
+            and ("\t" in text or "\n" in text)
+            and _atspi.libreoffice_app(app_id)
+            and self._run(lambda: _atspi.spreadsheet_open(app_id))
+        ):
+            origin = self._run(
+                lambda: _atspi.selected_sheet_address(app_id) or _atspi._focused_sheet_address(app_id)
+            )
+            if isinstance(origin, str) and origin:
+                self._sheet_type_origin = origin
         if location is not None or bar_before is not None:
             _linux_input.type_string(text, delay=0.05)
         else:
             _linux_input.type_string(text)
         if location is not None:
             return self._location_read_back(location, before, text, app_id)
+        if self._sheet_type_origin:
+            origin = self._sheet_type_origin
+            # Wait for the committed cells. Then leave the caret on the
+            # cell Enter moves to, not on the last cell the read opened.
+            mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
+            if mismatch is None:
+                return len(text)
+            self._sheet_type_origin = None
+            address, wanted, actual = mismatch
+            raise _atspi._text_mismatch(
+                "text_mismatch",
+                f"the text read back from {address} does not match {wanted!r}",
+                expected=wanted,
+                actual=actual,
+                cell=address,
+            )
+        # A Writer newline is Return, which this key path already sends. The
+        # paragraphs are the read-back. One paragraph that holds the same
+        # characters as line breaks is not a match. A sheet is not this.
+        if app_id and "\n" in text and _atspi.libreoffice_app(app_id):
+            writer = self._run(lambda: _atspi.focused_writer_document(app_id))
+            if writer is not None and not self._run(lambda: _atspi.spreadsheet_open(app_id)):
+                if self._run(lambda: _atspi.writer_type_landed(writer, text)):
+                    return len(text)
+                if self._run(lambda: _atspi.writer_type_conflict(writer, text)):
+                    raise _atspi._text_mismatch(
+                        "text_mismatch",
+                        "inserted as line breaks",
+                        expected=text,
+                        actual=self._run(lambda: _atspi.writer_type_readback(writer)),
+                    )
+        if self._drawing_type_state not in (None, "skip"):
+            status, shown = self._run(
+                lambda: _atspi.poll_drawing_type(app_id, self._drawing_type_before, text)
+            )
+            self._drawing_type_state = status
+            if status == "text" and _atspi.drawing_typed_visible(
+                self._drawing_type_before, shown, text,
+            ):
+                return len(text)
+            if status == "unreadable":
+                # The container's empty text is not the frame. Reporting it
+                # as a mismatch makes the caller type the same string again.
+                self._type_unverified = True
+                return len(text)
+            if status == "text":
+                raise _atspi._text_mismatch(
+                    "text_mismatch",
+                    f"the text read back does not contain {text!r}",
+                    expected=text,
+                    actual=shown,
+                )
         after = self._typed_readback(app_id)
+        if selection and _atspi._typed_visible(before, after, text, selection=selection):
+            self._type_expected = _atspi._matched_replacement(before, after, text, selection)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
         # first read can be a truncated URL. Calc is the same lag: the cell
@@ -1601,23 +3492,57 @@ class LinuxDriver:
                     expected=text,
                     actual=after,
                 )
+            # Not a sheet. Writer publishes one paragraph at a time, and the
+            # focused node's text stays empty. The same settle set_value uses
+            # confirms the lines. A document that is not Writer leaves
+            # writer_before unset.
+            if writer_before is not None:
+                shown = self._run(
+                    lambda: _atspi.poll_focused_writer_type(app_id, writer_before, text)
+                )
+                if _atspi._writer_typed_visible(writer_before, shown, text):
+                    return len(text)
+                if shown is not None:
+                    after = shown
+            elif shape_before is not None:
+                shown = self._run(
+                    lambda: _atspi.poll_focused_shape_type(app_id, shape_before, text)
+                )
+                if _atspi._typed_visible(shape_before, shown, text):
+                    return len(text)
+                if shown is not None:
+                    after = shown
         if (
             app_id
             and after is not None
             and not _atspi.libreoffice_app(app_id)
-            and not _atspi._typed_visible(before, after, text)
+            and not _atspi._typed_visible(before, after, text, selection=selection)
         ):
             focused = self._run(lambda: _atspi._focused_contenteditable(app_id))
             if focused is not None:
                 # Sleep between reads on this thread. Each read is its own
                 # AT-SPI call, so the a11y thread is not held for the wait.
+                # The selection was taken before the keys. When focus sits on
+                # a child text node, the editor read-back is the parent, and
+                # that parent's span is the one that was captured.
+                poll_before = before
+                poll_selection = selection
+                if editor_selection is not None and editor_before not in (None, before):
+                    poll_before = editor_before
+                    poll_selection = editor_selection
                 after = _atspi._poll_typed_text(
                     lambda: self._run(lambda: _atspi._readable_text(focused)),
-                    before,
+                    poll_before,
                     text,
                     chrome=True,
+                    selection=poll_selection,
                 )
-                if _atspi._typed_visible(before, after, text, chrome=True):
+                if _atspi._typed_visible(
+                    poll_before, after, text, chrome=True, selection=poll_selection,
+                ):
+                    self._type_expected = _atspi._matched_replacement(
+                        poll_before, after, text, poll_selection, chrome=True,
+                    ) or _atspi._field_text_for_type(after, text)
                     return len(text)
             elif self._run(lambda: _atspi.focused_chrome_rewrite(app_id)) is not None:
                 # The address bar publishes a short URL while suggestions
@@ -1641,7 +3566,9 @@ class LinuxDriver:
                     return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
-        if after is not None and not _atspi._typed_visible(before, after, text):
+        if after is not None and not _atspi._typed_visible(
+            before, after, text, selection=selection,
+        ):
             if app_id and bar_before is not None:
                 bar_after = self._run(lambda: _atspi.address_bar_text(app_id))
                 if bar_after == bar_before:
@@ -1677,16 +3604,35 @@ class LinuxDriver:
         """
         if not text or not _named_browser(app_id):
             return None
-        from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        active = _linux_system.active_window()
+        if not active:
+            return None
+        owner = str(active.get("app") or "")
+        if app_id and owner and _browser_family(owner) != _browser_family(app_id):
+            return None
+        copied = self._copy_focused_chooser_text()
+        if isinstance(copied, str) and _atspi._typed_visible(None, copied, text):
+            return copied
+        return None
+
+    def _copy_focused_chooser_text(self) -> str | None:
+        """Text in the focused Open/Save location entry, or None.
+
+        The dialog has keyboard focus and no accessibility entry. Select-all
+        and copy read that field. Selecting it also pops a list over Open and
+        Cancel, so Right collapses the selection before returning. A sentinel
+        is written first so a clipboard that already held the path cannot
+        count, and the previous clipboard is put back.
+        """
+        from a11y_computer_use.drivers import _linux_input, _linux_system
 
         active = _linux_system.active_window()
         if not active:
             return None
         title = " ".join(str(active.get("title") or "").casefold().split())
         if title not in {"open file", "save file", "save as"}:
-            return None
-        owner = str(active.get("app") or "")
-        if app_id and owner and _browser_family(owner) != _browser_family(app_id):
             return None
         saved = None
         restore = False
@@ -1715,8 +3661,10 @@ class LinuxDriver:
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.05)
-            if isinstance(got, str) and _atspi._typed_visible(None, got, text):
-                return got.replace("\u00a0", " ").strip("\n")
+            if isinstance(got, str) and got.strip():
+                text = got.replace("\u00a0", " ").strip("\n")
+                if "\n" not in text and "no file chosen" not in text.casefold():
+                    return text.strip()
             return None
         finally:
             # Select-all leaves a popup over the action buttons. Collapse the
@@ -1772,6 +3720,15 @@ class LinuxDriver:
                 time.sleep(0.1)
         actual = self._run(lambda: _atspi._full_text(handle))
         formula = self._run(lambda: _atspi._sheet_formula(handle))
+        # A range colon is escaped in the Formula attribute and the value is
+        # split there, so SUM(A1:A3) arrives as SUM(A1\. The editor has the
+        # formula that committed.
+        if _atspi._formula_needs_editor(formula, value):
+            opened = self._run(lambda: _atspi.committed_sheet_formula(handle))
+            if opened and _atspi.formulas_match(opened, value):
+                return
+            if opened:
+                formula = opened
         raise _atspi._text_mismatch(
             "text_mismatch",
             f"the value read back does not match {value!r}",
@@ -1853,43 +3810,396 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
+        # Return in a file chooser's location entry closes the dialog and
+        # leaves the file unchosen. Activate Open or Save instead, and do
+        # not report the key as pressed unless the opener shows the file.
+        if self._confirm_file_chooser(chord):
+            return None
         if printable_chord(chord):
             self._refuse_xtest_password_focus()
         self._focused_editable = None
         _linux_input.press_chord(chord)
         return None
 
+    def _confirm_file_chooser(self, chord: str) -> bool:
+        """Activate the chooser's Open or Save button. True when this chord was that confirm.
+
+        A bare Return, Enter, or kp_enter is the confirm. The key is not
+        sent. When the chooser has an accessibility button, that button is
+        scrolled or the window is resized when its box is missing or outside
+        the screen, then its AT-SPI action runs. The chooser window has to
+        close and the opener has to show the file. A browser chooser with no
+        accessibility button, including Chrome's, is fitted on screen and
+        Open is clicked. The page's file input has to show the file. Anything
+        else raises. A window that is not a chooser, and a non-browser
+        chooser with no accessibility button, returns False so the key is sent.
+        """
+        if not _bare_chooser_confirm(chord):
+            return False
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        active = _linux_system.active_window()
+        if not active or not _atspi.file_chooser_window_title(str(active.get("title") or "")):
+            return False
+        pid = int(active.get("pid") or 0) or None
+        title = str(active.get("title") or "")
+        try:
+            found = self._run(lambda: _atspi.file_chooser_controls(pid, title))
+        except ImportError:
+            return False
+        if found is None:
+            if _named_browser(str(active.get("app") or "")):
+                self._confirm_browser_chooser(active)
+                return True
+            return False
+        button, path, app_root = found
+        base = _atspi.file_basename(path)
+        if not base:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser has no typed path or selected file to open",
+                detail={
+                    "reason": "file_not_chosen",
+                    "outcome": "refused",
+                    "window_id": int(active.get("window_id") or 0),
+                },
+            )
+        window_id = int(active.get("window_id") or 0)
+        self._reveal_file_chooser_button(window_id, button)
+        if not self._run(lambda: _atspi.do_press(button)):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser's Open or Save button did not run its accessibility action",
+                detail={
+                    "reason": "file_chooser_action",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        self._verify_file_chooser(active, path, app_root)
+        return True
+
+    def _reveal_file_chooser_button(self, window_id: int, button) -> None:
+        """Scroll, then resize or move, when the accept button is not on screen."""
+        from a11y_computer_use.drivers import _atspi
+
+        def box():
+            return _atspi.atspi_screen_box(button)
+
+        current = self._run(box)
+        if not _chooser_button_clipped(current):
+            return
+        self._run(lambda: _atspi.scroll_to(button))
+        current = self._run(box)
+        if not _chooser_button_clipped(current):
+            return
+        if window_id <= 0:
+            return
+        self._place_chooser_on_screen(window_id)
+
+    def _place_chooser_on_screen(self, window_id: int) -> None:
+        """Resize and move ``window_id`` so the dialog sits inside the display."""
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        if window_id <= 0:
+            return
+        geom = _atspi.primary_geometry()[0]
+        margin = 32
+        dw = int(geom.display.width)
+        dh = int(geom.display.height)
+        fit_w = max(360, dw - 2 * margin)
+        fit_h = max(280, dh - 2 * margin)
+        rows = _linux_system.windows()
+        row = next((item for item in rows if int(item.get("window_id") or 0) == window_id), None)
+        bounds = (row or {}).get("bounds") or {}
+        width = int(bounds.get("width") or 0)
+        height = int(bounds.get("height") or 0)
+        x = int(bounds.get("x") or margin)
+        y = int(bounds.get("y") or margin)
+        if width > fit_w or height > fit_h or width <= 1 or height <= 1:
+            new_w = min(width, fit_w) if width > 1 else min(900, fit_w)
+            new_h = min(height, fit_h) if height > 1 else fit_h
+            _linux_system.resize_window(window_id, int(new_w), int(new_h))
+            rows = _linux_system.windows()
+            row = next((item for item in rows if int(item.get("window_id") or 0) == window_id), None)
+            bounds = (row or {}).get("bounds") or {}
+            width = int(bounds.get("width") or new_w)
+            height = int(bounds.get("height") or new_h)
+            x = int(bounds.get("x") or x)
+            y = int(bounds.get("y") or y)
+        nx, ny = x, y
+        if nx < margin:
+            nx = margin
+        if ny < margin:
+            ny = margin
+        if nx + max(width, 1) > dw - margin:
+            nx = max(margin, dw - margin - max(width, 1))
+        if ny + max(height, 1) > dh - margin:
+            ny = max(margin, dh - margin - max(height, 1))
+        if (nx, ny) != (x, y):
+            _linux_system.move_window(window_id, int(nx), int(ny))
+
+    def _confirm_browser_chooser(self, active: dict) -> None:
+        """Click Open on a browser chooser that has no accessibility button.
+
+        Chrome's GTK dialog is an X window, so Return closes it and the page
+        stays on "No file chosen". The location entry is read back, the
+        window is fitted on screen, and Open is clicked at the bottom-right.
+        The key is not sent. Success is the dialog gone and the page input
+        showing the file. A filename in the address bar or the window title
+        does not count while the input still says no file was chosen.
+        """
+        from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
+
+        window_id = int(active.get("window_id") or 0)
+        path = self._copy_focused_chooser_text() or str(self._chooser_readback or "")
+        path = str(path or "").strip()
+        base = _atspi.file_basename(path)
+        if not base or "\n" in path or "no file chosen" in path.casefold():
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser has no typed path or selected file to open",
+                detail={
+                    "reason": "file_not_chosen",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                },
+            )
+        self._place_chooser_on_screen(window_id)
+        bounds = _chooser_window_bounds(window_id)
+        width = int((bounds or {}).get("width") or 0)
+        height = int((bounds or {}).get("height") or 0)
+        if not bounds or width <= 1 or height <= 1:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser has no on-screen bounds for its Open button",
+                detail={
+                    "reason": "file_chooser_unchanged",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        if window_id > 0:
+            try:
+                _linux_system.focus_window(window_id)
+            except ComputerUseError:
+                pass
+        _linux_input.click(
+            int(bounds["x"]) + max(1, width - _CHOOSER_OPEN_FROM_RIGHT),
+            int(bounds["y"]) + max(1, height - _CHOOSER_OPEN_FROM_BOTTOM),
+        )
+        self._verify_browser_chooser(active, path)
+
+    def _verify_browser_chooser(self, active: dict, path: str) -> None:
+        """The chooser is gone and the page's file input shows ``path``."""
+        from a11y_computer_use.drivers import _atspi
+
+        window_id = int(active.get("window_id") or 0)
+        title = str(active.get("title") or "")
+        app = str(active.get("app") or "")
+        base = _atspi.file_basename(path)
+        deadline = time.monotonic() + 6.0
+        closed = False
+        while time.monotonic() < deadline:
+            if not _chooser_window_open(window_id, title, app):
+                closed = True
+                if self._page_shows_chosen_file(app, base):
+                    return
+            time.sleep(0.1)
+        if not closed:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser stayed open after the Open or Save action",
+                detail={
+                    "reason": "file_chooser_unchanged",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"the file chooser closed without the page showing {base!r}",
+            detail={
+                "reason": "file_not_chosen",
+                "outcome": "refused",
+                "window_id": window_id,
+                "expected": base,
+                "path": path,
+            },
+        )
+
+    def _page_shows_chosen_file(self, app: str, base: str) -> bool:
+        """True when a page snapshot shows ``base`` and not an empty file input.
+
+        A window title or an address bar that contains the filename is not
+        enough: an element that still says no file was chosen fails the check.
+        """
+        if not base:
+            return False
+        names = [app] if app else []
+        if _browser_family(app) == "chrome" and "chrome" not in names:
+            names.append("chrome")
+        saw_file = False
+        for scope in (Scope.WINDOW, Scope.APP):
+            for name in names:
+                try:
+                    shot = self.snapshot(scope, name)
+                except ComputerUseError:
+                    continue
+                texts = _snapshot_texts(shot)
+                folded = "\n".join(texts).casefold()
+                if any(phrase in folded for phrase in _FILE_INPUT_EMPTY):
+                    return False
+                if any(base in text for text in texts):
+                    saw_file = True
+        return saw_file
+
+    def _verify_file_chooser(self, active: dict, path: str, app_root) -> None:
+        """The chooser window is gone and the opener shows the file."""
+        from a11y_computer_use.drivers import _atspi
+
+        window_id = int(active.get("window_id") or 0)
+        title = str(active.get("title") or "")
+        app = str(active.get("app") or "")
+        base = _atspi.file_basename(path)
+        deadline = time.monotonic() + 4.0
+        closed = False
+        while time.monotonic() < deadline:
+            if not _chooser_window_open(window_id, title, app):
+                closed = True
+                if self._opener_shows_file(app_root, path, title):
+                    return
+            time.sleep(0.1)
+        if not closed:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser stayed open after the Open or Save action",
+                detail={
+                    "reason": "file_chooser_unchanged",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"the file chooser closed without showing {base!r}",
+            detail={
+                "reason": "file_not_chosen",
+                "outcome": "refused",
+                "window_id": window_id,
+                "expected": base,
+                "path": path,
+            },
+        )
+
+    def _opener_shows_file(self, app_root, path: str, chooser_title: str) -> bool:
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        try:
+            if app_root is not None and self._run(
+                lambda: _atspi.tree_shows_file(app_root, path, skip_titles=(chooser_title,))
+            ):
+                return True
+        except Exception:
+            pass
+        base = _atspi.file_basename(path)
+        full = str(path or "").strip()
+        try:
+            rows = _linux_system.windows()
+        except ComputerUseError:
+            return False
+        for row in rows:
+            title = str(row.get("title") or "")
+            if _atspi.file_chooser_window_title(title):
+                continue
+            if base and base in title:
+                return True
+            if full and full in title:
+                return True
+        return False
+
     def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
                  checker: Callable | None = None) -> Element:
-        """Poll ``checker`` until ``condition`` holds or ``timeout_s`` elapses.
+        """Wait until ``condition`` holds or ``timeout_s`` elapses.
 
         The Runtime supplies ``checker`` (built from the originating snapshot and
-        re-resolving through this driver), so the poll loop is identical across
-        platforms — the platform-specific re-resolution lives in `resolve_ref`.
+        re-resolving through this driver). ``exists`` and ``gone`` return only
+        what that checker returns. When the event thread is on, a quiet event
+        wait does not read the tree again; an event does. ``actionable`` also
+        requires a fresh AT-SPI read: visible, enabled, stable bounds, and the
+        center receiving events. The listener starts on a Linux display. The
+        wait wakes on state, children, bounds, and focus events, and otherwise
+        polls at 0.1s. An actionable timeout names the check that failed.
         """
         if checker is None:
             raise ValueError("LinuxDriver.wait_for needs a checker; the Runtime supplies one")
-        from a11y_computer_use.drivers import _atspi_events
+        if not callable(checker):
+            raise TypeError("checker must be callable")
+        if not isinstance(target, Element):
+            raise TypeError("target must be an Element")
+        if not isinstance(condition, WaitCondition):
+            raise TypeError("condition must be a WaitCondition")
+        from a11y_computer_use.drivers import _actionable, _atspi_events
 
-        events_on = _atspi_events.enabled()
-        deadline = time.monotonic() + timeout_s
+        limit = _actionable.require_timeout(timeout_s)
+        _atspi_events.ensure_started()
+
+        def _wake(remaining: float) -> bool:
+            if _atspi_events.listening():
+                found = _atspi_events.wait_for_event(
+                    _atspi_events.current_seq(),
+                    timeout=min(_actionable.EVENT_WAIT_CAP_S, remaining),
+                )
+                return found is not None
+            time.sleep(min(_actionable.FALLBACK_POLL_S, remaining))
+            return False
+
+        if condition is WaitCondition.ACTIONABLE:
+            def read() -> _actionable.Observation:
+                return self._run(lambda: _actionable.read_target(target))
+
+            def confirm() -> Element | None:
+                found = checker(target, condition)
+                if isinstance(found, Element) and found.actionable is True:
+                    return found
+                return None
+
+            return _actionable.wait_until_actionable(
+                target, timeout_s=limit, read=read, confirm=confirm, wait_event=_wake,
+            )
+
+        # exists and gone. The first pass always reads. After that, a quiet
+        # event wait is not a reason to snapshot again.
+        events_on = _atspi_events.enabled() or _atspi_events.listening()
+        deadline = time.monotonic() + limit
+        check = True
         while True:
-            result = checker(target, condition)
-            if result is not None:
-                return result
+            if check:
+                result = checker(target, condition)
+                if result is not None:
+                    if not isinstance(result, Element):
+                        raise TypeError("checker must return an Element or None")
+                    return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ComputerUseError(
                     ErrorCode.TIMEOUT,
-                    f"{target.ref} did not reach {condition.value} within {timeout_s}s",
-                    detail={"ref": target.ref, "condition": condition.value, "timeout_s": timeout_s},
+                    f"{target.ref} did not reach {condition.value} within {limit}s",
+                    detail={"ref": target.ref, "condition": condition.value, "timeout_s": limit},
                 )
             if events_on:
-                # wake the instant the UI changes (any standing a11y event), with
-                # a short safety tick — far lower latency than fixed polling.
-                _atspi_events.wait_for_event(_atspi_events.current_seq(), timeout=min(0.4, remaining))
+                woke = _atspi_events.wait_for_event(
+                    _atspi_events.current_seq(),
+                    timeout=min(_actionable.EVENT_WAIT_CAP_S, remaining),
+                )
+                check = woke is not None
             else:
-                time.sleep(min(0.1, remaining))
+                time.sleep(min(_actionable.FALLBACK_POLL_S, remaining))
+                check = True
 
     def displays(self):
         """The X screen as one display, id 0. Coordinates are root-window pixels."""
@@ -1981,9 +4291,22 @@ class LinuxDriver:
         pid is that window's comm (``covered by <comm>``). An unknown pid is
         not a cover: a missing hit-test must not refuse the crop.
         """
+        from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi, _linux_system
 
         bounds = element.bounds
+        if bounds is None:
+            return "off_screen"
+        handle = None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            handle = None
+        if self._gtk4_point_untrusted(element, handle):
+            # A collapsed or degenerate GTK 4 box is not a screen point. It is
+            # not evidence that some other window covers the element, and it
+            # is not a reason to skip the check once a real box is known.
+            return None
         cx = float(bounds.x) + float(bounds.width) / 2.0
         cy = float(bounds.y) + float(bounds.height) / 2.0
         try:
@@ -2020,10 +4343,53 @@ class LinuxDriver:
 
         return _linux_system.running_apps()
 
-    def launch_app(self, identifier: str) -> dict:
+    def terminal_target(self, app: str, target=None, *, launch: bool = False) -> bool:
+        """Recognize terminal apps and native terminal accessibles for the exec gate."""
+        from pathlib import Path
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def known(name: str) -> bool:
+            name = Path(name).name.casefold().removesuffix(".desktop")
+            return name in {
+                "xfce4-terminal", "gnome-terminal", "gnome-terminal-server",
+                "gnome-terminal-", "xterm", "uxterm", "konsole", "tilix",
+                "mate-terminal", "qterminal", "lxterminal", "alacritty",
+                "kitty", "foot", "footclient", "wezterm", "wezterm-gui",
+                "terminator", "terminology", "kgx", "ptyxis",
+                "ghostty", "rxvt", "urxvt", "urxvtc", "st", "cosmic-term",
+                "x-terminal-emulator", "sakura", "guake", "yakuake",
+                "org.gnome.terminal", "org.gnome.console", "org.gnome.ptyxis",
+                "org.kde.konsole", "com.gexperts.tilix",
+            }
+
+        if not launch and target is None and self._focused_editable is not None:
+            self._verify_remembered_editable(self._focused_editable)
+        if known(app):
+            return True
+        if launch:
+            # Resolve executable symlinks such as x-terminal-emulator.
+            import shutil
+
+            executable = shutil.which(app)
+            return bool(executable and known(str(Path(executable).resolve())))
+        if known(_resolved_app(app)):
+            return True
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        else:
+            handle = self._focused_editable
+        if handle is not None and self._run(lambda: _atspi.terminal_ancestor(handle)):
+            return True
+        focused, _truncated = self._run(lambda: _atspi._focused_node(app))
+        return self._run(lambda: _atspi.terminal_ancestor(focused))
+
+    def launch_app(self, identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
         from a11y_computer_use.drivers import _linux_system
 
         self._focused_editable = None
+        if argv:
+            return _linux_system.launch_app(identifier, argv=argv)
         return _linux_system.launch_app(identifier)
 
     def activate_app(self, identifier: str) -> str:
@@ -2078,7 +4444,10 @@ class LinuxDriver:
 
         The same origin ``windows`` reports. The outer frame is shifted by
         ``_NET_FRAME_EXTENTS`` so a decorated window does not list a few
-        pixels down and to the right of the point that was asked for.
+        pixels down and to the right of the point that was asked for. A
+        frame origin above or left of the screen is sent as a signed
+        coordinate. A float, a bool, a negative, or a point outside the
+        screen raises ValueError and the window is not moved.
         """
         self._ewmh(window_id, "move_window", lambda sys: sys.move_window(window_id, x, y))
 
@@ -2127,10 +4496,16 @@ class LinuxDriver:
         return self._run(lambda: _linux_menus.menu_items(root, path))
 
     def menu_press(self, app: str, path: str) -> str:
-        from a11y_computer_use.drivers import _linux_menus
+        from a11y_computer_use.drivers import _atspi, _linux_menus
 
         root = self._menu_root(app)
-        return self._run(lambda: _linux_menus.menu_press(root, path))
+        # The leaf goes out on the app's private socket. Dialog.run() from
+        # that handler must not hold the connection the next read uses.
+        return self._run(lambda: _linux_menus.menu_press(
+            root, path,
+            dispatch=_atspi.dispatch_menu_leaf,
+            await_dialog=_atspi.await_menu_dialog,
+        ))
 
     def menu_mnemonic(self, app: str, letter: str) -> str | None:
         """Top-level menu whose Alt mnemonic is ``letter``, or None."""
@@ -2168,6 +4543,45 @@ class LinuxDriver:
         except ComputerUseError:
             return {"open": False, "path": []}
 
+    def menu_escape_safe(self, app: str) -> bool:
+        """False when Escape would hit a showing dialog instead of the menu.
+
+        A failure to read the tree is treated as safe so a click is not
+        refused because the check itself could not run. The caller still
+        sends Escape only when a menu is open.
+        """
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            root = self._menu_root(app)
+        except ComputerUseError:
+            return True
+        try:
+            return bool(self._run(lambda: _linux_menus.escape_reaches_menu(root)))
+        except Exception:
+            return True
+
+    def target_vanished(self, element: Element) -> bool:
+        """True when ``element``'s accessible is gone and must not be clicked.
+
+        No handle is not this case: a coordinate click and a synthetic
+        element keep the path they already had. A read error is not a
+        vanished target.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            return False
+        if handle is None:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.target_vanished(handle)))
+        except Exception:
+            return False
+
     def menu_close(self, app: str) -> list[str]:
         """Close the open menu. An app that is not running is ``app_not_found``.
 
@@ -2204,6 +4618,75 @@ class LinuxDriver:
         _linux_system.write_clipboard(text)
 
 
+_CHOOSER_CONFIRM_KEYS = frozenset({"return", "enter", "kp_enter"})
+# Chrome's Open button sits inset from the dialog's bottom-right. A click
+# here lands on Open after the window has been fitted on screen.
+_CHOOSER_OPEN_FROM_RIGHT = 53
+_CHOOSER_OPEN_FROM_BOTTOM = 27
+_FILE_INPUT_EMPTY = ("no file chosen", "no file selected")
+
+
+def _bare_chooser_confirm(chord: str) -> bool:
+    """True for Return/Enter with no modifier. Shift+Return stays a key."""
+    parts = [part.strip().lower() for part in str(chord).split("+") if part.strip()]
+    return len(parts) == 1 and parts[0] in _CHOOSER_CONFIRM_KEYS
+
+
+def _chooser_button_clipped(box) -> bool:
+    """True when ``box`` is missing, zero-sized, or outside the primary screen."""
+    if box is None:
+        return True
+    x, y, width, height = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+    if width <= 1 or height <= 1:
+        return True
+    from a11y_computer_use.drivers import _atspi
+
+    geom = _atspi.primary_geometry()[0]
+    ox, oy = geom.origin
+    dw = float(geom.display.width)
+    dh = float(geom.display.height)
+    return x < ox or y < oy or x + width > ox + dw or y + height > oy + dh
+
+
+def _chooser_window_bounds(window_id: int) -> dict | None:
+    """Bounds of ``window_id``, or None when that window is not listed."""
+    from a11y_computer_use.drivers import _linux_system
+
+    if window_id <= 0:
+        return None
+    for row in _linux_system.windows():
+        if int(row.get("window_id") or 0) == int(window_id) and row.get("bounds"):
+            return row["bounds"]
+    return None
+
+
+def _snapshot_texts(shot) -> list[str]:
+    """Titles and values from a snapshot. Window titles are not included."""
+    texts: list[str] = []
+    for element in getattr(shot, "elements", ()) or ():
+        title = str(getattr(element, "title", "") or "")
+        if title:
+            texts.append(title)
+        value = getattr(element, "value", None)
+        if value is not None and str(value):
+            texts.append(str(value))
+    return texts
+
+
+def _chooser_window_open(window_id: int, title: str, app: str) -> bool:
+    """True while the chooser window id, or that title on the same app, is mapped."""
+    from a11y_computer_use.drivers import _linux_system
+
+    folded = " ".join(str(title or "").casefold().split())
+    for row in _linux_system.windows():
+        if window_id and int(row.get("window_id") or 0) == int(window_id):
+            return True
+        row_title = " ".join(str(row.get("title") or "").casefold().split())
+        if folded and row_title == folded and (not app or str(row.get("app") or "") == app):
+            return True
+    return False
+
+
 def _unsupported_file_dialog() -> ComputerUseError:
     """GTK and portal file choosers are not driven. The message is the limit."""
     return ComputerUseError(
@@ -2216,6 +4699,11 @@ def _unsupported_file_dialog() -> ComputerUseError:
                 "Open the chooser (for example menu 'File > Open'), then use the snapshot. "
                 "In a GTK 3 file chooser, Ctrl+L focuses the location bar. "
                 "set_value or type fills the location or name field. "
+                "Return activates Open or Save through that button's accessibility action "
+                "and checks that the dialog closed and the app shows the file. "
+                "A browser chooser with no accessibility button, including Chrome's, "
+                "is fitted on screen and Open is clicked. The page's file input has to "
+                "show the file; a page that still says no file was chosen is a failure. "
                 "An xdg-desktop-portal chooser is a separate dialog; drive the fields it exposes."
             ),
         },

@@ -204,7 +204,7 @@ def test_approve_prompt_names_role_window_and_redacts_args(monkeypatch) -> None:
         if script.asked:  # type: ignore[attr-defined]
             return turn(done("held", [{"element": {"role": "AXButton", "name": "Pay now"}}]))
         script.asked = True  # type: ignore[attr-defined]
-        return turn(ToolCall("click", {"ref": "e2", "note": card}))
+        return turn(ToolCall("click", {"ref": "e2", "button": card}))
 
     script.asked = False  # type: ignore[attr-defined]
     agent = Agent(
@@ -448,6 +448,77 @@ def test_missing_model_exits_3():
     assert exc.value.code == 3
 
 
+def test_stuck_budget_flags_reach_the_agent(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    custom = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}",
+        "--stuck-steps", "2",
+        "--stuck-time", "15",
+    ])
+    assert cli.build_agent(default).stuck_steps == 6
+    assert cli.build_agent(default).stuck_time_s == 120.0
+    agent = cli.build_agent(custom)
+    assert agent.stuck_steps == 2
+    assert agent.stuck_time_s == 15.0
+
+
+def test_temperature_and_seed_flags_reach_the_agent(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    custom = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}",
+        "--temperature", "0.2",
+        "--seed", "7",
+    ])
+    assert cli.build_agent(default).temperature is None
+    assert cli.build_agent(default).seed is None
+    agent = cli.build_agent(custom)
+    assert agent.temperature == 0.2
+    assert agent.seed == 7
+
+
+def test_task_class_flag_sets_caps_and_explicit_limits_win(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    plain = cli.build_agent(default)
+    assert plain.task_class is None
+    assert plain.max_steps == 50
+    assert plain.max_time_s == 900.0
+    named = parser.parse_args([
+        "run", "Copy each file into the Backup folder",
+        "--model", f"scripted:{script}",
+        "--task-class", "desktop_multi_file",
+    ])
+    agent = cli.build_agent(named)
+    assert agent.task_class == "desktop_multi_file"
+    assert agent.max_steps == 75
+    assert agent.max_time_s == 300.0
+    over = parser.parse_args([
+        "run", "Copy each file into the Backup folder",
+        "--model", f"scripted:{script}",
+        "--task-class", "desktop_multi_file",
+        "--max-steps", "4",
+        "--max-time", "12",
+    ])
+    tighter = cli.build_agent(over)
+    assert tighter.max_steps == 4
+    assert tighter.max_time_s == 12.0
+    auto = parser.parse_args([
+        "run", "Copy each file from Documents into the Backup folder",
+        "--model", f"scripted:{script}",
+        "--task-class", "auto",
+    ])
+    assert cli.build_agent(auto).task_class == "desktop_multi_file"
+    assert cli.build_agent(auto).max_time_s == 300.0
+
+
 def test_model_timeout_flag_defaults_to_120_and_is_configurable(tmp_path):
     script = tmp_path / "turns.json"
     script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
@@ -472,3 +543,416 @@ def test_domain_flags_reach_the_agent():
     assert agent.domain_policy.allowed == ("file", "example.com")
     assert agent.domain_policy.blocked == ("blocked.example",)
     assert agent.fence_untrusted is True
+
+
+def _waits(path, seconds: list[float], **hold) -> None:
+    turns = [
+        {"text": "", "calls": [{"name": "wait", "args": {"seconds": item}}]}
+        for item in seconds
+    ]
+    body: dict = {"turns": turns}
+    body.update(hold)
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def _spawn_run(script, trace, home, extra_env=None):
+    import os
+    import subprocess
+    import sys
+
+    grant = home / ".a11y-computer-use"
+    grant.mkdir(parents=True, exist_ok=True)
+    (grant / "permissions.json").write_text(
+        json.dumps({"apps": {"unknown": {"tier": "read"}}, "deny": [], "allow": []}),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    # An in-process test returns from main and puts the previous handler
+    # back. This child is the process under test: it must os._exit with the
+    # cancel handlers still installed.
+    env.pop("PYTEST_CURRENT_TEST", None)
+    if extra_env:
+        env.update(extra_env)
+    kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    # Ctrl+Break reaches a Windows child only when it is its own process
+    # group. POSIX uses a new session so the signal hits this process.
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    # A settle wait is gated on the frontmost app. macOS CI's frontmost app is
+    # not "unknown", so a grant for only that name refuses the wait at once
+    # and the next step has started before a poll can see this one. Grant the
+    # app NSWorkspace reports, which is the same app the wait checks.
+    # The file is the HOME this process was given. PermissionStore() with no
+    # path uses Path.home(), and on Windows that is USERPROFILE, not HOME, so
+    # a bare store would write the grant into the runner profile and later
+    # tests would be allowed through to the unimplemented Windows backend.
+    child = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from a11y_computer_use.safety import PermissionStore, Tier, frontmost_app\n"
+        "store = PermissionStore(Path(os.environ['HOME']) / '.a11y-computer-use' / 'permissions.json')\n"
+        "store.set_tier('unknown', Tier.READ)\n"
+        "bundle, _pid = frontmost_app()\n"
+        "if bundle:\n"
+        "    store.set_tier(bundle, Tier.READ)\n"
+        "from a11y_computer_use.agent.cli import main\n"
+        "raise SystemExit(main())\n"
+    )
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            child,
+            "run",
+            "wait a lot",
+            "--model",
+            f"scripted:{script}",
+            "--json",
+            "--max-time",
+            "90",
+            "--max-steps",
+            "10",
+            "--trace-dir",
+            str(trace),
+        ],
+        **kwargs,
+    )
+
+
+def _deliver(proc, sig_name: str) -> None:
+    """Deliver one cooperative cancel signal to a running agent process.
+
+    Windows cannot deliver SIGTERM to a Python handler. Ctrl+Break reaches
+    the SIGBREAK handler in a child started with ``CREATE_NEW_PROCESS_GROUP``.
+    """
+    import signal
+    import sys
+
+    if sys.platform == "win32":
+        if sig_name == "SIGTERM":
+            raise AssertionError("SIGTERM is not a cooperative cancel on Windows")
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+        return
+    proc.send_signal(getattr(signal, sig_name))
+
+
+def test_second_cancel_signal_exits_3(monkeypatch) -> None:
+    """The second signal must not fall through to the default SIGINT death."""
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    flag = __import__("threading").Event()
+    cancelled = {"n": 0}
+
+    class _Agent:
+        _signal_cancel = flag
+
+        def cancel(self) -> None:
+            cancelled["n"] += 1
+
+    hits = [0]
+    try:
+        cli._on_cancel_signal(_Agent(), hits, signal.SIGINT, None)
+        assert flag.is_set()
+        assert cancelled["n"] == 1
+        assert codes == []
+        with pytest.raises(SystemExit):
+            cli._on_cancel_signal(_Agent(), hits, signal.SIGINT, None)
+        assert codes == [3]
+        assert hits[0] == 2
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _wait_for_steps(trace, count: int, timeout: float) -> None:
+    import time
+
+    path = trace / "steps.jsonl"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if len(lines) >= count:
+                return
+        time.sleep(0.05)
+    raise AssertionError(f"trace did not record {count} steps")
+
+
+def _step_started(trace, *, strict: bool) -> list[dict]:
+    """``step_started`` lines flushed before each step's tool call.
+
+    A poll can observe a partial last line while the child is still writing.
+    ``strict`` is for the read after the process has exited.
+    """
+    path = trace / "events.jsonl"
+    if not path.is_file():
+        return []
+    started: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                raise
+            continue
+        if event.get("kind") == "step_started":
+            started.append(event)
+    return started
+
+
+def _wait_for_step_started(proc, trace, index: int, timeout: float) -> list[dict]:
+    """Block until ``events.jsonl`` reports that ``index`` has started."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _out, err = proc.communicate()
+            raise AssertionError(
+                f"child exited {proc.returncode} before step_started {index}: {err}"
+            )
+        started = _step_started(trace, strict=False)
+        if any(event.get("index") == index for event in started):
+            return started
+        time.sleep(0.05)
+    raise AssertionError(
+        f"trace did not record step_started {index}: {_step_started(trace, strict=False)}"
+    )
+
+
+@pytest.mark.parametrize("sig_name", ["SIGINT", "SIGTERM"])
+def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: str) -> None:
+    """Signal only after step 2 has started, and stop before any later step.
+
+    The waits do not block. On Windows a settle wait can return at once, so a
+    clock cannot keep step 3 from starting before the signal is delivered.
+    The scripted model holds turn 3 until ``cancel_signal`` records the hit.
+    The parent sends the signal only after steps 1 and 2 are on disk, and the
+    turn that would start step 3 is then offered with cancel already latched.
+    """
+    import sys
+    import time
+
+    if sys.platform == "win32" and sig_name == "SIGTERM":
+        pytest.skip("Windows TerminateProcess does not run a Python SIGTERM handler")
+    script = tmp_path / "turns.json"
+    trace = tmp_path / "trace"
+    _waits(
+        script,
+        [0.0, 0.0, 0.0],
+        hold_before_turn=3,
+        hold_file=str(trace / "cancel_signal"),
+    )
+    proc = _spawn_run(script, trace, tmp_path / "home")
+    try:
+        started = _wait_for_step_started(proc, trace, 2, 30)
+        started_actions = [event["action"] for event in started]
+        started_indexes = [event["index"] for event in started]
+        assert started_indexes == [1, 2]
+        assert started_actions == ["wait", "wait"]
+        signalled = time.monotonic()
+        _deliver(proc, sig_name)
+        out, err = proc.communicate(timeout=45)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    elapsed = time.monotonic() - signalled
+    assert proc.returncode == 3
+    # Turn 3 is released by the cancel record and must not run.
+    assert elapsed < 40, elapsed
+    assert "Traceback" not in err
+    assert "KeyboardInterrupt" not in err
+    payload = json.loads(out)
+    assert payload["status"] == "cancelled"
+    assert payload["reason"] == "cancelled"
+    finished = [step["action"] for step in payload["step_log"]]
+    assert finished == started_actions
+    recorded = [
+        json.loads(line)
+        for line in (trace / "steps.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [step["action"] for step in recorded] == started_actions
+    assert [step["index"] for step in recorded] == started_indexes
+    after = _step_started(trace, strict=True)
+    assert [event["index"] for event in after] == started_indexes
+    assert [event["action"] for event in after] == started_actions
+    assert payload["trace_dir"] == str(trace)
+
+
+def _wait_for_cancel_hit(proc, trace, hit: int, timeout: float) -> None:
+    """Block until ``cancel_signal`` records that ``hit`` was received."""
+    import time
+
+    path = trace / "cancel_signal"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        # Read the record before treating an exit as a miss. The child holds
+        # the cooperative ``os._exit`` until an ack file appears, so a
+        # recorded hit is still a live process. An exit with no record is
+        # the race this wait rejects.
+        seen = 0
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            try:
+                seen = int(text)
+            except ValueError:
+                seen = 0
+        if seen >= hit:
+            return
+        if proc.poll() is not None:
+            _out, err = proc.communicate()
+            raise AssertionError(
+                f"child exited {proc.returncode} before cancel hit {hit}: {err}"
+            )
+        time.sleep(0.01)
+    raise AssertionError(f"child did not record cancel hit {hit}")
+
+
+def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
+    """The second signal is sent only after the child records the first.
+
+    A fixed sleep can deliver it before the handler is installed, or after
+    the default handler is back during shutdown. macOS then exits -2 and
+    Windows exits 0xC000013A. The return code is still 3.
+
+    The wait does not block, so the run can reach ``os._exit`` before this
+    process reads ``cancel_signal``. The child holds that exit until
+    ``exit-ack`` appears. This test never writes the ack: the second signal's
+    ``os._exit(3)`` is what ends the process, while it is still alive.
+    """
+    import time
+
+    script = tmp_path / "turns.json"
+    trace = tmp_path / "trace"
+    ack = tmp_path / "exit-ack"
+    _waits(script, [0.0])
+    proc = _spawn_run(
+        script,
+        trace,
+        tmp_path / "home",
+        extra_env={"A11Y_AGENT_EXIT_ACK": str(ack)},
+    )
+    try:
+        _wait_for_step_started(proc, trace, 1, 30)
+        started = time.monotonic()
+        _deliver(proc, "SIGINT")
+        _wait_for_cancel_hit(proc, trace, 1, 20)
+        assert proc.poll() is None, proc.returncode
+        _deliver(proc, "SIGINT")
+        _out, err = proc.communicate(timeout=8)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert time.monotonic() - started < 8
+    assert proc.returncode == 3
+    assert not ack.is_file()
+    assert "Traceback" not in err
+    assert "KeyboardInterrupt" not in err
+
+
+def test_hard_exit_waits_until_the_ack_file_exists(tmp_path, monkeypatch) -> None:
+    """The cooperative exit stays alive until the parent has seen the record."""
+    import threading
+    import time
+
+    ack = tmp_path / "ack"
+    monkeypatch.setenv("A11Y_AGENT_EXIT_ACK", str(ack))
+    monkeypatch.setenv("A11Y_AGENT_EXIT_ACK_TIMEOUT", "2")
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+
+    def _write() -> None:
+        time.sleep(0.1)
+        ack.write_text("seen", encoding="utf-8")
+
+    threading.Thread(target=_write).start()
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        cli._hard_exit(3)
+    assert codes == [3]
+    assert time.monotonic() - started >= 0.05
+
+
+def test_hard_exit_without_an_ack_path_does_not_wait(monkeypatch) -> None:
+    monkeypatch.delenv("A11Y_AGENT_EXIT_ACK", raising=False)
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    with pytest.raises(SystemExit):
+        cli._hard_exit(3)
+    assert codes == [3]
+
+
+def test_run_arms_cancel_handlers_before_building_the_agent(monkeypatch) -> None:
+    """The handler is in place before ``build_agent``, and gone afterwards.
+
+    In-process callers get the previous handler back. A real process
+    ``os._exit``s instead, which this test does not do.
+    """
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    captured: dict = {}
+
+    def build(args):
+        del args
+        captured["handler"] = signal.getsignal(signal.SIGINT)
+        raise RuntimeError("stop before run")
+
+    monkeypatch.setattr(cli, "build_agent", build)
+    code = cli.main(["run", "goal", "--model", "scripted:missing.json"])
+    assert code == 3
+    assert captured["handler"] not in (signal.SIG_DFL, signal.SIG_IGN, None)
+    assert captured["handler"] != previous
+    assert signal.getsignal(signal.SIGINT) == previous
+
+
+def test_second_console_event_exits_3(monkeypatch) -> None:
+    """The second Ctrl+C or Ctrl+Break exits 3 and does not return."""
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    state = {"win_events": 0}
+    assert cli._windows_console_event(state, 0) is False  # CTRL_C_EVENT
+    assert cli._windows_console_event(state, 2) is False  # CTRL_CLOSE_EVENT is not claimed
+    assert codes == []
+    assert state["win_events"] == 1
+    with pytest.raises(SystemExit):
+        cli._windows_console_event(state, 1)  # CTRL_BREAK_EVENT
+    assert codes == [3]

@@ -32,6 +32,7 @@ from a11y_computer_use.agent.models.base import (
     tool_schema,
     usage_dict,
 )
+from a11y_computer_use.agent.models.sampling import resolve_sampling
 
 __all__ = ["OpenAICompatibleModel", "open_ai_compatible"]
 
@@ -107,6 +108,8 @@ class OpenAICompatibleModel:
         sleep: Callable[[float], None] | None = None,
         max_attempts: int = 3,
         default_timeout: float = 120.0,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> None:
         require_httpx()
         if not model:
@@ -131,6 +134,15 @@ class OpenAICompatibleModel:
         self._sleep = sleep
         self._max_attempts = max_attempts
         self._default_timeout = default_timeout
+        # Chat completions accepts both fields (OpenAI, xAI, Ollama, vLLM).
+        self.sampling = resolve_sampling(
+            temperature=temperature,
+            seed=seed,
+            supports_temperature=True,
+            supports_seed=True,
+            temperature_gap="",
+            seed_gap="",
+        )
 
     def complete(
         self,
@@ -145,6 +157,7 @@ class OpenAICompatibleModel:
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
         body: dict = {"model": self.model, "messages": _wire_messages(messages)}
+        body.update(self.sampling.request_fields())
         if tools:
             body["tools"] = [_wire_tool(tool) for tool in tools]
         data = self._post(url, headers, body, timeout)

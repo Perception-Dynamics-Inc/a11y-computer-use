@@ -11,12 +11,16 @@ Design invariants (do not weaken without updating every consumer):
   single global coordinate space — mixed Retina/1x setups (and, later,
   Windows negative virtual-desktop origins) make one a bug factory.
 * **Refs are snapshot-scoped.** An element ref like ``"e14"`` is only
-  meaningful within the `Snapshot` that produced it. macOS ``AXUIElementRef``
-  objects are live and unserializable, and trees mutate between ``observe()``
-  and ``act()``; ``act()`` re-resolves refs via the anchor attributes stored
-  on `Element` (role, title, path, bounds proximity) and raises
-  `ComputerUseError` with `ErrorCode.STALE_REF` when re-resolution fails,
-  prompting the caller to re-observe.
+  meaningful within the `Snapshot` that produced it, and on Linux it is also
+  bound to the process instance (pid and start time, plus the AT-SPI bus
+  name when the app exposes one) and the window or document it came from.
+  macOS ``AXUIElementRef`` objects are live and unserializable, and trees
+  mutate between ``observe()`` and ``act()``; ``act()`` re-resolves refs via
+  the anchor attributes stored on `Element` (role, title, path, bounds
+  proximity) and raises `ComputerUseError` with `ErrorCode.STALE_REF` when
+  re-resolution fails, including when that process instance has been
+  replaced. The caller re-observes. The action is not applied to the new
+  process.
 * **Errors are structured, never stringly-typed.** Every failure mode a model
   is expected to react to is an `ErrorCode`; drivers raise `ComputerUseError`
   and the server serializes it via `ComputerUseError.to_dict()`.
@@ -103,6 +107,29 @@ def unknown_display_message(display_id: int, displays: Sequence[Display]) -> str
     """Name the ids the caller can use. An unknown id is not display 0."""
     ids = ", ".join(str(item.display_id) for item in displays) or "(none)"
     return f"unknown display_id {display_id}; valid ids: {ids}"
+
+
+def unknown_fields_message(given: object, allowed: object) -> str | None:
+    """Name keys in ``given`` that ``allowed`` does not declare.
+
+    None when every key is declared, or when ``given`` is not a mapping.
+    The wording matches an act step's unknown field: ``unknown field
+    'zoom'; expected app, ref, text``. Several keys use ``fields``. An empty
+    allowed set says ``expected no fields``.
+    """
+    if not isinstance(given, dict):
+        return None
+    try:
+        allowed_names = {str(name) for name in allowed}
+    except TypeError:
+        return None
+    extra = sorted((str(name) for name in given if str(name) not in allowed_names), key=str)
+    if not extra:
+        return None
+    expected = ", ".join(sorted(allowed_names)) if allowed_names else "no fields"
+    names = ", ".join(repr(name) for name in extra)
+    label = "field" if len(extra) == 1 else "fields"
+    return f"unknown {label} {names}; expected {expected}"
 
 
 def point_outside_display(x: object, y: object, display: Display, *, where: str = "point") -> str | None:
@@ -193,7 +220,8 @@ class Element:
         value: Current value for value-bearing elements (text fields,
             checkboxes, sliders); None for elements without a value. Secure
             fields always carry ``value=None`` (never the secret).
-        bounds: On-screen rect in display-qualified physical pixels.
+        bounds: On-screen rect in display-qualified physical pixels. None when
+            the control has no allocation, such as a hidden notebook tab.
         snapshot_id: Id of the owning `Snapshot`; the staleness anchor.
         parent: Ref of the parent element; None for the snapshot root.
         path: Role path from the root to this node inclusive, e.g.
@@ -221,13 +249,22 @@ class Element:
             or None when the app exposes none. Far more durable than the
             title/path/bounds anchor across relayout, scroll, and dynamic lists,
             so `resolve_ref` matches on it first when present.
+        instance_id: Process identity the ref was issued against (Linux: pid,
+            start time, and the AT-SPI bus name). None when the backend did
+            not record one. A live tree from a different instance does not
+            match this ref.
+        document_id: Window or document identity (a document URL, or the
+            window title with one leading modified-marker removed). None when
+            the backend did not record one. A different file path in that
+            title does not match this ref. A browser window title follows
+            the active tab and does not, by itself, make the ref stale.
     """
 
     ref: str
     role: str
     title: str
     value: str | None
-    bounds: Bounds
+    bounds: Bounds | None
     snapshot_id: str
     parent: str | None = None
     path: tuple[str, ...] = ()
@@ -241,6 +278,24 @@ class Element:
     expanded: bool | None = None
     placeholder: str = ""
     stable_id: str | None = None
+    instance_id: str | None = None
+    document_id: str | None = None
+    #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
+    #: text, or the tail of a longer buffer, with a leading ellipsis when
+    #: older output was omitted. ``find`` still searches the whole buffer.
+    #: None for every other role.
+    subrole: str | None = None
+    #: Tooltip sentence that was glued onto a control's accessible name.
+    #: Empty when the name was a single line. ``find`` searches it. The
+    #: rendered name does not include it.
+    hint: str = ""
+    #: Key chord that was glued onto that tooltip, such as ``T`` or
+    #: ``Ctrl+S``. Empty when there was no parenthetical chord.
+    shortcut: str = ""
+    #: A fact about how this row opens, when a single click only selects it.
+    #: ``activates on double-click`` is a GTK tree or tree-table row. None
+    #: for every other element. A click is not rewritten into that double-click.
+    note: str | None = None
 
     @property
     def actionable(self) -> bool:
@@ -312,15 +367,25 @@ class ErrorCode(str, Enum):
     SECURE_FIELD = "secure_field"
     """Target is a secure/password field; requires human handoff."""
 
+    EXEC_DISABLED = "exec_disabled"
+    """Terminal launch or input attempted without execution permission."""
+
     FOCUS_CHANGED = "focus_changed"
     """The app in front of / under the target changed between the permission
     decision and injection (same-window recheck, PLAN.md §6); re-observe."""
+
+    FOCUS_LOST = "focus_lost"
+    """Keyboard focus was not on the set_value or type target. No further
+    keystrokes were sent. The outcome is refused."""
 
     APP_NOT_FOUND = "app_not_found"
     """No running (or launchable) application matches the given identifier."""
 
     TIMEOUT = "timeout"
     """The operation (e.g. ``wait_for``, a hung-app AX call) timed out."""
+
+    APP_NOT_RESPONDING = "app_not_responding"
+    """The application is running but did not answer accessibility queries in time."""
 
     BUSY = "busy"
     """The Runtime is occupied or its bounded request queue is full; retry later."""
