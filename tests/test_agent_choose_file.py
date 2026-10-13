@@ -393,3 +393,51 @@ def test_agent_choose_file_is_verified_only_when_the_file_is_shown(tmp_path) -> 
     chords = [params.get("chord") for name, params in runtime.calls if name == "key"]
     assert chords == ["ctrl+l", "Return"]
     assert not any(name == "file_dialog" for name, _params in runtime.calls)
+
+
+def test_choose_file_rejects_a_stale_chooser_without_input(tmp_path) -> None:
+    desk = _Desk(str(tmp_path / "picked.txt"))
+    desk.windows = lambda: [{"window_id": 3, "app": "python3", "title": "FileHost"}]
+    io = desk.io()
+    io.sleep = lambda _seconds: (_ for _ in ()).throw(AssertionError("waited"))
+    result = perform_choose_file(io, desk.path, apps=["python3"])
+    assert result.reason == "no_file_chooser"
+    assert "open the file dialog first" in result.message
+    assert "Ctrl+O" in result.message
+    assert desk.calls == []
+
+
+def test_choose_file_rejects_unrelated_open_cancel_buttons(tmp_path) -> None:
+    desk = _Desk(str(tmp_path / "picked.txt"), titles=["Open"])
+    desk.snapshot = lambda _app: _snap(
+        _node("e1", "AXWindow", "Open"),
+        _node("e2", "AXWindow", "Preferences"),
+        _node("e3", "AXButton", "Open", parent="e2"),
+        _node("e4", "AXButton", "Cancel", parent="e2"),
+        _node("e5", "AXTextField", "Name", editable=True, parent="e2"),
+    )
+    result = perform_choose_file(desk.io(), desk.path, apps=["python3"])
+    assert result.reason == "no_file_chooser"
+    assert desk.calls == []
+
+
+def test_agent_choose_file_without_dialog_sends_no_input(tmp_path) -> None:
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    runtime = _Runtime(str(target), accept=False)
+    runtime.open = False
+    result, _agent = _run(runtime, str(target), tmp_path)
+    step = result.step_log[0]
+    assert step.verified is False
+    assert step.error and "no_file_chooser" in step.error
+    assert "open the file dialog first" in step.error
+    assert "file_not_chosen" not in step.error
+    assert not any(name in {"key", "type", "set_value"} for name, _ in runtime.calls)
+
+
+def test_ordinary_open_window_does_not_match_a_stale_other_chooser(tmp_path) -> None:
+    desk = _Desk(str(tmp_path / "picked.txt"), titles=["Open"])
+    # The tree still contains Open File, but the only mapped candidate is Open.
+    result = perform_choose_file(desk.io(), desk.path, apps=["python3"])
+    assert result.reason == "no_file_chooser"
+    assert desk.calls == []
