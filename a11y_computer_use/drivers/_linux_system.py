@@ -546,6 +546,18 @@ def pid_at_point(x: float, y: float) -> int | None:
     return _top_window_pid(x, y)
 
 
+def window_at_point(x: float, y: float) -> dict | None:
+    """Identity and title of the topmost managed window at a screen point."""
+    try:
+        with _open_display() as d:
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            return {"window_id": int(win.id), "title": _win_title(win, d)}
+    except Exception:
+        return None
+
+
 def _launcher_comm(identifier: str, comm: str) -> bool:
     """Whether ``identifier`` names the same process as ``comm``.
 

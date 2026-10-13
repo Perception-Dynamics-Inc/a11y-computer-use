@@ -1215,6 +1215,7 @@ class LinuxDriver:
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
+        self._sheet_type_readback: tuple[str, str] | None = None
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
@@ -1923,6 +1924,14 @@ class LinuxDriver:
             return False
         if self._run(lambda: _atspi.is_libreoffice_shape_text(handle)):
             return False
+        if self._run(lambda: _atspi.gtk_icon_view_item(handle)):
+            if self._run(lambda: _atspi.click_gtk_icon_view_item(handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not select only that icon",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
             # it (best-effort — grab_focus is cursor-free but headless X may not
@@ -2380,6 +2389,16 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
+            if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{target.ref} ({target.role}) has unverified GTK 4 in-window dialog bounds; "
+                    "the pointer click was not sent. Use press for semantic activation.",
+                    detail={
+                        "ref": target.ref, "role": target.role,
+                        "reason": "not_actionable", "outcome": "refused",
+                    },
+                )
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
@@ -3219,6 +3238,7 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._sheet_type_readback = None
         self._type_expected = None
         self._sheet_type_origin = None
         self._drawing_type_before = None
@@ -3462,6 +3482,12 @@ class LinuxDriver:
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)
+        if (
+            app_id and _atspi.libreoffice_app(app_id)
+            and _atspi._typed_visible(before, after, text)
+            and self._run(lambda: _atspi.spreadsheet_open(app_id))
+        ):
+            self._sheet_type_readback = (app_id, after)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
         # first read can be a truncated URL. Calc is the same lag: the cell
@@ -3484,6 +3510,10 @@ class LinuxDriver:
                 sheet=sheet,
             )
             if _atspi._typed_visible(before, after, text):
+                if sheet:
+                    # Preserve the actual settled read: a subsequent snapshot
+                    # can lose the transient editor in libatspi's child cache.
+                    self._sheet_type_readback = (app_id, after)
                 return len(text)
             if sheet:
                 raise _atspi._text_mismatch(
@@ -4283,6 +4313,41 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_system
 
         return _linux_system.app_at_point_id(point.x, point.y)
+
+    def same_app_window_cover(self, element: Element, app: str | None) -> str | None:
+        """Return a covering same-app sibling toplevel for a ref click.
+
+        Resolve the target's owning toplevel so controls in the front dialog
+        remain clickable. Missing X11/AT-SPI evidence preserves normal clicks.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        bounds = element.bounds
+        if bounds is None:
+            return None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None or self._gtk4_point_untrusted(element, handle):
+                return None
+            toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            if toplevel is None:
+                return None
+            _active, title, pid, extents = toplevel
+            cx = float(bounds.x) + float(bounds.width) / 2.0
+            cy = float(bounds.y) + float(bounds.height) / 2.0
+            owner_pid = _linux_system.pid_at_point(cx, cy)
+            if not pid or not owner_pid or int(owner_pid) != int(pid):
+                return None
+            target_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+            front = _linux_system.window_at_point(cx, cy)
+            if target_id is not None and front is not None and front["window_id"] != target_id:
+                return front["title"] or "another window"
+        except Exception:  # no reliable toplevel hit-test
+            pass
+        return None
 
     def occlusion(self, element: Element, app: str | None) -> str | None:
         """None when the element's center belongs to ``app``.

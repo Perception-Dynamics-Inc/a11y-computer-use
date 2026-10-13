@@ -111,8 +111,12 @@ def test_topmost_window_wins_when_windows_overlap(monkeypatch) -> None:
     )
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {300: "gedit", 400: "dialog"}.get(pid))
+    monkeypatch.setattr(_linux_system, "_win_title", lambda win, d: "Preferences" if win.id == 0x40 else "Editor")
     assert _linux_system.app_at_point_id(350, 250) == "dialog"  # inside both: topmost wins
     assert _linux_system.app_at_point_id(150, 150) == "gedit"  # only the lower window
+    assert _linux_system.window_at_point(350, 250) == {"window_id": 0x40, "title": "Preferences"}
+    assert _linux_system.window_at_point(150, 150) == {"window_id": 0x30, "title": "Editor"}
+    assert _linux_system.window_at_point(3000, 3000) is None
 
 
 def test_pids_matching_matches_the_owner_comm_but_never_a_window_title(monkeypatch) -> None:
