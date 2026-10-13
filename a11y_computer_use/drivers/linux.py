@@ -1979,6 +1979,26 @@ class LinuxDriver:
                 int(round(box[1] + box[3] / 2)),
             )
             return True
+        # GtkCellRendererToggle's accessible toggle can return True without
+        # emitting toggled. Selection is not evidence of a checkbox click.
+        if self._run(lambda: _atspi.gtk_toggle_cell(handle)):
+            bounds = element.bounds
+            width, height = _screen_span()
+            if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "toggle cell has no usable screen bounds")
+            left, top = max(0, bounds.x), max(0, bounds.y)
+            right, bottom = min(width, bounds.x + bounds.width), min(height, bounds.y + bounds.height)
+            if right <= left or bottom <= top:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "toggle cell has no on-screen bounds")
+            before = self._run(lambda: _atspi.checked_state(handle))
+            self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+            if self._run(lambda: _atspi.checked_state_flipped(handle, before)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the checked state",
+                detail={"ref": element.ref, "role": element.role, "reason": "checked_unchanged"},
+            )
         # A Qt grid cell's Toggle action adds the cell and leaves currentItem
         # where it was. Selection.select_child does the same on Qt 6.11. A
         # pointer click at the cell center selects only that cell and makes
