@@ -12765,6 +12765,10 @@ def test_running_app_without_atspi_tree_fails_fast(
     driver = LinuxDriver()
     driver.ensure_trusted = lambda: None
     runtime = _bare_runtime(driver)
+    # Runtime normally resolves OS app identities using the host platform.
+    # This injected Linux driver must use the synthetic Linux identity on
+    # macOS and Windows too, without querying native running applications.
+    monkeypatch.setattr(runtime, "_resolve_app", lambda name: (None, name))
     for _repeat in range(2):
         for call, expected_wait in (
             (lambda: runtime.desktop_snapshot(app), 0.25),
