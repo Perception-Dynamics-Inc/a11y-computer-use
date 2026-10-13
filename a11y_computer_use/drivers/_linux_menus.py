@@ -16,8 +16,12 @@ menu that is empty until it is shown is opened and then closed. Pressing opens
 each level and activates the leaf with the item's ``click`` action. A menu
 whose only action has an empty name (LibreOffice menu-bar entries) is opened
 with that action. An open menu is one whose item is ``SELECTED`` or whose
-popup is ``SHOWING``. Close sends Escape and succeeds only after that menu is
-gone. A shortcut is the accelerator in the AT-SPI binding: a tagged chord, or
+popup is ``SHOWING``. Java ATK leaves ``SELECTED`` on a menu-bar entry after
+the popup has closed; that entry is open only when a popup or an item is
+``SHOWING``. A leaf press closes a popup that is still showing, and does not
+send Escape when a dialog is already showing. Close sends Escape and succeeds
+only after that menu is gone. A shortcut is the accelerator in the AT-SPI
+binding: a tagged chord, or
 a bare key name such as F11, not the Alt mnemonic letter. A binding whose accelerator
 field is empty (``a;<Alt>v:a;``, ``f;<Alt>f;``, ``_F;;``) has no shortcut;
 the underlined letter is ``mnemonic``.
@@ -86,9 +90,19 @@ def _role(node: object) -> str:
     return str(_call(node, "get_role_name", default="") or "").lower()
 
 
+def _drop_event_cache(node: object) -> None:
+    """Drop one item's event-thread property cache before a name or state read."""
+    if getattr(node, "clear_cache_single", None) is None:
+        return
+    from a11y_computer_use.drivers._atspi import _drop_cached_properties
+
+    _drop_cached_properties(node)
+
+
 def _name(node: object) -> str:
     if _role(node) == "separator":
         return ""
+    _drop_event_cache(node)
     return str(_call(node, "get_name", default="") or "")
 
 
@@ -120,9 +134,11 @@ def _has_state(node: object, *names: str) -> bool:
     direct = _states(node)
     if direct is not None:
         return any(name.lower() in direct for name in names)
+    _drop_event_cache(node)
     state_set = _call(node, "get_state_set")
     if state_set is None or not hasattr(state_set, "contains"):
         return False
+    enum = None
     try:
         import gi
 
@@ -131,9 +147,12 @@ def _has_state(node: object, *names: str) -> bool:
 
         enum = Atspi.StateType
     except Exception:
-        return False
+        enum = None
+    # macOS and Windows CI import this module without the Atspi typelib.
+    # A fake state set still answers contains(); the name is the token.
+    # Linux uses the StateType member the real set expects.
     for name in names:
-        member = getattr(enum, name.upper(), None)
+        member = getattr(enum, name.upper(), None) if enum is not None else name
         if member is not None and bool(_call(state_set, "contains", member, default=False)):
             return True
     return False
@@ -672,13 +691,80 @@ def _walk(app: object, path: str) -> list[object]:
     return nodes
 
 
+def _java_toolkit(node: object) -> bool:
+    """True when ``node`` belongs to the Java ATK wrapper.
+
+    The toolkit name is ``JAVA``. A fake tree with no toolkit is not Java,
+    so GTK's SELECTED-means-open rule stays in place.
+    """
+    try:
+        from a11y_computer_use.drivers._atspi import _toolkit_name
+    except Exception:
+        return False
+    try:
+        return "java" in _toolkit_name(node)
+    except Exception:
+        return False
+
+
+_DIALOG_ROLES = frozenset({
+    "dialog", "alert", "file chooser", "color chooser", "font chooser",
+})
+
+
+def _popup_or_item_showing(node: object, depth: int = 0) -> bool:
+    """True when a popup or a menu item under ``node`` is SHOWING.
+
+    The bar entry's own SHOWING state is the label on the menu bar, not an
+    open popup. Only a child menu or a child item counts.
+    """
+    if depth > 5:
+        return False
+    for child in _raw_children(node):
+        role = _role(child)
+        if role in _MENU_ROLES or role in _ITEM_ROLES:
+            if _has_state(child, "SHOWING"):
+                return True
+        if role in _MENU_ROLES and _popup_or_item_showing(child, depth + 1):
+            return True
+    return False
+
+
+def _tree_has_showing_dialog(node: object, depth: int = 0) -> bool:
+    """True when a dialog under ``node`` is SHOWING.
+
+    Escape would go to that dialog, not to a menu on the window behind it.
+    A dialog that is only in the tree and not SHOWING is not this case.
+    """
+    if node is None or depth > 8:
+        return False
+    role = _role(node)
+    if (role in _DIALOG_ROLES or role.endswith(" dialog")) and _has_state(node, "SHOWING"):
+        return True
+    for child in _raw_children(node)[:40]:
+        if _tree_has_showing_dialog(child, depth + 1):
+            return True
+    return False
+
+
+def escape_reaches_menu(app: object) -> bool:
+    """False when Escape would dismiss a showing dialog instead of the menu."""
+    return not _tree_has_showing_dialog(app)
+
+
 def _is_open(node: object) -> bool:
     """True when this menu is popped open.
 
     The bar entry itself is SHOWING whenever its label is on screen, so that
     state is not an open menu. SELECTED on the entry, or SHOWING/SELECTED on
     its popup child, is.
+
+    Java ATK keeps SELECTED on the bar entry after the popup closes. That
+    leftover bit is not an open menu: the entry counts only when a popup or
+    an item is SHOWING.
     """
+    if _java_toolkit(node):
+        return _popup_or_item_showing(node)
     if _has_state(node, "SELECTED"):
         return True
     return any(
@@ -805,6 +891,40 @@ def _open_branch(app: object, path: str, settle) -> object:
     return top
 
 
+def _close_leftover_popup(app: object, path: str, settle, dismiss) -> None:
+    """Close a popup that is still showing after the leaf ran.
+
+    A dialog the leaf opened is left alone: Escape would cancel it. A Java
+    bar entry that only keeps SELECTED, with no showing item, is already
+    closed and is not dismissed. When the popup is still showing after
+    Escape, the press does not report a clean success.
+    """
+    if _tree_has_showing_dialog(app):
+        return
+    if not menu_state(app).get("open"):
+        return
+    dismiss()
+    after = menu_state(app)
+    for _attempt in range(3):
+        if not after.get("open"):
+            return
+        settle(menus.MENU_OPEN_SETTLE_S)
+        after = menu_state(app)
+    if not after.get("open"):
+        return
+    still = [str(part) for part in (after.get("path") or [])]
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the menu is still open after the item was pressed",
+        detail={
+            "path": path,
+            "reason": "menu_still_open",
+            "open": still,
+            "hint": "Escape was sent after the item ran, and the popup is still showing.",
+        },
+    )
+
+
 def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=None, await_dialog=None) -> str:
     """Activate the item at ``path``; returns its title.
 
@@ -817,7 +937,9 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
     ``ok``, ``dispatched``, or ``refused``. A modal dialog's D-Bus reply is
     ``dispatched``, not a refusal. ``await_dialog(app, dispatched=...)``
     then waits for that window on the connection used for reads. Parent
-    menus stay on the synchronous press.
+    menus stay on the synchronous press. A leaf that is not itself a menu
+    then closes a popup that is still showing. A showing dialog is not
+    given that Escape.
     """
     settle = settle or _settle
     dismiss = dismiss or _dismiss_menu
@@ -874,6 +996,8 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
                 )
             if await_dialog is not None:
                 await_dialog(app, dispatched=(outcome == "dispatched"))
+            if not _has_submenu(node):
+                _close_leftover_popup(app, path, settle, dismiss)
             return title
         if not _press(node):
             abandon()
@@ -883,6 +1007,8 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
                 detail={"path": path, "reason": "press_failed", "level": depth},
             )
         if last:
+            if not _has_submenu(node):
+                _close_leftover_popup(app, path, settle, dismiss)
             return title
         opened.append(node)
         settle(menus.MENU_OPEN_SETTLE_S)

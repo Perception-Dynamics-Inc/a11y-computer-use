@@ -111,10 +111,38 @@ def _require_swing_host() -> None:
 
 
 def _jni_dir() -> str | None:
-    matches = glob.glob("/usr/lib/**/libatk-wrapper.so*", recursive=True)
-    if not matches:
+    # Query the installed package rather than recursively following every
+    # symlink under /usr/lib (the CI image includes large SDK trees).
+    probe = subprocess.run(
+        ["dpkg-query", "-L", "libatk-wrapper-java-jni"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
         return None
-    return str(Path(matches[0]).parent)
+    for filename in probe.stdout.splitlines():
+        path = Path(filename)
+        if path.name == "libatk-wrapper.so" and path.is_file():
+            return str(path.parent)
+    return None
+
+
+def test_jni_dir_uses_installed_package_files(tmp_path: Path, monkeypatch) -> None:
+    library = tmp_path / "jni" / "libatk-wrapper.so"
+    library.parent.mkdir()
+    library.touch()
+    calls = []
+
+    def query(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, f"/usr/lib\n{library}\n", "")
+
+    def recursive_glob(*args, **kwargs):
+        raise AssertionError("JNI discovery must not traverse the system library tree")
+
+    monkeypatch.setattr(subprocess, "run", query)
+    monkeypatch.setattr(glob, "glob", recursive_glob)
+    assert _jni_dir() == str(library.parent)
+    assert calls == [["dpkg-query", "-L", "libatk-wrapper-java-jni"]]
 
 
 def _wrapper_jar() -> str | None:

@@ -188,6 +188,45 @@ def test_list_reads_a_gtk_menu_without_pressing_it() -> None:
     assert checked["title"] == "Toolbar" and checked["checked"] is True
 
 
+def test_menu_state_drops_the_event_cache_before_the_read(monkeypatch) -> None:
+    """A check bit served from the event cache is read again.
+
+    Qt's checkable item has no ``.states`` set. ``get_state_set`` would
+    otherwise keep CHECKED from before the action. The drop is one node,
+    and only while the listener is up.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    class Item:
+        def __init__(self) -> None:
+            self.drops = 0
+            self.on = False
+
+        def get_role_name(self) -> str:
+            return "menu item"
+
+        def clear_cache_single(self) -> None:
+            self.drops += 1
+            self.on = True
+
+        def get_state_set(self):
+            on = self.on
+
+            class States:
+                def contains(self, _member: object) -> bool:
+                    return on
+
+            return States()
+
+    item = Item()
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    assert _linux_menus._checked(item) is None
+    assert item.drops == 0
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    assert _linux_menus._checked(item) is True
+    assert item.drops == 2
+
+
 def test_qt_checkable_menu_item_reports_checked_true_or_false() -> None:
     """A Qt QAction stays role ``menu item`` and adds the CHECKABLE state.
 
@@ -981,6 +1020,125 @@ def test_electron_menu_item_submenu_opens_the_next_popup() -> None:
     frame.parent = app
     assert _linux_menus.menu_press(app, "File > Recent > notes.txt", settle=lambda _s: None) == "notes.txt"
     assert log == ["File", "Recent", "notes.txt"]
+
+
+def _bind_java(app, *nodes):
+    """Mark ``app`` as the Java ATK wrapper and point ``nodes`` at it."""
+    app.get_toolkit_name = lambda: "JAVA"
+
+    def application():
+        return app
+
+    app.get_application = application
+    for node in nodes:
+        node.get_application = application
+    return app
+
+
+def _swing_edit(*, item_showing: bool):
+    """Edit > Clear Notes. The bar entry stays SELECTED, as Java ATK does."""
+    item_states = {"sensitive", "enabled"}
+    if item_showing:
+        item_states.add("showing")
+    clear = _item("Clear Notes", states=item_states)
+    edit = _menu("Edit", clear, states={"sensitive", "enabled", "showing", "selected"})
+    bar = Acc("menu bar", "", [edit])
+    frame = Acc("frame", "Probe", [bar], states={"active", "showing"})
+    app = Acc("application", "java", [frame])
+    _bind_java(app, clear, edit, bar, frame)
+    return app, edit, clear, frame
+
+
+def test_java_selected_without_a_showing_item_is_not_an_open_menu() -> None:
+    """A leftover SELECTED on a Java menu-bar entry is not an open menu.
+
+    The entry counts only when a popup or an item is SHOWING. GTK still
+    treats SELECTED alone as open; that case is the disabled-Save test.
+    """
+    app, edit, clear, _frame = _swing_edit(item_showing=False)
+    assert "selected" in edit.states
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+    clear.states.add("showing")
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["Edit"]}
+
+
+def test_java_menu_press_closes_the_popup_and_ignores_leftover_selected() -> None:
+    """The leaf runs, then Escape closes the popup. SELECTED may remain."""
+    app, edit, clear, _frame = _swing_edit(item_showing=False)
+    edit.states.discard("selected")
+
+    class _Open(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            edit.states.add("selected")
+            clear.states.add("showing")
+            return True
+
+    edit.get_action_iface = lambda: _Open(edit)  # type: ignore[method-assign]
+    sent: list[str] = []
+
+    def dismiss() -> None:
+        sent.append("escape")
+        clear.states.discard("showing")
+
+    title = _linux_menus.menu_press(
+        app, "Edit > Clear Notes", settle=lambda _s: None, dismiss=dismiss,
+    )
+    assert title == "Clear Notes"
+    assert clear.pressed == ["click"]
+    assert sent == ["escape"]
+    assert "selected" in edit.states
+    assert "showing" not in clear.states
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+
+
+def test_java_menu_press_does_not_escape_into_a_showing_dialog() -> None:
+    """A dialog opened by the leaf is not cancelled to close the popup."""
+    app, edit, clear, frame = _swing_edit(item_showing=False)
+    dialog = Acc("dialog", "Confirm", states={"showing", "visible", "active"})
+    frame.children.append(dialog)
+    _bind_java(app, dialog)
+
+    class _Keep(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            edit.states.add("selected")
+            clear.states.add("showing")
+            return True
+
+    edit.get_action_iface = lambda: _Keep(edit)  # type: ignore[method-assign]
+    clear.get_action_iface = lambda: _Keep(clear)  # type: ignore[method-assign]
+    sent: list[str] = []
+    title = _linux_menus.menu_press(
+        app, "Edit > Clear Notes", settle=lambda _s: None,
+        dismiss=lambda: sent.append("escape"),
+    )
+    assert title == "Clear Notes"
+    assert clear.pressed == ["click"]
+    assert sent == []
+    assert _linux_menus.menu_state(app)["open"] is True
+    assert _linux_menus.escape_reaches_menu(app) is False
+
+
+def test_java_press_of_the_menu_itself_leaves_the_popup_open() -> None:
+    """``menu(path='Edit')`` opens the menu. It is not closed again."""
+    app, edit, clear, _frame = _swing_edit(item_showing=False)
+    edit.states.discard("selected")
+
+    class _Open(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            edit.states.add("selected")
+            clear.states.add("showing")
+            return True
+
+    edit.get_action_iface = lambda: _Open(edit)  # type: ignore[method-assign]
+    sent: list[str] = []
+    assert _linux_menus.menu_press(
+        app, "Edit", settle=lambda _s: None, dismiss=lambda: sent.append("escape"),
+    ) == "Edit"
+    assert sent == []
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["Edit"]}
 
 
 def test_file_dialog_names_the_linux_limit() -> None:
