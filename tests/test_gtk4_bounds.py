@@ -522,3 +522,44 @@ def test_non_gtk4_negative_window_origin_keeps_pointer_click(monkeypatch, toolki
     driver.click(_element(Bounds(0, 524, 275, 34, 34)))
     assert clicks == [(541, 292)]
     assert button.pressed == []
+
+
+@pytest.mark.parametrize("role", ["alert", "dialog"])
+@pytest.mark.parametrize("kwargs", [{}, {"button": MouseButton.RIGHT}, {"count": 2}, {"modifiers": ("shift",)}])
+def test_gtk4_in_window_dialog_positive_box_refuses_click(monkeypatch, role, kwargs):
+    """#520: a recovered positive box can omit the AdwAlertDialog offset."""
+    clicks = _stub_click(monkeypatch)
+    frame, button = _button(_App("GTK", "4.18.6"), window=(377, 372, 156, 44))
+    dialog = _Node(role, "End sleep?", (0, 0, 400, 200), (200, 250, 400, 200),
+                   parent=frame, app=button.app)
+    panel = _Node("panel", "", (0, 0, 400, 100), (200, 350, 400, 100),
+                  parent=dialog, app=button.app)
+    button.parent = panel
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(_element(Bounds(0, 852, 447, 156, 44)), **kwargs)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+    assert exc.value.detail["outcome"] == "refused"
+    assert clicks == []
+    assert button.pressed == []
+
+
+@pytest.mark.parametrize("toolkit,version,nested", [
+    ("GTK", "3.24", True), ("Qt", "6.8", True), ("GTK", "", True),
+    ("GTK", "4.18.6", False),
+])
+def test_other_dialogs_keep_pointer_click(monkeypatch, toolkit, version, nested):
+    clicks = _stub_click(monkeypatch)
+    frame, button = _button(_App(toolkit, version))
+    dialog = _Node("dialog", "Confirm", (0, 0, 400, 200), (0, 0, 400, 200),
+                   parent=frame if nested else None, app=button.app)
+    button.parent = dialog
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: button)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    driver.click(_element(Bounds(0, 852, 447, 156, 44)))
+    assert clicks == [(930, 469)]
+    assert button.pressed == []
