@@ -4758,6 +4758,19 @@ class Runtime:
             menu_note.append(self._dismiss_open_menu(app))
             if isinstance(act, Element):
                 self._refuse_vanished_target(act)
+                sibling_cover = getattr(self.driver, "same_app_window_cover", None)
+                cover = sibling_cover(act, app) if sibling_cover is not None else None
+                if cover:
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{act.ref} is covered by {cover}",
+                        detail={
+                            "ref": act.ref, "role": act.role,
+                            "reason": "covered", "outcome": "refused",
+                            "next": ["foreground", "ref"],
+                            "evidence": f"the window is covered by {cover}",
+                        },
+                    )
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier
