@@ -34,3 +34,5 @@
 - 2026-10-14 (PR #259): Keep native AT-SPI EDITABLE-state enforcement distinct from synthetic transports that have no native state API. Preserve the latter's verified write/focus fallback, and forward internal keyword arguments (such as Writer's force=True) when wrapping a write to restore caret/selection on failure.
 - 2026-10-13 (#259): When tightening AT-SPI entry-state checks, preserve the dedicated Writer document and table-cell paths and the Impress/Draw paragraph exception. Writer cell replacement uses `set_text(..., force=True)` without selection; wrappers that restore caret/selection must forward that flag.
 - 2026-10-14 (PR #259 merge): Caret-restoration wrappers must retain private GTK 4 write verification in the wrapped implementation; do not replace that verification with snapshot text reads, which must keep masked entry contents private.
+
+- 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
