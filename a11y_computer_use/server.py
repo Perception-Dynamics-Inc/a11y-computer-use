@@ -6079,8 +6079,9 @@ class Runtime:
         also stops at 120 seconds from the start. ``budget_s`` of 0 stops
         before any scroll. The note names the scroll container, its
         scroll position, and the last rows on screen. A document, a
-        table, or a list is tried with Ctrl+F first, including an
-        overflow list shorter than the window. A miss keeps the wheel.
+        table, or a list in a recognized Chromium app is tried with
+        Ctrl+F first, including an overflow list shorter than the window.
+        A miss keeps the wheel.
         After Ctrl+F, Chrome is latched and the tree is read again until
         the page frame is back. The find bar and an empty cached frame
         are not wheeled.
@@ -6417,6 +6418,14 @@ class Runtime:
                 visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
                 return visible <= 80
 
+            # Native viewers share these roles, but Escape may close their
+            # window rather than a find bar. Require a resolved Chromium id.
+            chromium_find = bundle.casefold() in {
+                "chrome", "chrome.exe", "google-chrome", "google-chrome-stable",
+                "chromium", "chromium.exe", "chromium-browser",
+                "com.google.chrome", "org.chromium.chromium",
+            }
+
             def wants_in_page_find(_shot: Snapshot, anchor: Element | None) -> bool:
                 """Ctrl+F once before the wheel, for a document, a table, or a list.
 
@@ -6426,7 +6435,7 @@ class Runtime:
                 budget. A miss falls through to the wheel. A tall list, the
                 document group, or a scroll area is the same find.
                 """
-                if not text or "\n" in text or len(text) > 80 or anchor is None:
+                if not chromium_find or not text or "\n" in text or len(text) > 80 or anchor is None:
                     return False
                 if not callable(getattr(self.driver, "key_chord", None)):
                     return False
@@ -6539,7 +6548,7 @@ class Runtime:
                 read again until that page frame is back. A miss does not
                 count as a scroll.
                 """
-                if not text or "\n" in text or len(text) > 80:
+                if not chromium_find or not text or "\n" in text or len(text) > 80:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
