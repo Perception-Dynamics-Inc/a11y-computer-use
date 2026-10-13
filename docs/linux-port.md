@@ -163,3 +163,20 @@ in that tree. Use Audacity's `Tracks > Mute/Unmute` menus for mute operations.
 The unnamed panel in the Time toolbar is labelled `Audacity Time clock` and stays
 opaque: its displayed reading is not an accessible value. When Audacity publishes
 real children or names, the driver preserves them.
+
+## Meld file comparisons
+
+Meld 3.22.3 (GTK 3) exposes the file-diff chunk-action gutter between text
+panes as a single unnamed `opaque_region`. Its painted per-chunk merge arrows
+are not separate accessible controls or AT-SPI actions. Targeting a specific
+gutter arrow by ref is unsupported; the gutter ref identifies the whole strip,
+and a reported click on it does not verify that a change was merged. Do not
+infer arrow locations from the strip's bounds.
+
+For a merge operation, explicitly select the intended change with the named
+`Go to the next change` or `Go to the previous change` header-bar buttons, then
+use `Push current change to the left`, `Push current change to the right`, or
+`Delete change` as appropriate. Take a fresh snapshot and check the destination
+pane's text to verify the result. These are separate requested operations:
+an explicit gutter-arrow click must not be silently replaced with navigation
+or a header-bar action. If that arrow cannot be addressed, report the limitation.
