@@ -111,8 +111,12 @@ def test_topmost_window_wins_when_windows_overlap(monkeypatch) -> None:
     )
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {300: "gedit", 400: "dialog"}.get(pid))
+    monkeypatch.setattr(_linux_system, "_win_title", lambda win, d: "Preferences" if win.id == 0x40 else "Editor")
     assert _linux_system.app_at_point_id(350, 250) == "dialog"  # inside both: topmost wins
     assert _linux_system.app_at_point_id(150, 150) == "gedit"  # only the lower window
+    assert _linux_system.window_at_point(350, 250) == {"window_id": 0x40, "title": "Preferences"}
+    assert _linux_system.window_at_point(150, 150) == {"window_id": 0x30, "title": "Editor"}
+    assert _linux_system.window_at_point(3000, 3000) is None
 
 
 def test_pids_matching_matches_the_owner_comm_but_never_a_window_title(monkeypatch) -> None:
@@ -1433,3 +1437,46 @@ def test_disagreeing_cmdline_and_exe_do_not_pick_a_program(monkeypatch) -> None:
     assert _linux_system._identity_for_pid(55, "gnome-text-edit") == "gnome-text-edit"
     assert _linux_system.resolve_app("gnome-text-editor") == "gnome-text-edit"
     assert _linux_system.frontmost_app_id() == "gnome-text-edit"
+
+
+@pytest.mark.parametrize("parent_app", ["chrome", "ungranted"])
+def test_portal_dialog_inherits_only_explicit_parent_grant(monkeypatch, tmp_path, parent_app):
+    from a11y_computer_use.safety import PermissionStore, Tier, check_action
+    from a11y_computer_use.schema import WindowOp, WindowVerb
+
+    class Portal(_ClassWin):
+        def get_full_property(self, atom, kind):
+            if atom == "WM_TRANSIENT_FOR":
+                return _NS(value=[0x20])
+            return super().get_full_property(atom, kind)
+
+    parent = _ClassWin(0x20, pid=200, title="Browser")
+    portal = Portal(0x30, pid=300, title="Open File")
+    _active_display(monkeypatch, [parent, portal], 0x30)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {200: parent_app, 300: "xdg-desktop-por"}.get(pid))
+    monkeypatch.setattr(_linux_system, "_cmdline_basename", lambda pid: "xdg-desktop-portal-gtk" if pid == 300 else None)
+    monkeypatch.setattr(_linux_system, "_exe_basename", lambda pid: "xdg-desktop-portal-gtk" if pid == 300 else None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = PermissionStore()
+    store.set_tier("chrome", Tier.FULL)
+    assert _linux_system.frontmost_app_id() == parent_app
+    assert _linux_system.window_owner(0x30) == parent_app
+    assert _linux_system.active_window()["app"] == parent_app
+    assert _linux_system.app_at_point_id(20, 20) == parent_app
+    decision = check_action(WindowOp(verb=WindowVerb.LIST), _linux_system.frontmost_app_id(), store=store)
+    assert decision.allowed is (parent_app == "chrome")
+    # Sharing a backend PID must never authorize all of its dialogs.
+    assert 300 not in _linux_system.pids_matching(parent_app)
+    # A different program sharing the truncated name must not inherit grants.
+    monkeypatch.setattr(_linux_system, "_cmdline_basename", lambda pid: "xdg-desktop-portal-impostor")
+    monkeypatch.setattr(_linux_system, "_exe_basename", lambda pid: "xdg-desktop-portal-impostor")
+    assert _linux_system.window_owner(0x30) == "xdg-desktop-portal-impostor"
+
+
+def test_portal_without_managed_parent_keeps_own_identity(monkeypatch):
+    portal = _ClassWin(0x30, pid=300, title="Open File")
+    _active_display(monkeypatch, [portal], 0x30)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "xdg-desktop-por")
+    monkeypatch.setattr(_linux_system, "_cmdline_basename", lambda pid: "xdg-desktop-portal-gtk")
+    monkeypatch.setattr(_linux_system, "_exe_basename", lambda pid: "xdg-desktop-portal-gtk")
+    assert _linux_system.frontmost_app_id() == "xdg-desktop-portal-gtk"

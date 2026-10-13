@@ -685,3 +685,16 @@ def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_erro
     assert "thunar" in exc.value.message
     assert "needs_permission" not in exc.value.message
     assert "ask the user" not in exc.value.message
+
+
+def test_installed_bundle_keeps_requested_spelling_despite_linux_path() -> None:
+    resolution = resolve_launch(
+        "Mousepad",
+        installed_bundle="com.example.Mousepad",
+        granted=["com.example.Mousepad"],
+        entries=[],
+        path_lookup=lambda name: "/usr/bin/mousepad" if name == "mousepad" else None,
+    )
+    assert resolution.resolved is True
+    assert resolution.launch_name == "Mousepad"
+    assert resolution.gate_key == "com.example.Mousepad"
