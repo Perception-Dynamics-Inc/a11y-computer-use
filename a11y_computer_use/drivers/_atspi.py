@@ -2682,6 +2682,30 @@ def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
     return y < top + box_h and y + height > top and x < left + box_w and x + width > left
 
 
+def _gtk_editor_on_screen(acc, full: str) -> str:
+    """Only text ranges GTK places inside the editor's viewport are searchable.
+
+    Missing geometry or an unsupported Text range query gives no evidence of
+    visible document text. Keep the full value for editing, but fail closed
+    for snapshot searches rather than claiming an off-screen buffer hit.
+    """
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return ""
+    Atspi = _atspi()
+    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
+        acc, *(int(v) for v in box), Atspi.CoordType.SCREEN,
+        Atspi.TextClipType.BOTH, Atspi.TextClipType.BOTH,
+    ))
+    parts = []
+    for span in ranges or ():
+        start = getattr(span, "start_offset", None)
+        end = getattr(span, "end_offset", None)
+        if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(full):
+            parts.append(full[start:end])
+    return "\n".join(parts)
+
+
 def _terminal_on_screen(acc, full: str) -> str:
     """The on-screen slice of a VTE buffer.
 
@@ -3397,6 +3421,11 @@ class ATSPIAccessor:
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
+        elif (
+            role == "AXTextArea" and role_str == "text"
+            and isinstance(value, str) and "gtk" in _toolkit_name(node)
+        ):
+            screen_text = _gtk_editor_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
