@@ -6170,6 +6170,9 @@ class Runtime:
         table, or a list in a recognized Chromium app is tried with
         Ctrl+F first, including an overflow list shorter than the window.
         A miss keeps the wheel.
+        A container with an opaque region refuses in-app find before
+        sending input: its matches cannot be verified in the tree, and
+        native Find could leave document text selected.
         After Ctrl+F, Chrome is latched and the tree is read again until
         the page frame is back. The find bar and an empty cached frame
         are not wheeled.
@@ -6683,6 +6686,30 @@ class Runtime:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
+                # An opaque drawing area cannot expose a confirming match.
+                # Native Find may still select document text, so refusing
+                # must happen before Ctrl+F or any query text is injected.
+                shot = self._current
+                if shot is not None:
+                    by_ref = {el.ref: el for el in shot.elements}
+                    for el in shot.elements:
+                        if el.role != "opaque_region":
+                            continue
+                        seen: set[str] = set()
+                        node = el
+                        while node.ref not in seen:
+                            seen.add(node.ref)
+                            if node.ref == anchor.ref:
+                                raise ComputerUseError(
+                                    ErrorCode.UNSUPPORTED,
+                                    "cannot verify an in-app find in an opaque container; "
+                                    "find was not opened and no query was typed",
+                                    detail={"reason": "opaque_find_unverifiable", "ref": anchor.ref},
+                                )
+                            parent = by_ref.get(node.parent)
+                            if parent is None:
+                                break
+                            node = parent
                 try:
                     self.driver.key_chord("ctrl+f")
                     self.driver.type_text(text)
@@ -9284,8 +9311,10 @@ def build_server(
         position, and the last rows seen. A document, a table, or a list
         is searched with Ctrl+F first, including an overflow list shorter
         than the window. After Ctrl+F, Chrome is latched and the tree is
-        read again until the page frame is back. The find bar and an
-        empty cached frame are not wheeled. A paginated
+        read again until the page frame is back. In-app find is refused
+        before input for containers with opaque regions, whose matches
+        cannot be verified and could leave document text selected. The find
+        bar and an empty cached frame are not wheeled. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
         window keeps the wheel. A large GTK table is searched once
