@@ -13391,11 +13391,15 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
 
 
 _SWING_MENU_APP = textwrap.dedent(
+
+
+_SWING_TABLE_APP = textwrap.dedent(
     r"""
     import javax.swing.*;
     import java.awt.*;
 
     public class SwingMenuProbe {
+    public class SwingTableProbe {
         static String status = "Status: idle";
 
         public static void main(String[] args) {
@@ -13428,6 +13432,14 @@ _SWING_MENU_APP = textwrap.dedent(
                 for (int i = 0; i < rows.length; i++) {
                     rows[i][0] = i + 1;
                     rows[i][1] = String.format("ROW-%03d", i + 1);
+                JFrame frame = new JFrame("SwingTableProbe");
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                JLabel statusLabel = new JLabel(status);
+                String[] columns = {"ID", "Item", "Qty"};
+                Object[][] rows = new Object[160][3];
+                for (int i = 0; i < rows.length; i++) {
+                    rows[i][0] = i;
+                    rows[i][1] = String.format("ROW-%03d", i);
                     rows[i][2] = i;
                 }
                 JTable table = new JTable(rows, columns);
@@ -13457,6 +13469,13 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
     ``menu(path='Edit > Clear Notes')`` must leave the popup closed. The
     next Yes click confirms the dialog. It does not report success while
     the click lands on the table behind a cancelled dialog.
+
+
+def test_linux_swing_table_rows_scroll_into_view(tmp_path) -> None:
+    """Live Swing JTable, when the Java ATK wrapper is installed.
+
+    A row below the viewport is not listed with an off-window box.
+    ``find`` scrolls it into view. The click lands on that row.
     """
     from a11y_computer_use import safety, server
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -13470,6 +13489,8 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
     _require_bus(driver)
     source = tmp_path / "SwingMenuProbe.java"
     source.write_text(_SWING_MENU_APP)
+    source = tmp_path / "SwingTableProbe.java"
+    source.write_text(_SWING_TABLE_APP)
     compiled = subprocess.run(
         [javac, str(source)], cwd=tmp_path, capture_output=True, text=True,
     )
@@ -13479,6 +13500,9 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
         [
             java, f"-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper",
             "-cp", f"{jar}:{tmp_path}", "SwingMenuProbe",
+            java,
+            "-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper",
+            "-cp", f"{jar}:{tmp_path}", "SwingTableProbe",
         ],
         cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
@@ -13522,6 +13546,37 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
         assert "Yes" in found and "no elements match" not in found
         yes = next(el for el in runtime._current.elements if el.title == "Yes" and el.clickable)
         clicked = runtime.click(yes.ref)
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                pytest.skip(f"Swing table probe exited {proc.returncode} before it was on the bus")
+            try:
+                snap = driver.snapshot(Scope.WINDOW, app)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            if snap is not None and any(el.title == "ROW-000" for el in snap.elements):
+                break
+            time.sleep(0.3)
+        else:
+            pytest.skip("Swing table probe did not publish ROW-000 on the AT-SPI bus")
+        assert snap is not None
+        assert not any(el.title == "ROW-150" for el in snap.elements)
+        for el in snap.elements:
+            if el.title.startswith("ROW-") and el.bounds is not None:
+                assert el.bounds.y + el.bounds.height <= 800, (el.title, el.bounds)
+        store = safety.PermissionStore(tmp_path / "swing-table-permissions.json")
+        store.set_tier(app, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "swing-table-audit"), driver=driver,
+        )
+        found = runtime.find(app, text="ROW-150")
+        assert "no elements match" not in found, found
+        assert "ROW-150" in found
+        row = next(el for el in runtime._current.elements if el.title == "ROW-150" and el.bounds is not None)
+        assert row.bounds.y >= 0 and row.bounds.y < 800
+        clicked = runtime.click(row.ref)
         assert "clicked" in str(clicked), clicked
         deadline = time.monotonic() + 4
         shown = ""
@@ -13534,5 +13589,10 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
             time.sleep(0.2)
         assert "dialog=yes" in shown, shown
         assert "row=ROW-" not in shown
+            shown = " ".join(f"{el.title or ''} {el.value or ''}" for el in shot.elements)
+            if "row=ROW-150" in shown:
+                break
+            time.sleep(0.2)
+        assert "row=ROW-150" in shown, shown
     finally:
         _stop(proc)
