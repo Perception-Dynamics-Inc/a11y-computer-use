@@ -197,7 +197,9 @@ For clipboard support install one of `xclip`, `xsel`, or `wl-clipboard`; headles
 In CI the shared core tests (`tests/test_drivers.py`, `tests/test_observe.py`, `tests/test_linux_synthetic.py`) and the MCP `build_server()` smoke run on `ubuntu-latest`, and `tests/test_linux_live.py` exercises the driver name, an AT-SPI snapshot of the GTK app, an a11y button press with an observable effect, a11y typing via `EditableText`, and the `org.a11y.Status` flip against a live bus. Coordinate click/drag/scroll, key chords, capture, EWMH windowing, and clipboard are implemented but have no live test yet. The `Driver` contract is a shared signature protocol (`a11y_computer_use/drivers/base.py`), and `tests/test_drivers.py` checks only that `LinuxDriver` satisfies it structurally, so a green Linux job shows that the platform-free engine passes on `ubuntu-latest` and that the five live-tested paths (driver name, AT-SPI snapshot, accessibility press, accessibility typing, `org.a11y.Status` flip) work against a GTK3 window; it is not a behavioural comparison with the macOS driver, which no test performs.
 
 Audacity's wxGTK toolbar tools may be childless AT-SPI panels with the command
-name in the description. The Linux driver exposes these as buttons, so
+name in the description. The Linux driver recognizes a native toolbar ancestor
+or an immediate sibling grip described as `Audacity … Toolbar` and exposes the
+command panels as buttons, keeping the grip a group, so
 `find(role="button", text="Play")` includes the transport control. A childless,
 unnamed track view remains an `opaque_region`, labelled `Audacity track / waveform`;
 Mute, Solo, track names, Gain, and Pan painted inside it are not separate controls
