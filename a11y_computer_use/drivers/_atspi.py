@@ -1134,12 +1134,46 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+def _audacity_track_area(container) -> bool:
+    """Recognize a project track area by its published Timeline Options control.
+
+    Stay in this container: a separate wx dialog may also have role frame.
+    A bounded search fails closed when the project context is unavailable.
+    """
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth):
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH:
+            return False
+        budget -= 1
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog"} and depth:
+            return False
+        if _node_name(node).strip().casefold() == "timeline options":
+            return True
+        if role in _SURFACE_SKIP_ROLES:
+            return False
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return False
+        for index in range(min(count, _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None and walk(child, depth + 1):
+                return True
+        return False
+
+    return walk(container, 0)
+
+
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
 
     Toolbar tools put their label in the tooltip. The track view and Time
     clock paint their contents without publishing controls or a value. Keep
     those surfaces opaque; never invent track names or clock readings.
+    Require Timeline Options in the local track area / project window for
+    surface hints: wxGTK dialogs can expose a frame rather than a dialog.
     """
     if _child_count(node) != 0 or not _parent_of(node):
         return "", "", ""
@@ -1168,10 +1202,12 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
-        if not name and not description and _node_name(toolbar).casefold() in {"time", "time toolbar"}:
+        if (not name and not description
+                and _node_name(toolbar).casefold() in {"time", "time toolbar"}
+                and _audacity_track_area(parent)):
             return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     elif not name and not description and focusable and size is not None:
-        if size[0] >= 300 and size[1] >= 100:
+        if size[0] >= 300 and size[1] >= 100 and _audacity_track_area(_parent_of(node)):
             return (
                 "", "Audacity track / waveform",
                 "Track controls are not exposed by AT-SPI; use Tracks > Mute/Unmute menus.",

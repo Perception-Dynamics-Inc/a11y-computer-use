@@ -94,7 +94,8 @@ def test_toolbar_tool_is_a_findable_clickable_button(description):
 def test_track_and_clock_remain_opaque_with_surface_notes():
     track = _Node("panel", size=(1096.0, 436.0), focusable=True)
     clock = _Node("panel", size=(230.0, 41.0))
-    frame = _frame(track, _Node("tool bar", "Time", children=[clock], size=(250.0, 60.0)))
+    area = _Node("panel", children=[_Node("push button", "Timeline Options"), track])
+    frame = _frame(area, _Node("tool bar", "Time", children=[clock], size=(250.0, 60.0)))
     snap = _snapshot(frame)
     regions = observe.find_elements(snap, role="opaque_region")
     assert {el.title for el in regions} == {"Audacity track / waveform", "Audacity Time clock"}
@@ -103,6 +104,40 @@ def test_track_and_clock_remain_opaque_with_surface_notes():
     assert not observe.find_elements(snap, text="Mute")
     assert not observe.find_elements(snap, text="Solo")
     assert not observe.find_elements(snap, text="probe_tone")
+
+
+@pytest.mark.parametrize("role", ["frame", "window", "dialog"])
+def test_crash_recovery_list_and_clock_have_no_project_surface_hints(role):
+    recovery = _Node("panel", size=(495.0, 165.0), focusable=True)
+    clock = _Node("panel", size=(230.0, 41.0))
+    frame = _frame(
+        _Node("panel", "Recoverable projects", children=[recovery]),
+        _Node("tool bar", "Time", children=[clock]),
+        role=role,
+    )
+    frame.name = "Automatic Crash Recovery"
+    # A project in the same application must not supply the dialog's context.
+    project = _Node("frame", "Audacity", children=[_Node("push button", "Timeline Options")])
+    project.parent = frame.parent
+    frame.parent.children.append(project)
+    for node in (recovery, clock):
+        raw = _atspi.ATSPIAccessor().read(node)
+        assert raw.surface_name == ""
+        assert raw.note == ""
+    regions = observe.find_elements(_snapshot(frame), role="opaque_region")
+    assert regions
+    assert all("Audacity track" not in el.title and not el.note for el in regions)
+
+
+def test_unrelated_panel_in_project_window_has_no_track_hint():
+    other = _Node("panel", size=(495.0, 165.0), focusable=True)
+    _frame(
+        _Node("panel", children=[_Node("push button", "Timeline Options")]),
+        _Node("panel", "Other group", children=[other]),
+    )
+    raw = _atspi.ATSPIAccessor().read(other)
+    assert raw.surface_name == ""
+    assert raw.note == ""
 
 
 @pytest.mark.parametrize("app,role", [("other", "frame"), ("audacity", "dialog")])
