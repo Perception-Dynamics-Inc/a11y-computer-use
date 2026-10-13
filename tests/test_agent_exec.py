@@ -298,3 +298,15 @@ def test_exec_output_is_capped_and_invalid_exec_is_rejected(tmp_path):
     assert cwd_denied.step_log[0].error == "cwd is not a directory"
     assert _audit(cwd_denied)[0]["approval"] == "rejected"
     assert cwd_denied.answer == "no cwd"
+
+
+def test_agent_propagates_exec_permission_to_runtime(tmp_path):
+    """The GUI terminal gate receives the run's explicit execution setting."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    for allowed in (False, True):
+        result, _events, runtime, _agent = run(
+            ScriptedModel([turn(done("ready", [{"element": {"role": "AXButton", "name": "Save"}}]))]),
+            elements, trace_dir=tmp_path / str(allowed), allow_exec=allowed,
+        )
+        assert result.status == "success"
+        assert runtime.allow_exec is allowed

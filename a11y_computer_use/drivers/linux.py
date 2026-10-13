@@ -1923,6 +1923,14 @@ class LinuxDriver:
             return False
         if self._run(lambda: _atspi.is_libreoffice_shape_text(handle)):
             return False
+        if self._run(lambda: _atspi.gtk_icon_view_item(handle)):
+            if self._run(lambda: _atspi.click_gtk_icon_view_item(handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not select only that icon",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
             # it (best-effort — grab_focus is cursor-free but headless X may not
@@ -1979,6 +1987,26 @@ class LinuxDriver:
                 int(round(box[1] + box[3] / 2)),
             )
             return True
+        # GtkCellRendererToggle's accessible toggle can return True without
+        # emitting toggled. Selection is not evidence of a checkbox click.
+        if self._run(lambda: _atspi.gtk_toggle_cell(handle)):
+            bounds = element.bounds
+            width, height = _screen_span()
+            if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "toggle cell has no usable screen bounds")
+            left, top = max(0, bounds.x), max(0, bounds.y)
+            right, bottom = min(width, bounds.x + bounds.width), min(height, bounds.y + bounds.height)
+            if right <= left or bottom <= top:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "toggle cell has no on-screen bounds")
+            before = self._run(lambda: _atspi.checked_state(handle))
+            self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+            if self._run(lambda: _atspi.checked_state_flipped(handle, before)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the checked state",
+                detail={"ref": element.ref, "role": element.role, "reason": "checked_unchanged"},
+            )
         # A Qt grid cell's Toggle action adds the cell and leaves currentItem
         # where it was. Selection.select_child does the same on Qt 6.11. A
         # pointer click at the cell center selects only that cell and makes
@@ -2360,6 +2388,16 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
+            if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{target.ref} ({target.role}) has unverified GTK 4 in-window dialog bounds; "
+                    "the pointer click was not sent. Use press for semantic activation.",
+                    detail={
+                        "ref": target.ref, "role": target.role,
+                        "reason": "not_actionable", "outcome": "refused",
+                    },
+                )
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
@@ -3186,6 +3224,24 @@ class LinuxDriver:
             actual=after,
         )
 
+    def _verify_remembered_editable(self, handle) -> str:
+        """Keep cached editable ownership checks ahead of terminal detection."""
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _linux_system
+
+        app_id, _pid = self.frontmost_app()
+        owner_pid = self._run(lambda: _atspi.pid_of(handle))
+        owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
+        if not owner or not app_id or owner != app_id:
+            self._focused_editable = None
+            raise ComputerUseError(
+                ErrorCode.FOCUS_CHANGED,
+                "the remembered editable does not belong to a verified frontmost app; "
+                "focus the intended field again or use set_value with its ref",
+                detail={"editable_app": owner, "frontmost_app": app_id},
+            )
+        return app_id
+
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.
@@ -3220,19 +3276,7 @@ class LinuxDriver:
         if handle is not None and self._run(lambda: _atspi.is_secure(handle)):
             raise _secure_focus_error("AT-SPI role 'password text' on the focused editable")
         if handle is not None:
-            from a11y_computer_use.drivers import _linux_system
-
-            app_id, _pid = self.frontmost_app()
-            owner_pid = self._run(lambda: _atspi.pid_of(handle))
-            owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
-            if not owner or not app_id or owner != app_id:
-                self._focused_editable = None
-                raise ComputerUseError(
-                    ErrorCode.FOCUS_CHANGED,
-                    "the remembered editable does not belong to a verified frontmost app; "
-                    "focus the intended field again or use set_value with its ref",
-                    detail={"editable_app": owner, "frontmost_app": app_id},
-                )
+            app_id = self._verify_remembered_editable(handle)
         else:
             app_id, _pid = self.frontmost_app()
             if app_id:
@@ -3567,6 +3611,8 @@ class LinuxDriver:
                     return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
+        if after is None:
+            self._type_unverified = True
         if after is not None and not _atspi._typed_visible(
             before, after, text, selection=selection,
         ):
@@ -4283,6 +4329,41 @@ class LinuxDriver:
 
         return _linux_system.app_at_point_id(point.x, point.y)
 
+    def same_app_window_cover(self, element: Element, app: str | None) -> str | None:
+        """Return a covering same-app sibling toplevel for a ref click.
+
+        Resolve the target's owning toplevel so controls in the front dialog
+        remain clickable. Missing X11/AT-SPI evidence preserves normal clicks.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        bounds = element.bounds
+        if bounds is None:
+            return None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None or self._gtk4_point_untrusted(element, handle):
+                return None
+            toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            if toplevel is None:
+                return None
+            _active, title, pid, extents = toplevel
+            cx = float(bounds.x) + float(bounds.width) / 2.0
+            cy = float(bounds.y) + float(bounds.height) / 2.0
+            owner_pid = _linux_system.pid_at_point(cx, cy)
+            if not pid or not owner_pid or int(owner_pid) != int(pid):
+                return None
+            target_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+            front = _linux_system.window_at_point(cx, cy)
+            if target_id is not None and front is not None and front["window_id"] != target_id:
+                return front["title"] or "another window"
+        except Exception:  # no reliable toplevel hit-test
+            pass
+        return None
+
     def occlusion(self, element: Element, app: str | None) -> str | None:
         """None when the element's center belongs to ``app``.
 
@@ -4343,6 +4424,47 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_system
 
         return _linux_system.running_apps()
+
+    def terminal_target(self, app: str, target=None, *, launch: bool = False) -> bool:
+        """Recognize terminal apps and native terminal accessibles for the exec gate."""
+        from pathlib import Path
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def known(name: str) -> bool:
+            name = Path(name).name.casefold().removesuffix(".desktop")
+            return name in {
+                "xfce4-terminal", "gnome-terminal", "gnome-terminal-server",
+                "gnome-terminal-", "xterm", "uxterm", "konsole", "tilix",
+                "mate-terminal", "qterminal", "lxterminal", "alacritty",
+                "kitty", "foot", "footclient", "wezterm", "wezterm-gui",
+                "terminator", "terminology", "kgx", "ptyxis",
+                "ghostty", "rxvt", "urxvt", "urxvtc", "st", "cosmic-term",
+                "x-terminal-emulator", "sakura", "guake", "yakuake",
+                "org.gnome.terminal", "org.gnome.console", "org.gnome.ptyxis",
+                "org.kde.konsole", "com.gexperts.tilix",
+            }
+
+        if not launch and target is None and self._focused_editable is not None:
+            self._verify_remembered_editable(self._focused_editable)
+        if known(app):
+            return True
+        if launch:
+            # Resolve executable symlinks such as x-terminal-emulator.
+            import shutil
+
+            executable = shutil.which(app)
+            return bool(executable and known(str(Path(executable).resolve())))
+        if known(_resolved_app(app)):
+            return True
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        else:
+            handle = self._focused_editable
+        if handle is not None and self._run(lambda: _atspi.terminal_ancestor(handle)):
+            return True
+        focused, _truncated = self._run(lambda: _atspi._focused_node(app))
+        return self._run(lambda: _atspi.terminal_ancestor(focused))
 
     def launch_app(self, identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
         from a11y_computer_use.drivers import _linux_system
