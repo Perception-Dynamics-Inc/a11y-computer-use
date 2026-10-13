@@ -737,6 +737,47 @@ def test_unnamed_gtk_combo_value_is_displayed_text_or_a_selected_cell(atspi) -> 
     assert tree_raw.value == "Portrait"
 
 
+@pytest.mark.parametrize("role", ["menu item", "check menu item", "radio menu item"])
+def test_gtk4_popover_item_uses_relation_label_without_reading_value(atspi, monkeypatch, role) -> None:
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    label = _Node("label", text="Terminate…", toolkit="gtk")
+    item = _Node(
+        role, text=None, actions=["click"], toolkit="gtk",
+        states={"ENABLED", "SENSITIVE", "SHOWING", "VISIBLE"},
+    )
+    item.relations = [_Relation("LABELLED_BY", [label])]
+    item.get_value_iface = lambda: None
+
+    def forbidden_value(_acc):
+        pytest.fail("CurrentValue must not be read without a Value interface")
+
+    monkeypatch.setattr(_Atspi.Value, "get_current_value", forbidden_value)
+    raw = _read(item)
+    assert raw.title == "Terminate…"
+    assert raw.value is None
+    assert raw.actions  # The original click capability remains available.
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    snap = observe.build_snapshot(
+        item, ATSPIAccessor(), scope=Scope.WINDOW, app="GTK4 Menu", pid=None,
+        geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+    assert any(el.title == "Terminate…" and el.value is None for el in snap.elements)
+    assert "Terminate…" in observe.render_text(snap)
+    matches = observe.find_elements(snap, text="Terminate", role="menuitem", clickable=True)
+    assert len(matches) == 1
+    assert matches[0].title == "Terminate…"
+
+    item.name = "Existing name"
+    assert _read(item).title == "Existing name"
+    item.name = ""
+    label.name = "Properties"
+    assert _read(item).title == "Properties"
+    item.relations = []
+    assert _read(item).title == ""
+
+
 def test_hidden_window_is_omitted_and_a_showing_window_stays(atspi) -> None:
     """A nested frame that is not showing and not visible leaves the snapshot.
 
