@@ -3605,6 +3605,11 @@ class ATSPIAccessor:
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
+        if role_str == "status bar":
+            # GTK can register the bar before allocating it. Refresh before
+            # reading geometry: _state_flags refreshes later, after a cached
+            # zero-size rectangle would already have hidden the status text.
+            _drop_cached_properties(node)
         # GTK3 gives a single-line Gtk.Entry the same "text" role as a
         # Gtk.TextView. The entry carries SINGLE_LINE; the view carries
         # MULTI_LINE. A single-line entry is a text field, not a textarea.

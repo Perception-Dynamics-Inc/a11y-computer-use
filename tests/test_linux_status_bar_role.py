@@ -46,6 +46,32 @@ def test_status_bar_role_is_not_a_group() -> None:
     assert _atspi._ROLE.get("panel") == "AXGroup"
 
 
+def test_status_bar_refreshes_startup_geometry_before_reading(monkeypatch) -> None:
+    """A cached, unallocated GTK bar must not hide the current caret line."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    bar = _Bar("line: 301")
+    bar.allocated = False
+    bar.clear_cache_single = lambda: setattr(bar, "allocated", True)
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    monkeypatch.setattr(
+        _atspi, "_extents",
+        lambda acc, keep_zero=False: (
+            ((2.0, 760.0), (1276.0, 19.0)) if acc.allocated
+            else ((0.0, 0.0), (0.0, 0.0))
+        ),
+    )
+    def state_flags(acc):
+        _atspi._drop_cached_properties(acc)
+        return True, False, None, False, None, False, False
+
+    monkeypatch.setattr(_atspi, "_state_flags", state_flags)
+    raw = _atspi.ATSPIAccessor().read(bar)
+    assert raw.title == "line: 301"
+    assert raw.position == (2.0, 760.0)
+    assert raw.size == (1276.0, 19.0)
+
+
 def test_status_bar_snapshot_says_statusbar(monkeypatch) -> None:
     """The image metadata bar keeps its text and renders as statusbar."""
     monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
