@@ -239,6 +239,16 @@ verified for this change.
 ### Opaque document search
 `scroll_to_find` refuses in-app Find before sending keys or query text when the chosen container contains an `opaque_region`, such as AbiWord’s document drawing area. It returns `unsupported` with reason `opaque_find_unverifiable`: the accessibility tree cannot verify a match, and native Find could leave document text selected for replacement by a later `type`. This refusal does not open Find or change the document selection.
 
+## Kate document text search
+Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
+omit Kate textarea buffer values because the editor bounds do not establish
+character visibility. `find` and `scroll_to_find` cannot verify individual
+document text matches; even visible buffer text is excluded until character
+visibility can be established. The editor ref remains available, with a hint
+to use in-document navigation. Single-line search fields keep their values.
+This conservative behavior is covered by synthetic tests; no live Kate run
+was performed for #477.
+
 GTK grid buttons with empty or duplicated accessible names use the nearest
 sibling label to their left with overlapping vertical extents. Explicit
 `labelled-by` relations take precedence. Missing geometry or equally near
@@ -248,6 +258,16 @@ lets snapshots and `find` identify font and colour controls by their row label;
 button handles, actions, and measured bounds are unchanged. Covered by hermetic
 galculator-shaped regression tests; no local live verification.
 
+
+### Masked GTK 4 entries
+
+Password roles, password/protected states, and explicit entry visibility-off
+signals are treated as secure fields and their text is not read. GTK 4 can omit
+all masking metadata for a masked `Gtk.Entry`. An empty `GetText(0, -1)`
+result therefore stays empty in snapshots, find, and action readback, even when
+the character count is positive. This also hides values for plain GTK 4 entries
+with the same empty sentinel behavior. Positive-offset reads are used only for
+private boolean write verification; their contents are never published.
 ### Execution permission and launchers
 
 With `allow_exec=False` (the default), terminal launches and input require an

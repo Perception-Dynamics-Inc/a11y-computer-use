@@ -700,6 +700,21 @@ class ActionRefused(Exception):
         self.decision = decision
 
 
+_FIND_BAR_FIELD_ROLES = frozenset({"AXTextField", "AXSearchField", "AXTextArea"})
+
+
+def _is_find_bar_chrome(element: Element) -> bool:
+    """True for the find bar's close button, frame, or Find field.
+
+    A page button titled Find is not the bar. A table cell is not the bar.
+    """
+    title = element.title or ""
+    folded = title.lstrip().lower()
+    if title == "Close find bar" or folded.startswith("find in page"):
+        return True
+    return title == "Find" and element.role in _FIND_BAR_FIELD_ROLES
+
+
 def error_text(exc: ComputerUseError) -> str:
     """Render a structured error as one clear tool-error line.
 
@@ -1668,6 +1683,11 @@ def _linux_point_matches_snapshot_pid(runtime, target: Target) -> bool:
         from a11y_computer_use.drivers import _linux_system
 
         found = _linux_system.pid_at_point(point.x, point.y)
+        # Shared portal backends can own choosers for different granted apps.
+        # Their PID alone proves nothing; use the parent-derived app hit-test.
+        identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+        if identity in _linux_system._PORTAL_BACKENDS:
+            return False
     except Exception:
         return False
     return bool(found) and int(found) == int(pid)
@@ -2874,6 +2894,14 @@ class Runtime:
                         better = _atspi.drawing_paragraph_shown(handle)
                     if better is not None:
                         readback = better
+                    settled = getattr(self.driver, "_sheet_type_readback", None)
+                    self.driver._sheet_type_readback = None
+                    if (
+                        isinstance(settled, tuple) and len(settled) == 2
+                        and settled[0] == app and isinstance(settled[1], str)
+                        and _atspi._typed_visible(previous, settled[1], requested)
+                    ):
+                        readback = settled[1]
             if readback is None:
                 readable = False
         # Chrome's contenteditable often publishes the new characters after
@@ -6170,22 +6198,29 @@ class Runtime:
         checks again. The ref and the bounds are from that confirming
         snapshot, not from the pre-scroll one.
 
+        In-app find is refused before input for containers with opaque
+        regions, whose matches cannot be verified and could leave document
+        text selected.
+
         The search stops after ``budget_s`` seconds with no progress (15
         by default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). A step
         that shows different on-screen rows, or that changes the
         container's scroll offset, starts that clock again. The search
         also stops at 120 seconds from the start. ``budget_s`` of 0 stops
         before any scroll. The note names the scroll container, its
-        scroll position, and the last rows on screen. A document, a
-        table, or a list in a recognized Chromium app is tried with
-        Ctrl+F first, including an overflow list shorter than the window.
-        A miss keeps the wheel.
-        A container with an opaque region refuses in-app find before
-        sending input: its matches cannot be verified in the tree, and
-        native Find could leave document text selected.
-        After Ctrl+F, Chrome is latched and the tree is read again until
-        the page frame is back. The find bar and an empty cached frame
-        are not wheeled.
+        scroll position, and the last rows on screen. A document, a table, or
+        a list may be tried with Ctrl+F before the wheel, including an
+        overflow list shorter than the window. Those keystrokes are sent
+        only when the grant allows typing and a real find bar is
+        verified: Chromium or Firefox, or a bar already in the tree, and
+        after Ctrl+F the focused field is that bar. The query, Return,
+        and Escape are not sent when the bar does not appear, so a Swing
+        cell is not edited and a click grant sends nothing. Each
+        keystroke is gated and audited like type and key. A miss is not
+        found. The find field is not the match, and neither is an editor
+        whose value only grew by the query. After a verified find, Chrome
+        is latched and the tree is read again until the page frame is
+        back. The find bar and an empty cached frame are not wheeled.
         A paginated or virtualized table that already fits in the window
         then steps with Page Down. A table that still runs past the
         window keeps the wheel, so the last rows can come on screen.
@@ -6257,6 +6292,36 @@ class Runtime:
             display = next((item for item in snap.displays if item.is_main), snap.displays[0])
             return (0, 0, display.width, display.height)
 
+        def query_hits(shot: Snapshot) -> list[Element]:
+            """Matches for this search, without the find bar or a typed-into editor.
+
+            The Find field's value is the query, and it is not the row.
+            An editor whose value grew by that query is the cell
+            ``scroll_to_find`` must not report as found. A row whose title
+            or value is the query itself still matches.
+            """
+            hits = [
+                el for el in observe.find_elements(shot, text=text, role=role)
+                if not _is_find_bar_chrome(el)
+            ]
+            if not text:
+                return hits
+            needle = text
+            kept: list[Element] = []
+            for el in hits:
+                value = "" if el.value is None else str(el.value)
+                editor = el.role in _FIND_BAR_FIELD_ROLES or el.role == "AXComboBox"
+                appended = (
+                    editor
+                    and needle in value
+                    and value != needle
+                    and value.endswith(needle)
+                    and len(value) > len(needle)
+                )
+                if not appended:
+                    kept.append(el)
+            return kept
+
         def on_screen(el: Element, snap: Snapshot) -> bool:
             """True when ``el``'s center sits inside the window.
 
@@ -6276,7 +6341,7 @@ class Runtime:
             return left <= center_x < right and top <= center_y < bottom
 
         def search_matches(snap: Snapshot) -> tuple[Element, ...]:
-            matches = observe.find_elements(snap, text=text, role=role)
+            matches = tuple(query_hits(snap))
             if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
                 return observe.prefer_exact_targets(matches, text)
             by_ref = {el.ref: el for el in snap.elements}
@@ -6583,12 +6648,13 @@ class Runtime:
                 return visible <= 80
 
             # Native viewers share these roles, but Escape may close their
-            # window rather than a find bar. Require a resolved Chromium id.
+            # window rather than a find bar. Require a recognized browser or
+            # a driver that can verify find support before sending any keys.
             chromium_find = bundle.casefold() in {
                 "chrome", "chrome.exe", "google-chrome", "google-chrome-stable",
                 "chromium", "chromium.exe", "chromium-browser",
                 "com.google.chrome", "org.chromium.chromium",
-            }
+            } or callable(getattr(self.driver, "supports_in_page_find", None))
 
             def wants_in_page_find(_shot: Snapshot, anchor: Element | None) -> bool:
                 """Ctrl+F once before the wheel, for a document, a table, or a list.
@@ -6740,34 +6806,141 @@ class Runtime:
                                 break
                             node = parent
 
-            def try_in_page_find(anchor: Element) -> str | None:
-                """Ctrl+F once. The match is returned only when a later snapshot shows it.
+            def _snapshot_shows_find_bar(shot: Snapshot | None) -> bool:
+                if shot is None:
+                    return False
+                return any(_is_find_bar_chrome(el) for el in shot.elements)
 
-                Escape closes the find bar before that snapshot, so the ref
-                is the page. The Chrome process is latched and the tree is
-                read again until that page frame is back. A miss does not
-                count as a scroll.
+            def _find_typing_allowed() -> bool:
+                """FULL tier for the query. A refusal is audited and sends no keys.
+
+                A test double returns None and does not raise. That is allowed.
+                A click grant raises ActionRefused after the deny row.
+                """
+                query = text
+                if not isinstance(query, str) or not query:
+                    return False
+                try:
+                    decision = self._require_permission(TypeText(text=query), bundle)
+                except ActionRefused:
+                    return False
+                if decision is not None and not getattr(decision, "allowed", False):
+                    return False
+                return True
+
+            def _find_host(shot: Snapshot | None) -> bool:
+                """Chromium, Firefox, or a find bar already in this snapshot."""
+                if _snapshot_shows_find_bar(shot):
+                    return True
+                probe = getattr(self.driver, "supports_in_page_find", None)
+                if not callable(probe):
+                    return False
+                try:
+                    return probe(bundle) is True
+                except Exception:
+                    return False
+
+            def _send_find_chord(chord: str) -> bool:
+                def execute_chord() -> None:
+                    self.driver.key_chord(chord)
+
+                try:
+                    self._run_gated(KeyChord(chord=chord), bundle, execute_chord)
+                except ActionRefused:
+                    return False
+                except Exception:
+                    return False
+                return True
+
+            def _send_find_query() -> bool:
+                query = text
+                if not isinstance(query, str) or not query:
+                    return False
+
+                def execute_query() -> None:
+                    self.driver.type_text(query)
+
+                try:
+                    self._run_gated(TypeText(text=query), bundle, execute_query)
+                except ActionRefused:
+                    return False
+                except Exception:
+                    return False
+                return True
+
+            def _find_bar_verified() -> bool:
+                """True when the find field has focus, or the snapshot shows the bar.
+
+                The Linux driver answers from the focused node. A snapshot of
+                an open Chrome find bar is the empty cached frame, so that
+                driver is not snapshotted here. A fake driver with no probe
+                is read once.
+                """
+                if _snapshot_shows_find_bar(self._current):
+                    return True
+                probe = getattr(self.driver, "find_bar_focused", None)
+                if callable(probe):
+                    for attempt in range(12):
+                        try:
+                            seen = probe(bundle)
+                        except Exception:
+                            return False
+                        if seen is True:
+                            return True
+                        if attempt >= 11:
+                            break
+                        time.sleep(0.05)
+                    return False
+                if getattr(self.driver, "name", None) == "linux":
+                    return False
+                try:
+                    fresh = self.driver.snapshot(Scope(scope), bundle)
+                except Exception:
+                    return False
+                if not isinstance(fresh, Snapshot):
+                    return False
+                self._current = fresh
+                return _snapshot_shows_find_bar(fresh)
+
+            def try_in_page_find(anchor: Element) -> str | None:
+                """Ctrl+F once, only into a verified find bar the grant allows.
+
+                The query is not typed unless focus is in that bar. A Swing
+                table has no bar, so the selected cell is left alone and the
+                search reports not found. A click grant audits a denial and
+                sends no key. Escape closes the bar before the confirming
+                snapshot, so the ref is the page. Chrome is latched and the
+                tree is read again until that page frame is back. A miss
+                does not count as a scroll.
                 """
                 if not chromium_find or not text or "\n" in text or len(text) > 80:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
                 refuse_opaque_find(anchor)
-                try:
-                    self.driver.key_chord("ctrl+f")
-                    self.driver.type_text(text)
-                    self.driver.key_chord("Return")
-                    time.sleep(0.2)
-                except Exception:
-                    try:
-                        self.driver.key_chord("Escape")
-                    except Exception:
-                        pass
+                if not _find_typing_allowed():
                     return None
-                try:
-                    self.driver.key_chord("Escape")
-                except Exception:
-                    pass
+                if not _find_host(self._current):
+                    return None
+                already_open = _snapshot_shows_find_bar(self._current)
+                if not already_open:
+                    if not _send_find_chord("ctrl+f"):
+                        return None
+                    if not _find_bar_verified():
+                        # Ctrl+F on a browser can open the bar before the
+                        # focus probe sees it. Escape closes that bar.
+                        # Swing never reaches this: it is not a find host.
+                        _send_find_chord("Escape")
+                        latch_once()
+                        return None
+                if not _send_find_query():
+                    _send_find_chord("Escape")
+                    return None
+                if not _send_find_chord("Return"):
+                    _send_find_chord("Escape")
+                    return None
+                time.sleep(0.2)
+                _send_find_chord("Escape")
                 # The confirming read is the cache clear. A short page that
                 # does not name the target stops there. Another snapshot and
                 # a pause miss the 12s bound. A tall table, or a row that is
@@ -9359,15 +9532,21 @@ def build_server(
         unsupported statusbar_only_match error. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
+        In-app find is refused before input for containers with opaque
+        regions, whose matches cannot be verified and could leave document
+        text selected.
         A step that changes either one starts that clock again. The search
         also stops at 120 seconds. It reports the container, its scroll
         position, and the last rows seen. A document, a table, or a list
-        is searched with Ctrl+F first, including an overflow list shorter
-        than the window. After Ctrl+F, Chrome is latched and the tree is
-        read again until the page frame is back. In-app find is refused
-        before input for containers with opaque regions, whose matches
-        cannot be verified and could leave document text selected. The find
-        bar and an empty cached frame are not wheeled. A paginated
+        may be searched with Ctrl+F before the wheel, including an
+        overflow list shorter than the window, only when the grant allows
+        typing and a real find bar is verified. Chromium and Firefox open
+        that bar; a Swing table does not, and the query is not typed into
+        the selected cell. A click grant audits a denial and sends no
+        key. A miss is not found. The find field, and an editor whose
+        value only grew by the query, are not the match. After a verified
+        find, Chrome is latched and the tree is read again until the page
+        frame is back. The find bar and an empty cached frame are not wheeled. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
         window keeps the wheel. A large GTK table is searched once
