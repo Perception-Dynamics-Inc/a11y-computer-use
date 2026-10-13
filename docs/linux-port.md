@@ -246,6 +246,13 @@ to use in-document navigation. Single-line search fields keep their values.
 This conservative behavior is covered by synthetic tests; no live Kate run
 was performed for #477.
 
+Kate's unnamed, childless filler directly left of a multiline editor is labelled
+`Kate editor gutter` when native bounds establish the shared edge and height.
+It remains opaque: AT-SPI does not expose individual line numbers, so this label
+supports finding the gutter, not targeting a particular line. Missing or ambiguous
+geometry leaves it unnamed. This recognition is covered by synthetic tests;
+Kate has not been live-verified for this change.
+
 GTK grid buttons with empty or duplicated accessible names use the nearest
 sibling label to their left with overlapping vertical extents. Explicit
 `labelled-by` relations take precedence. Missing geometry or equally near
