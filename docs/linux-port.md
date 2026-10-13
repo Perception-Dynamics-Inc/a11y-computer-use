@@ -235,6 +235,16 @@ tree. Use the page-number field, `Go to Page…`, or the Find bar instead.
 Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
+## Qt document searches
+Qt multiline editors (including FeatherPad) expose the entire document through
+AT-SPI Text. Snapshot values and text searches use `Text.get_bounded_ranges`
+inside the measured editor bounds, falling back to native point offsets and
+verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+these ranges, so an off-screen match becomes searchable when it enters the
+viewport. When neither interface establishes visibility, the document value is
+omitted and its hint recommends in-document Find or line navigation. `find` and
+`scroll_to_find` cannot confirm document text through the whole buffer in that
+case. This path is covered by synthetic tests; FeatherPad has not been live-
 verified for this change.
 
 GTK grid buttons with empty or duplicated accessible names use the nearest
