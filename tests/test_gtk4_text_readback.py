@@ -163,3 +163,120 @@ def test_unmarked_gtk4_masked_entry_never_exposes_bounded_text(monkeypatch):
     assert all(end == -1 for _, end in field.reads)
     assert _atspi._verification_matches(field, field.text)
     assert _atspi._full_text(field) == ""
+
+
+@pytest.mark.parametrize("signal", ["attribute", "method"])
+def test_visible_gtk4_entry_reads_back_in_snapshot_and_find(monkeypatch, signal):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Scope
+    from tests.test_linux_synthetic import _geometry
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Api)
+    field = _Entry("entry", "Visible entry 584")
+    field.get_name = lambda: "Entry"
+    if signal == "attribute":
+        field.get_attributes = lambda: {"visibility": "true"}
+    else:
+        field.get_visibility = lambda: True
+    assert _atspi._full_text(field) == field.text
+    assert _atspi._value_text(field, "AXTextField", "entry") == field.text
+    snap = observe.build_snapshot(field, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                                  app="test", pid=1, geometry=_geometry())
+    assert observe.find_elements(snap, text=field.text)
+    field.text = "Changed entry 584"
+    assert _atspi._full_text(field) == field.text
+
+
+@pytest.mark.parametrize("sentinel_empty", [False, True])
+@pytest.mark.parametrize("metadata", [False, True])
+@pytest.mark.parametrize("text", ["●●●", "•••", "***", "⬤⬤", "\u200b\u200b"])
+def test_bullets_only_entry_never_publishes_value(monkeypatch, metadata, text, sentinel_empty):
+    class Text(_Text):
+        @staticmethod
+        def get_text(acc, start, end):
+            acc.reads.append((start, end))
+            return "" if sentinel_empty and end == -1 else acc.text[start:None if end == -1 else end]
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: type("Api", (), {"Text": Text}))
+    field = _Entry("entry", text)
+    if metadata:
+        field.get_attributes = lambda: {"visibility": "true"}
+    assert _atspi._full_text(field) == ""
+    assert _atspi._value_text(field, "AXTextField", "entry") is None
+    if not metadata:
+        assert all(end == -1 for _, end in field.reads)
+
+
+@pytest.mark.parametrize("signal", ["invisible", "false-attribute", "false-method"])
+def test_visibility_conflicts_fail_closed(monkeypatch, signal):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Api)
+    field = _Entry("entry", "secret 584")
+    field.get_attributes = lambda: {"visibility": "true"}
+    field.get_visibility = lambda: True
+    if signal == "invisible":
+        field.get_state_set = lambda: SimpleNamespace(names={"INVISIBLE"})
+    elif signal == "false-attribute":
+        field.get_attributes = lambda: {"visibility": "false"}
+    else:
+        field.get_visibility = lambda: False
+    assert _atspi._full_text(field) is None
+    assert field.reads == []
+
+
+@pytest.mark.parametrize("char", ["x", "120"])
+def test_toolkit_invisible_character_is_not_published(monkeypatch, char):
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Api)
+    field = _Entry("entry", "xxxx")
+    field.get_attributes = lambda: {"visibility": "true", "invisible-char": char}
+    assert _atspi._full_text(field) == ""
+    assert _atspi._value_text(field, "AXTextField", "entry") is None
+
+
+@pytest.mark.parametrize("role", ["entry", "text", "table cell"])
+@pytest.mark.parametrize("sentinel_empty", [True, False])
+def test_text_read_fetches_security_metadata_once(monkeypatch, role, sentinel_empty):
+    calls = {"attributes": 0, "visibility": 0, "count": 0}
+
+    class Text(_Text):
+        @staticmethod
+        def get_character_count(acc):
+            calls["count"] += 1
+            return len(acc.text)
+
+        @staticmethod
+        def get_text(acc, start, end):
+            acc.reads.append((start, end))
+            return "" if sentinel_empty and end == -1 else acc.text
+
+    def attributes():
+        calls["attributes"] += 1
+        return {"visibility": "true"}
+
+    def visibility():
+        calls["visibility"] += 1
+        return True
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: type("Api", (), {"Text": Text}))
+    field = _Entry(role, "visible")
+    field.get_attributes = attributes
+    field.get_visibility = visibility
+    entry = role in {"entry", "text"}
+    assert _atspi._read_full_text(field) == ("visible" if entry or not sentinel_empty else "")
+    assert calls == {"attributes": 1, "visibility": int(entry),
+                     "count": int(entry and sentinel_empty)}
+    assert field.reads == ([(0, -1), (0, 7)] if entry and sentinel_empty else [(0, -1)])
+
+
+def test_known_empty_text_does_not_retry_bounded_read(monkeypatch):
+    class Text(_Text):
+        @staticmethod
+        def get_character_count(acc):
+            pytest.fail("the caller already supplied the character count")
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: type("Api", (), {"Text": Text}))
+    field = _Entry("entry", "")
+    field.get_attributes = lambda: {"visibility": "true"}
+    assert _atspi._read_full_text(field, count=0) == ""
+    assert field.reads == [(0, -1)]

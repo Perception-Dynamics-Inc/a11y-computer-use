@@ -193,3 +193,36 @@ def test_set_text_still_trusts_a_write_it_cannot_read_back(fake_atspi, monkeypat
     monkeypatch.setattr(_linux_input, "type_string", lambda _text: (_ for _ in ()).throw(AssertionError("typed")))
     assert _atspi.set_text(field, "BETA") is True
     assert field.writes == ["BETA"]
+
+
+def test_native_entry_without_editable_state_is_refused_before_writing(
+    fake_atspi, monkeypatch
+) -> None:
+    """A native state API makes a missing EDITABLE bit authoritative."""
+    monkeypatch.setattr(
+        _FakeAtspi, "StateType", type("NativeStates", (), {"EDITABLE": "EDITABLE"}),
+        raising=False,
+    )
+    field = _NullEntry()
+    typed: list[str] = []
+    monkeypatch.setattr(_linux_input, "type_string", typed.append)
+    assert _atspi.set_text(field, "Anchorage") is False
+    assert field.writes == []
+    assert field.focused_attempts == 0
+    assert typed == []
+
+
+def test_writer_document_keeps_its_dedicated_replace_path(fake_atspi, monkeypatch) -> None:
+    """Writer document replacement must bypass the ordinary entry-state gate."""
+    field = _NullEntry()
+    field.role = "document text"
+    monkeypatch.setattr(_atspi, "is_writer_document", lambda acc: acc is field)
+    writes: list[tuple[object, str]] = []
+    monkeypatch.setattr(
+        _atspi, "_set_writer_document_text",
+        lambda acc, text: writes.append((acc, text)) or True,
+    )
+    assert _atspi.set_text(field, "Writer text") is True
+    assert writes == [(field, "Writer text")]
+    assert field.writes == []
+    assert field.focused_attempts == 0
