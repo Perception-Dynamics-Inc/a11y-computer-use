@@ -87,7 +87,7 @@ def _runtime(tmp_path, driver):
     for name in names:
         store.set_tier(name, safety.Tier.FULL)
     return server.Runtime(
-        store=store, audit=safety.AuditLog(tmp_path / "audit.jsonl"), driver=driver,
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
     )
 
 
@@ -138,6 +138,72 @@ def test_gtk4_calculator_click_lands_on_the_button(tmp_path) -> None:
                 break
             time.sleep(0.25)
         assert shown is not None and "7" in str(shown.value), getattr(shown, "value", None)
+    finally:
+        _stop_group(proc)
+
+
+def test_gtk4_column_view_left_edge_row_activates(tmp_path) -> None:
+    """A Baobab-like flush row click updates a real GTK4 activation label."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "column617.py"
+    script.write_text('''
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="Column617")
+    window.set_default_size(640, 400)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    status = Gtk.Label(label="Home Folder")
+    model = Gtk.SingleSelection.new(Gtk.StringList.new(["Folder617", "Other617"]))
+    view = Gtk.ColumnView.new(model)
+    factory = Gtk.SignalListItemFactory()
+    factory.connect("setup", lambda factory, item: item.set_child(Gtk.Label(xalign=0)))
+    factory.connect("bind", lambda factory, item: item.get_child().set_label(item.get_item().get_string()))
+    column = Gtk.ColumnViewColumn.new("Folder", factory)
+    column.set_expand(True)
+    view.append_column(column)
+    view.set_single_click_activate(True)
+    view.connect("activate", lambda view, index: status.set_label("Opened " + model.get_item(index).get_string()))
+    box.append(status)
+    box.append(view)
+    window.set_child(box)
+    window.present()
+app = Gtk.Application(application_id="org.example.Column617")
+app.connect("activate", activate)
+app.run([])
+''')
+    proc = _launch(sys.executable, str(script))
+    try:
+        row = _window(driver, "column617")
+        assert row is not None, driver.windows()
+        assert int(row.get("pid") or 0) == proc.pid, row
+        driver.move_window(int(row["window_id"]), 200, 100)
+        driver.focus_window(int(row["window_id"]))
+        runtime = _runtime(tmp_path, driver)
+        app = str(row["app"])
+        deadline = time.monotonic() + 15
+        target = None
+        while time.monotonic() < deadline:
+            runtime.desktop_snapshot(app)
+            snap = runtime._current
+            target = next((el for el in snap.elements
+                           if el.role == "AXRow" and "Folder617" in el.title), None) if snap else None
+            if target is not None:
+                break
+            time.sleep(0.2)
+        assert target is not None, snap
+        runtime.click(target.ref)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, app)
+            if any(el.title == "Opened Folder617" for el in shot.elements):
+                break
+            time.sleep(0.2)
+        assert any(el.title == "Opened Folder617" for el in shot.elements), shot
     finally:
         _stop_group(proc)
 
@@ -284,5 +350,82 @@ app.run([])
                 assert caught.value.code is ErrorCode.SECURE_FIELD
                 assert "ReplacementSecret584" not in str(caught.value)
                 assert "ProbeSecret584" not in str(caught.value)
+    finally:
+        _stop_group(proc)
+
+
+@pytest.mark.parametrize("kind", ["plain", "masked", "password"])
+@pytest.mark.parametrize("operation", ["type", "set"])
+def test_gtk4_empty_entry_first_write_is_private(tmp_path, kind, operation):
+    """An empty unknown entry allows one privately verified, redacted write."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "entry584.py"
+    script.write_text(f'''
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="Entry584")
+    entry = Gtk.PasswordEntry() if {kind!r} == "password" else Gtk.Entry()
+    if {kind!r} == "masked":
+        entry.set_visibility(False)
+
+    entry.update_property([Gtk.AccessibleProperty.LABEL], ["Field584"])
+    window.set_child(entry)
+    window.present()
+app = Gtk.Application(application_id="org.example.Entry584")
+app.connect("activate", activate)
+app.run([])
+''')
+    proc = _launch(sys.executable, str(script))
+    try:
+        row = _window(driver, "entry584")
+        assert row is not None, driver.windows()
+        driver.focus_window(int(row["window_id"]))
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 15
+        while True:
+            runtime.desktop_snapshot(str(row["app"]))
+            snap = runtime._current
+            fields = [el for el in snap.elements if el.title == "Field584"] if snap else []
+            if fields or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        assert len(fields) == 1
+        field = fields[0]
+        secret = "FirstWrite584"
+        if kind == "password":
+            assert field.secure
+            for operation in (lambda: runtime.type_text(secret, ref=field.ref),
+                              lambda: runtime.set_value(field.ref, secret)):
+                with pytest.raises(ComputerUseError) as caught:
+                    operation()
+                assert caught.value.code is ErrorCode.SECURE_FIELD
+                assert secret not in str(caught.value)
+        else:
+            assert not field.secure
+            result = (runtime.type_text(secret, ref=field.ref) if operation == "type"
+                      else runtime.set_value(field.ref, secret))
+            assert result.outcome == "confirmed"
+            assert secret not in str(result) + repr(result.as_dict())
+            audit_files = list(runtime.audit.dir_path.glob("*.jsonl"))
+            assert audit_files
+            audit_text = "".join(path.read_text() for path in audit_files)
+            assert audit_text
+            assert secret not in audit_text
+            runtime.desktop_snapshot(str(row["app"]))
+            snap = runtime._current
+            field = next(el for el in snap.elements if el.title == "Field584")
+            if kind == "plain":
+                assert field.value == secret
+                assert observe.find_elements(snap, text=secret)
+            else:
+                assert field.secure and field.value is None
+                assert secret not in repr(snap)
+                assert not observe.find_elements(snap, text=secret)
     finally:
         _stop_group(proc)

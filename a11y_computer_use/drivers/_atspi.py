@@ -328,6 +328,40 @@ def process_in_startup(pid: int | None) -> bool:
     return age is not None and age < ATSPI_STARTUP_GRACE_S
 
 
+def registration_startup_remaining(app: str) -> float:
+    """Remaining existing startup grace for an unambiguous window owner.
+
+    A newly mapped window can precede AT-SPI registration. Older apps and
+    owners whose age cannot be verified get no additional registration wait.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        pids = _linux_system.pids_matching(app)
+        if not pids:
+            # GTK's program name can differ from its interpreter's comm.
+            # WM_CLASS identifies the mapped window for this timing hint;
+            # titles alone never establish an owner.
+            pids = {
+                row["pid"] for row in _linux_system.windows()
+                if isinstance(row.get("pid"), int) and row["pid"] > 0
+                and _linux_system._class_matches_identifier(
+                    app, str(row.get("wm_class") or ""),
+                    str(row.get("wm_class_class") or ""),
+                )
+            }
+    except Exception:
+        # Process age is only a registration hint; unavailable X11 identity
+        # must not replace the snapshot's own accessibility result.
+        return 0.0
+    if len(pids) != 1:
+        return 0.0
+    age = process_age_s(next(iter(pids)))
+    if age is None:
+        return 0.0
+    return max(0.0, ATSPI_STARTUP_GRACE_S - age)
+
+
 def stopped_pid_for_app(app: str) -> int | None:
     """The stopped pid for ``app``, when one process is unambiguously it.
 
@@ -2248,10 +2282,11 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     return ""
 
 
-def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
-    """The readable text of a ``<div>`` whose children are inline.
+def _section_text(acc, role_str: str, attrs: dict) -> str | None:
+    """Read a text-bearing HTML section's own Text interface.
 
-    AT-SPI exposes that div as a section, and a section is a group, so the
+    Firefox and WebKitGTK expose pre, code, and quote text on sections
+    without static-text children. AT-SPI maps sections to groups, so the
     value read is skipped. Chromium's text is the sentence with one U+FFFC
     per link, and the same words are also separate static-text children, so
     find cannot match a phrase that crosses them. Firefox exposes that same
@@ -2262,7 +2297,9 @@ def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
     """
     if role_str != "section":
         return None
-    if str(attrs.get("tag") or "").lower() != "div":
+    if str(attrs.get("tag") or "").lower() not in {
+        "div", "pre", "code", "blockquote", "address", "figcaption",
+    }:
         return None
     raw = _direct_text(acc)
     if not raw.replace(_OBJECT_REPLACEMENT, "").strip():
@@ -2623,13 +2660,26 @@ def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
     Adding the recovered content origin fixes body widgets, but does not
-    make these negative WINDOW coordinates reliable pointer targets (#502).
-    Use the control's activation action rather than guessing another offset.
+    make boxes outside the frame reliable pointer targets (#502). The frame
+    itself can start at a negative WINDOW offset; a body row fully inside
+    that reported frame is still a valid target (#617). Missing frame bounds
+    leave the negative-origin guard in place.
     """
     if acc is None or not _gtk4_app(acc):
         return False
     window = _raw_rect(acc, "WINDOW")
-    return window is not None and (window[0] < 0 or window[1] < 0)
+    if window is None or (window[0] >= 0 and window[1] >= 0):
+        return False
+    frame = _frame_ancestor(acc)
+    frame_box = _raw_rect(frame, "WINDOW") if frame is not None else None
+    if (frame_box is not None and all(math.isfinite(value) for value in frame_box)
+            and frame_box[2] > 0 and frame_box[3] > 0):
+        x, y, width, height = window
+        fx, fy, fw, fh = frame_box
+        if (width > 0 and height > 0 and fx <= x and fy <= y
+                and x + width <= fx + fw and y + height <= fy + fh):
+            return False
+    return True
 
 
 def published_origin_untrusted(acc) -> bool:
@@ -3695,8 +3745,8 @@ class ATSPIAccessor:
         # interface. That is a text control: textarea when it is multi-line.
         # Chromium's roleless contenteditable stays a group.
         role = _gecko_contenteditable_role(node, role, role_str, attrs, state_editable)
-        # Groups skip the value probe. A div is a section, and its text is
-        # the inline sentence; reading that one string is what find matches.
+        # Groups skip the value probe. Text-bearing HTML sections need their
+        # own Text string so find can match words absent from child nodes.
         # A file chooser is a dialog, but its name is the title. Probing Value
         # used to be skipped when the role was a window.
         # A PDF page is the exception: its Text interface is the page, and
@@ -3725,9 +3775,9 @@ class ATSPIAccessor:
         ):
             # An empty contenteditable can publish a Value double. The text
             # interface is the value. A number is not that text.
-            value = _div_inline_sentence(node, role_str, attrs)
+            value = _section_text(node, role_str, attrs)
         if value is None:
-            sentence = _div_inline_sentence(node, role_str, attrs)
+            sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
         qt_document = (
@@ -5690,7 +5740,12 @@ def _text_security(acc):
                 acc, 0, api.TextGranularity.LINE,
             ))
             content = getattr(rendered, "content", None)
-            if not isinstance(content, str) or not content or _entry_text_masked(role, attrs, content):
+            if content == "":
+                count = _safe(lambda: api.Text.get_character_count(acc))
+                if isinstance(count, int) and not isinstance(count, bool) and count == 0:
+                    return False, role, attrs, "unknown"
+                return True, role, attrs, visibility
+            if not isinstance(content, str) or _entry_text_masked(role, attrs, content):
                 return True, role, attrs, visibility
             # A custom masking glyph need not be one of the known bullets.
             # Compare privately with the buffer; never publish a mismatch.
@@ -5708,9 +5763,48 @@ def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
     GTK 4 layout strings expose masking even when GetText and metadata do
-    not. Ambiguous single-line GTK entries require human handoff.
+    not. Empty GTK entries without masking metadata remain unknown until written.
     """
     return _text_security(acc)[0]
+
+
+def text_visibility_unknown(acc) -> bool:
+    """An empty GTK 4 entry with no real masking or visibility signal."""
+    return _text_security(acc)[3] == "unknown"
+
+
+class _PrivateTextCount(int):
+    """A verified character count whose receipt and audit must stay redacted."""
+
+    private_text_verified = True
+
+
+def _write_unknown_entry(acc, text: str, *, insert: bool) -> bool:
+    """Write an empty unknown entry once; expose only a verified boolean.
+
+    The rendered layout may become masked after this write. Buffer reads here
+    must never reach a snapshot, error detail, or action result.
+    """
+    api = _atspi()
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    if insert:
+        method = getattr(eti, "insert_text", None) or getattr(eti, "insertText", None)
+        if method is None:
+            return False
+        _call_first(eti, ("insert_text", "insertText"), 0, text,
+                    _insert_length(method, text, acc), default=False)
+    else:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        _call_first(acc, ("clear_cache", "clearCache"))
+        count = _safe(lambda: api.Text.get_character_count(acc))
+        if count == len(text) and _safe(lambda: api.Text.get_text(acc, 0, count)) == text:
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    return False
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -7922,10 +8016,15 @@ def insert_text(acc, text: str) -> int | None:
     embedded NUL, so the text alone can look right while the widget holds
     extra characters.
     """
+    typed = text.replace("\r\n", "\n")
+    if text_visibility_unknown(acc):
+        if _write_unknown_entry(acc, typed, insert=True):
+            return _PrivateTextCount(len(typed))
+        raise _text_mismatch("text_mismatch", "private text write could not be verified",
+                             private_text=True)
     eti = _editable_iface(acc)
     if eti is None:
         return None
-    typed = text.replace("\r\n", "\n")
     # A Writer document's own text stays empty. The paragraphs are the
     # read-back, captured before the insert so a later poll can see them
     # arrive. An entry is not this document and does not walk.
@@ -14696,6 +14795,10 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
         return False
+    if text_visibility_unknown(acc):
+        if _write_unknown_entry(acc, text, insert=False):
+            return True
+        raise _text_mismatch("text_mismatch", "private text write could not be verified")
     if force:
         return _replace_editable_text(acc, text)
     # AbiWord's GtkEntry buffer is not its dialog model: EditableText can
