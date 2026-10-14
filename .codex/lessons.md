@@ -44,6 +44,12 @@
 - 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.
 
 - 2026-10-14 (#552 repair): Opaque-search refusals must remain before input when merging verified Find support; retain the FULL grant gate and focused find-bar verification as independent requirements.
+- 2026-10-14 (PR #562 repair): When merging viewport text reads with app-specific snapshot fixes, retain both native visibility helpers and independent label/value handling. Run Qt, AT-SPI cache, and shared server regressions; whole-buffer Text values do not establish substring visibility.
+- 2026-10-14 (#542): Omit clipped prefixes and suffixes from Qt viewport text, adding separators only between visible fragments. Placeholder prefixes can make a genuine newly visible token look like text appended to an editor query and prevent shared scroll-search confirmation.
+- 2026-10-14 (#542 repair): Qt line edits can map to AXTextArea without a SINGLE_LINE state. Require native MULTI_LINE or a multiline attribute before viewport text reads; probing GetBoundedRanges on ordinary Qt controls can stall snapshots when Qt cannot marshal QSpiTextRange replies.
+- 2026-10-14 (PR #562 CI repair): urllib HTTPSHandler eagerly creates a TLS context even in an HTTP-only opener. Initialize the shared HTTP handler directly when an overridden https_open already creates its verified context; otherwise native trust-store loading can exhaust a short HTTP observation deadline before the request. Test that HTTP probes never load TLS settings.
+- 2026-10-14 (PR #562 merge repair): Preserve Kate's app-specific document visibility refusal after generic Qt viewport reads. Cover both Kate and FeatherPad with an available viewport result so a successful generic read cannot silently override the conservative KTextEditor behavior.
+
 - 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
 

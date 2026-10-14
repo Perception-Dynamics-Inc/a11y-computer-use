@@ -3034,6 +3034,7 @@ def _qt_viewport_text(acc) -> str | None:
         if not isinstance(text, str):
             return None
         visible = []
+        clipped = False
         for index, char in enumerate(text):
             rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
                 acc, start + index, coord,
@@ -3043,11 +3044,14 @@ def _qt_viewport_text(acc) -> str | None:
                 return None
             # Keep a separator at clipped characters so two disconnected
             # visible fragments cannot manufacture a substring match.
-            visible.append(char if hits else "\n")
-        # Edge placeholders are not document content. Retain internal
-        # separators, but do not make a lone visible token look appended
-        # to an editor value to the shared search guard.
-        return "".join(visible).strip("\n")
+            if hits:
+                if clipped and visible:
+                    visible.append("\n")
+                visible.append(char)
+                clipped = False
+            else:
+                clipped = True
+        return "".join(visible)
     try:
         contents = [span.content for span in ranges]
         if not all(isinstance(content, str) for content in contents):
@@ -3726,7 +3730,10 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
-        qt_document = role == "AXTextArea" and role_str != "terminal" and _qt_app(node)
+        qt_document = (
+            role == "AXTextArea" and role_str != "terminal"
+            and _qt_app(node) and _reports_multiline(node, attrs)
+        )
         if qt_document:
             value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:

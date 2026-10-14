@@ -13088,6 +13088,16 @@ def test_qt_document_point_offsets_verify_character_visibility(monkeypatch, miss
     else:
         assert "TOKEN_001" in value
         assert "TOKEN_070" not in value
+        text_api = _atspi._atspi().Text
+        # Read the opposite viewport without including clipped-prefix placeholders.
+        monkeypatch.setattr(text_api, "get_character_extents", lambda acc, offset, coord: (
+            _NS(x=20, y=900 if offset < 10 else 40, width=8, height=16)
+        ))
+        monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+            CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3), Text=text_api,
+        ))
+        assert _atspi._qt_viewport_text(object()) == "TOKEN_070"
+
 
 @pytest.mark.parametrize("value", ["150%", "150 %", "150", "200%", "100%"])
 def test_xournal_zoom_percent_uses_offset_log_on_driver_path(fake_atspi, monkeypatch, value):
