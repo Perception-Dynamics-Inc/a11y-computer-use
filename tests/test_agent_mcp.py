@@ -76,6 +76,20 @@ def _payload(result) -> dict:
     return json.loads(text)
 
 
+def test_step_started_is_visible_without_disk_sync(tmp_path: Path, monkeypatch) -> None:
+    """Lifecycle polling needs visibility, without a blocking disk sync."""
+    from a11y_computer_use.agent.trace import Trace
+
+    def refuse_sync(_fd):
+        raise AssertionError("lifecycle events must not wait for physical storage")
+
+    monkeypatch.setattr(os, "fsync", refuse_sync)
+    trace = Trace(tmp_path / "trace")
+    event = {"kind": "step_started", "index": 1, "action": "click"}
+    trace.append_event(event)
+    assert json.loads(trace.events_path.read_text(encoding="utf-8")) == event
+
+
 def _error_text(result) -> str:
     assert result.isError, result
     return " ".join(getattr(block, "text", "") for block in result.content)

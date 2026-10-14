@@ -441,3 +441,86 @@ def test_ordinary_open_window_does_not_match_a_stale_other_chooser(tmp_path) -> 
     result = perform_choose_file(desk.io(), desk.path, apps=["python3"])
     assert result.reason == "no_file_chooser"
     assert desk.calls == []
+
+
+class _OfficeDesk(_Desk):
+    """VCL's Open dialog: Ctrl+L does not expose a location entry."""
+
+    def __init__(self, path, *, focused=True, read_back=True, **kwargs):
+        super().__init__(path, titles=["Open"], **kwargs)
+        self.filename_focused = focused
+        self.read_back = read_back
+
+    def windows(self):
+        return [{**row, "app": "soffice"} for row in super().windows()]
+
+    def snapshot(self, app):
+        host = _node("e1", "AXWindow", "LibreOffice Calc")
+        label = _node("e4", "AXLabel", self.label, parent="e1")
+        if not self.open:
+            return _snap(host, label)
+        return _snap(
+            host, label,
+            _node("e2", "AXDialog", "Open", parent="e1"),
+            _node("e5", "AXButton", "Open", parent="e2"),
+            _node("e6", "AXButton", "Cancel", parent="e2"),
+            _node("e9", "AXTextField", "File name", editable=True,
+                  focused=self.filename_focused and ("key", "alt+n") in self.calls,
+                  parent="e2"),
+        )
+
+    def set_value(self, ref, value):
+        result = super().set_value(ref, value)
+        return result if self.read_back else _confirmed(value + "-extra")
+
+
+def test_choose_file_drives_libreoffice_filename_field(tmp_path) -> None:
+    desk = _OfficeDesk(str(tmp_path / "data (20).csv"))
+    result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+    assert result.ok
+    assert desk.calls == [
+        ("focus", 7), ("key", "alt+n"),
+        ("set_value", ("e9", desk.path)), ("key", "Return"),
+    ]
+    assert "dialog closed" in result.evidence
+
+
+def test_libreoffice_requires_filename_focus_and_exact_readback(tmp_path) -> None:
+    for kwargs in ({"focused": False}, {"read_back": False}):
+        desk = _OfficeDesk(str(tmp_path / "data.csv"), **kwargs)
+        result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+        assert not result.ok
+        assert result.reason == "path_not_entered"
+        assert "File name field" in result.message
+        assert ("key", "Return") not in desk.calls
+        if not desk.filename_focused:
+            assert desk.set_values == []
+
+
+def test_libreoffice_requires_closed_dialog_and_file_evidence(tmp_path) -> None:
+    for kwargs, reason in (({"close": False}, "file_chooser_unchanged"),
+                           ({"show": False}, "file_not_chosen")):
+        desk = _OfficeDesk(str(tmp_path / "data.csv"), **kwargs)
+        result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+        assert not result.ok
+        assert result.reason == reason
+
+
+def test_libreoffice_does_not_use_filename_field_outside_chooser(tmp_path) -> None:
+    desk = _OfficeDesk(str(tmp_path / "data.csv"))
+    original = desk.snapshot
+
+    def snapshot(app):
+        snap = original(app)
+        for element in snap.elements:
+            if element.ref == "e9":
+                element.title = "Search"
+        return _snap(*snap.elements,
+                     _node("e10", "AXTextField", "File name", editable=True,
+                           focused=True, parent="e1"))
+
+    desk.snapshot = snapshot
+    result = perform_choose_file(desk.io(), desk.path, apps=["soffice"], timeout_s=0)
+    assert result.reason == "path_not_entered"
+    assert desk.set_values == []
+    assert ("key", "Return") not in desk.calls

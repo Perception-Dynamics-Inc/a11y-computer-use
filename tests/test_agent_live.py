@@ -1647,9 +1647,61 @@ def _clear_focus(*, show_desktop: bool = False) -> str:
     try:
         from a11y_computer_use.drivers import _linux_system
 
-        return _linux_system.frontmost_app_id() or "unknown"
+        # EWMH client messages are asynchronous. The window manager can still
+        # report the previous terminal while it processes show-desktop, even
+        # after our own connection has flushed the active-window property.
+        deadline = time.monotonic() + 3
+        while True:
+            front = _linux_system.frontmost_app_id() or "unknown"
+            if front == "unknown" or time.monotonic() >= deadline:
+                return front
+            time.sleep(0.05)
     except Exception:
         return "unknown"
+
+
+@pytest.mark.parametrize("focus", ["", "unknown"])
+def test_clear_focus_waits_for_the_window_manager(monkeypatch, focus) -> None:
+    """A pending desktop request must settle before the short agent run."""
+    from types import SimpleNamespace
+
+    from a11y_computer_use.drivers import _linux_system
+
+    # No display, Xlib installation, or GI is needed for this setup regression.
+    monkeypatch.setitem(sys.modules, "Xlib", SimpleNamespace())
+    monkeypatch.setattr(sys.modules[__name__], "_set_showing_desktop", lambda showing: None)
+    reads = []
+    states = iter(["xfce4-terminal", "xfce4-terminal", focus])
+
+    def frontmost():
+        reads.append(True)
+        return next(states)
+
+    sleeps = []
+    ticks = iter([0, 0, 0.05])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", frontmost)
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert _clear_focus(show_desktop=True) == "unknown"
+    assert len(reads) == 3
+    assert sleeps == [0.05, 0.05]
+
+
+def test_clear_focus_reports_a_window_that_stays_focused(monkeypatch) -> None:
+    """Exhausting the setup wait must preserve the live assertion's failure."""
+    from types import SimpleNamespace
+
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setitem(sys.modules, "Xlib", SimpleNamespace())
+    monkeypatch.setattr(sys.modules[__name__], "_set_showing_desktop", lambda showing: None)
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", lambda: "xfce4-terminal")
+    ticks = iter([0, 0, 3])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert _clear_focus(show_desktop=True) == "xfce4-terminal"
+    assert sleeps == [0.05]
 
 
 @requires_display
@@ -1882,6 +1934,73 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
             assert finished_flag.exists(), "the model call was killed before its own timeout"
     finally:
         _set_showing_desktop(False)
+
+
+@requires_display
+def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path, isolated_home) -> None:
+    """Live. Text Editor and the Chrome names share a grant. Terminals do not.
+
+    mousepad, gedit, or gnome-text-editor is launched as Text Editor. A grant
+    for xterm does not launch gnome-terminal when exec is enabled. With exec
+    disabled, even the granted terminal is blocked and audited. Chrome's names
+    are checked on the real permission store; this test does not start a browser.
+    """
+    import shutil
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.app_identity import same_app
+    from a11y_computer_use.safety import Tier
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+    from a11y_computer_use.server import ActionRefused
+
+    editor = next((
+        name for name in ("mousepad", "gedit", "gnome-text-editor")
+        if shutil.which(name)
+    ), None)
+    assert editor, "no text editor binary; the linux job installs mousepad"
+    store = safety.PermissionStore()
+    store.set_tier(editor, Tier.FULL)
+    assert store.get_tier("Text Editor") is Tier.FULL
+    assert store.get_tier("gedit") is Tier.FULL
+    store.set_tier("chromium", Tier.CLICK)
+    assert store.get_tier("google-chrome") is Tier.CLICK
+    assert store.get_tier("chrome") is Tier.CLICK
+    assert store.get_tier("chromium-browser") is Tier.CLICK
+    store.set_tier("xterm", Tier.FULL)
+    assert store.get_tier("gnome-terminal") is None
+    assert store.get_tier("kitty") is None
+    assert same_app("xterm", "gnome-terminal") is False
+    assert same_app("gnome-terminal", "gnome-terminal-server") is True
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+    runtime.APP_LAUNCH_WAIT_S = 12
+    try:
+        text = runtime.app("launch", "Text Editor")
+        assert "needs_permission" not in text, text
+        assert "launched" in text, text
+        for terminal in ("xterm", "gnome-terminal"):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.app("launch", terminal)
+            assert caught.value.code is ErrorCode.EXEC_DISABLED
+            rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+                    for line in path.read_text().splitlines()]
+            assert rows[-1]["result"] == "exec_disabled"
+            assert rows[-1]["metrics"]["security_violation"] == "exec_disabled"
+        runtime.allow_exec = True
+        launched_other = False
+        try:
+            other = runtime.app("launch", "gnome-terminal")
+        except ComputerUseError as exc:
+            assert exc.code in {ErrorCode.APP_NOT_FOUND, ErrorCode.UNSUPPORTED}
+        except ActionRefused:
+            launched_other = False
+        else:
+            launched_other = str(other).startswith("launched")
+        assert launched_other is False
+    finally:
+        try:
+            runtime.app("quit", editor)
+        except Exception:
+            subprocess.run(["pkill", "-x", editor], check=False, timeout=3)
 
 
 @requires_display

@@ -2,12 +2,17 @@
 
 A grant stored under one name covers the same app asked for under another:
 case, a desktop-file id, an executable basename, a WM_CLASS, or a known
-alias. ``Files`` is nautilus or thunar, ``Terminal`` is gnome-terminal or
-xterm, and ``libreoffice calc`` is soffice. Calc, Writer, and Impress labels
-start ``localc``, ``lowriter``, or ``loimpress`` when that program is on
-PATH, and otherwise ``soffice`` or ``libreoffice`` with the module flag.
+alias. ``Files`` is nautilus, thunar, or pcmanfm. ``Text Editor`` is
+mousepad, gedit, or gnome-text-editor. ``google-chrome``, ``chrome``,
+``chromium``, and ``chromium-browser`` are one app. ``libreoffice calc`` is
+soffice. A terminal grant matches that binary's own aliases only:
+``gnome-terminal`` covers ``gnome-terminal-server``, and it does not cover
+``xterm``. The label ``Terminal`` still launches the one granted terminal.
 Alias matches are exact tokens. They are not substrings, so ``Files`` does
 not match an unrelated name that merely contains those letters.
+
+Calc, Writer, and Impress labels start ``localc``, ``lowriter``, or
+``loimpress`` when available, otherwise the office host with its module flag.
 
 On Linux a display name is the desktop file's ``Name`` or ``GenericName``
 (``Mousepad``, ``Text Editor``). The program is that file's executable when
@@ -32,17 +37,32 @@ _GROUPS: tuple[frozenset[str], ...] = (
         "org.gnome.nautilus",
     }),
     frozenset({
-        "terminal",
+        "text editor",
+        "mousepad",
+        "gedit",
+        "gnome-text-editor",
+        "org.gnome.gedit",
+        "org.gnome.texteditor",
+        "org.xfce.mousepad",
+    }),
+    frozenset({
+        "google-chrome",
+        "google-chrome-stable",
+        "chrome",
+        "chromium",
+        "chromium-browser",
+    }),
+    frozenset({
         "gnome-terminal",
         "gnome-terminal-server",
-        "xfce4-terminal",
-        "xterm",
-        "konsole",
-        "kitty",
-        "alacritty",
-        "tilix",
         "org.gnome.terminal",
     }),
+    frozenset({"xfce4-terminal"}),
+    frozenset({"xterm"}),
+    frozenset({"konsole"}),
+    frozenset({"kitty"}),
+    frozenset({"alacritty"}),
+    frozenset({"tilix"}),
     frozenset({
         "libreoffice calc",
         "libreoffice-calc",
@@ -68,6 +88,7 @@ _GROUPS: tuple[frozenset[str], ...] = (
 _LABELS = frozenset({
     "files",
     "terminal",
+    "text editor",
     "libreoffice calc",
     "libreoffice-calc",
     "calc",
@@ -78,6 +99,24 @@ _LABELS = frozenset({
     "libreoffice-impress",
     "impress",
 })
+
+#: Executable names of terminal apps. The label ``Terminal`` is not in here.
+_TERMINAL_BINS = frozenset({
+    "gnome-terminal",
+    "gnome-terminal-server",
+    "xfce4-terminal",
+    "xterm",
+    "konsole",
+    "kitty",
+    "alacritty",
+    "tilix",
+})
+
+
+def _terminal_binary(name: str) -> bool:
+    """True when ``name`` is one terminal executable, not the ``Terminal`` label."""
+    return bool(tokens(name) & _TERMINAL_BINS)
+
 
 # Dedicated wrapper, then the flag passed to soffice or libreoffice.
 _OFFICE_MODULES: dict[str, tuple[str, str]] = {
@@ -499,14 +538,46 @@ def resolve_launch(
             if hit is not None:
                 break
 
+    generic_editor = (
+        normalize(name) == "text editor" and display is not None
+        and normalize(str(display.get("name") or "")) != "text editor"
+    )
+    if (display is not None and not installed_bundle
+            and (generic_editor or normalize(name) not in _LABELS)):
+        # The desktop display label selects its own program and permission gate.
+        hit = name if name in granted else _exact_grant(name, granted)
+        for field in ("exec", "id", "name", "wm_class", "generic_name"):
+            if hit is not None:
+                break
+            hit = _exact_grant(str(display.get(field) or ""), granted)
+            if hit is not None:
+                break
+
     launch_name = name
-    label = normalize(name) in _LABELS
+    label = normalize(name) in _LABELS and not generic_editor
     if label:
         concrete = ""
         if hit and normalize(hit) not in _LABELS:
             concrete = hit
         if not concrete and running and normalize(running) not in _LABELS:
             concrete = running
+        if not concrete and normalize(name) == "terminal":
+            granted_terms = [key for key in granted if _terminal_binary(key)]
+            for entry in matched:
+                exe = str(entry.get("exec") or "")
+                for key in granted_terms:
+                    if exe and (same_app(exe, key) or normalize(exe) == normalize(key)):
+                        concrete = key
+                        break
+                if concrete:
+                    break
+            if not concrete and len(granted_terms) == 1:
+                concrete = granted_terms[0]
+            # The label is not in any terminal group, so a grant does not match
+            # it by identity. The chosen grant is still a resolved launch, even
+            # when no desktop file is named Terminal.
+            if concrete:
+                hit = concrete
         if not concrete:
             for entry in matched:
                 exe = str(entry.get("exec") or "")
@@ -518,7 +589,7 @@ def resolve_launch(
         if concrete:
             launch_name = concrete
     else:
-        program = _linux_launch_program(name, catalog, lookup, display)
+        program = None if installed_bundle else _linux_launch_program(name, catalog, lookup, display)
         if program:
             launch_name = program
         elif (

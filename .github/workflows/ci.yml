@@ -189,8 +189,9 @@ jobs:
       # Qt fixture for the live line-edit, combo, and value test. The fixture
       # also accepts PySide6 and PyQt5. This job installs PyQt6: Ubuntu 24.04's
       # Qt 5 build ships no AT-SPI adaptor, so a PyQt5 window never appears
-      # on the bus. pcmanfm and xterm are the Files and Terminal binaries the
-      # agent grant test launches. Without one of each family that test skips.
+      # on the bus. pcmanfm, xterm, and mousepad are the Files, Terminal, and
+      # Text Editor binaries the agent grant tests launch. Without one of each
+      # family that test skips.
       # pcmanfm, not thunar: thunar pulls libxfce4ui and xfconf, and the live
       # step on that image never saw a Firefox AT-SPI tree. mousepad is the
       # key-outcome check: its document sits under a tab group.
@@ -223,11 +224,12 @@ jobs:
             exit 1
           fi
       # gnome-calculator and gnome-text-editor cover the GTK 4 bounds
-      # live tests and the empty-field check. A separate step, so the
+      # live tests and the empty-field check. The Python entry fixtures
+      # also need GTK 4 introspection bindings. A separate step, so the
       # shared apt list stays as it is.
       - name: install GTK 4 calculator and text editor
         run: |
-          sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor
+          sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor gir1.2-gtk-4.0
           command -v gnome-calculator
           command -v gnome-text-editor
       # evince is the PDF page-text and side-pane thumbnail live tests.
@@ -243,7 +245,17 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends geany
           command -v geany
-      # inkscape is the toolbox-name and zoom-percent live tests. A separate step, so the
+      # OpenJDK 21 and the Java ATK Wrapper are the Swing JTable live test.
+      # scroll_to_find must not type into a selected cell. A separate step,
+      # so the shared apt line stays as it is.
+      - name: install OpenJDK and the Java ATK wrapper
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            openjdk-21-jdk libatk-wrapper-java libatk-wrapper-java-jni
+          javac -version
+          java -version
+          dpkg-query -W libatk-wrapper-java libatk-wrapper-java-jni
+      # inkscape is the SVG canvas, toolbox-name and zoom-percent live tests.
       # shared apt line stays as it is. The test skips when the binary
       # is absent.
       - name: install Inkscape
@@ -380,7 +392,7 @@ jobs:
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
-            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py tests/test_evince_page_text.py tests/test_inkscape_zoom.py tests/test_inkscape_toolbar.py -v -rs --tb=line -p no:cacheprovider
+            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py tests/test_evince_page_text.py tests/test_linux_swing_live.py tests/test_inkscape_canvas.py tests/test_inkscape_zoom.py tests/test_inkscape_toolbar.py -v -rs --tb=line -p no:cacheprovider
           '
 
   package:

@@ -4,11 +4,43 @@
 
 **Status:** implemented; partially live-verified in CI. `tests/test_linux_live.py` (5 tests, `5 passed` on run 33436980587 at 3b331ba, `ubuntu-latest` under Xvfb + `dbus-run-session` + `at-spi-bus-launcher`) covers the driver name, an AT-SPI snapshot of a real GTK3 window, an a11y button press via `do_action`, a11y text entry via `EditableText`, and the `org.a11y.Status` flip. Coordinate click/drag/scroll, key chords, capture, `wait_for`, and `set_value` are implemented. Clipboard bytes (CR, CRLF, NUL, non-text, and invalid UTF-8) and the EWMH window verbs are live-checked under openbox by `tests/test_linux_desktop_live.py` in the Linux CI job. The Wayland matrix below reflects a manual headless-sway run and is not CI-tested. `tests/test_linux_synthetic.py` (runs on any OS, no bus) covers the role vocabulary, accessor, chord parsing, and error paths; `tests/test_linux_live.py` (Linux-only, self-skips without a reachable bus) launches a real GTK3 window (`cuatestapp`), snapshots it through the shared pruning engine, focuses its entry via AT-SPI **without moving the cursor**, and types via AT-SPI `EditableText.insert_text` (XTEST keystrokes are only the fallback when no editable was focused through the driver). A `linux` CI job (`ubuntu-latest`) runs the bus-free tests on every push and the live AT-SPI run under Xvfb + a session/a11y bus (`xvfb-run` + `dbus-run-session` + `at-spi-bus-launcher --launch-immediately`). The live step self-skips if the a11y bus is unreachable, but on the current head it runs and passes (run 33436980587 on 3b331ba: `5 passed`), mirroring how `windows-latest` verifies the Windows backend.
 
+Xournal++ zoom sliders owned by `xournalpp` or `Xournal++` accept `150%`, `150 %`, and out-of-range bare numbers as percents when the current label and Value match the application's offset natural-log scale. Conversion uses `log(percent / 100 - 0.20753)` without step snapping. In-range bare numbers remain raw values. Percent writes require both the raw Value and the displayed percent to confirm; builds that change only the adjustment return `text_mismatch` without substituting clicks or keys. This path is covered by hermetic tests; live Xournal++ verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
 - `observe.build_snapshot` and the pruning engine: walks any `TreeAccessor` and prunes/indexes it. The Linux `ATSPIAccessor` feeds the *same* engine; `_match_anchor` (ref re-resolution) is reused verbatim.
-- `safety.py` (tiers, gates, audit log, confirmation classifier) and the MCP server. `build_server` registers 26 tools on the Linux, macOS, and Windows drivers (`desktop_snapshot`, `find`, `screenshot`, `zoom`, `crop`, `screen_text`, `click`, `hover`, `type`, `key`, `scroll`, `drag`, `wait_for`, `act`, `set_value`, `scroll_to_find`, `app`, `window`, `clipboard`, `menu`, `file_dialog`, `notes`, `wait_until`, `request_permission`, `grant_app`, `report_issue`). The browser driver adds `console`, `network`, and `webmcp` when the driver has those methods. Platform-free.
+- `safety.py` (tiers, gates, audit log, confirmation classifier) and the MCP server. `build_server` registers 27 tools on the Linux, macOS, and Windows drivers (`desktop_snapshot`, `find`, `screenshot`, `zoom`, `crop`, `screen_text`, `click`, `hover`, `type`, `key`, `scroll`, `drag`, `wait_for`, `act`, `set_value`, `scroll_to_find`, `app`, `window`, `clipboard`, `menu`, `file_dialog`, `files`, `notes`, `wait_until`, `request_permission`, `grant_app`, `report_issue`). The browser driver adds `console`, `network`, and `webmcp` when the driver has those methods. Platform-free.
+
+## Files in opaque file-manager views
+
+Thunar 4.20 exposes named cells in List View, but its Icon and Compact views
+can expose only an unnamed `opaque_region`. The Linux `files` helper supports
+named file tasks without clicking that surface. Configure the MCP server's
+environment with `A11Y_COMPUTER_USE_FILE_ROOTS=/absolute/task/root` (multiple
+roots are separated by `:`). The helper is disabled by default. This setting
+grants direct filesystem access inside those roots independently of app grants.
+
+Use `files(action="list", path="/absolute/task/root")` to discover names, then
+`mkdir`, `rename`, or `move` with absolute paths. For example:
+
+```python
+files(action="mkdir", path="/absolute/task/root/archive")
+files(action="rename", path="/absolute/task/root/alpha.txt",
+      destination="/absolute/task/root/final.txt")
+files(action="move", path="/absolute/task/root/final.txt",
+      destination="/absolute/task/root/archive/final.txt")
+```
+
+The CLI can call the same helper with `run-once` and a JSON object containing
+`"tool": "files"`. Paths must stay inside the configured roots; roots themselves
+cannot be renamed or moved. Parents must exist. Symlink traversal, overwrites,
+special-file moves, and cross-filesystem moves are refused. `rename` keeps the
+same parent; `move` takes the exact destination path including its name. Listing
+is limited to 200 entries and returns an error rather than a partial list.
+Every attempt is audit logged before mutation, and success requires filesystem
+verification. These operations change files directly; they do not select items
+in Thunar. D3's live agent acceptance rate has not been measured by these tests.
 
 ## The role-vocabulary trick
 
@@ -32,6 +64,8 @@ Closing that bar leaves the page scrolled to the match. Chrome then reports the 
 
 The find bar and an omnibox popup also stick in the AT-SPI client cache. A snapshot taken while the bar is open remembers that Chrome process. Typing in the find field does too, which is what ``scroll_to_find`` does: it opens the bar, types, and closes it before the next snapshot, so that snapshot would not otherwise see the find field. The next snapshot, including one after the bar closes and one after Reload, drops that cache and walks the frame that holds the selected tab rather than a leftover find-in-page or omnibox frame. A page-window snapshot that still has a cached find-in-page or omnibox frame beside it drops that cache even when the process was not remembered yet. Reload does not reuse the cached document. The address bar by itself does not remember the process.
 
+For Chrome/Electron processes that advertise a DevTools port, the Linux form overlay uses the optional `[browser]` extra to read and write matching DOM controls. Without `websocket-client`, snapshots and form writes retain the native AT-SPI path, including selection and numeric value writes. Native verification still determines success. Other CDP connection, script, and read-back failures remain errors; they do not retry a potentially completed write through AT-SPI. Selecting the standalone browser backend still requires the extra.
+
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 
 | Driver primitive | Linux (implemented) | macOS / Windows analog |
@@ -45,8 +79,8 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 | `hover` | XTEST absolute `MotionNotify` plus a flush, and no button. Computer-use `mouse_move` / `move` and the MCP `hover` tool, an `act` step `{"do":"hover"}`, and `run-once` call the same `Runtime.hover`: the pointer goes to an x,y point or a ref and a tooltip or a hover-opened menu can see the motion. A point owned by another app is `focus_changed` and the pointer is not moved. Click, right-click, double-click, and drag keep their own sequences. The tool registration is covered by synthetic tests; not a live tooltip run | macOS `kCGEventMouseMoved` |
 | `drag` | XTEST: absolute motion → `ButtonPress` → absolute motion → `ButtonRelease` | `CGEvent` drag / `SendInput` |
 | `scroll` | `unit=lines` on a target that is not a Chromium list: XTEST wheel buttons **4/5** (vertical) and **6/7** (horizontal), one notch per unit. A Chromium list whose own box sits fully on the screen, or a list inside a shorter overflow ancestor, does not start with that wheel. One line is one content row (`_ROWS_PER_LINE` is 1 in `drivers/_atspi.py`), and the step is not larger than the rows already on screen. The driver writes that list's vertical AT-SPI scroll bar by that distance. When the list has no such bar, it calls AT-SPI `scroll_to` (`TOP_EDGE`) on a row that many lines from the on-screen head. When the bar write or `scroll_to` does not move the painted rows, a left click lands on the vertical track (the lower track to go down, the upper track to go up). A wheel is sent only when those do not move the list. A step is a success when the pixels in the list box change and the on-screen head leaves the previous row. A head that moved by about the requested lines is that step even when the grab is at or under the uniform-row floor (0.4): the bar write stays, and no track click or wheel follows. A page-sized jump is not that step. `page_unchanged` is the case where the head stays and the grab stays at or under 1. A content-height list whose parent is the document, and a document group, keep the wheel. A document group is not a list. XTEST notches do not move a Chrome document, so a line step uses a CDP `scrollBy` of about 40 pixels per line when that window's process was started with `--remote-debugging-port`, and keeps the step only when `scrollTop` changes. A window with no port keeps the wheel. A Chromium document's tree trails that wheel, so the call waits until the on-screen names change, at most 0.9s, before the next snapshot. `scroll_to_find` on a page of plain elements anchors on the titled document rather than a larger empty Chrome panel. `snapshot` lists every on-screen row of a Chromium list; 16 is the hit-test sample count (`_MAX_ROW_SAMPLES`), not a cap on that walk. A list longer than `_MAX_CHILDREN_FETCH` (250) is not read from child 0: the on-screen walk starts at the first child whose box reaches the viewport, so a painted row past that index is still listed. Rows the accessibility tree does not expose are not added. `unit=pixels`: AT-SPI `Value.set_current_value` on the nearest scroll bar by that delta (GTK scrolled windows expose the value in pixels); the write is read back. A missing bar uses a CDP `scrollTop` write when that window's process was started with `--remote-debugging-port`, and keeps the step only when `scrollTop` changes. Otherwise it sends XTEST wheel notches at the element box (about one per 80 pixels) and keeps the step only when a grab of that box changes. A step that cannot be checked, or that does not move, is `unsupported`. Native Wayland rejects the wheel fallback; the bar path and a CDP scroll do not need XTEST. The line-scroll description is the control flow in `LinuxDriver.scroll` and `_atspi.py`. The tests use synthetic trees, not a live Chrome list. Pixel scroll is covered by synthetic tests, not a live Mousepad run | macOS `CGEventScrollWheel` line vs pixel units / Windows `MOUSEEVENTF_WHEEL` (wheel not implemented) |
-| `type_text` | Optional `ref` on the `type` tool resolves that element (a replaced process is `stale_ref` / `app_restarted`), focuses it, and types only after keyboard focus reads back on that accessible. Unconfirmed focus is `focus_lost` and sends no keystrokes and no insert. The outcome read-back is that element. Without `ref`: AT-SPI `EditableText.insert_text` on the remembered editable after verifying its owner matches the frontmost app. No widget focus is required, but missing/mismatched app ownership returns `focus_changed`; use explicit `set_value` without a detectable frontmost app. Coordinate/key/app/window changes clear the remembered target. Otherwise XTEST uses a prepared Unicode keymap and paced keystrokes. Chrome's GTK Open File (and Save) dialog is an X window with no AT-SPI location entry, so the page focus stays empty after the keys land. That read-back copies the focused location entry with select-all, collapses the selection so the chooser's Open button is not left covered, and restores the previous clipboard. The type is confirmed from that entry, not reported as `text_mismatch` with an empty page. | `CGEventKeyboardSetUnicodeString` / `KEYEVENTF_UNICODE` |
-| `set_value` | An element that is not editable (the snapshot flag is false and the role is not a text field, text area, search field, or secure field) raises an error that the element is not editable. That call sends no keystrokes, clicks, or focus changes. An editable element is written with AT-SPI EditableText. Success is `Text.get_text(0, -1)` equaling the new string, the same read a snapshot uses. GTK `set_text_contents` replaces. A Chromium web field whose `set_text_contents` appends is selected and deleted, then written again. If that snapshot text remains, or the field has no EditableText, X11 focuses the field, sends ctrl+a and BackSpace, and types the new string, and that is success only when the snapshot read equals the new string. A field whose text cannot be read at all is trusted when `set_text_contents` returned true. A Chromium contenteditable with no textbox role is an AT-SPI section whose tag is `div` or `span`. `STATE_EDITABLE` on that section marks the group editable in the snapshot (`edit`) even when EditableText is absent, and `set_value` is allowed. With no EditableText the write uses the empty-contenteditable clear (focus, ctrl+a, BackSpace, Delete) and then types; success is the readable text, and one trailing newline is the `<br>`. That section is covered by a live Chrome test. Firefox's own roleless contenteditable is the same section shape and also has EditableText, so it stays editable. A paragraph, panel, document, or `<select>` is not an entry: Firefox can report `STATE_EDITABLE` or EditableText on those nodes, and neither sets the edit flag. `set_value` on one raises not-editable before any select-all. An Impress or Draw paragraph is the exception when it has both `STATE_EDITABLE` and EditableText: the snapshot marks it `edit`, and `set_value` replaces it through EditableText with no select-all. A browser paragraph stays refused. A live Draw page covers a rectangle and an ellipse. A `<select>` is still written as a combo. A live Firefox test covers the paragraph, the select, a real input, and a contenteditable. The GTK replace stays on synthetic trees. | macOS `AXValue` / UIA `ValuePattern.SetValue` |
+| `type_text` | Optional `ref` on the `type` tool resolves that element (a replaced process is `stale_ref` / `app_restarted`), focuses it, and types only after keyboard focus reads back on that accessible. Unconfirmed focus is `focus_lost` and sends no keystrokes and no insert. The outcome read-back is that element. Without `ref`: AT-SPI `EditableText.insert_text` on the remembered editable after verifying its owner matches the frontmost app. No widget focus is required, but missing/mismatched app ownership returns `focus_changed`; use explicit `set_value` without a detectable frontmost app. Coordinate/key/app/window changes clear the remembered target. Otherwise XTEST uses a prepared Unicode keymap and paced keystrokes. On X11, a Chromium single-line entry treats one trailing LF or CRLF as Enter: the payload is typed and verified in that entry before Enter is sent once. Failed payload verification withholds Enter. Focused entry discovery uses native focused states inside a focused container, including PDF toolbars; multiline fields keep their existing behavior. This path has synthetic regression coverage; no live verification is claimed. Chrome's GTK Open File (and Save) dialog is an X window with no AT-SPI location entry, so the page focus stays empty after the keys land. That read-back copies the focused location entry with select-all, collapses the selection so the chooser's Open button is not left covered, and restores the previous clipboard. The type is confirmed from that entry, not reported as `text_mismatch` with an empty page. | `CGEventKeyboardSetUnicodeString` / `KEYEVENTF_UNICODE` |
+| `set_value` | An element that is not editable (the snapshot flag is false and the role is not a text field, text area, search field, or secure field) raises an error that the element is not editable. That call sends no keystrokes, clicks, or focus changes. An editable element is written with AT-SPI EditableText. Success is `Text.get_text(0, -1)` equaling the new string, the same read a snapshot uses. GTK `set_text_contents` replaces. A Chromium web field whose `set_text_contents` appends is selected and deleted, then written again. If that snapshot text remains, or the field has no EditableText, X11 focuses the field, sends ctrl+a and BackSpace, and types the new string, and that is success only when the snapshot read equals the new string. A field whose text cannot be read at all is trusted when `set_text_contents` returned true. A Chromium contenteditable with no textbox role is an AT-SPI section whose tag is `div` or `span`. `STATE_EDITABLE` on that section marks the group editable in the snapshot (`edit`) even when EditableText is absent, and `set_value` is allowed. With no EditableText the write uses the empty-contenteditable clear (focus, ctrl+a, BackSpace, Delete) and then types; success is the readable text, and one trailing newline is the `<br>`. That section is covered by a live Chrome test. Firefox's own roleless contenteditable is the same section shape and also has EditableText, so it stays editable. The edit flag uses the node's own `STATE_EDITABLE`, not EditableText support. A failed or refused write restores the previous caret and text selection, including on the document. A paragraph, panel, document, or `<select>` is not an entry: Firefox can report `STATE_EDITABLE` or EditableText on those nodes, and neither sets the edit flag. `set_value` on one raises not-editable before any select-all. An Impress or Draw paragraph is the exception when it has both `STATE_EDITABLE` and EditableText: the snapshot marks it `edit`, and `set_value` replaces it through EditableText with no select-all. A browser paragraph stays refused. A live Draw page covers a rectangle and an ellipse. A `<select>` is still written as a combo. A live Firefox test covers the paragraph, the select, a real input, and a contenteditable. The GTK replace stays on synthetic trees. | macOS `AXValue` / UIA `ValuePattern.SetValue` |
 | `key_chord` | XTEST via python-xlib: chord → X keysyms (`keysymdef.h` table) → keycodes → modifier `KeyPress`es, key press/release, modifier `KeyRelease`s; `validate_chord` fails fast on dry-run. (Real widget focus is needed for chords to land, so a full desktop session, not headless, is where they apply.) A bare Return, Enter, or kp_enter while the active window is a GTK file chooser (Open File, Save File, Save As, and the other titles in `_FILE_CHOOSER_TITLES`) does not send the key. The Open or Save button's AT-SPI action runs instead, after `scroll_to` and, when the button box is missing or outside the screen, a resize or move that places the window inside the display. The chooser window then has to be gone and the opener's accessibility text or another window title has to show the file. A dialog that stays open is `unsupported` / `file_chooser_unchanged`. One that closes without the file is `unsupported` / `file_not_chosen`. A named browser's chooser with no accessibility button, including Chrome's GTK Open File dialog, is not sent the key either. The window is resized and moved inside the display, then Open is clicked inset from the bottom-right. Success requires the dialog to close and the page's file input to show the file. A page that still says "No file chosen", including when the address bar or a window title contains the filename, is `unsupported` / `file_not_chosen`. A dialog that stays open is `file_chooser_unchanged`. Any other chooser with no accessibility button still sends the key. `file_dialog` stays unsupported. | `_US_KEYCODES` / VK codes via `SendInput` |
 | `wait_for` | `exists` and `gone` re-resolve through `resolve_ref` and return only when that checker does. `actionable` also reads the accessible: it has to be showing, on the primary screen, enabled or sensitive, stable (the same box on two reads at least 0.05s apart), and the process that owns the top window at its center, with the hit on that node or a descendant. The AT-SPI listener (state-changed, children-changed, bounds-changed, focus) starts on a Linux display and wakes the wait; otherwise the poll is 0.1s and never longer than the time left. While that listener is up, a snapshot drops the application's cached children before the walk, so a Chromium page that never entered the cache is still read from the bus. A timeout is `ErrorCode.TIMEOUT` and names the check that failed (`visible`, `enabled`, `stable`, `receiving_events`, or `actionable`). A sample that fails a check is not success. | identical loop on macOS and Windows |
 | `screenshot` | native Wayland (`WAYLAND_DISPLAY` set, no `DISPLAY`): `grim -` first; X11/XWayland: PIL `ImageGrab.grab(xdisplay=$DISPLAY)` to PNG, with grim as the last resort; structured `PERMISSION_DENIED_SCREEN` carrying X11 and Wayland hints when neither path works (headless without Xvfb) | `CGWindowListCreateImage` / DXGI Desktop Duplication (Windows: not implemented yet) |
@@ -63,6 +97,14 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 
 **App identity** on Linux is the process **comm name** (`/proc/<pid>/comm`, exe-basename fallback), the analog of a macOS bundle id / Windows exe for permission-keying and the safety layer's app gating.
 
+HTML `section` nodes tagged `div`, `pre`, `code`, `blockquote`, `address`,
+or `figcaption` expose their own AT-SPI Text as snapshot values, including
+when Gecko or WebKitGTK provides no static-text children. This makes those
+words available to `find` and snapshot-based `scroll_to_find`. Sections containing
+only embedded controls stay valueless, and protected text stays private.
+This mapping is covered by synthetic tests; Firefox/Yelp live verification
+has not been performed for this change.
+
 ## Linux-specific concerns (no macOS analog)
 
 - Qt on X11 joins the accessibility tree through the X root-window property `AT_SPI_BUS` (type `STRING`, 8-bit) or through `org.a11y.Bus` on the session bus. `at-spi-bus-launcher` writes that property when it starts. Tester launched a PyQt6 window with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` before the property existed, and the window never appeared in the tree. The live Qt fixture reads `org.a11y.Bus.GetAddress` and writes that address onto the root before the process starts. It does not export `AT_SPI_BUS_ADDRESS`: on Qt 6.4 that variable makes the bridge emit its enable signal before the slot is connected, and the application never registers. Set the root property, and leave the variable unset, when you launch Qt outside the fixture.
@@ -70,6 +112,7 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 - A ref click on a file-manager side pane, or on a tree or list row that opens a folder, uses that row's own activation. A Thunar shortcut cell's `activate` action and Return leave the folder where it was; the click is a pointer click at the row. A tree or list row whose own action is `activate` uses that action. Return is sent only when the row has no box and no activate action. The click is `confirmed` only when the location entry or the path bar changed. A row that was only selected is `partial`. A file row inside the folder view's tab still selects and does not open. A GTK tree with no location bar still selects through the parent's Selection interface.
 - A ref click on a Qt table cell is a pointer click at the cell's center. `Toggle` and `Selection.select_child` add the cell and leave `currentItem` where it was, so a later Delete or key would hit every selected cell and the old current cell. The click is a success only when that cell is the only selected cell and it is focused, which is the current cell. The outcome is `confirmed` when the accessibility state changed to that, and `refused` with `selection_unchanged` when the click did not. A tree item stays on `Toggle`, which selects the row and does not expand it.
 - Accessibility must be ENABLED; it is the key runtime requirement. This is the exact opposite of the Grok-desktop default, which ships with a11y OFF and drives everything by vision+coordinates. a11y-computer-use's a11y-first path needs the AT-SPI2 registry reachable, which means: `at-spi2-core` installed and running (the `org.a11y.Bus` name present on the session bus), toolkits bridging into it (`gsettings set org.gnome.desktop.interface toolkit-accessibility true`; for non-GNOME sessions export `GTK_MODULES=gail:atk-bridge`), and Chromium/Electron apps launched with `--force-renderer-accessibility` (they otherwise expose an empty tree). `ensure_trusted` (`a11y_computer_use/drivers/linux.py`) checks only the first of these: it best-effort sets `org.a11y.Status.IsEnabled`/`ScreenReaderEnabled` true on the session bus (`_atspi.enable_a11y_status`, result not checked; opt out with `A11Y_COMPUTER_USE_NO_WEB_A11Y=1`) and then probes `Atspi.get_desktop(0)`; if the bindings fail to import or the desktop is unreachable it raises a structured `permission_denied_accessibility` error whose hint lists the apt, gsettings, and `--force-renderer-accessibility` steps. It does not verify that toolkits are bridged (gsettings / `GTK_MODULES`) or that Chromium/Electron apps were launched with `--force-renderer-accessibility`; an app whose tree is empty for those reasons still yields an empty snapshot, not an error. Turning an accessibility-OFF Linux desktop into an accessibility-FIRST one is the whole point of this backend.
+- A running app that appears in app/window lists but has no AT-SPI root returns `unsupported` with `reason: no_accessibility_bridge` from app-scoped snapshots, find, and menu listing. A window first listed after the registration eligibility check remains `app_not_found` for that observation so the next call can retry registration. Snapshots preserve the remaining existing 15 s startup grace for an unambiguous newly started window owner, so a GTK4 window may register its tree after it maps. A distinct GTK program name may identify that owner through WM_CLASS when the process runs under an interpreter; a window title alone does not establish ownership. Older non-LibreOffice apps get one short registration retry; LibreOffice retains its 15 s registration grace period. This also covers an app connected to the accessibility bus without exporting a root. The hint suggests screenshots with explicit coordinates, enabling the bridge, or retrying if the app is still starting. A registered app with an empty tree remains a valid snapshot; an app absent from both AT-SPI and the lists remains `app_not_found`.
 - A frozen application does not answer AT-SPI. libatspi waits 300ms per call, and a walk of a stopped process (Mousepad under `SIGSTOP`) used to take about 19s and then succeed with an empty tree plus the custom-drawn `screen_text` note. `screen_text` has no engine on Linux. Snapshot now bounds that wait per application. A read that returns, however slow, is a live app: Firefox, Chrome, and LibreOffice cross 300ms on startup and on large documents. `app_not_responding` is raised only with evidence of a hang. The process state in `/proc/<pid>/stat` is `T` or `t` (stopped) and a query went unanswered, which fails on that first miss so a `SIGSTOP` stays inside one D-Bus timeout. The pid is the window owner when that comm matches, or the one stopped process whose command line contains the AT-SPI program name when the comm is different (`cuatestapp` on `python`). Otherwise the process is still scheduled, and the error is raised only when a cheap ping (`get_name` / `get_process_id`, retried, on a longer timeout than the walk) gets no reply across several seconds of consecutive misses. A process younger than the registration wait is not failed for those misses; the snapshot wait retries it. The note is not added. `Scope.DISPLAY` skips an application that does not answer and still returns the others. After the process continues, the next snapshot is the tree again. Ref re-resolution is unchanged: a missing anchor is still `stale_ref`, and a node that is only scrolled off or not showing keeps the code it had.
 - No batch read. AT-SPI is a D-Bus protocol with **no batch/prefetch**: every property and every `get_child_at_index` is its own cross-process round-trip (the weakness it has vs UIA's `CacheRequest` and AX's multi-attribute reads). Two mitigations in `_atspi.py`: every read is defensive (`_safe`/`_call_first`: a flaky read degrades to a sane default, never crashes the walk), and children fetched per node are capped at `_MAX_CHILDREN_FETCH` (250); the engine only walks the first `_MAX_WALK_CHILDREN` (200) anyway, so fetching a virtualized 10k-row list one round-trip at a time would be ruinous for nothing. A Chromium list is the exception in `ATSPIAccessor.children`: it returns the on-screen named rows, and when the child count is above that cap the walk starts at the first child whose box reaches the viewport. Rows the tree does not expose are not added. A subtree cache/diff is the perf follow-up.
 - PyGObject interface-method collision. Reading a text field's contents must use the explicit interface class form `Atspi.Text.get_text(acc, 0, -1)`. The instance form `acc.get_text_iface().get_text(a, b)` resolves to `Atspi.Accessible.get_text` (a 1-arg method) and raises `TypeError`, which, swallowed by the defensive readers, silently blanks every field value. (`get_character_count` and the EditableText/Action methods don't collide.) `_value_text` uses the explicit form.
@@ -122,6 +165,18 @@ name:
 pip install 'a11y-computer-use[agent,linux]'
 ```
 
+That command compiles PyGObject and pycairo in an isolated venv. PyGObject is sdist-only and pycairo has no Linux wheel, so the build needs `pkg-config` plus the cairo and girepository headers. Without those headers, pip fails while compiling one of the two.
+
+The install that does not compile them uses the distro GI packages and a venv that can import those modules (`--system-site-packages`):
+
+```bash
+sudo apt install python3-gi python3-gi-cairo gir1.2-atspi-2.0
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install 'a11y-computer-use[agent,linux]'
+```
+
+`python3-gi` is PyGObject, `python3-gi-cairo` is the cairo override those bindings import, and `gir1.2-atspi-2.0` is the AT-SPI2 typelib. An isolated venv still works when the build dependencies later in this section are installed first.
+
 `a11y-agent` refuses to start when `gi` or `Xlib` cannot be imported. The
 process exits 3 with status `failed` and an install message. It does not hand
 that ImportError to the model as a permission observation.
@@ -132,7 +187,7 @@ From a clone, the same extra is an editable install:
 pip install -e '.[linux]'
 ```
 
-**python-xlib** is a core dependency on Linux (`sys_platform == 'linux'`), so `pip install a11y-computer-use` can list X11 windows. If that import still fails, `app list`, `window list`, `key` with `app`, and an app-scoped `find` return `unsupported` with `reason` `missing_dependency` and the hint `pip install python-xlib`. They do not return an empty list as `confirmed`, and they do not wait 15s and report LibreOffice's gtk3 bridge as missing. The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe) and repeats **python-xlib**, both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so a Linux install of the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
+**python-xlib** is a core dependency on Linux (`sys_platform == 'linux'`), so `pip install a11y-computer-use` can list X11 windows. If that import still fails, `app list`, `window list`, `key` with `app`, and an app-scoped `find` return `unsupported` with `reason` `missing_dependency` and the hint `pip install python-xlib`. They do not return an empty list as `confirmed`, and they do not wait 15s and report LibreOffice's gtk3 bridge as missing. The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe) and repeats **python-xlib**, both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so an isolated venv that installs the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
 
 Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibility bus:
 
@@ -140,7 +195,7 @@ Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibil
 sudo apt install gir1.2-atspi-2.0 at-spi2-core
 ```
 
-A source build, when those wheels are absent, also needs headers and pkg-config. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
+A source build into an isolated venv, when those wheels are absent, also needs headers and pkg-config. This is the alternative to the `--system-site-packages` install above. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
 
 ```bash
 sudo apt install pkg-config libcairo2-dev python3-dev python3.13-dev \
@@ -155,11 +210,157 @@ For clipboard support install one of `xclip`, `xsel`, or `wl-clipboard`; headles
 In CI the shared core tests (`tests/test_drivers.py`, `tests/test_observe.py`, `tests/test_linux_synthetic.py`) and the MCP `build_server()` smoke run on `ubuntu-latest`, and `tests/test_linux_live.py` exercises the driver name, an AT-SPI snapshot of the GTK app, an a11y button press with an observable effect, a11y typing via `EditableText`, and the `org.a11y.Status` flip against a live bus. Coordinate click/drag/scroll, key chords, capture, EWMH windowing, and clipboard are implemented but have no live test yet. The `Driver` contract is a shared signature protocol (`a11y_computer_use/drivers/base.py`), and `tests/test_drivers.py` checks only that `LinuxDriver` satisfies it structurally, so a green Linux job shows that the platform-free engine passes on `ubuntu-latest` and that the five live-tested paths (driver name, AT-SPI snapshot, accessibility press, accessibility typing, `org.a11y.Status` flip) work against a GTK3 window; it is not a behavioural comparison with the macOS driver, which no test performs.
 
 Audacity's wxGTK toolbar tools may be childless AT-SPI panels with the command
-name in the description. The Linux driver exposes these as buttons, so
+name in the description. The Linux driver recognizes a native toolbar ancestor
+or an immediate sibling grip described as `Audacity … Toolbar` and exposes the
+command panels as buttons, keeping the grip a group, so
 `find(role="button", text="Play")` includes the transport control. A childless,
 unnamed track view remains an `opaque_region`, labelled `Audacity track / waveform`;
 Mute, Solo, track names, Gain, and Pan painted inside it are not separate controls
 in that tree. Use Audacity's `Tracks > Mute/Unmute` menus for mute operations.
 The unnamed panel in the Time toolbar is labelled `Audacity Time clock` and stays
-opaque: its displayed reading is not an accessible value. When Audacity publishes
+opaque, including the wxGTK layout with the toolbar description on a sibling
+grip: its displayed reading is not an accessible value. When Audacity publishes
 real children or names, the driver preserves them.
+
+## Meld file comparisons
+
+Meld 3.22.3 (GTK 3) exposes the file-diff chunk-action gutter between text
+panes as a single unnamed `opaque_region`. Its painted per-chunk merge arrows
+are not separate accessible controls or AT-SPI actions. Targeting a specific
+gutter arrow by ref is unsupported; the gutter ref identifies the whole strip,
+and a reported click on it does not verify that a change was merged. Do not
+infer arrow locations from the strip's bounds.
+
+For a merge operation, explicitly select the intended change with the named
+`Go to the next change` or `Go to the previous change` header-bar buttons, then
+use `Push current change to the left`, `Push current change to the right`, or
+`Delete change` as appropriate. Take a fresh snapshot and check the destination
+pane's text to verify the result. These are separate requested operations:
+an explicit gutter-arrow click must not be silently replaced with navigation
+or a header-bar action. If that arrow cannot be addressed, report the limitation.
+
+Okular's Thumbnails sidebar can expose its painted thumbnail strip as an
+empty AT-SPI filler, without page icons or page-label text. In the reported
+Sidebar structure (a Thumbnails label above a filler beside a scrollbar),
+the Linux driver labels that opaque region `Okular thumbnails` and includes
+a navigation note. `find` cannot select a thumbnail by page number in this
+tree. Use the page-number field, `Go to Page…`, or the Find bar instead.
+Native names and per-page children, when exposed, retain the normal role and
+label handling; the driver does not synthesize thumbnail targets or bounds.
+This fallback is covered by synthetic tests; a live Okular run has not been
+verified for this change.
+
+Okular may expose its PDF page viewport as an unnamed, childless filler without
+an AT-SPI Text interface. In the document pane, the Linux driver labels this
+opaque surface `Okular document / page view` and includes a limitation note.
+`find` and `scroll_to_find` cannot read page tokens from that surface. Explicitly
+use Okular's Ctrl+F Find bar or page-number control and verify the resulting UI;
+these tools do not automatically invoke in-app search. Accessible names and
+page text supplied by the application remain unchanged.
+
+### Opaque document search
+`scroll_to_find` refuses in-app Find before sending keys or query text when the chosen container contains an `opaque_region`, such as AbiWord’s document drawing area. It returns `unsupported` with reason `opaque_find_unverifiable`: the accessibility tree cannot verify a match, and native Find could leave document text selected for replacement by a later `type`. This refusal does not open Find or change the document selection.
+
+## Kate document text search
+Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
+omit Kate textarea buffer values because the editor bounds do not establish
+character visibility. `find` and `scroll_to_find` cannot verify individual
+document text matches; even visible buffer text is excluded until character
+visibility can be established. The editor ref remains available, with a hint
+to use in-document navigation. Single-line search fields keep their values.
+This conservative behavior is covered by synthetic tests; no live Kate run
+was performed for #477.
+
+GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
+
+Kate's unnamed, childless filler directly left of a multiline editor is labelled
+`Kate editor gutter` when native bounds establish the shared edge and height.
+It remains opaque: AT-SPI does not expose individual line numbers, so this label
+supports finding the gutter, not targeting a particular line. Missing or ambiguous
+geometry leaves it unnamed. This recognition is covered by synthetic tests;
+Kate has not been live-verified for this change.
+
+GTK grid buttons with empty or duplicated accessible names use the nearest
+sibling label to their left with overlapping vertical extents. Explicit
+`labelled-by` relations take precedence. Missing geometry or equally near
+labels leave the raw name unchanged. The original nonempty button name (for
+example `Sans Bold`) is retained as its value when no value is exposed. This
+lets snapshots and `find` identify font and colour controls by their row label;
+button handles, actions, and measured bounds are unchanged. Covered by hermetic
+galculator-shaped regression tests; no local live verification.
+
+
+### Masked GTK 4 entries
+
+Password roles, password/protected/invisible states, visibility-off, and
+invisible-character attributes classify an entry as `securetextfield`. Its
+value is omitted, and type/set_value are refused without echoing the input.
+
+GTK 4 can omit those signals and expose the plaintext buffer through bounded
+`GetText` even when the entry is masked. For GTK 4 single-line entries the driver
+checks `Text.GetStringAtOffset(0, LINE)`, which the GTK 4.18 probe showed returns
+the rendered text: plain text for visible entries, bullets for masked entries.
+A nonempty, unmasked layout string matching a private buffer read permits
+snapshot/find readback. Custom glyphs that differ from the buffer, masking
+strings and missing layout replies require human handoff. An empty rendered
+line with a zero character count and no masking signal is unknown rather than
+secure: ref-based type/set_value may write it once using private boolean
+verification. The action result and audit input are redacted even if the entry
+subsequently proves visible. A fresh snapshot classifies the rendered line:
+bullets become secure, matching plain text permits readback. GTK 3 and multiline
+editors keep their existing text path. State and toolkit attributes are read once
+within each security probe; the layout call is limited to GTK single-line
+entry/text roles outside GTK 3.
+
+## Qt document searches
+
+Qt multiline editors (including FeatherPad) expose the entire document through
+AT-SPI Text. Native multiline states or attributes select this path; ordinary
+Qt line edits retain their text without requesting document viewport ranges.
+Snapshot values and text searches use `Text.get_bounded_ranges`
+inside the measured editor bounds, falling back to native point offsets and
+verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+these ranges, so an off-screen match becomes searchable when it enters the
+viewport. When neither interface establishes visibility, the document value is
+omitted and its hint recommends in-document Find or line navigation. `find` and
+`scroll_to_find` cannot confirm document text through the whole buffer in that
+case. This path is covered by synthetic tests; FeatherPad has not been live-
+verified for this change.
+
+### Execution permission and launchers
+
+With `allow_exec=False` (the default), terminal launches and input require an
+explicit execution grant, independently of a FULL app grant. The same launch
+gate refuses known run dialogs/app finders, script interpreters, shells, and
+generic launch wrappers (including `exo-open`, `gtk-launch`, and `xdg-open`).
+It checks command strings before application resolution, executable symlinks,
+desktop-file Exec programs, and resolved launch arguments. Each refusal returns
+`exec_disabled` and writes an audit entry. Input to known app finders is also
+refused; a Python process hosting an ordinary GUI editor is not itself a
+terminal input target. These name-based checks are not a process sandbox.
+
+## gucharmap Character Table
+
+The reported GTK 3 Character Table exposes an unnamed drawing area with no
+AT-SPI children. The Linux driver labels it `gucharmap Character Table` and
+explains that its ref identifies the whole opaque table. It does not publish
+character cells, names, codepoints, or inferred glyph positions. `find` and
+`scroll_to_find` cannot target the painted characters; scrolling may change
+selection. A click on the table cannot confirm a requested character.
+
+Use `Search > Find` or the `Go` menu only as separate requested operations,
+then verify the selected codepoint and name in the statusbar or Character
+Details. A statusbar match describes the current selection, not a clickable
+character cell. Native drawing-area names, descriptions, and children take
+precedence over this fallback label.
+
+## Gnumeric name-box navigation
+
+Ref-based activation of Gnumeric's `AXImage` named `go-jump` is refused with an
+`unsupported` error because this name-box control has been reported to crash
+Gnumeric (#492). The guard covers accessibility activation and element pointer
+clicks. It does not substitute keyboard input or claim cell-address navigation
+succeeded. Coordinate-only clicks do not identify an accessible control and are
+not covered by this guard.
+
+Editable web combobox inputs (ARIA autocomplete and HTML datalist) retain their combobox role and expose `edit` when their native node has `tag=input`, Text, and `EDITABLE`, without `READ_ONLY`. `set_value` uses the verified text replacement path, and `type(ref=...)` uses the focus-confirmed text path; values are not restricted to popup options. Select-style combos retain option selection. This distinction is hermetic-tested; native Chrome verification remains a CI/live check.

@@ -384,6 +384,78 @@ def test_find_treats_nbsp_as_a_space() -> None:
     assert observe.find_elements(snap, text="quick brown fox")
 
 
+def _ranked(role: str, title: str, **kwargs) -> Element:
+    return Element(
+        ref=kwargs.pop("ref", "e1"),
+        role=role,
+        title=title,
+        value=kwargs.pop("value", None),
+        bounds=Bounds(0, 10, 20, 80, 16),
+        snapshot_id="s",
+        clickable=kwargs.pop("clickable", False),
+        subrole=kwargs.pop("subrole", None),
+    )
+
+
+def test_exact_control_names_outrank_a_label_that_mentions_them() -> None:
+    """Ranking for find and scroll_to_find. Not a live tree.
+
+    A cell titled with the needle wins over a label that only mentions it.
+    The label is left out when it is the only hit. An exact label title, a
+    paragraph value, a button substring, and a field value stay.
+    """
+    label = _ranked(
+        "AXStaticText", "See ROW-05000 in the list",
+        subrole="label", ref="e1",
+    )
+    cell = _ranked("AXCell", "ROW-05000", clickable=True, ref="e2")
+    ranked = observe.prefer_exact_targets((label, cell), "ROW-05000")
+    assert [el.ref for el in ranked] == ["e2"]
+    assert observe.prefer_exact_targets((label,), "ROW-05000") == ()
+    welcome = _ranked("AXStaticText", "Welcome back", subrole="label")
+    assert observe.prefer_exact_targets((welcome,), "Welcome back") == (welcome,)
+    paragraph = _ranked("AXStaticText", "", value="The quick brown fox jumps")
+    assert observe.prefer_exact_targets((paragraph,), "quick brown fox") == (paragraph,)
+    button = _ranked("AXButton", "Save document", clickable=True)
+    assert observe.prefer_exact_targets((button,), "Save") == (button,)
+    field = _ranked("AXTextField", "Name", value="Alice")
+    assert observe.prefer_exact_targets((field,), "Alice") == (field,)
+    spaced = _ranked("AXStaticText", "Welcome\u00a0back", subrole="label")
+    assert observe.prefer_exact_targets((spaced,), "Welcome back") == (spaced,)
+
+
+@pytest.mark.parametrize(
+    "title", [
+        "Cursor size:", "  Cursor size:  ", "Cursor size…", "Cursor\u00a0size:",
+        "Adjust Cursor size in Settings",
+    ],
+)
+@pytest.mark.parametrize("text", ["Cursor size", "cursor size", "Cursor", "size", "sor si"])
+def test_partial_form_label_names_survive_find_ranking(title: str, text: str) -> None:
+    """Partial label names survive the shared find/scroll_to_find ranking."""
+    snap = snap_of(ax(
+        "AXWindow", title="Settings", at=(0, 0), size=(800, 600), children=[
+            ax("AXStaticText", title=title, subrole="label", at=(10, 10), size=(200, 24)),
+        ],
+    ))
+    matches = observe.find_elements(snap, text=text)
+    assert len(matches) == 1
+    assert matches[0].title == title
+    assert observe.prefer_exact_targets(matches, text) == matches
+
+
+def test_exact_control_still_outranks_partial_form_label() -> None:
+    label = _ranked("AXStaticText", "Cursor size:", subrole="label", ref="e1")
+    control = _ranked("AXSlider", "Cursor size", clickable=True, ref="e2")
+    assert observe.prefer_exact_targets((label, control), "Cursor size") == (control,)
+
+
+@pytest.mark.parametrize("title", ["ROW-05000:", " ROW-05000… "])
+def test_indexed_target_form_label_keeps_trailing_punctuation(title: str) -> None:
+    label = _ranked("AXStaticText", title, subrole="label")
+    assert observe.prefer_exact_targets((label,), "ROW-05000") == (label,)
+
+
 def test_single_child_wrappers_collapse() -> None:
     snap = snap_of(typical_app_window())
     editor = by_title(snap, "Document body")

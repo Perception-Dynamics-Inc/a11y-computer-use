@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -37,6 +38,19 @@ from a11y_computer_use.schema import (
     Target,
     WaitCondition,
 )
+
+
+def _no_accessibility_tree(app: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{app!r} is running but exposes no AT-SPI accessibility tree",
+        detail={
+            "app": app,
+            "reason": "no_accessibility_bridge",
+            "hint": "Use a screenshot and explicit coordinates, or enable the app's "
+                    "accessibility bridge. If the app is still starting, retry.",
+        },
+    )
 
 
 def _hint_pid(app: str) -> int | None:
@@ -80,10 +94,15 @@ def _point_of(target: Target) -> tuple[int, int]:
     """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
-    if target.bounds is None:
+    bounds = target.bounds
+    center = bounds.center if bounds is not None else None
+    if center is None or any(
+        not math.isfinite(v) or v < -32768 or v > 32767
+        for v in (center.x, center.y)
+    ):
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
-            f"{target.ref} ({target.role}) has no bounds; no pointer click was sent",
+            f"{target.ref} ({target.role}) has no usable bounds; no pointer click was sent",
             detail={"ref": target.ref, "role": target.role, "reason": "not_actionable"},
         )
     return int(target.bounds.center.x), int(target.bounds.center.y)
@@ -1215,6 +1234,7 @@ class LinuxDriver:
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
+        self._sheet_type_readback: tuple[str, str] | None = None
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
@@ -1437,17 +1457,23 @@ class LinuxDriver:
         # other case: the caller says LibreOffice and the bus says
         # soffice.bin, so the comm is used only after the given name misses.
         resolved, root = self._root_for_snapshot(app, scope)
-        # The X window is in app list and window list before the application
-        # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
-        # the list still shows the app, or a LibreOffice process in this
-        # session is up, and stop at ATSPI_REGISTER_WAIT_S. A name that is
-        # not listed does not wait, including a soffice process on another
-        # display. The missing gtk3 bridge is reported after that deadline,
-        # not during the registration gap.
-        if root is None and (
+        # Preserve the existing process-startup grace: GTK4 can map its
+        # window before registering its tree. Older non-office apps get one
+        # short retry, since a window alone does not promise a bridge.
+        waiting_for_registration = root is None and (
             _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
-        ):
-            deadline = time.monotonic() + _atspi.ATSPI_REGISTER_WAIT_S
+        )
+        if waiting_for_registration:
+            office = _atspi.libreoffice_app(app) or _atspi.libreoffice_app(resolved)
+            wait = (_atspi.ATSPI_REGISTER_WAIT_S if office
+                    else _atspi.ATSPI_REGISTER_POLL_S)
+            if not office:
+                wait = max(wait, min(
+                    _atspi.ATSPI_REGISTER_WAIT_S,
+                    max(_atspi.registration_startup_remaining(app),
+                        _atspi.registration_startup_remaining(resolved)),
+                ))
+            deadline = time.monotonic() + wait
             while root is None and time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1460,10 +1486,8 @@ class LinuxDriver:
                     _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
                 ):
                     break
-        # An empty tree is a running app with nothing to show. No AT-SPI
-        # application at all is the same answer menu list already gives:
-        # the app is not running. An empty snapshot there told the agent
-        # the app was open and custom-drawn.
+        # A listed app without a root is running but currently inaccessible.
+        # Keep genuinely absent apps distinct from a missing bridge.
         if root is None:
             if _atspi.libreoffice_without_bridge(resolved):
                 raise ComputerUseError(
@@ -1476,6 +1500,13 @@ class LinuxDriver:
                         "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
                     },
                 )
+            # A window can map between the registration check and this
+            # final listing. It has not received even the short retry yet;
+            # leave it retryable rather than diagnosing a missing bridge.
+            if waiting_for_registration and (
+                _atspi.app_listed(app) or _atspi.app_listed(resolved)
+            ):
+                raise _no_accessibility_tree(resolved)
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {resolved!r}",
@@ -1717,6 +1748,9 @@ class LinuxDriver:
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
         semantics as macOS, without macOS's pyobjc `observe.snapshot`.
 
+        An unnamed textarea whose pruned path changed can also resolve by
+        its AT-SPI bus/object identity in the fresh tree.
+
         A node the pruned tree dropped because its document is not showing is
         ``not_showing``, not ``stale_ref``. ``stale_ref`` stays the answer when
         the node is gone. A node that is still alive and has scrolled off the
@@ -1730,6 +1764,30 @@ class LinuxDriver:
         try:
             return observe.rematch_ref(snap, ref, live)
         except ComputerUseError as exc:
+            if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
+                anchor = snap.element(ref)
+                # GTK can retain or flatten an unnamed group as transient
+                # siblings appear. Require native identity, never geometry or
+                # a namesake, to recover an unnamed editor across that change.
+                if anchor.role == "AXTextArea" and not anchor.title and live.app == snap.app:
+                    from a11y_computer_use.drivers import _atspi
+
+                    handle = observe.ax_handle_for(snap.snapshot_id, ref)
+                    key = (
+                        self._run(lambda: _atspi._atspi_wrapper_key(handle))
+                        if handle is not None else None
+                    )
+                    if key is not None:
+                        matches = [
+                            el for el in live.elements
+                            if el.role == anchor.role and el.title == anchor.title
+                            and observe._bound_to_same_target(anchor, el)
+                            and self._run(lambda el=el: _atspi._atspi_wrapper_key(
+                                observe.ax_handle_for(live.snapshot_id, el.ref)
+                            )) == key
+                        ]
+                        if len(matches) == 1:
+                            return matches[0]
             # A quit-and-relaunched app, or a different document, must stay
             # stale_ref. Searching the new tree for a hidden namesake would
             # retarget the error onto the replacement.
@@ -1887,6 +1945,28 @@ class LinuxDriver:
         except Exception:
             return
 
+    def _refuse_gnumeric_go_jump(self, element: Element, handle) -> None:
+        """Refuse the name-box image whose activation crashes Gnumeric (#492)."""
+        if element.role != "AXImage" or element.title != "go-jump" or handle is None:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        def owner_name():
+            app = _atspi._application_of(handle)
+            return _atspi._call_first(app, ("get_name", "getName"), default="") or ""
+
+        if str(self._run(owner_name)).casefold() != "gnumeric":
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "Gnumeric's name-box go-jump image can crash the application; activation was refused",
+            detail={
+                "ref": element.ref, "role": element.role,
+                "reason": "gnumeric_go_jump_crash", "outcome": "refused",
+                "hint": "Cell-address navigation through this control is unsupported (issue #492).",
+            },
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -1901,6 +1981,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_gnumeric_go_jump(element, handle)
         pressed = _cdp_forms.press_checkable(
             element,
             window_title=self._dom_window_title(handle),
@@ -1923,6 +2004,14 @@ class LinuxDriver:
             return False
         if self._run(lambda: _atspi.is_libreoffice_shape_text(handle)):
             return False
+        if self._run(lambda: _atspi.gtk_icon_view_item(handle)):
+            if self._run(lambda: _atspi.click_gtk_icon_view_item(handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not select only that icon",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
             # it (best-effort — grab_focus is cursor-free but headless X may not
@@ -2193,6 +2282,16 @@ class LinuxDriver:
             },
         ) from exc
 
+    def text_visibility_unknown(self, element: Element) -> bool:
+        """Whether this write needs private verification and a redacted receipt."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role not in {"AXTextField", "AXTextArea"} or element.value is not None:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        return handle is not None and self._run(lambda: _atspi.text_visibility_unknown(handle))
+
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -2301,30 +2400,50 @@ class LinuxDriver:
                         f"{element.ref} ({element.role}) has no Value interface",
                         detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
                     )
-        # A menu, heading, label, button, browser paragraph, or select is not
-        # a text target. Raising here is what stops the Runtime from focusing
-        # it and typing the value into whatever is frontmost. No key, click,
-        # or focus is sent. The snapshot flag is not enough: Firefox reports
-        # STATE_EDITABLE and EditableText on static nodes, and selecting one
-        # selects the page. The live node has to be an editable entry. An
-        # Impress or Draw paragraph with that state and EditableText is one.
+        # A menu, label, button, browser paragraph, or select is not a text
+        # target. Raising here is what stops the Runtime from focusing it and
+        # typing the value into whatever is frontmost. The snapshot flag is
+        # not enough: Firefox reports EditableText on static nodes and on
+        # address-bar wrappers, and selecting one selects the page. The live
+        # node has to be an editable entry (its own STATE_EDITABLE). A refused
+        # or failed write restores the caret and selection captured before
+        # the call, including on the document, and that restore sends no keys.
+        points = []
+        if handle is not None:
+            points = self._run(lambda: _atspi._capture_text_points(handle)) or []
+
+        def restore() -> None:
+            if points:
+                self._run(lambda: _atspi._restore_text_points(points))
+
         if not _accepts_text(element):
+            restore()
             raise _not_editable(element)
         if handle is None:
             return False
         # A synthetic field has no AT-SPI role and stays on set_text. A
-        # paragraph, panel, document, combo, or read-only node is refused
-        # here, before set_text can select it. A contenteditable section and
-        # a Chrome date segment are not refused.
+        # paragraph, panel, document, combo, read-only node, or entry
+        # without STATE_EDITABLE is refused here, before set_text can
+        # select it. A contenteditable section and a Chrome date segment
+        # are not refused. Impress and Draw editable paragraphs retain their
+        # native EditableText path.
         if self._run(lambda: _atspi._blocks_text_replace(handle)):
+            restore()
             raise _not_editable(element)
         # EditableText replace, or X11 clear-and-type when that interface is
         # missing. Success is the snapshot text read (Text.get_text 0, -1),
         # not a bounded read that can echo the request. A write that does not
         # stick raises: returning False made the Runtime type into whatever
         # was focused and still report success. Marshaled onto the a11y thread.
-        success = self._run(lambda: _atspi.set_text(handle, value))
+        # A failed write restores the pre-call caret after set_text's own
+        # restore, which can itself select the document.
+        try:
+            success = self._run(lambda: _atspi.set_text(handle, value))
+        except Exception:
+            restore()
+            raise
         if not success:
+            restore()
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
                 f"the value read back does not match {value!r}",
@@ -2378,8 +2497,19 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_gnumeric_go_jump(target, handle)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
+            if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{target.ref} ({target.role}) has unverified GTK 4 in-window dialog bounds; "
+                    "the pointer click was not sent. Use press for semantic activation.",
+                    detail={
+                        "ref": target.ref, "role": target.role,
+                        "reason": "not_actionable", "outcome": "refused",
+                    },
+                )
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
@@ -2395,6 +2525,12 @@ class LinuxDriver:
             x, y = int(revealed[0]), int(revealed[1])
         else:
             x, y = _point_of(target)
+        gtk4_text = (
+            isinstance(target, Element)
+            and target.role in {"AXTextField", "AXTextArea", "AXSearchField"}
+            and handle is not None
+            and self._run(lambda: bool(_atspi._gtk4_app(handle)))
+        )
         header_box_untrusted = handle is not None and self._run(
             lambda: _atspi.gtk4_window_origin_untrusted(handle)
         )
@@ -2404,7 +2540,9 @@ class LinuxDriver:
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
             # Header-bar controls expose click/press. Do not substitute an
             # unrelated action, or fall back to their known unreliable point.
-            activated = plain and self._run(
+            # GTK 4 entry 'activate' does not establish keyboard focus.
+            # Without reliable geometry an explicit click must be refused.
+            activated = plain and not gtk4_text and self._run(
                 lambda: _atspi._do_action_named(handle, frozenset({"click", "press"}))
                 if header_box_untrusted else _atspi.do_press(handle)
             )
@@ -2450,6 +2588,25 @@ class LinuxDriver:
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         self._note_pointer(x, y)
+        if gtk4_text and button is MouseButton.LEFT:
+            # Wait for the pointer event to be processed; never replace a
+            # missed click with grab_focus or a widget activation action.
+            for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
+                if self._run(lambda: _atspi._focus_on_target(handle)) is True:
+                    break
+                if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
+                    time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
+            else:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_LOST,
+                    f"click did not focus {target.ref} ({target.role})",
+                    detail={
+                        "ref": target.ref,
+                        "role": target.role,
+                        "reason": "focus_lost",
+                        "outcome": "unconfirmed",
+                    },
+                )
         # A double-click does not place the caret through the text
         # interface. When the pointer did land in this paragraph, the
         # following type inserts there. A miss leaves the caret elsewhere
@@ -2678,6 +2835,49 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         return bool(self._run(lambda: _atspi.latch_chromium_find(app)))
+
+    def supports_in_page_find(self, app: str) -> bool:
+        """True when Ctrl+F opens a find bar in ``app``.
+
+        Chromium and Firefox do. Java Swing, GTK, and Qt do not. False when
+        the tree cannot be read, so ``scroll_to_find`` does not type the query
+        into whichever cell already has the caret.
+        """
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.schema import Scope
+
+        def probe() -> bool:
+            root = _atspi.find_root(app, Scope.WINDOW)
+            return _atspi.app_supports_in_page_find(root)
+
+        try:
+            return bool(self._run(probe))
+        except Exception:
+            return False
+
+    def find_bar_focused(self, app: str) -> bool:
+        """True when keyboard focus is in the browser find field.
+
+        One focused-node read, not a page snapshot. An open find bar fills
+        libatspi's child cache, and a snapshot of it is the empty frame
+        ``scroll_to_find`` must not wheel. False when focus is a table cell,
+        a page input, or unknown.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        def probe() -> bool:
+            try:
+                acc, truncated = _atspi._focused_node(app, max_nodes=48)
+            except Exception:
+                return False
+            if truncated or acc is None:
+                return False
+            return _atspi.focused_find_field(acc)
+
+        try:
+            return bool(self._run(probe))
+        except Exception:
+            return False
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
@@ -3266,6 +3466,7 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._sheet_type_readback = None
         self._type_expected = None
         self._sheet_type_origin = None
         self._drawing_type_before = None
@@ -3291,6 +3492,35 @@ class LinuxDriver:
             # The find field latches this process even when the open bar is
             # not in a snapshot. scroll_to_find types and closes it first.
             self._run(lambda: _atspi.note_focused_find_bar(app_id))
+        if text.endswith("\n") and text[:-1] and "\n" not in text[:-1] and "\t" not in text:
+            entry = handle
+            if entry is None and app_id:
+                entry = self._run(lambda: _atspi.focused_chromium_entry(app_id))
+            if entry is not None and self._run(
+                lambda: _atspi.chromium_single_line_entry(entry)
+            ):
+                if self._run(lambda: _atspi.is_secure(entry)):
+                    raise _secure_focus_error("focused Chromium entry is secure")
+                if _on_wayland():
+                    raise _wayland_input_error("type_text with trailing Enter")
+                payload = text[:-1]
+                before = self._run(lambda: _atspi._readable_text(entry))
+                selection = self._run(lambda: _atspi._selection_span(entry, before))
+                self._run(lambda: _atspi._type_into_target(entry, payload))
+                after = _atspi._poll_typed_text(
+                    lambda: self._run(lambda: _atspi._readable_text(entry)),
+                    before, payload, selection=selection,
+                )
+                if after is None or not _atspi._typed_visible(
+                    before, after, payload, selection=selection,
+                ):
+                    raise _atspi._text_mismatch(
+                        "text_mismatch", "the single-line entry did not confirm the text; Enter was not sent",
+                        expected=payload, actual=after,
+                    )
+                self._type_expected = after
+                self._run(lambda: _atspi._type_into_target(entry, "\n"))
+                return len(text)
         if (
             handle is not None
             and ("\t" in text or "\n" in text)
@@ -3458,7 +3688,18 @@ class LinuxDriver:
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
-            mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
+            # Return to the caller after committing so event_main can process
+            # the editor's removal before the next native tree operation.
+            if self._run(lambda: _atspi._commit_open_sheet_editor(app_id)):
+                time.sleep(_atspi._SHEET_GRID_COMMIT_PAUSE_S)
+            # Each native read marshals through _safe/_call_first. The
+            # verification waits must leave the event loop free to process
+            # Calc's commit and cache updates between those reads.
+            from a11y_computer_use.drivers import _dbus_guard
+
+            mismatch = _dbus_guard.call_with_reconnect(
+                lambda: _atspi.sheet_grid_check(app_id, origin, text)
+            )
             if mismatch is None:
                 return len(text)
             self._sheet_type_origin = None
@@ -3509,6 +3750,12 @@ class LinuxDriver:
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)
+        if (
+            app_id and _atspi.libreoffice_app(app_id)
+            and _atspi._typed_visible(before, after, text)
+            and self._run(lambda: _atspi.spreadsheet_open(app_id))
+        ):
+            self._sheet_type_readback = (app_id, after)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
         # first read can be a truncated URL. Calc is the same lag: the cell
@@ -3531,6 +3778,10 @@ class LinuxDriver:
                 sheet=sheet,
             )
             if _atspi._typed_visible(before, after, text):
+                if sheet:
+                    # Preserve the actual settled read: a subsequent snapshot
+                    # can lose the transient editor in libatspi's child cache.
+                    self._sheet_type_readback = (app_id, after)
                 return len(text)
             if sheet:
                 raise _atspi._text_mismatch(
@@ -4331,6 +4582,41 @@ class LinuxDriver:
 
         return _linux_system.app_at_point_id(point.x, point.y)
 
+    def same_app_window_cover(self, element: Element, app: str | None) -> str | None:
+        """Return a covering same-app sibling toplevel for a ref click.
+
+        Resolve the target's owning toplevel so controls in the front dialog
+        remain clickable. Missing X11/AT-SPI evidence preserves normal clicks.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        bounds = element.bounds
+        if bounds is None:
+            return None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None or self._gtk4_point_untrusted(element, handle):
+                return None
+            toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            if toplevel is None:
+                return None
+            _active, title, pid, extents = toplevel
+            cx = float(bounds.x) + float(bounds.width) / 2.0
+            cy = float(bounds.y) + float(bounds.height) / 2.0
+            owner_pid = _linux_system.pid_at_point(cx, cy)
+            if not pid or not owner_pid or int(owner_pid) != int(pid):
+                return None
+            target_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+            front = _linux_system.window_at_point(cx, cy)
+            if target_id is not None and front is not None and front["window_id"] != target_id:
+                return front["title"] or "another window"
+        except Exception:  # no reliable toplevel hit-test
+            pass
+        return None
+
     def occlusion(self, element: Element, app: str | None) -> str | None:
         """None when the element's center belongs to ``app``.
 
@@ -4393,13 +4679,34 @@ class LinuxDriver:
         return _linux_system.running_apps()
 
     def terminal_target(self, app: str, target=None, *, launch: bool = False) -> bool:
-        """Recognize terminal apps and native terminal accessibles for the exec gate."""
+        """Recognize shell-capable launchers and native terminal input targets."""
         from pathlib import Path
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
         def known(name: str) -> bool:
             name = Path(name).name.casefold().removesuffix(".desktop")
+            # Run dialogs can execute arbitrary commands through ordinary input.
+            if name in {
+                "xfce4-appfinder", "xfce4-run", "gmrun", "gexec", "grun",
+                "krunner", "kstart", "kstart5", "dmenu", "dmenu_run", "rofi",
+                "ulauncher", "albert", "synapse",
+            }:
+                return True
+            if launch:
+                import re
+
+                # Interpreters and generic launch wrappers can start a shell.
+                # Do not classify a running Python GUI by its process comm.
+                if name in {
+                    "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh",
+                    "ash", "busybox", "perl", "ruby", "irb", "node", "nodejs",
+                    "lua", "luajit", "tclsh", "wish", "php", "r", "rscript",
+                    "env", "sudo", "doas", "pkexec", "nohup", "setsid",
+                    "exo-open", "xdg-terminal", "xdg-terminal-exec",
+                    "gtk-launch", "xdg-open", "gio",
+                } or re.fullmatch(r"(?:python|pypy)(?:[23](?:\.\d+)*)?", name):
+                    return True
             return name in {
                 "xfce4-terminal", "gnome-terminal", "gnome-terminal-server",
                 "gnome-terminal-", "xterm", "uxterm", "konsole", "tilix",
@@ -4417,11 +4724,38 @@ class LinuxDriver:
         if known(app):
             return True
         if launch:
+            import shlex
+
+            # Check command strings before app resolution (which may reject
+            # them), and every token of resolved desktop Exec argv afterward.
+            try:
+                parts = shlex.split(app)
+            except ValueError:
+                parts = [app]
+            if isinstance(target, tuple):
+                parts.extend(target)
+            if any(known(part) for part in parts):
+                return True
+
             # Resolve executable symlinks such as x-terminal-emulator.
             import shutil
 
-            executable = shutil.which(app)
-            return bool(executable and known(str(Path(executable).resolve())))
+            for part in parts:
+                executable = shutil.which(part)
+                if executable and known(str(Path(executable).resolve())):
+                    return True
+            from a11y_computer_use.drivers import _linux_system
+
+            # Match launch_app's executable-before-desktop precedence. Inspect
+            # Exec even when gtk-launch would delegate to the desktop service.
+            if not _linux_system._which_program(app):
+                entry = _linux_system._desktop_entry(app)
+                if entry:
+                    for part in _linux_system._desktop_match_names(app, entry[1]):
+                        executable = shutil.which(part)
+                        if known(part) or (executable and known(str(Path(executable).resolve()))):
+                            return True
+            return False
         if known(_resolved_app(app)):
             return True
         if isinstance(target, Element):
@@ -4531,6 +4865,8 @@ class LinuxDriver:
         except ImportError as exc:
             raise _missing_atspi_bindings(exc) from exc
         if root is None:
+            if _atspi.app_listed(app):
+                raise _no_accessibility_tree(app)
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {app!r}",
