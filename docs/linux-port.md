@@ -360,3 +360,5 @@ Gnumeric (#492). The guard covers accessibility activation and element pointer
 clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
+
+Editable web combobox inputs (ARIA autocomplete and HTML datalist) retain their combobox role and expose `edit` when their native node has `tag=input`, Text, and `EDITABLE`, without `READ_ONLY`. `set_value` uses the verified text replacement path, and `type(ref=...)` uses the focus-confirmed text path; values are not restricted to popup options. Select-style combos retain option selection. This distinction is hermetic-tested; native Chrome verification remains a CI/live check.
