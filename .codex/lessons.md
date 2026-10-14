@@ -78,3 +78,5 @@
 - 2026-10-14 (PR #566 repair): Appended test conflicts can contain regressions already present earlier in main. Preserve each test once and compare the resolved diff against main before validation.
 
 - 2026-10-14 (#584): Empty GTK 4 plain and visibility-off entries both expose an empty rendered LINE and no visibility metadata. A zero character count makes this state unknown, not secure; first writes require private buffer equality and redacted receipts/audit. Only later rendered text distinguishes visible contents from masking. GTK text roles may map to AXTextArea even for single-line entries.
+
+- 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.

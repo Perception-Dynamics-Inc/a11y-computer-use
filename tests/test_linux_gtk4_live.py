@@ -87,7 +87,7 @@ def _runtime(tmp_path, driver):
     for name in names:
         store.set_tier(name, safety.Tier.FULL)
     return server.Runtime(
-        store=store, audit=safety.AuditLog(tmp_path / "audit.jsonl"), driver=driver,
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
     )
 
 
@@ -346,7 +346,11 @@ app.run([])
                       else runtime.set_value(field.ref, secret))
             assert result.outcome == "confirmed"
             assert secret not in str(result) + repr(result.as_dict())
-            assert secret not in (tmp_path / "audit.jsonl").read_text()
+            audit_files = list(runtime.audit.dir_path.glob("*.jsonl"))
+            assert audit_files
+            audit_text = "".join(path.read_text() for path in audit_files)
+            assert audit_text
+            assert secret not in audit_text
             runtime.desktop_snapshot(str(row["app"]))
             snap = runtime._current
             field = next(el for el in snap.elements if el.title == "Field584")
