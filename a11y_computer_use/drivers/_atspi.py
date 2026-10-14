@@ -168,6 +168,7 @@ _PICK_ACTION_NAMES = frozenset({"select", "pick"})
 _MAX_CHILDREN_FETCH = 250
 
 _inited = False
+_atspi_binding = None
 
 
 def _atspi():
@@ -176,8 +177,12 @@ def _atspi():
 
     The import stays inside this function. A missing ``gi`` module, or a
     typelib ``require_version`` cannot load, is ImportError either way.
+    Reuse the successfully initialized binding, not any accessibility data.
+    A bus reconnect clears ``_inited`` and must still initialize it again.
     """
-    global _inited
+    global _inited, _atspi_binding
+    if _inited and _atspi_binding is not None and sys.modules.get("gi") is not None:
+        return _atspi_binding
     try:
         import gi
     except ImportError as exc:
@@ -202,6 +207,7 @@ def _atspi():
         # 300ms bound from the first call.
         _safe(lambda: Atspi.set_timeout(300, 0))
         _inited = True
+    _atspi_binding = Atspi
     return Atspi
 
 
@@ -16922,22 +16928,15 @@ def _frame_hierarchy_showing(node) -> bool:
     document web, its internal frame, and the scroll pane around that frame
     are SHOWING.
     """
-    current = node
-    seen: set[int] = set()
-    for _ in range(8):
-        if current is None or id(current) in seen:
-            return False
-        seen.add(id(current))
+    # Parent reads can return fresh GI proxies. Keep them alive and use
+    # native identity so a recycled Python id cannot hide the active page.
+    for current in _ancestor_chain(node, 8):
         role = _role_name(current)
         if role in {"document web", "document frame", "internal frame", "scroll pane"}:
             if _state_has(current, "SHOWING"):
                 return True
         if role in {"frame", "window", "application"}:
             break
-        parent = _parent_of(current)
-        if parent is None or parent is current:
-            break
-        current = parent
     return False
 
 
@@ -17000,22 +16999,13 @@ def _enclosing_tab_document(doc):
     the outermost document web under the window. An iframe's document web
     has that outer document as an ancestor.
     """
-    current = doc
     outer = doc
-    seen: set[int] = set()
-    for _ in range(24):
-        if current is None or id(current) in seen:
-            break
-        seen.add(id(current))
+    for current in _ancestor_chain(doc, 24):
         role = _role_name(current)
         if role in {"frame", "window", "application"}:
             break
         if role == "document web":
             outer = current
-        parent = _parent_of(current)
-        if parent is None or parent is current:
-            break
-        current = parent
     return outer
 
 
