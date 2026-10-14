@@ -270,7 +270,14 @@ character visibility. `find` and `scroll_to_find` cannot verify individual
 document text matches; even visible buffer text is excluded until character
 visibility can be established. The editor ref remains available, with a hint
 to use in-document navigation. Single-line search fields keep their values.
-This conservative behavior is covered by synthetic tests; no live Kate run
+Automatic `scroll_to_find` selects this editor view ahead of sibling breadcrumb
+lists. Text search returns `unsupported` with reason
+`document_text_visibility_unavailable` before wheel or Find input because the
+accessibility tree cannot confirm a visible match. An explicit container `ref`
+still selects that container. Editor selection and refusal were checked against
+Kate 25.04.3 under an isolated Xvfb/D-Bus session for #647.
+
+The buffer suppression is covered by synthetic tests; no live Kate run
 was performed for #477.
 
 GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
