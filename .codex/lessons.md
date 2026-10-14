@@ -95,12 +95,16 @@
 
 - 2026-10-14 (PR #566 repair): Appended test conflicts can contain regressions already present earlier in main. Preserve each test once and compare the resolved diff against main before validation.
 
+- 2026-10-14 (#600): Chromium single-line inputs cannot retain a trailing newline. Verify the payload in the native entry before sending Enter once; a simultaneously focused PDF toolbar container is not field read-back. Preserve both typing regressions and native activation safety regressions when merging appended tests.
+
 - 2026-10-14 (#584): Empty GTK 4 plain and visibility-off entries both expose an empty rendered LINE and no visibility metadata. A zero character count makes this state unknown, not secure; first writes require private buffer equality and redacted receipts/audit. Only later rendered text distinguishes visible contents from masking. GTK text roles may map to AXTextArea even for single-line entries.
 
 - 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
 - 2026-10-14 (#589): GTK transient siblings can change the pruned path of an unnamed textarea without replacing it. Rebind only when the fresh snapshot contains the same AT-SPI bus/object identity and preserves process/document binding; geometry and an unnamed role alone do not identify the editor. Preserve independent appended regression tests when merging main.
+- 2026-10-14 (PR #606 repair): Gate Chromium focused-entry discovery on the already observed node’s toolkit before repeating focus discovery. Native Calc read-back must retain a single focus-tree lookup; browser-specific disambiguation must not add native tree traversals to other apps.
 
 - 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
 - 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
+- 2026-10-14 (#537): `_atspi()` was initialized once but still ran `gi.require_version` for every state/geometry probe; the newer masking probes multiplied typelib version enumeration during Calc snapshots. Cache only the successfully initialized binding, preserve `_inited` invalidation on D-Bus reconnect and missing-GI dependency isolation, and keep all native state/geometry/readback calls live. Profile the event-thread callback, not just the caller waiting in `submit`; use fresh LibreOffice and D-Bus processes for repeated loaded measurements.
