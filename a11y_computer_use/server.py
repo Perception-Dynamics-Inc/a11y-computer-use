@@ -816,10 +816,20 @@ def _page_group_ancestor(el, by_ref, below_window):
     return titled if titled is not None else best
 
 
+def _document_text_unavailable(element: Element) -> bool:
+    """A document view whose toolkit cannot verify visible text."""
+    return (
+        element.role == "AXTextArea"
+        and element.value is None
+        and "Visible document text unavailable" in element.hint
+    )
+
+
 def _scroll_anchor(snap):
     """The element to wheel while searching.
 
-    A scroll area wins at any size. Otherwise the largest list, table,
+    An editor with unavailable visible text wins over sibling containers.
+    Otherwise a scroll area wins at any size, followed by the largest list, table,
     outline, or grid smaller than the window (the overflow list). A list
     taller than the window is the document's content box: the wheel goes to
     the document group that contains it when that group is smaller than the
@@ -855,6 +865,14 @@ def _scroll_anchor(snap):
     candidates = [el for el in snap.elements if content(el)]
     if not candidates:
         return None
+
+    # A suppressed document buffer still identifies the editor view. Do not
+    # let a sibling breadcrumb list become the search container instead.
+    editors = [el for el in candidates if _document_text_unavailable(el)
+               and el.enabled and not el.secure and _positive_box(el)]
+    if editors:
+        focused = [el for el in editors if el.focused]
+        return largest(focused or editors)
 
     areas = [el for el in candidates if el.role == "AXScrollArea"]
     if areas:
@@ -6185,7 +6203,9 @@ class Runtime:
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
-        body-scroll page, not the window's tab strip.
+        body-scroll page, not the window's tab strip. An editor with unavailable
+        visible text is preferred over sibling lists and text search refuses
+        before input because a visible match cannot be verified.
         An opaque container without readable contents returns
         ``container_not_readable`` before input; the target's presence
         cannot be determined from that accessibility tree. An unscoped text
@@ -7096,6 +7116,14 @@ class Runtime:
                     else:
                         same_rows = 0
                     previous_rows = seen
+                if text and anchor_now is not None and _document_text_unavailable(anchor_now):
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        "cannot verify visible text in this editor; use in-document "
+                        "Find or line navigation, then inspect the result",
+                        detail={"reason": "document_text_visibility_unavailable",
+                                "ref": anchor_now.ref, "role": anchor_now.role},
+                    )
                 matches = search_matches(snap)
                 if not matches and document_anchor(anchor_now):
                     refuse_opaque_find(anchor_now)
@@ -9596,7 +9624,11 @@ def build_server(
         cell, row, or other control has that exact name, the match is that
         control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. An opaque container with no
+        matching ref(s) or a not-found note. Automatic selection prefers an
+        editor with unavailable visible text over sibling lists; text search
+        there returns unsupported document_text_visibility_unavailable before
+        input. An explicit ref overrides automatic selection.
+        An opaque container with no
         readable contents returns container_not_readable before sending input;
         this does not establish that the target is absent. An unscoped text search
         with only statusbar hits and an opaque content surface returns an

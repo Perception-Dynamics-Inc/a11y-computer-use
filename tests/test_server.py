@@ -4585,3 +4585,50 @@ def test_scroll_to_find_can_still_find_header(monkeypatch):
     rt._require_permission = lambda *args, **kwargs: None
     monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
     assert "found after 0 scroll(s)" in rt.scroll_to_find("app", text="ITEM-001")
+
+
+def test_scroll_to_find_prefers_unreadable_editor_over_breadcrumbs(monkeypatch) -> None:
+    """Kate's suppressed buffer must not redirect search to its path list."""
+    import dataclasses
+
+    window = Element(ref="e1", role="AXWindow", title="editor.txt", value=None,
+                     bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")
+    crumbs = Element(ref="e2", role="AXList", title="", value=None,
+                     bounds=Bounds(0, 64, 91, 736, 17), snapshot_id="s", parent="e1")
+    editor = Element(ref="e3", role="AXTextArea", title="editor.txt", value=None,
+                     bounds=Bounds(0, 95, 109, 644, 480), snapshot_id="s", parent="e1",
+                     focused=True, editable=True,
+                     hint="Visible document text unavailable; use in-document Find or line navigation")
+    shot = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="kate", pid=1,
+                    created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                    elements=(window, crumbs, editor))
+    assert server._scroll_anchor(shot) == editor
+    # The view remains the document even when another control owns focus.
+    assert server._scroll_anchor(dataclasses.replace(
+        shot, elements=(window, crumbs, dataclasses.replace(editor, focused=False)))).ref == "e3"
+    # A find field without document metadata retains normal list selection.
+    assert server._scroll_anchor(dataclasses.replace(
+        shot, elements=(window, crumbs, dataclasses.replace(editor, hint="")))).ref == "e2"
+
+    class Driver:
+        def ensure_trusted(self): pass
+        def snapshot(self, scope, app): return shot
+        def resolve_ref(self, old, ref, *, live): return observe.rematch_ref(old, ref, live)
+        def scroll(self, *args, **kwargs): pytest.fail("must not wheel an unverifiable editor or breadcrumbs")
+        def key_chord(self, *args): pytest.fail("must not invoke unverified Find")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._current = shot
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "kate"))
+    for ref in (None, "e3"):
+        with pytest.raises(ComputerUseError) as caught:
+            rt.scroll_to_find("kate", text="BOTTOM_MARKER_BETA", ref=ref)
+        assert caught.value.code == ErrorCode.UNSUPPORTED
+        assert caught.value.detail == {"reason": "document_text_visibility_unavailable",
+                                       "ref": "e3", "role": "AXTextArea"}
+    # Explicit caller scope continues to override automatic editor selection.
+    out = rt.scroll_to_find("kate", text="BOTTOM_MARKER_BETA", ref="e2", max_scrolls=0)
+    assert "container: AXList" in out
