@@ -13966,3 +13966,67 @@ def test_html_section_text_keeps_empty_wrappers_and_secrets_private(fake_atspi, 
     section.get_attributes = lambda: {"tag": tag}
     _adopt(section, _Acc("push button", name="Run"))
     assert _atspi.ATSPIAccessor().read(section).value is None
+
+
+@pytest.mark.parametrize("attrs", [
+    {"tag": "input", "autocomplete": "list", "haspopup": "listbox", "xml-roles": "combobox"},
+    {"tag": "input", "haspopup": "listbox"},
+])
+def test_web_input_combo_uses_verified_text_path(fake_atspi, monkeypatch, attrs):
+    """ARIA and datalist inputs accept arbitrary text without option children."""
+    combo = _Acc("combo box", name="Fruit", width=120, height=30,
+                 states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    combo.get_attributes = lambda: attrs
+    combo.text = ""
+    combo.get_text_iface = lambda: combo
+    combo.get_text = lambda *_args: combo.text
+    combo.get_character_count = lambda: len(combo.text)
+    window = _adopt(_Acc("frame", name="Chrome", width=400, height=300), combo)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=582, geometry=_geometry())
+    field, = [el for el in snap.elements if el.role == "AXComboBox"]
+    assert field.editable
+    assert "edit" in observe.render_text(snap, mode="interactive")
+    assert _atspi.control_kind(combo) is None
+    assert not _atspi._blocks_text_replace(combo)
+    assert _atspi._editable_iface(combo) is None
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: combo)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda node: True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda node: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda node, text: setattr(node, "text", text))
+    driver = LinuxDriver()
+    assert driver.set_value(field, "Mango") is True
+    assert combo.text == "Mango"
+    monkeypatch.setattr(_atspi, "_type_into_target",
+                        lambda node, text: setattr(node, "text", node.text + text))
+    assert driver.type_into(field, "Pe") == 2
+    assert combo.text == "MangoPe"
+    combo.text = ""
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda *_args: None)
+    with pytest.raises(ComputerUseError) as mismatch:
+        driver.set_value(field, "unverified")
+    assert mismatch.value.detail["reason"] == "text_mismatch"
+    assert combo.text == ""
+    combo.states.remove("EDITABLE")
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(field, "blocked")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert combo.text == ""
+
+
+@pytest.mark.parametrize("tag,states,has_text", [
+    ("select", {"EDITABLE"}, True),
+    ("input", set(), True),
+    ("input", {"EDITABLE", "READ_ONLY"}, True),
+    ("input", {"EDITABLE"}, False),
+    ("", {"EDITABLE"}, True),
+])
+def test_select_style_combo_remains_blocked_for_text(fake_atspi, tag, states, has_text):
+    combo = _Acc("combo box", states=states)
+    combo.get_attributes = lambda: {"tag": tag}
+    if has_text:
+        combo.get_text_iface = lambda: combo
+    assert not _atspi.editable_entry(combo)
+    assert _atspi._blocks_text_replace(combo)
+    assert _atspi.control_kind(combo) == "combo"

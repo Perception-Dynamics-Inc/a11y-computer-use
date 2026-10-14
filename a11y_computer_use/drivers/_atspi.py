@@ -7747,12 +7747,13 @@ def editable_entry(
     The positive signal is ``STATE_EDITABLE`` on this node. EditableText
     support is not that signal: Firefox exposes the interface on paragraphs,
     documents, and address-bar wrappers that are not editors. A paragraph,
-    panel, document, or combo/select is not an entry even when it reports
+    panel, document, or select-style combo is not an entry even when it reports
     ``STATE_EDITABLE``. A read-only node is not.
 
     An entry, password, text, or spin-button role is an entry only when this
     node is ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
     whose tag is ``div`` or ``span`` and whose own state is ``EDITABLE``.
+    An input-tagged combobox with Text and EDITABLE is also an entry.
     Chromium often has no EditableText (#221). Firefox's roleless
     contenteditable is the same section and does not need the interface
     either. A paragraph is not that section.
@@ -7764,7 +7765,19 @@ def editable_entry(
     role = role_str if role_str is not None else _role_name(acc)
     if role in {"paragraph", "heading"}:
         return bool(drawing)
-    if role in {"combo box", "combo-box"} or role in _STATIC_REPLACE_ROLES:
+    if role in {"combo box", "combo-box"}:
+        # ARIA autocomplete and datalist inputs own their text; their popup
+        # options are not children and do not constrain the input value.
+        if attrs is None:
+            attrs = _get_attributes(acc)
+        if state_editable is None:
+            state_editable = _state_has(acc, "EDITABLE")
+        return bool(
+            str(attrs.get("tag") or "").lower() == "input"
+            and state_editable and not _state_has(acc, "READ_ONLY")
+            and _call_first(acc, ("get_text_iface",)) is not None
+        )
+    if role in _STATIC_REPLACE_ROLES:
         return False
     if role in _ENTRY_ROLE_NAMES:
         if _state_has(acc, "READ_ONLY"):
@@ -7793,9 +7806,9 @@ def _blocks_text_replace(acc) -> bool:
     """True when ``set_text`` must not select or type into this node.
 
     A role-less object is a synthetic field. A browser paragraph, panel,
-    document, or combo is blocked even when it exposes EditableText or
+    document, or select-style combo is blocked even when it exposes EditableText or
     ``STATE_EDITABLE``. An Impress or Draw paragraph with both is not
-    blocked. A contenteditable section and a real entry are not.
+    blocked. A contenteditable section, input combobox, and real entry are not.
     """
     role = _role_name(acc)
     if role == "":
@@ -7806,6 +7819,8 @@ def _blocks_text_replace(acc) -> bool:
         return False
     if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
         return False
+    if role in {"combo box", "combo-box"}:
+        return not editable_entry(acc)
     if role in _STATIC_REPLACE_ROLES:
         return True
     if role == "section":
@@ -11647,7 +11662,8 @@ def focused_key_evidence(app: str) -> tuple:
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
 
-    A combo is set through its own items or its own entry. A spin button,
+    A select-style combo is set through its own items or its own entry.
+    An editable input combobox stays on ``set_text``. A spin button,
     slider, or other Value-interface control is set through current value.
     A plain text role stays on ``set_text``. A scroll bar's Value drives
     pixel scroll and is not a ``set_value`` target.
@@ -11660,7 +11676,7 @@ def control_kind(acc) -> str | None:
     """
     role = _role_name(acc)
     if role == "combo box":
-        return "combo"
+        return None if editable_entry(acc) else "combo"
     if role in {"list box", "list"} and _collect_options(acc):
         return "combo"
     # A missing role is a fake or a node we cannot classify. Do not probe
@@ -14733,7 +14749,7 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     Success is the readable text, where one trailing newline is the ``<br>``.
     A Chrome date, time, or month segment is typed and checked against
     ``valuetext``. The Value interface is not that check.
-    A browser paragraph, a panel, a document, or a combo is not replaced.
+    A browser paragraph, panel, document, or select-style combo is not replaced.
     Firefox exposes EditableText on those nodes, and selecting one selects
     the page. This returns false before any selection or key. An Impress
     or Draw paragraph with ``STATE_EDITABLE`` and EditableText is replaced
