@@ -13897,6 +13897,49 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("extra_group", [False, True])
+def test_textarea_ref_survives_transient_wrapper_with_native_identity(monkeypatch, extra_group):
+    """A new GI proxy for the same editor survives either wrapper transition."""
+    from dataclasses import replace
+
+    short = ("AXWindow", "AXGroup", "AXTextArea")
+    long = ("AXWindow", "AXGroup", "AXGroup", "AXTextArea")
+    anchor = Element("e4", "AXTextArea", "", "before", Bounds(0, 0, 0, 500, 300),
+                     "editor-old", path=short if extra_group else long,
+                     instance_id="process-1", document_id="title:/tmp/draft.txt - Text Editor")
+    current = replace(anchor, ref="e5", snapshot_id="editor-live", value="after",
+                      path=long if extra_group else short)
+    old = Snapshot("editor-old", Scope.WINDOW, "gnome-text-editor", 1, 0.0, (), (anchor,))
+    live = replace(old, snapshot_id="editor-live", elements=(current,))
+    old_proxy, new_proxy = object(), object()
+    keys = {old_proxy: (":1.12", "/editor"), new_proxy: (":1.12", "/editor")}
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda handle: keys.get(handle))
+    observe._register_epoch(old.snapshot_id, {}, {anchor.ref: old_proxy})
+    observe._register_epoch(live.snapshot_id, {}, {current.ref: new_proxy})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *_args: None)
+    assert driver.resolve_ref(old, anchor.ref, live=live) is current
+
+    # Identical role, title and geometry cannot authorize a replacement object.
+    for key in [(":1.12", "/replacement"), (":1.13", "/editor"), None]:
+        keys[new_proxy] = key
+        with pytest.raises(ComputerUseError) as exc:
+            driver.resolve_ref(old, anchor.ref, live=live)
+        assert exc.value.code is ErrorCode.STALE_REF
+    keys[new_proxy] = keys[old_proxy]
+    for changed in [replace(current, instance_id="process-2"),
+                    replace(current, document_id="title:/tmp/other.txt - Text Editor")]:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(changed,)))
+        assert exc.value.code is ErrorCode.STALE_REF
+    duplicate = replace(current, ref="e6")
+    observe._register_epoch(live.snapshot_id, {}, {current.ref: new_proxy, duplicate.ref: new_proxy})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(current, duplicate)))
+    assert exc.value.code is ErrorCode.STALE_REF
+
+
 @pytest.mark.parametrize("remembered", [False, True])
 @pytest.mark.parametrize("ending", ["\n", "\r\n"])
 @pytest.mark.parametrize("lands", [False, True])
@@ -14285,3 +14328,59 @@ def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, 
                         lambda *args, **kwargs: pytest.fail("Chrome lookup on native editor"))
     assert _atspi.focused_text("soffice") == "Item"
     assert lookups == ["soffice"]
+
+
+@pytest.mark.parametrize("stable_keys", [False, True])
+@pytest.mark.parametrize("check", ["showing", "tab_title"])
+def test_firefox_visibility_keeps_fresh_parent_wrappers(monkeypatch, stable_keys, check):
+    """Recycled proxy ids must not hide the active Firefox document (#632)."""
+    import weakref
+
+    # Model allocator reuse deterministically: an id is reusable only after
+    # its wrapper has been collected. No timing or GI dependency is involved.
+    slots = []
+
+    class Proxy:
+        def __init__(self, depth):
+            self.depth = depth
+
+    def proxy_id(node):
+        for index, held in enumerate(slots):
+            if held() is node:
+                return index
+        for index, held in enumerate(slots):
+            if held() is None:
+                slots[index] = weakref.ref(node)
+                return index
+        slots.append(weakref.ref(node))
+        return len(slots) - 1
+
+    def role(node):
+        if node.depth == 0:
+            return "document web"
+        if node.depth == 6:
+            return "internal frame" if check == "showing" else "document web"
+        if node.depth == 7:
+            return "frame"
+        return "panel"
+
+    monkeypatch.setattr(_atspi, "id", proxy_id, raising=False)
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node:
+                        (":1.632", f"/node/{node.depth}") if stable_keys else None)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda node:
+                        Proxy(node.depth + 1) if node.depth < 7 else None)
+    monkeypatch.setattr(_atspi, "_role_name", role)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state:
+                        state == "SHOWING" and node.depth in ({6} if check == "showing" else {0}))
+    monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "cuapara")
+    monkeypatch.setattr(_atspi, "_node_name", lambda node:
+                        "Child frame" if check == "tab_title" and node.depth == 0 else "cuapara")
+
+    assert not _atspi._hidden_gecko_browser(Proxy(0))
+
+    # The fix must still omit a genuinely hidden/background document.
+    if check == "showing":
+        monkeypatch.setattr(_atspi, "_state_has", lambda node, state: False)
+    else:
+        monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "Other tab")
+    assert _atspi._hidden_gecko_browser(Proxy(0))
