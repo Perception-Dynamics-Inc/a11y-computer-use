@@ -1989,7 +1989,8 @@ def test_scroll_to_find_pages_a_table_before_the_wheel(monkeypatch) -> None:
     assert scrolls == []
 
 
-def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> None:
+@pytest.mark.parametrize("opaque_sibling", [False, True])
+def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch, opaque_sibling) -> None:
     """Synthetic snapshots, not a live Chrome page.
 
     A body-scroll document tries Ctrl+F before the wheel. The row is
@@ -2010,6 +2011,11 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
             Element(ref="a", role="AXListItem", title="ITEM-001 scroll-row", value=None,
                     bounds=Bounds(0, 20, 80, 400, 28), snapshot_id="s"),
         ]
+        if opaque_sibling:
+            els.append(Element(
+                ref="canvas", role="opaque_region", title="", value=None,
+                bounds=Bounds(0, 920, 40, 60, 640), snapshot_id="s", parent="win",
+            ))
         if found:
             els.append(Element(
                 ref="hit", role="AXListItem", title="ITEM-180 scroll-row", value=None,
@@ -2032,10 +2038,22 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
         def scroll(self, target, **kw):
             scrolls.append(int(kw.get("dy") or 0))
 
+        bar = False
+
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return _D.bar
+
         def key_chord(self, chord, **_kw):
             chords.append(chord)
+            if chord == "ctrl+f":
+                _D.bar = True
             if chord == "Return":
                 _D.found = True
+            if chord == "Escape":
+                _D.bar = False
 
         def type_text(self, text, **_kw):
             chords.append(f"type:{text}")
@@ -2054,6 +2072,64 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
     assert chords[:3] == ["ctrl+f", "type:ITEM-180", "Return"]
     assert "Escape" in chords
     assert scrolls == []
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_scroll_to_find_refuses_opaque_document_before_find_input(monkeypatch, pinned) -> None:
+    """AbiWord's drawing area cannot verify a hit that native Find selects."""
+    from a11y_computer_use import server
+
+    snap = Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="abiword", pid=1, created_at=0.0,
+        displays=(Display(0, 1000, 700, 1.0, True),),
+        elements=(
+            Element(ref="win", role="AXWindow", title="document", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="page", role="AXGroup", title="Document", value=None,
+                    bounds=Bounds(0, 0, 40, 900, 640), snapshot_id="s", parent="win"),
+            Element(ref="inner", role="AXGroup", title="", value=None,
+                    bounds=Bounds(0, 0, 40, 880, 640), snapshot_id="s", parent="page"),
+            Element(ref="canvas", role="opaque_region", title="", value=None,
+                    bounds=Bounds(0, 0, 40, 880, 640), snapshot_id="s", parent="inner"),
+        ),
+    )
+    inputs = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+        def resolve_ref(self, old, ref, **kwargs):
+            return snap.element(ref)
+
+        def key_chord(self, chord):
+            inputs.append(chord)
+
+        def type_text(self, text):
+            inputs.append(text)
+
+        def scroll(self, target, **kwargs):
+            inputs.append("scroll")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._current = snap
+    rt._anchor_audited = lambda ref, kind: (snap, snap.element(ref))
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "abiword"))
+
+    with pytest.raises(ComputerUseError) as caught:
+        rt.scroll_to_find("abiword", text="Line 120 of", ref="page" if pinned else None,
+                          max_scrolls=4)
+    assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "opaque_find_unverifiable"
+    assert "no query was typed" in str(caught.value)
+    assert inputs == []
 
 
 def _short_overflow_list(head: int, *, found: str | None = None) -> Snapshot:
@@ -2107,10 +2183,22 @@ def test_scroll_to_find_uses_in_page_find_on_a_short_overflow_list(monkeypatch) 
         def scroll(self, target, **kw):
             scrolls.append(int(kw.get("dy") or 0))
 
+        bar = False
+
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return _D.bar
+
         def key_chord(self, chord, **_kw):
             chords.append(chord)
+            if chord == "ctrl+f":
+                _D.bar = True
             if chord == "Return":
                 _D.found = True
+            if chord == "Escape":
+                _D.bar = False
 
         def type_text(self, text, **_kw):
             chords.append(f"type:{text}")
@@ -2350,9 +2438,18 @@ def test_scroll_to_find_re_reads_until_the_page_frame_returns(monkeypatch) -> No
             scrolled.append(target.role)
             raise AssertionError(f"wheeled {target.role} {target.ref}")
 
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return state.get("bar", False)
+
         def key_chord(self, chord, **_kw):
             if chord == "ctrl+f":
                 state["poison"] = True
+                state["bar"] = True
+            if chord == "Escape":
+                state["bar"] = False
 
         def type_text(self, text, **_kw):
             pass
@@ -2403,9 +2500,18 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
         def scroll(self, target, **kw):
             scrolled.append(f"{target.role}:{target.ref}")
 
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return poisoned.get("bar", False)
+
         def key_chord(self, chord, **_kw):
             if chord == "ctrl+f":
                 poisoned["on"] = True
+                poisoned["bar"] = True
+            if chord == "Escape":
+                poisoned["bar"] = False
 
         def type_text(self, text, **_kw):
             pass
@@ -2444,7 +2550,7 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     A Next link under a table that still runs past the window is the
     next page, not a reason to Page Down in place. The wheel moves the
     document. The missing row is not found, and page_unchanged is not
-    reported.
+    reported. The table has no find bar, so the search text is not typed.
     """
     from a11y_computer_use import server
 
@@ -2497,7 +2603,8 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     assert out.startswith("not found after")
     assert "page_unchanged" not in out
     assert "pagedown" not in chords
-    assert "ctrl+f" in chords
+    assert "ctrl+f" not in chords
+    assert not any(item.startswith("type:") for item in chords)
     assert scrolls == [5, 5]
 
 
@@ -3479,7 +3586,8 @@ def test_activate_accepts_the_window_stack_when_nsworkspace_lags(monkeypatch) ->
     server._activate(_Running())  # no raise: the target owns the top window
 
 
-def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("program", [None, "krita"])
+def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch, program) -> None:
     """A grant for the bundle id must cover `app launch <display name>` before the app runs."""
     launched: list[str] = []
 
@@ -3491,14 +3599,24 @@ def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch) 
         def main_display_id(self): return 0
         def launch_app(self, ident): launched.append(ident)
 
-    monkeypatch.setattr(server, "_installed_bundle_id", lambda ident: "org.krita" if ident == "Krita" else None)
+    import shutil
+    from a11y_computer_use import app_identity
+
+    # Keep the bundle grant test independent of the host executable/catalog.
+    # A lowercase executable intentionally canonicalizes the launch spelling.
+    monkeypatch.setattr(shutil, "which", lambda ident: "/usr/bin/krita" if program and ident == program else None)
+    monkeypatch.setattr(app_identity, "load_desktop_entries", lambda: (
+        [{"id": "org.krita.desktop", "name": "Krita", "exec": "krita"}] if program else []
+    ))
+    monkeypatch.setattr(server, "_installed_bundle_id",
+                        lambda ident: "org.krita" if ident == "Krita" and not program else None)
     store = safety.PermissionStore(tmp_path / "p.json")
     store.set_tier("org.krita", safety.Tier.CLICK)
     rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
     monkeypatch.setattr(rt, "_resolve_app", lambda ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "x")))
     monkeypatch.setattr(rt, "_wait_first_window", lambda name, wait: "Krita")
     assert "launched Krita" in rt.app("launch", "Krita")
-    assert launched == ["Krita"]
+    assert launched == [program or "Krita"]
 
 
 def test_launch_wait_recognises_truncated_and_vendor_prefixed_linux_comm_names(tmp_path, monkeypatch) -> None:
