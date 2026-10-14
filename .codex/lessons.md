@@ -91,3 +91,5 @@
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
 - 2026-10-14 (PR #606 repair): Gate Chromium focused-entry discovery on the already observed node’s toolkit before repeating focus discovery. Native Calc read-back must retain a single focus-tree lookup; browser-specific disambiguation must not add native tree traversals to other apps.
+
+- 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
