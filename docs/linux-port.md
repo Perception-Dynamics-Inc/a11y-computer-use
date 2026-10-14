@@ -384,4 +384,11 @@ clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
 
+GTK 4 tree-expander buttons exposing `listitem.toggle-expand` (or the
+state-appropriate `listitem.expand` / `listitem.collapse`) use that native action
+for a ref click. The driver verifies a change in the live `EXPANDED` state;
+a successful action acknowledgement or focus moving to another row is
+insufficient. A failed expansion returns an error without a pointer fallback,
+since these controls can report bounds that do not match their painted rows.
+
 Editable web combobox inputs (ARIA autocomplete and HTML datalist) retain their combobox role and expose `edit` when their native node has `tag=input`, Text, and `EDITABLE`, without `READ_ONLY`. `set_value` uses the verified text replacement path, and `type(ref=...)` uses the focus-confirmed text path; values are not restricted to popup options. Select-style combos retain option selection. This distinction is hermetic-tested; native Chrome verification remains a CI/live check.
