@@ -2660,13 +2660,26 @@ def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
     Adding the recovered content origin fixes body widgets, but does not
-    make these negative WINDOW coordinates reliable pointer targets (#502).
-    Use the control's activation action rather than guessing another offset.
+    make boxes outside the frame reliable pointer targets (#502). The frame
+    itself can start at a negative WINDOW offset; a body row fully inside
+    that reported frame is still a valid target (#617). Missing frame bounds
+    leave the negative-origin guard in place.
     """
     if acc is None or not _gtk4_app(acc):
         return False
     window = _raw_rect(acc, "WINDOW")
-    return window is not None and (window[0] < 0 or window[1] < 0)
+    if window is None or (window[0] >= 0 and window[1] >= 0):
+        return False
+    frame = _frame_ancestor(acc)
+    frame_box = _raw_rect(frame, "WINDOW") if frame is not None else None
+    if (frame_box is not None and all(math.isfinite(value) for value in frame_box)
+            and frame_box[2] > 0 and frame_box[3] > 0):
+        x, y, width, height = window
+        fx, fy, fw, fh = frame_box
+        if (width > 0 and height > 0 and fx <= x and fy <= y
+                and x + width <= fx + fw and y + height <= fy + fh):
+            return False
+    return True
 
 
 def published_origin_untrusted(acc) -> bool:
