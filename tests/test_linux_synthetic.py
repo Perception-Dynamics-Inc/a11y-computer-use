@@ -12977,6 +12977,128 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     assert LinuxDriver().terminal_target("console-alias", launch=True)
 
 
+@pytest.mark.parametrize("available,use_offsets", [(True, False), (True, True), (False, False)])
+def test_qt_document_find_uses_only_viewport_ranges(monkeypatch, available, use_offsets):
+    """FeatherPad's whole buffer must not become an off-screen find hit."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, True, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((20.0, 30.0), (800.0, 400.0)))
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda acc, coord: (20.0, 30.0, 800.0, 400.0))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: "TOKEN_001\nTOKEN_070")
+    monkeypatch.setattr(_atspi, "_qt_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {})
+    monkeypatch.setattr(_atspi, "_stable_id", lambda *args: None)
+    calls = []
+    painted = ["TOKEN_001"]
+
+    def ranges(*args):
+        calls.append(args[1:])
+        if not available:
+            raise NotImplementedError("Qt bounded ranges unavailable")
+        return [] if use_offsets else [_NS(content=painted[0])]
+
+    buffer = "TOKEN_001\nTOKEN_070"
+    def character_rect(acc, offset, coord):
+        token = "TOKEN_001" if offset < 10 else "TOKEN_070"
+        return _NS(x=20, y=40 if token == painted[0] else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        Text=_NS(
+            get_bounded_ranges=ranges,
+            get_offset_at_point=lambda acc, x, y, coord: (
+                (0 if y == 30 else len(buffer) - 1) if available else -1
+            ),
+            get_text=lambda acc, start, end: buffer[start:end],
+            get_character_extents=character_rect,
+        ), CoordType=_NS(SCREEN=0),
+        TextClipType=_NS(BOTH=3),
+    ))
+
+    class Editor:
+        def get_role_name(self):
+            return "text"
+
+        def get_name(self):
+            return "Document"
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States({"MULTI_LINE", "EDITABLE"})
+
+    raw = _atspi.ATSPIAccessor().read(Editor())
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="featherpad", pid=1, geometry=_geometry())
+    assert calls == [(20, 30, 800, 400, 0, 3, 3)]
+    assert not observe.find_elements(snap, text="TOKEN_070")
+    assert bool(observe.find_elements(snap, text="TOKEN_001")) is available
+    assert raw.editable
+    if not available:
+        assert raw.value is None
+        assert "in-document Find" in raw.hint
+
+    if available:
+        from a11y_computer_use import server
+
+        driver = LinuxDriver()
+        driver.ensure_trusted = lambda: None
+        def snapshot(*args):
+            visible = _atspi.ATSPIAccessor().read(Editor())
+            return build_snapshot((visible, []), _FakeAccessor(), scope=Scope.WINDOW,
+                                  app="featherpad", pid=1, geometry=_geometry())
+        driver.snapshot = snapshot
+        scrolls = []
+        def scroll(anchor, *, dy):
+            scrolls.append(dy)
+            painted[0] = "TOKEN_070"
+        driver.scroll = scroll
+        runtime = server.Runtime.__new__(server.Runtime)
+        runtime.driver = driver
+        runtime._resolve_app = lambda app: (None, app)
+        runtime._run_gated = lambda action, app, execute, **kwargs: execute()
+        runtime._require_permission = lambda *args, **kwargs: None
+        runtime._recheck_target = lambda *args, **kwargs: None
+        result = runtime.scroll_to_find("featherpad", text="TOKEN_070", max_scrolls=3)
+        assert scrolls == [5]
+        assert "found after 1 scroll(s)" in result
+        assert "TOKEN_070" in result
+
+
+@pytest.mark.parametrize("missing_geometry", [False, True])
+def test_qt_document_point_offsets_verify_character_visibility(monkeypatch, missing_geometry):
+    """Qt's unimplemented bounded ranges still allow honest viewport reads."""
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+    text = "TOKEN_001\nTOKEN_070"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=lambda *args: [],
+            get_offset_at_point=lambda acc, x, y, coord: 0 if y == 30 else len(text) - 1,
+            get_text=lambda acc, start, end: text[start:end],
+            get_character_extents=lambda acc, offset, coord: (
+                None if missing_geometry else
+                _NS(x=20, y=40 if offset < 10 else 900, width=8, height=16)
+            ),
+        ),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    if missing_geometry:
+        assert value is None
+    else:
+        assert "TOKEN_001" in value
+        assert "TOKEN_070" not in value
+        text_api = _atspi._atspi().Text
+        # Read the opposite viewport without including clipped-prefix placeholders.
+        monkeypatch.setattr(text_api, "get_character_extents", lambda acc, offset, coord: (
+            _NS(x=20, y=900 if offset < 10 else 40, width=8, height=16)
+        ))
+        monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+            CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3), Text=text_api,
+        ))
+        assert _atspi._qt_viewport_text(object()) == "TOKEN_070"
+
+
 @pytest.mark.parametrize("app", ["vlc", "krita"])
 @pytest.mark.parametrize("listed_by", ["apps", "windows"])
 def test_running_app_without_atspi_tree_fails_fast(
@@ -13775,6 +13897,114 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("remembered", [False, True])
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+@pytest.mark.parametrize("lands", [False, True])
+def test_chromium_single_line_type_verifies_before_enter(
+    fake_atspi, monkeypatch, remembered, ending, lands,
+) -> None:
+    """Synthetic Chrome input: Enter is sent once, only after verified text."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    field = _KeyClearedWebField("")
+    _mark_toolkit(field, "Chromium", "Chrome")
+    field.get_role_name = lambda: "entry"
+    field.get_attributes = lambda: {"tag": "input"}
+    field.focused = True
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("chrome", 7))
+    monkeypatch.setattr(driver, "_verify_remembered_editable", lambda acc: "chrome")
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_chromium_entry", lambda app: field)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda seconds: None)
+    sent = []
+
+    def type_string(text):
+        sent.append(text)
+        if text == "\n":
+            assert field.text == "hello"
+        elif lands:
+            field.text += text
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    if remembered:
+        driver._focused_editable = field
+    if lands:
+        assert driver.type_text("hello" + ending) == 6
+        assert driver._type_expected == "hello"
+        assert sent.count("\n") == 1
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.type_text("hello" + ending)
+        assert exc.value.detail["reason"] == "text_mismatch"
+        assert "\n" not in sent
+
+
+@pytest.mark.parametrize("tag,multiline,expected", [
+    ("input", False, True), ("", False, True),
+    ("textarea", False, False), ("div", False, False),
+    ("input", True, False),
+])
+def test_chromium_single_line_entry_metadata(fake_atspi, monkeypatch, tag, multiline, expected):
+    field = _Acc("entry", states=("FOCUSED",))
+    _mark_toolkit(field, "Chromium", "Chrome")
+    field.get_attributes = lambda: {"tag": tag, "aria-multiline": str(multiline).lower()}
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    assert _atspi.chromium_single_line_entry(field) is expected
+
+
+def test_chromium_focused_readback_uses_entry_inside_focused_toolbar(fake_atspi, monkeypatch):
+    toolbar = _Acc("tool bar", states=("FOCUSED",))
+    field = _Acc("entry", states=("FOCUSED",))
+    _adopt(toolbar, field)
+    for node in (toolbar, field):
+        _mark_toolkit(node, "Chromium", "Chrome")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app, **kwargs: (toolbar, False))
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "7" if acc is field else "Toolbar7/12Zoom")
+    assert _atspi.focused_chromium_entry("chrome") is field
+    assert _atspi.focused_text("chrome") == "7"
+    second = _Acc("entry", states=("FOCUSED",))
+    _mark_toolkit(second, "Chromium", "Chrome")
+    _adopt(toolbar, field, second)
+    assert _atspi.focused_chromium_entry("chrome") is None
+
+
+def test_chromium_single_line_enter_verifies_selection_replacement(fake_atspi, monkeypatch):
+    """Synthetic PDF toolbar entry replaces ctrl+a's selection before Enter."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    field = _KeyClearedWebField("12")
+    _mark_toolkit(field, "Chromium", "Chrome")
+    field.get_role_name = lambda: "entry"
+    field.focused = True
+    driver = LinuxDriver()
+    driver._focused_editable = field
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_verify_remembered_editable", lambda acc: "chrome")
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_selection_span", lambda acc, before: (0, 2))
+    sent = []
+
+    def type_string(text):
+        sent.append(text)
+        if text == "7":
+            field.text = "7"
+        else:
+            assert text == "\n" and field.text == "7"
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    assert driver.type_text("7\n") == 2
+    assert sent == ["7", "\n"]
+    assert driver._type_expected == "7"
+
+
 @pytest.mark.parametrize("name", ["Main Menu", "Open"])
 @pytest.mark.parametrize("case", ["duplicate", "outer_action", "different_name", "different_bounds", "missing_bounds", "two_children", "not_gtk4", "no_child_action", "not_toggle"])
 def test_gtk4_menu_button_snapshot_keeps_native_toggle(monkeypatch, name, case):
@@ -14063,3 +14293,21 @@ def test_firefox_input_combo_wrapper_and_static_text_are_not_editable(fake_atspi
     assert _atspi.set_text(node, "replacement") is False
     if role == "combo box":
         assert _atspi.control_kind(node) == "combo"
+
+
+def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, monkeypatch):
+    """Chrome entry discovery must not traverse Calc's focus tree again."""
+    field = _Acc("entry", name="Calc editor")
+    _mark_toolkit(field, "gtk", "LibreOffice")
+    lookups = []
+
+    def focused(app, **kwargs):
+        lookups.append(app)
+        return field, False
+
+    monkeypatch.setattr(_atspi, "_focused_node", focused)
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "Item")
+    monkeypatch.setattr(_atspi, "focused_chromium_entry",
+                        lambda *args, **kwargs: pytest.fail("Chrome lookup on native editor"))
+    assert _atspi.focused_text("soffice") == "Item"
+    assert lookups == ["soffice"]
