@@ -3741,14 +3741,24 @@ class ATSPIAccessor:
             if label:
                 name = label
         if (
-            not surface_name
-            and role_str in {"drawing area", "canvas"}
+            role_str in {"drawing area", "canvas"}
             and _generic_region_name(str(name))
             and _generic_region_name(str(description))
         ):
-            surface_name, content_note, canvas_text = _drawing_canvas_facts(node, size)
+            canvas_name, content_note, canvas_text = _drawing_canvas_facts(node, size)
+            surface_name = canvas_name or surface_name
             if canvas_text and not isinstance(value, str):
                 value = canvas_text
+        elif (
+            role_str == "filler" and not surface_name
+            and _generic_region_name(str(name))
+            and _generic_region_name(str(description))
+            and _child_count(node) == 0 and value is None
+        ):
+            # Inkscape's empty dock content is also an opaque surface.
+            # Use its real document/window label, without claiming that
+            # this sibling is the SVG canvas or inventing a content box.
+            surface_name, _note, _text = _drawing_canvas_facts(node, size)
         return RawNode(
             role=role,
             subrole=(

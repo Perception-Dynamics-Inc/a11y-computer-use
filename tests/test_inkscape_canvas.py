@@ -140,6 +140,23 @@ def _snap(monkeypatch, frame):
     )
 
 
+def test_empty_inkscape_dock_keeps_window_label_and_native_box(monkeypatch) -> None:
+    dock = _Node("filler", box=((890.0, 265.0), (379.0, 348.0)))
+    frame = _frame(dock)
+    snap = _snap(monkeypatch, frame)
+    region = next(el for el in snap.elements if el.role == "opaque_region")
+    assert region.title == _FRAME
+    assert region.content_note == ""
+    assert region.bounds.x == 890
+    assert region.bounds.y == 265
+    assert region.bounds.width == 379
+    assert region.bounds.height == 348
+    dock.app = _App("other editor")
+    assert _atspi.ATSPIAccessor().read(dock).surface_name == ""
+    unnamed = next(el for el in _snap(monkeypatch, frame).elements if el.role == "opaque_region")
+    assert region.clickable == unnamed.clickable
+
+
 def test_document_title_names_the_canvas_and_a_miss_says_why(monkeypatch) -> None:
     label = _Node("label", _DOC, box=((-8.0, -8.0), (1.0, 1.0)))
     canvas = _Node("drawing area", box=_CANVAS_BOX, focusable=True)
@@ -276,6 +293,19 @@ def test_the_frame_title_suffix_names_the_canvas_without_an_app_name(monkeypatch
     raw = _atspi.ATSPIAccessor().read(canvas)
     assert raw.surface_name == _FRAME
     assert raw.content_note == _NOTE
+
+
+def test_childless_inkscape_tab_surface_keeps_native_document_context(monkeypatch) -> None:
+    surface = _Node("filler", box=_CANVAS_BOX)
+    tab = _Node("page tab", "Fill", children=[surface])
+    frame = _frame(tab)
+    _patch(monkeypatch)
+    raw = _atspi.ATSPIAccessor().read(surface)
+    assert raw.surface_name == _FRAME
+    assert raw.content_note == ""
+    assert (raw.position, raw.size) == _CANVAS_BOX
+    surface.app.name = "another app"
+    assert _atspi.ATSPIAccessor().read(surface).surface_name == ""
 
 
 def test_live_inkscape_canvas_is_named_and_hidden_svg_is_not_silent(tmp_path) -> None:
