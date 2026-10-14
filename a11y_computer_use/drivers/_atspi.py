@@ -328,6 +328,40 @@ def process_in_startup(pid: int | None) -> bool:
     return age is not None and age < ATSPI_STARTUP_GRACE_S
 
 
+def registration_startup_remaining(app: str) -> float:
+    """Remaining existing startup grace for an unambiguous window owner.
+
+    A newly mapped window can precede AT-SPI registration. Older apps and
+    owners whose age cannot be verified get no additional registration wait.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        pids = _linux_system.pids_matching(app)
+        if not pids:
+            # GTK's program name can differ from its interpreter's comm.
+            # WM_CLASS identifies the mapped window for this timing hint;
+            # titles alone never establish an owner.
+            pids = {
+                row["pid"] for row in _linux_system.windows()
+                if isinstance(row.get("pid"), int) and row["pid"] > 0
+                and _linux_system._class_matches_identifier(
+                    app, str(row.get("wm_class") or ""),
+                    str(row.get("wm_class_class") or ""),
+                )
+            }
+    except Exception:
+        # Process age is only a registration hint; unavailable X11 identity
+        # must not replace the snapshot's own accessibility result.
+        return 0.0
+    if len(pids) != 1:
+        return 0.0
+    age = process_age_s(next(iter(pids)))
+    if age is None:
+        return 0.0
+    return max(0.0, ATSPI_STARTUP_GRACE_S - age)
+
+
 def stopped_pid_for_app(app: str) -> int | None:
     """The stopped pid for ``app``, when one process is unambiguously it.
 
