@@ -13133,6 +13133,8 @@ def test_missing_tree_does_not_restart_the_process_startup_grace(fake_atspi, mon
         assert exc.value.code is ErrorCode.UNSUPPORTED
         assert exc.value.detail["reason"] == "no_accessibility_bridge"
         assert clock["t"] - before == pytest.approx(expected_wait)
+
+
 @pytest.mark.parametrize("value", ["150%", "150 %", "150", "200%", "100%"])
 def test_xournal_zoom_percent_uses_offset_log_on_driver_path(fake_atspi, monkeypatch, value):
     slider = _Acc("slider", name="185%", value=0.5,
@@ -13803,3 +13805,42 @@ def test_window_mapping_after_registration_check_stays_retryable(fake_atspi, mon
     snap = driver.snapshot(Scope.WINDOW, "cuqtcells")
     assert snap.elements[0].role == "AXWindow"
     assert clock["t"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("method", ["press_element", "click"])
+def test_gnumeric_go_jump_refused_before_activation(fake_atspi, monkeypatch, method):
+    app = _Acc("application", name="Gnumeric")
+    image = _Acc("image", name="go-jump")
+    image.get_application = lambda: app
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: image)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "do_press", lambda *_args: pytest.fail("dangerous action sent"))
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer click sent"))
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: pytest.fail("window raised"))
+    element = Element("e492", "AXImage", "go-jump", None,
+                      Bounds(0, 20, 30, 16, 16), "snap492", clickable=True)
+
+    with pytest.raises(ComputerUseError) as exc:
+        getattr(driver, method)(element)
+
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "gnumeric_go_jump_crash"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "crash" in str(exc.value)
+
+
+@pytest.mark.parametrize("app_name,role,title", [
+    ("Firefox", "AXImage", "go-jump"),
+    ("Gnumeric", "AXButton", "go-jump"),
+    ("Gnumeric", "AXImage", "other-image"),
+])
+def test_gnumeric_crash_guard_is_scoped_to_named_image(fake_atspi, monkeypatch, app_name, role, title):
+    app = _Acc("application", name=app_name)
+    image = _Acc("image", name=title)
+    image.get_application = lambda: app
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e492", role, title, None, None, "snap492", clickable=True)
+    driver._refuse_gnumeric_go_jump(element, image)
