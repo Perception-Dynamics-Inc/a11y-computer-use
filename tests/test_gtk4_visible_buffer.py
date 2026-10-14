@@ -67,3 +67,36 @@ def test_gtk4_missing_range_uses_measured_character_rectangles(monkeypatch, hidd
     monkeypatch.setattr(_atspi, '_raw_rect', lambda *args: (-5, 82, 690, 423))
     assert _atspi._gtk4_visible_buffer(object(), 'abc') == ('abc' if hidden is None else '')
     assert calls == [(0, 1), (1, 1), (2, 1)]
+
+
+@pytest.mark.parametrize('text', ['hello', '7', 'hello\nDEEP_MARKER'])
+def test_gtk4_unsupported_geometry_keeps_buffer_readback_out_of_search(monkeypatch, text):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Scope
+    from tests.test_gtk4_bounds import _App, _Node
+    from tests.fixtures.trees import GEOMETRY
+
+    node = _Node('text', '', (0, 0, 500, 400), (0, 80, 500, 400),
+                 app=_App('GTK', '4.14.5'))
+    monkeypatch.setattr(_atspi, '_atspi', lambda: NS(Text=NS(
+        get_character_count=lambda acc: len(text),
+    ), CoordType=NS(WINDOW=1, SCREEN=0)))
+    monkeypatch.setattr(_atspi, '_state_has', lambda acc, flag: flag in {'MULTI_LINE', 'EDITABLE', 'SHOWING', 'VISIBLE'})
+    monkeypatch.setattr(_atspi, '_read_full_text', lambda *args, **kwargs: text)
+    monkeypatch.setattr(_atspi, '_gtk4_client_origin', lambda *args: (10, 10))
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(node)
+    assert raw.value == text
+    assert raw.search_value == ''
+    assert 'visibility unavailable' in raw.content_note
+    snap = observe.build_snapshot(node, accessor, scope=Scope.WINDOW,
+                                  app='editor', pid=77, geometry=GEOMETRY)
+    assert any(el.value == text for el in snap.elements)
+    assert observe.find_elements(snap, text=text.splitlines()[-1]) == ()
+
+    monkeypatch.setattr(_atspi, '_gtk4_visible_buffer', lambda *args: text.splitlines()[0])
+    visible = observe.build_snapshot(node, accessor, scope=Scope.WINDOW,
+                                     app='editor', pid=77, geometry=GEOMETRY)
+    assert observe.find_elements(visible, text=text.splitlines()[0])
+    if '\n' in text:
+        assert observe.find_elements(visible, text='DEEP_MARKER') == ()

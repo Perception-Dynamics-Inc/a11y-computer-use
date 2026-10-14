@@ -13897,6 +13897,49 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("extra_group", [False, True])
+def test_textarea_ref_survives_transient_wrapper_with_native_identity(monkeypatch, extra_group):
+    """A new GI proxy for the same editor survives either wrapper transition."""
+    from dataclasses import replace
+
+    short = ("AXWindow", "AXGroup", "AXTextArea")
+    long = ("AXWindow", "AXGroup", "AXGroup", "AXTextArea")
+    anchor = Element("e4", "AXTextArea", "", "before", Bounds(0, 0, 0, 500, 300),
+                     "editor-old", path=short if extra_group else long,
+                     instance_id="process-1", document_id="title:/tmp/draft.txt - Text Editor")
+    current = replace(anchor, ref="e5", snapshot_id="editor-live", value="after",
+                      path=long if extra_group else short)
+    old = Snapshot("editor-old", Scope.WINDOW, "gnome-text-editor", 1, 0.0, (), (anchor,))
+    live = replace(old, snapshot_id="editor-live", elements=(current,))
+    old_proxy, new_proxy = object(), object()
+    keys = {old_proxy: (":1.12", "/editor"), new_proxy: (":1.12", "/editor")}
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda handle: keys.get(handle))
+    observe._register_epoch(old.snapshot_id, {}, {anchor.ref: old_proxy})
+    observe._register_epoch(live.snapshot_id, {}, {current.ref: new_proxy})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *_args: None)
+    assert driver.resolve_ref(old, anchor.ref, live=live) is current
+
+    # Identical role, title and geometry cannot authorize a replacement object.
+    for key in [(":1.12", "/replacement"), (":1.13", "/editor"), None]:
+        keys[new_proxy] = key
+        with pytest.raises(ComputerUseError) as exc:
+            driver.resolve_ref(old, anchor.ref, live=live)
+        assert exc.value.code is ErrorCode.STALE_REF
+    keys[new_proxy] = keys[old_proxy]
+    for changed in [replace(current, instance_id="process-2"),
+                    replace(current, document_id="title:/tmp/other.txt - Text Editor")]:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(changed,)))
+        assert exc.value.code is ErrorCode.STALE_REF
+    duplicate = replace(current, ref="e6")
+    observe._register_epoch(live.snapshot_id, {}, {current.ref: new_proxy, duplicate.ref: new_proxy})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(current, duplicate)))
+    assert exc.value.code is ErrorCode.STALE_REF
+
+
 @pytest.mark.parametrize("remembered", [False, True])
 @pytest.mark.parametrize("ending", ["\n", "\r\n"])
 @pytest.mark.parametrize("lands", [False, True])
@@ -14198,6 +14241,103 @@ def test_html_section_text_keeps_empty_wrappers_and_secrets_private(fake_atspi, 
     assert _atspi.ATSPIAccessor().read(section).value is None
 
 
+@pytest.mark.parametrize("attrs", [
+    {"tag": "input", "autocomplete": "list", "haspopup": "listbox", "xml-roles": "combobox"},
+    {"tag": "input", "haspopup": "listbox"},
+])
+def test_web_input_combo_uses_verified_text_path(fake_atspi, monkeypatch, attrs):
+    """ARIA and datalist inputs accept arbitrary text without option children."""
+    combo = _Acc("combo box", name="Fruit", width=120, height=30,
+                 states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    app = _Acc("application", name="Chromium")
+    app.get_toolkit_name = lambda: "Chromium"
+    combo.get_application = lambda: app
+    combo.get_attributes = lambda: attrs
+    combo.text = ""
+    combo.get_text_iface = lambda: combo
+    combo.get_text = lambda *_args: combo.text
+    combo.get_character_count = lambda: len(combo.text)
+    window = _adopt(_Acc("frame", name="Chrome", width=400, height=300), combo)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=582, geometry=_geometry())
+    field, = [el for el in snap.elements if el.role == "AXComboBox"]
+    assert field.editable
+    assert "edit" in observe.render_text(snap, mode="interactive")
+    assert _atspi.control_kind(combo) is None
+    assert not _atspi._blocks_text_replace(combo)
+    assert _atspi._editable_iface(combo) is None
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: combo)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda node: True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda node: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda node, text: setattr(node, "text", text))
+    driver = LinuxDriver()
+    assert driver.set_value(field, "Mango") is True
+    assert combo.text == "Mango"
+    monkeypatch.setattr(_atspi, "_type_into_target",
+                        lambda node, text: setattr(node, "text", node.text + text))
+    assert driver.type_into(field, "Pe") == 2
+    assert combo.text == "MangoPe"
+    combo.text = ""
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda *_args: None)
+    with pytest.raises(ComputerUseError) as mismatch:
+        driver.set_value(field, "unverified")
+    assert mismatch.value.detail["reason"] == "text_mismatch"
+    assert combo.text == ""
+    combo.states.remove("EDITABLE")
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(field, "blocked")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert combo.text == ""
+
+
+@pytest.mark.parametrize("tag,states,has_text", [
+    ("select", {"EDITABLE"}, True),
+    ("input", set(), True),
+    ("input", {"EDITABLE", "READ_ONLY"}, True),
+    ("input", {"EDITABLE"}, False),
+    ("", {"EDITABLE"}, True),
+])
+def test_select_style_combo_remains_blocked_for_text(fake_atspi, tag, states, has_text):
+    combo = _Acc("combo box", states=states)
+    combo.get_application = lambda: _Acc("application", name="Chromium")
+    combo.get_attributes = lambda: {"tag": tag}
+    if has_text:
+        combo.get_text_iface = lambda: combo
+    assert not _atspi.editable_entry(combo)
+    assert _atspi._blocks_text_replace(combo)
+    assert _atspi.control_kind(combo) == "combo"
+
+
+@pytest.mark.parametrize("role,tag", [
+    ("combo box", "input"),
+    ("combo box", "select"),
+    ("paragraph", "p"),
+])
+def test_firefox_input_combo_wrapper_and_static_text_are_not_editable(fake_atspi, role, tag):
+    """Gecko's address-bar wrapper is not an editor despite its input tag."""
+    app = _Acc("application", name="Firefox")
+    app.get_toolkit_name = lambda: "Gecko"
+    node = _Acc(role, name="Search with Google or enter address", width=120, height=30,
+                states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    node.get_application = lambda: app
+    node.get_attributes = lambda: {"tag": tag, "xml-roles": "combobox"}
+    node.get_text_iface = lambda: node
+    node.get_editable_text_iface = lambda: node
+    node.get_text = lambda *_args: "unchanged"
+    node.get_character_count = lambda: 9
+    window = _adopt(_Acc("frame", name="Firefox", width=400, height=300), node)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="firefox", pid=623, geometry=_geometry())
+    field, = [el for el in snap.elements if el.title == node.name]
+    assert field.editable is False
+    assert not _atspi.editable_entry(node)
+    assert _atspi._blocks_text_replace(node)
+    assert _atspi.set_text(node, "replacement") is False
+    if role == "combo box":
+        assert _atspi.control_kind(node) == "combo"
+
+
 def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, monkeypatch):
     """Chrome entry discovery must not traverse Calc's focus tree again."""
     field = _Acc("entry", name="Calc editor")
@@ -14214,3 +14354,80 @@ def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, 
                         lambda *args, **kwargs: pytest.fail("Chrome lookup on native editor"))
     assert _atspi.focused_text("soffice") == "Item"
     assert lookups == ["soffice"]
+
+
+@pytest.mark.parametrize("stable_keys", [False, True])
+@pytest.mark.parametrize("check", ["showing", "tab_title"])
+def test_firefox_visibility_keeps_fresh_parent_wrappers(monkeypatch, stable_keys, check):
+    """Recycled proxy ids must not hide the active Firefox document (#632)."""
+    import weakref
+
+    # Model allocator reuse deterministically: an id is reusable only after
+    # its wrapper has been collected. No timing or GI dependency is involved.
+    slots = []
+
+    class Proxy:
+        def __init__(self, depth):
+            self.depth = depth
+
+    def proxy_id(node):
+        for index, held in enumerate(slots):
+            if held() is node:
+                return index
+        for index, held in enumerate(slots):
+            if held() is None:
+                slots[index] = weakref.ref(node)
+                return index
+        slots.append(weakref.ref(node))
+        return len(slots) - 1
+
+    def role(node):
+        if node.depth == 0:
+            return "document web"
+        if node.depth == 6:
+            return "internal frame" if check == "showing" else "document web"
+        if node.depth == 7:
+            return "frame"
+        return "panel"
+
+    monkeypatch.setattr(_atspi, "id", proxy_id, raising=False)
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node:
+                        (":1.632", f"/node/{node.depth}") if stable_keys else None)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda node:
+                        Proxy(node.depth + 1) if node.depth < 7 else None)
+    monkeypatch.setattr(_atspi, "_role_name", role)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state:
+                        state == "SHOWING" and node.depth in ({6} if check == "showing" else {0}))
+    monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "cuapara")
+    monkeypatch.setattr(_atspi, "_node_name", lambda node:
+                        "Child frame" if check == "tab_title" and node.depth == 0 else "cuapara")
+
+    assert not _atspi._hidden_gecko_browser(Proxy(0))
+
+    # The fix must still omit a genuinely hidden/background document.
+    if check == "showing":
+        monkeypatch.setattr(_atspi, "_state_has", lambda node, state: False)
+    else:
+        monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "Other tab")
+    assert _atspi._hidden_gecko_browser(Proxy(0))
+
+
+@pytest.mark.parametrize("text", ["Cursor size", "cursor size", "Cursor", "size:"])
+def test_find_and_scroll_to_find_keep_gtk_form_label_with_colon(
+    fake_atspi, monkeypatch, text
+) -> None:
+    """A synthetic AT-SPI form label remains discoverable without a control."""
+    from a11y_computer_use import server
+
+    label = _Acc("label", name="Cursor size:", width=100, height=24)
+    window = _Acc("frame", name="Settings", width=800, height=600)
+    _adopt(window, label)
+    _bind_gtk_app(window)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text=text)
+    assert 'statictext "Cursor size:"' in found
+    landed = runtime.scroll_to_find("treeprobe", text=text, max_scrolls=0)
+    assert landed.startswith("found after 0 scroll")
+    assert 'statictext "Cursor size:"' in landed

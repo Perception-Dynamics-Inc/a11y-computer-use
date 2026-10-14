@@ -102,6 +102,7 @@
 - 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
+- 2026-10-14 (#589): GTK transient siblings can change the pruned path of an unnamed textarea without replacing it. Rebind only when the fresh snapshot contains the same AT-SPI bus/object identity and preserves process/document binding; geometry and an unnamed role alone do not identify the editor. Preserve independent appended regression tests when merging main.
 - 2026-10-14 (PR #606 repair): Gate Chromium focused-entry discovery on the already observed node’s toolkit before repeating focus discovery. Native Calc read-back must retain a single focus-tree lookup; browser-specific disambiguation must not add native tree traversals to other apps.
 
 - 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
@@ -109,3 +110,11 @@
 - 2026-10-14 (#588): GTK 4 text ranges can reject SCREEN coordinates and point-to-offset queries while WINDOW range extents work. Compare ranges and widget bounds in WINDOW space; keep full-buffer write verification separate from visible snapshot values.
 
 - 2026-10-14 (PR #626 repair): GTK 4 bridges can omit WINDOW GetRangeExtents while supporting GetCharacterExtents. Keep unavailable geometry unreadable, but verify every character through the native fallback rather than relying on endpoint boxes for wrapped lines.
+
+- 2026-10-14 (PR #623 CI repair): Firefox address-bar combo wrappers can expose an input tag, Text, and EDITABLE together. Those signals alone do not identify the Chromium ARIA/datalist editor from #582. Scope that exception to Chromium and preserve Gecko wrapper, select, and paragraph refusals; verify both the Firefox live regression and hermetic tests with GI imports blocked.
+- 2026-10-14 (#537): `_atspi()` was initialized once but still ran `gi.require_version` for every state/geometry probe; the newer masking probes multiplied typelib version enumeration during Calc snapshots. Cache only the successfully initialized binding, preserve `_inited` invalidation on D-Bus reconnect and missing-GI dependency isolation, and keep all native state/geometry/readback calls live. Profile the event-thread callback, not just the caller waiting in `submit`; use fresh LibreOffice and D-Bus processes for repeated loaded measurements.
+
+- 2026-10-14 (PR #602 repair): Validate browser live failures with a running window manager before attributing them to ref matching. An extracted Openbox needs both its shared-library path and theme data; missing either can leave native window verification unavailable.
+- 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
+
+- 2026-10-14 (PR #626 CI repair): GTK 4.14 routes GtkAccessibleText through a bridge that implements neither range nor character extents, unlike newer GTK. Keep buffer read-back separate from verified visibility in the search index; label unverified contents and never allow them to satisfy find. Reproduce version-dependent failures with the runner’s GTK and app libraries.

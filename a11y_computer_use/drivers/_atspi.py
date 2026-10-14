@@ -168,6 +168,7 @@ _PICK_ACTION_NAMES = frozenset({"select", "pick"})
 _MAX_CHILDREN_FETCH = 250
 
 _inited = False
+_atspi_binding = None
 
 
 def _atspi():
@@ -176,8 +177,12 @@ def _atspi():
 
     The import stays inside this function. A missing ``gi`` module, or a
     typelib ``require_version`` cannot load, is ImportError either way.
+    Reuse the successfully initialized binding, not any accessibility data.
+    A bus reconnect clears ``_inited`` and must still initialize it again.
     """
-    global _inited
+    global _inited, _atspi_binding
+    if _inited and _atspi_binding is not None and sys.modules.get("gi") is not None:
+        return _atspi_binding
     try:
         import gi
     except ImportError as exc:
@@ -202,6 +207,7 @@ def _atspi():
         # 300ms bound from the first call.
         _safe(lambda: Atspi.set_timeout(300, 0))
         _inited = True
+    _atspi_binding = Atspi
     return Atspi
 
 
@@ -3878,6 +3884,18 @@ class ATSPIAccessor:
             sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
+        search_value = None
+        if (value is None and role == "AXTextArea"
+                and role_str in {"text", "editable text", "entry"}
+                and _gtk4_app(node) and not is_secure(node)):
+            # GTK 4.14 implements neither text extent API for AccessibleText.
+            # Preserve native buffer read-back, without indexing it as visible.
+            buffer = _read_full_text(node)
+            if isinstance(buffer, str) and buffer and (
+                _reports_multiline(node, attrs) or "\n" in buffer
+            ):
+                value = buffer
+                search_value = ""
         qt_document = (
             role == "AXTextArea" and role_str != "terminal"
             and _qt_app(node) and _reports_multiline(node, attrs)
@@ -3908,7 +3926,10 @@ class ATSPIAccessor:
                 "Visible document text unavailable; use in-document Find or line navigation"
             )
         surface_name = ""
-        content_note = ""
+        content_note = (
+            "Buffer contents; text visibility unavailable, excluded from text search."
+            if search_value is not None else ""
+        )
         panel_note = ""
         if (
             role_str == "drawing area"
@@ -4033,6 +4054,7 @@ class ATSPIAccessor:
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
+            search_value=search_value,
             surface_name=surface_name,
             content_note=content_note,
             hint=hint,
@@ -7959,12 +7981,13 @@ def editable_entry(
     The positive signal is ``STATE_EDITABLE`` on this node. EditableText
     support is not that signal: Firefox exposes the interface on paragraphs,
     documents, and address-bar wrappers that are not editors. A paragraph,
-    panel, document, or combo/select is not an entry even when it reports
+    panel, document, or select-style combo is not an entry even when it reports
     ``STATE_EDITABLE``. A read-only node is not.
 
     An entry, password, text, or spin-button role is an entry only when this
     node is ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
     whose tag is ``div`` or ``span`` and whose own state is ``EDITABLE``.
+    A Chromium input-tagged combobox with Text and EDITABLE is also an entry.
     Chromium often has no EditableText (#221). Firefox's roleless
     contenteditable is the same section and does not need the interface
     either. A paragraph is not that section.
@@ -7976,7 +7999,23 @@ def editable_entry(
     role = role_str if role_str is not None else _role_name(acc)
     if role in {"paragraph", "heading"}:
         return bool(drawing)
-    if role in {"combo box", "combo-box"} or role in _STATIC_REPLACE_ROLES:
+    if role in {"combo box", "combo-box"}:
+        # Chromium ARIA autocomplete and datalist inputs own their text; their popup
+        # options are not children and do not constrain the input value.
+        # Gecko address-bar wrappers also report input, Text, and EDITABLE;
+        # those wrappers must retain the select-style classification.
+        if not _chromium_app(acc):
+            return False
+        if attrs is None:
+            attrs = _get_attributes(acc)
+        if state_editable is None:
+            state_editable = _state_has(acc, "EDITABLE")
+        return bool(
+            str(attrs.get("tag") or "").lower() == "input"
+            and state_editable and not _state_has(acc, "READ_ONLY")
+            and _call_first(acc, ("get_text_iface",)) is not None
+        )
+    if role in _STATIC_REPLACE_ROLES:
         return False
     if role in _ENTRY_ROLE_NAMES:
         if _state_has(acc, "READ_ONLY"):
@@ -8005,9 +8044,9 @@ def _blocks_text_replace(acc) -> bool:
     """True when ``set_text`` must not select or type into this node.
 
     A role-less object is a synthetic field. A browser paragraph, panel,
-    document, or combo is blocked even when it exposes EditableText or
+    document, or select-style combo is blocked even when it exposes EditableText or
     ``STATE_EDITABLE``. An Impress or Draw paragraph with both is not
-    blocked. A contenteditable section and a real entry are not.
+    blocked. A contenteditable section, input combobox, and real entry are not.
     """
     role = _role_name(acc)
     if role == "":
@@ -8018,6 +8057,8 @@ def _blocks_text_replace(acc) -> bool:
         return False
     if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
         return False
+    if role in {"combo box", "combo-box"}:
+        return not editable_entry(acc)
     if role in _STATIC_REPLACE_ROLES:
         return True
     if role == "section":
@@ -11859,7 +11900,8 @@ def focused_key_evidence(app: str) -> tuple:
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
 
-    A combo is set through its own items or its own entry. A spin button,
+    A select-style combo is set through its own items or its own entry.
+    An editable input combobox stays on ``set_text``. A spin button,
     slider, or other Value-interface control is set through current value.
     A plain text role stays on ``set_text``. A scroll bar's Value drives
     pixel scroll and is not a ``set_value`` target.
@@ -11872,7 +11914,7 @@ def control_kind(acc) -> str | None:
     """
     role = _role_name(acc)
     if role == "combo box":
-        return "combo"
+        return None if editable_entry(acc) else "combo"
     if role in {"list box", "list"} and _collect_options(acc):
         return "combo"
     # A missing role is a fake or a node we cannot classify. Do not probe
@@ -14945,7 +14987,7 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     Success is the readable text, where one trailing newline is the ``<br>``.
     A Chrome date, time, or month segment is typed and checked against
     ``valuetext``. The Value interface is not that check.
-    A browser paragraph, a panel, a document, or a combo is not replaced.
+    A browser paragraph, panel, document, or select-style combo is not replaced.
     Firefox exposes EditableText on those nodes, and selecting one selects
     the page. This returns false before any selection or key. An Impress
     or Draw paragraph with ``STATE_EDITABLE`` and EditableText is replaced
@@ -16944,22 +16986,15 @@ def _frame_hierarchy_showing(node) -> bool:
     document web, its internal frame, and the scroll pane around that frame
     are SHOWING.
     """
-    current = node
-    seen: set[int] = set()
-    for _ in range(8):
-        if current is None or id(current) in seen:
-            return False
-        seen.add(id(current))
+    # Parent reads can return fresh GI proxies. Keep them alive and use
+    # native identity so a recycled Python id cannot hide the active page.
+    for current in _ancestor_chain(node, 8):
         role = _role_name(current)
         if role in {"document web", "document frame", "internal frame", "scroll pane"}:
             if _state_has(current, "SHOWING"):
                 return True
         if role in {"frame", "window", "application"}:
             break
-        parent = _parent_of(current)
-        if parent is None or parent is current:
-            break
-        current = parent
     return False
 
 
@@ -17022,22 +17057,13 @@ def _enclosing_tab_document(doc):
     the outermost document web under the window. An iframe's document web
     has that outer document as an ancestor.
     """
-    current = doc
     outer = doc
-    seen: set[int] = set()
-    for _ in range(24):
-        if current is None or id(current) in seen:
-            break
-        seen.add(id(current))
+    for current in _ancestor_chain(doc, 24):
         role = _role_name(current)
         if role in {"frame", "window", "application"}:
             break
         if role == "document web":
             outer = current
-        parent = _parent_of(current)
-        if parent is None or parent is current:
-            break
-        current = parent
     return outer
 
 

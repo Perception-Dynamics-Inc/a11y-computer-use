@@ -287,6 +287,9 @@ class RawNode:
     #: when the driver could not separate the screen from the buffer. The
     #: snapshot shows this text; ``find`` still searches ``value``.
     screen_text: str | None = None
+    #: Explicit search value when displayed buffer contents have unverified visibility.
+    #: None keeps normal value indexing; an empty string excludes the buffer.
+    search_value: str | None = None
     #: A control the toolkit did not allocate, such as a notebook page tab
     #: while the tab bar is hidden. The snapshot keeps the name and does not
     #: invent a box. Also used for visible Evince page text whose native
@@ -1386,9 +1389,10 @@ def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[
     ``find_elements`` stays a substring search. ``find`` and ``scroll_to_find``
     apply this ranking. When a cell, row, or other control is titled exactly
     with ``text``, only those matches are returned. A label whose title merely
-    contains ``text`` is dropped. A label whose title is ``text`` stays. A
-    paragraph or other static text whose value contains ``text`` stays, and so
-    does a button or field matched by substring when no exact control exists.
+    contains ``text`` is dropped when an exact control exists. Otherwise
+    substring label matches stay, including form labels with punctuation.
+    Mentions of indexed row identifiers (for example ``ROW-05000``) still
+    do not count as the row itself, so scrolling can discover the actual row.
     """
     if not matches or not isinstance(text, str) or not text.strip():
         return tuple(matches)
@@ -1406,10 +1410,18 @@ def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[
     if exact:
         return exact
 
+    # Keep #446's off-screen row search: explanatory labels containing an
+    # indexed identifier must not stop discovery before its cell is visible.
+    # Ordinary label queries remain substring searches.
+    if re.fullmatch(r"[^\W\d_][\w-]*[-_]\d+", needle) is None:
+        return tuple(matches)
+
     def mentions_label(el: Element) -> bool:
         if el.subrole != "label" or el.role not in {"AXStaticText", "AXHeading"}:
             return False
-        return _folded_title(el.title or "") != needle
+        title = _folded_title(el.title or "")
+        # A form label may itself name the indexed target, with punctuation.
+        return title != needle and re.sub(r"[\W_]+$", "", title) != needle
 
     return tuple(el for el in matches if not mentions_label(el))
 
@@ -2741,6 +2753,8 @@ def _flatten(
             value = _clip(raw_value, _MAX_VALUE_CHARS)
             if raw_value != value:
                 full_values[ref] = raw_value
+    if not secure and node.raw.search_value is not None:
+        full_values[ref] = node.raw.search_value
     out.append(
         Element(
             ref=ref,

@@ -424,6 +424,38 @@ def test_exact_control_names_outrank_a_label_that_mentions_them() -> None:
     assert observe.prefer_exact_targets((spaced,), "Welcome back") == (spaced,)
 
 
+@pytest.mark.parametrize(
+    "title", [
+        "Cursor size:", "  Cursor size:  ", "Cursor size…", "Cursor\u00a0size:",
+        "Adjust Cursor size in Settings",
+    ],
+)
+@pytest.mark.parametrize("text", ["Cursor size", "cursor size", "Cursor", "size", "sor si"])
+def test_partial_form_label_names_survive_find_ranking(title: str, text: str) -> None:
+    """Partial label names survive the shared find/scroll_to_find ranking."""
+    snap = snap_of(ax(
+        "AXWindow", title="Settings", at=(0, 0), size=(800, 600), children=[
+            ax("AXStaticText", title=title, subrole="label", at=(10, 10), size=(200, 24)),
+        ],
+    ))
+    matches = observe.find_elements(snap, text=text)
+    assert len(matches) == 1
+    assert matches[0].title == title
+    assert observe.prefer_exact_targets(matches, text) == matches
+
+
+def test_exact_control_still_outranks_partial_form_label() -> None:
+    label = _ranked("AXStaticText", "Cursor size:", subrole="label", ref="e1")
+    control = _ranked("AXSlider", "Cursor size", clickable=True, ref="e2")
+    assert observe.prefer_exact_targets((label, control), "Cursor size") == (control,)
+
+
+@pytest.mark.parametrize("title", ["ROW-05000:", " ROW-05000… "])
+def test_indexed_target_form_label_keeps_trailing_punctuation(title: str) -> None:
+    label = _ranked("AXStaticText", title, subrole="label")
+    assert observe.prefer_exact_targets((label,), "ROW-05000") == (label,)
+
+
 def test_single_child_wrappers_collapse() -> None:
     snap = snap_of(typical_app_window())
     editor = by_title(snap, "Document body")

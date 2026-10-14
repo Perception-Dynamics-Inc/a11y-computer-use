@@ -5,7 +5,8 @@ every on-screen box. When that process was started with
 ``--remote-debugging-port``, form-control values and checked state are
 read and written through the page DOM and merged onto the matching
 elements. Refs and bounds are unchanged. A missing port leaves the
-AT-SPI snapshot and the AT-SPI write path as they were. This module
+AT-SPI snapshot and the AT-SPI write path as they were. A missing
+optional websocket-client dependency also keeps that native path. This module
 does not launch a browser and does not add debugging flags.
 
 Geometry from the DOM is ignored. A control the snapshot does not
@@ -862,7 +863,16 @@ def _only_form_page(pages: list, expression: str | None) -> str | None:
 def _eval_socket(socket: str, expression: str) -> object:
     from a11y_computer_use.drivers._cdp import CDPSession, connect
 
-    transport = connect(socket, timeout=3.0)
+    try:
+        transport = connect(socket, timeout=3.0)
+    except ComputerUseError as exc:
+        # No connection or DOM write has happened when the dependency is
+        # absent. Other CDP failures must remain errors: native retry could
+        # repeat an action whose effect is unknown.
+        if (exc.code is ErrorCode.UNSUPPORTED
+                and exc.detail.get("reason") == "missing_browser_dependency"):
+            return None
+        raise
     session = CDPSession(transport, default_timeout=3.0)
     try:
         reply = session.call(
