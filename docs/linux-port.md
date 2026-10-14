@@ -299,6 +299,11 @@ galculator-shaped regression tests; no local live verification.
 
 ### Masked GTK 4 entries
 
+GTK 4 PasswordEntry wrappers and their password text children are classified as
+secure. Ref-based `type` and `set_value` refuse an already observed secure field
+before live ref resolution, so a rebuilt child cannot turn the refusal into
+`stale_ref`. The refusal is audited with the ref and role, without the input.
+
 Password roles, password/protected/invisible states, visibility-off, and
 invisible-character attributes classify an entry as `securetextfield`. Its
 value is omitted, and type/set_value are refused without echoing the input.

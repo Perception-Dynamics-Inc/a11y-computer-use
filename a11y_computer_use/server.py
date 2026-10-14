@@ -3215,11 +3215,26 @@ class Runtime:
             raise
 
     def _resolve(self, ref: str, kind: str) -> tuple[Snapshot, Element]:
-        """Anchor ``ref`` and re-resolve it against the live tree through the
-        driver. A failure (``stale_ref`` from either step, or a driver error
-        during the re-walk) is recorded in the audit log before it propagates."""
+        """Resolve a ref against the live tree, auditing any failure.
+
+        Text writes to an issued secure ref are refused before live resolution:
+        a rebuilt native child must not turn a secure refusal into stale_ref.
+        No old handle is reused to perform an action. Other targets still need
+        ordinary live resolution and the act-time security checks.
+        """
+        snap, anchor = self._anchor_audited(ref, kind)
+        if kind == "typetext" and anchor.secure:
+            self._record_failure(
+                kind, app=snap.app or "unknown",
+                params={"ref": ref, "role": anchor.role},
+                result=ErrorCode.SECURE_FIELD.value,
+            )
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "refusing to write a secure field; secrets are entered by the human",
+                detail={"ref": ref, "role": anchor.role},
+            )
         try:
-            snap, _anchor = self._anchor(ref)
             live = self.driver.resolve_ref(snap, ref)
         except ComputerUseError as exc:
             self._audit_stale(kind, ref, exc)
@@ -5508,9 +5523,10 @@ class Runtime:
     def _type_at_ref(self, text: str, ref: str, app: str | None) -> str:
         """Type ``text`` into ``ref`` only after focus is confirmed on it.
 
-        Resolution is the same path click and set_value use, so a replaced
-        process is ``stale_ref`` with reason ``app_restarted`` and nothing is
-        typed. The outcome read-back is this element, not the field that
+        An issued secure ref is refused before resolution. Other refs use the
+        same live resolution as click and set_value, so a replaced process is
+        ``stale_ref`` with reason ``app_restarted`` and nothing is typed.
+        The outcome read-back is this element, not the field that
         happened to be focused before the call.
         """
         snap, live = self._resolve(ref, "typetext")
@@ -6079,7 +6095,8 @@ class Runtime:
         """Set an editable element's value directly via the a11y API (one op),
         falling back to focus + type when the app exposes no settable value.
         Gated at the target's app, FULL tier (a text-entry path). A secure
-        field is refused ahead of the tier gate (the answer is ``secure_field``
+        field already marked secure is refused before live ref resolution
+        and the tier gate (the answer is ``secure_field``
         whatever the grant: a human types secrets, not this tool) and the
         refusal is written to the audit log with the ref and role only, never
         the value."""
@@ -9408,7 +9425,8 @@ def build_server(
         different app than app= is invalid_arguments and nothing is typed.
         Gated at tier 'full' against the target app; refuses with
         secure_field when a password field has focus or the ref is a secure
-        field — secrets are typed by the human, never by this tool. The
+        field — secrets are typed by the human, never by this tool. An issued
+        secure ref is refused and audited before live ref resolution. The
         text is unchanged. An empty GTK 4 entry with no masking signal accepts
         type(ref) with a redacted result and private boolean verification;
         a fresh snapshot then classifies its rendered text.
@@ -9602,7 +9620,8 @@ def build_server(
         target focus can activate a different control. set_value does not
         send Return or activate the field automatically.
         Gated at tier 'full'; refuses secure/password fields (secrets are
-        entered by the human, never this tool). An empty GTK 4 entry without
+        entered by the human, never this tool). An issued secure ref is refused
+        and audited before live ref resolution. An empty GTK 4 entry without
         masking signals accepts a privately verified write with a redacted
         result; a fresh snapshot then classifies its rendered text.
         Ideal for filling forms fast.
