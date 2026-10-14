@@ -8,6 +8,7 @@
 - The first #503 attempt (dropping GTK 4 nodes with garbage sizes) broke the huge Calc and combo popup tests. Large-but-valid geometry is legitimate; only filter clearly uninitialized sizes.
 - 2026-10-13 (#480): Linux maps native AT-SPI terminals to AXTextArea; inspect native terminal ancestry, including remembered editable handles, rather than treating every multiline editor as a shell. Preserve cached-field ownership checks before terminal detection so stale focus still returns an audited focus_changed error. Execution permission is independent of per-app FULL grants and defaults off for MCP Runtime hosts as well as agents.
 - 2026-10-13 (#537): Repeated AT-SPI `get_application` calls are expensive in Calc snapshots. Cache successful owner lookups within the existing operation-scoped getter cache; preserve retries for missing owners and invalidate on mutations. A getter can return a fresh GI wrapper, so toolkit attributes attached to that wrapper alone do not prevent repeated owner lookups.
+- 2026-10-13 (#548): A mapped GTK4 window can precede AT-SPI registration. Before reporting a missing bridge, preserve the remaining existing process-startup grace for an unambiguous owner; older apps still fail fast. Keep registration tests hermetic and run them with gi imports disabled to check non-Linux dependency isolation.
 
 - 2026-10-13 (#202): When merging grant aliases with desktop launch resolution, preserve GenericName program selection and exact permission gates alongside grant-selected labels. Installed bundle resolution must keep the requested spelling even if a Linux executable with a case-folded name is on PATH.
 - 2026-10-13 (#488): xdg-desktop-portal backends share one process across requesting apps. Resolve the full backend name before matching it, inherit identity only from a managed `WM_TRANSIENT_FOR` parent, and bind observations to the active chooser frame. Never add a portal PID to a requesting app's `pids_matching` set, expand that frame into sibling dialogs, or treat a matching portal PID as sufficient for a pointer permission recheck: this would expose other apps under the requesting app's grant.
@@ -15,7 +16,6 @@
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 - 2026-10-13 (#496): Okular's childless PDF filler has no AT-SPI Text interface. Keep document surface labels scoped to the unnamed layered/split document pane with a scrollbar sibling; exclude dialogs and named sidebar panes. Do not treat an in-app search invocation as a verified page-text match.
 - 2026-10-13 (#515): AbiWord opaque document views can select text through native Find without exposing a confirming accessibility match. Refuse before Ctrl+F/query input when the search container contains an opaque region; unrelated opaque siblings must not block a verifiable container. Launch-gate tests must stub PATH and desktop entries because executable casing is intentionally canonicalized.
-
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
 
@@ -33,6 +33,10 @@
 - 2026-10-14 (PR #535): When merging AT-SPI naming fallbacks, retain independent role-specific rules together. Relation-derived GTK menu labels must pass through the same rich-text normalization as native names; cover quoted attribute delimiters in the relation-label regression too.
 - 2026-10-14 (#446 repair): A post-commit pause inside the AT-SPI event-thread callback cannot process the editor-removal event. Commit in one driver operation, pause on the caller, then verify in the next operation; keep the existing pause bound.
 
+- 2026-10-14 (#548 repair): Injecting a Linux driver into Runtime does not change its host-platform app resolver. Synthetic Runtime regressions must supply the fake app identity as well as Linux app/window lists, so macOS does not query NSWorkspace before reaching the driver.
+
+- 2026-10-14 (#560 repair): EditableText alone does not prove a GTK text view is writable; preserve the native EDITABLE recheck and the shared read_only override when merging observation changes. Refresh the PR branch from origin before resolving main conflicts so existing repairs are retained.
+- 2026-10-14 (#560 validation): In a sandbox with a read-only home cache, AT-SPI bus activation aborts Python subprocesses even in hermetic CLI tests. Set XDG_CACHE_HOME to a writable temporary directory and run under dbus-run-session; an Xvfb session alone does not fix the cache path.
 - 2026-10-14 (#515 repair): Opaque document search refusal must run before unreadable-container returns and outside Chromium-only Find eligibility; preserve the separate unreadable-list result and scope the refusal to the chosen container.
 
 - 2026-10-14 (#501 repair): Xournal++ zoom uses `log(percent / 100 - 0.20753)` and requires both raw Value and displayed percent read-back. In isolated Chrome live tests, a D-Bus keyring prompt can steal keyboard focus; reproduce with CI's window manager and prevent unrelated credential prompts in the temporary desktop session before diagnosing an input regression.
@@ -49,6 +53,12 @@
 - 2026-10-14 (#478): Kate’s painted gutter has no accessible line labels. Scope its contextual name to native editor siblings and retain the opaque-region limitation; never infer line targets from the strip’s bounds. When merging surface-label branches, keep each application’s recognition condition independent.
 - 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.
 
+- 2026-10-14 (#548 repair): GTK program names can differ from interpreter process names before AT-SPI registration. Measure startup age from an unambiguous WM_CLASS window PID and preserve the original caller name for this timing hint; titles alone are insufficient and permission routing must stay unchanged.
+
+- 2026-10-14 (#560 merge repair): A sandboxed test process can see desktop windows with host PIDs that differ from subprocess PIDs. Such a session cannot validate live window ownership; run hermetic checks without DISPLAY/WAYLAND_DISPLAY and use CI for native verification. Keep the live ownership assertions intact.
+
+- 2026-10-14 (#570 repair): Writable worktree files do not guarantee writable linked Git metadata or protected lesson files. If those mounts refuse writes, use a writable temporary clone of the current remote PR branch, merge main there, and push normally to preserve branch history.
+
 - 2026-10-14 (PR #539 merge repair): In a sandbox sharing a desktop, GTK live tests can enumerate a launched window yet fail their on-screen/process-family match. Reproduce the same assertion from an unchanged main checkout before attributing it to a merged server change; do not relax window ownership checks.
 - 2026-10-14 (#552 repair): Opaque-search refusals must remain before input when merging verified Find support; retain the FULL grant gate and focused find-bar verification as independent requirements.
 - 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
@@ -60,6 +70,11 @@
 
 - 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
 
+- 2026-10-14 (#548 repair): A window may map between the registration eligibility check and the final missing-root check. Do not report a missing bridge for an app that has not received its registration retry; keep that first observation retryable. Exercise this ordering with synthetic lists and a scripted clock.
+
+- 2026-10-14 (PR #570 conflict repair): Refresh the remote PR head before merging main; an older local branch can miss repairs already pushed. Resolve independently appended regression tests by retaining both complete test blocks and check the resulting diff against main.
+
+- 2026-10-14 (#570 merge repair): Preserve main's platform_editable override when merging text-view guards. A text-view handle with a state-set API still needs the live EDITABLE recheck when GI is unavailable; transports without a state-set API retain their existing verified replacement path.
 
 - 2026-10-14 (#202 repair): Linux live segfault logs can identify concurrent native getters beside `Atspi.event_main`. Preserve main's `_call_first` event-thread dispatch and its regression when merging identity changes; driver-level dispatch alone does not cover direct AT-SPI callers.
 - 2026-10-14 (PR #472 repair): A drawing-canvas fallback must run only when no surface label was already recognized. Otherwise an empty Inkscape result erases Gnumeric and gucharmap labels; run those surface regressions alongside the canvas tests when merging app-specific naming rules.
@@ -71,3 +86,8 @@
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
 
 - 2026-10-14 (PR #566 repair): Appended test conflicts can contain regressions already present earlier in main. Preserve each test once and compare the resolved diff against main before validation.
+
+- 2026-10-14 (#584): Empty GTK 4 plain and visibility-off entries both expose an empty rendered LINE and no visibility metadata. A zero character count makes this state unknown, not secure; first writes require private buffer equality and redacted receipts/audit. Only later rendered text distinguishes visible contents from masking. GTK text roles may map to AXTextArea even for single-line entries.
+
+- 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.
+- 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
