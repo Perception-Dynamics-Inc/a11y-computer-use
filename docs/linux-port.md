@@ -247,6 +247,15 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+
+Okular may expose its PDF page viewport as an unnamed, childless filler without
+an AT-SPI Text interface. In the document pane, the Linux driver labels this
+opaque surface `Okular document / page view` and includes a limitation note.
+`find` and `scroll_to_find` cannot read page tokens from that surface. Explicitly
+use Okular's Ctrl+F Find bar or page-number control and verify the resulting UI;
+these tools do not automatically invoke in-app search. Accessible names and
+page text supplied by the application remain unchanged.
+
 ### Opaque document search
 `scroll_to_find` refuses in-app Find before sending keys or query text when the chosen container contains an `opaque_region`, such as AbiWord’s document drawing area. It returns `unsupported` with reason `opaque_find_unverifiable`: the accessibility tree cannot verify a match, and native Find could leave document text selected for replacement by a later `type`. This refusal does not open Find or change the document selection.
 
@@ -300,6 +309,21 @@ bullets become secure, matching plain text permits readback. GTK 3 and multiline
 editors keep their existing text path. State and toolkit attributes are read once
 within each security probe; the layout call is limited to GTK single-line
 entry/text roles outside GTK 3.
+
+## Qt document searches
+
+Qt multiline editors (including FeatherPad) expose the entire document through
+AT-SPI Text. Native multiline states or attributes select this path; ordinary
+Qt line edits retain their text without requesting document viewport ranges.
+Snapshot values and text searches use `Text.get_bounded_ranges`
+inside the measured editor bounds, falling back to native point offsets and
+verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+these ranges, so an off-screen match becomes searchable when it enters the
+viewport. When neither interface establishes visibility, the document value is
+omitted and its hint recommends in-document Find or line navigation. `find` and
+`scroll_to_find` cannot confirm document text through the whole buffer in that
+case. This path is covered by synthetic tests; FeatherPad has not been live-
+verified for this change.
 
 ### Execution permission and launchers
 
