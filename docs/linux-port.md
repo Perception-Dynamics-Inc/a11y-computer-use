@@ -392,3 +392,13 @@ insufficient. A failed expansion returns an error without a pointer fallback,
 since these controls can report bounds that do not match their painted rows.
 
 Editable web combobox inputs (ARIA autocomplete and HTML datalist) retain their combobox role and expose `edit` when their native node has `tag=input`, Text, and `EDITABLE`, without `READ_ONLY`. `set_value` uses the verified text replacement path, and `type(ref=...)` uses the focus-confirmed text path; values are not restricted to popup options. Select-style combos retain option selection. This distinction is hermetic-tested; native Chrome verification remains a CI/live check.
+
+## Qt Quick checkable clicks
+
+Qt Quick checkboxes, switches, and radio buttons can expose `Toggle`, `Press`,
+and `SetFocus`: `Toggle` changes state without user signals, while `Press` does
+nothing. Ref clicks on Qt checkable roles with that action pair use one X11
+pointer click at the visible center of the reported bounds and require a stable
+checked-state change. Missing or off-screen bounds, native Wayland, and an
+unchanged checked state return an error; no AT-SPI Toggle follows the click.
+This path is covered by hermetic tests; a live QML run has not been performed.
