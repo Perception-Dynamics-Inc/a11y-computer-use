@@ -288,6 +288,8 @@ class Element:
     #: mentions the text and a cell or control has the exact name.
     #: None for every other role.
     subrole: str | None = None
+    #: Native heading level, when reported; never inferred from text or geometry.
+    heading_level: int | None = None
     #: Set when a canvas has no accessible text and no children. The
     #: snapshot and a find that misses print this sentence. Empty when the
     #: toolkit exposed the content, and on every other role. It is not a box.
