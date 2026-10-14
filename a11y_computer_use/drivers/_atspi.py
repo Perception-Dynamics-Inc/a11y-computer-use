@@ -5370,24 +5370,32 @@ def desktop_application_roots() -> DesktopApplications:
     return DesktopApplications(ready, silent)
 
 
+def _text_security(acc):
+    """Read security metadata once; visibility is meaningful only for entries."""
+    role = _role_name(acc)
+    if role == "password text":
+        return True, role, {}, None
+    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED", "INVISIBLE")):
+        return True, role, {}, None
+    attrs = _get_attributes(acc)
+    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
+           for key in ("password", "protected")):
+        return True, role, attrs, None
+    visibility = None
+    if role in {"entry", "text"}:
+        visibility = _call_first(acc, ("get_visibility",))
+        if visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}:
+            return True, role, attrs, visibility
+    return False, role, attrs, visibility
+
+
 def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
     GTK 4 can omit every masking signal; its empty sentinel must also remain
     empty in public text readback.
     """
-    if _role_name(acc) == "password text":
-        return True
-    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED", "INVISIBLE")):
-        return True
-    attrs = _get_attributes(acc)
-    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
-           for key in ("password", "protected")):
-        return True
-    if _role_name(acc) in {"entry", "text"}:
-        visibility = _call_first(acc, ("get_visibility",))
-        return visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}
-    return False
+    return _text_security(acc)[0]
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -7711,21 +7719,18 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
-def _entry_text_visible(acc) -> bool:
+def _entry_text_visible(role, attrs, visibility) -> bool:
     """Require an explicit toolkit text-visibility signal before retrying."""
-    if _role_name(acc) not in {"entry", "text"} or is_secure(acc):
+    if role not in {"entry", "text"}:
         return False
-    attrs = _get_attributes(acc)
-    visibility = str(attrs.get("visibility", "")).strip().lower()
-    return visibility in {"true", "1"} or _call_first(acc, ("get_visibility",)) is True
+    return str(attrs.get("visibility", "")).strip().lower() in {"true", "1"} or visibility is True
 
 
-def _entry_text_masked(acc, text) -> bool:
+def _entry_text_masked(role, attrs, text) -> bool:
     """Treat bullets and toolkit invisible characters as masked text."""
-    if _role_name(acc) not in {"entry", "text"} or not isinstance(text, str):
+    if role not in {"entry", "text"} or not isinstance(text, str) or not text:
         return False
     glyphs = set("●•*◦○∙⋅▪▫■□⬤\u200b\u200c\u200d\u2060\ufeff")
-    attrs = _get_attributes(acc)
     for key in ("invisible-char", "invisible_char"):
         char = str(attrs.get(key, ""))
         if len(char) == 1:
@@ -7747,16 +7752,19 @@ def _read_full_text(acc, *, count=None, verification=False):
     unreadable. A bounded retry may expose an unmarked masked entry, so
     public retries require explicit text visibility and reject masking glyphs.
     """
-    if is_secure(acc):
+    secure, role, attrs, visibility = _text_security(acc)
+    if secure:
         return None
     Atspi = _atspi()
     got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
-    if got == "" and (verification or _entry_text_visible(acc)):
+    if got == "" and count != 0 and (
+        verification or _entry_text_visible(role, attrs, visibility)
+    ):
         if count is None:
             count = _safe(lambda: Atspi.Text.get_character_count(acc))
         if isinstance(count, int) and not isinstance(count, bool) and count > 0:
             got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
-    if not verification and _entry_text_masked(acc, got):
+    if not verification and _entry_text_masked(role, attrs, got):
         return ""
     return got
 

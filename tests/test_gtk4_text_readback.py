@@ -232,3 +232,51 @@ def test_toolkit_invisible_character_is_not_published(monkeypatch, char):
     field.get_attributes = lambda: {"visibility": "true", "invisible-char": char}
     assert _atspi._full_text(field) == ""
     assert _atspi._value_text(field, "AXTextField", "entry") is None
+
+
+@pytest.mark.parametrize("role", ["entry", "text", "table cell"])
+@pytest.mark.parametrize("sentinel_empty", [True, False])
+def test_text_read_fetches_security_metadata_once(monkeypatch, role, sentinel_empty):
+    calls = {"attributes": 0, "visibility": 0, "count": 0}
+
+    class Text(_Text):
+        @staticmethod
+        def get_character_count(acc):
+            calls["count"] += 1
+            return len(acc.text)
+
+        @staticmethod
+        def get_text(acc, start, end):
+            acc.reads.append((start, end))
+            return "" if sentinel_empty and end == -1 else acc.text
+
+    def attributes():
+        calls["attributes"] += 1
+        return {"visibility": "true"}
+
+    def visibility():
+        calls["visibility"] += 1
+        return True
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: type("Api", (), {"Text": Text}))
+    field = _Entry(role, "visible")
+    field.get_attributes = attributes
+    field.get_visibility = visibility
+    entry = role in {"entry", "text"}
+    assert _atspi._read_full_text(field) == ("visible" if entry or not sentinel_empty else "")
+    assert calls == {"attributes": 1, "visibility": int(entry),
+                     "count": int(entry and sentinel_empty)}
+    assert field.reads == ([(0, -1), (0, 7)] if entry and sentinel_empty else [(0, -1)])
+
+
+def test_known_empty_text_does_not_retry_bounded_read(monkeypatch):
+    class Text(_Text):
+        @staticmethod
+        def get_character_count(acc):
+            pytest.fail("the caller already supplied the character count")
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: type("Api", (), {"Text": Text}))
+    field = _Entry("entry", "")
+    field.get_attributes = lambda: {"visibility": "true"}
+    assert _atspi._read_full_text(field, count=0) == ""
+    assert field.reads == [(0, -1)]
