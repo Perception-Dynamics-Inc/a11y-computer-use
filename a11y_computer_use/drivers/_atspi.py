@@ -1946,6 +1946,23 @@ def _action_iface(acc):
     return _call_first(acc, ("get_action_iface", "get_action"))
 
 
+def _gtk4_menu_button_wrapper(acc) -> bool:
+    """Recognize an actionless duplicate around one native GTK 4 toggle."""
+    if not _gtk4_app(acc) or _action_names(acc) or _child_count(acc) != 1:
+        return False
+    child = _call_first(acc, ("get_child_at_index",), 0)
+    if child is None or _role_name(child) != "toggle button":
+        return False
+    if "AXPress" not in _action_names(child) or _node_name(acc) != _node_name(child):
+        return False
+    position, size = _extents(acc, keep_zero=True)
+    return (
+        position is not None and size is not None
+        and size[0] > 0 and size[1] > 0
+        and (position, size) == _extents(child, keep_zero=True)
+    )
+
+
 def _action_names(acc) -> tuple[str, ...]:
     """AX action names for this node, mapped from its AT-SPI actions."""
     action = _action_iface(acc)
@@ -3763,6 +3780,12 @@ class ATSPIAccessor:
             node, role_str=role_str, attrs=attrs, state_editable=state_editable,
             drawing=self._drawing_paragraph(node, role_str, state_editable),
         )
+        if role_str == "push button" and _gtk4_menu_button_wrapper(node):
+            # GtkMenuButton's Action belongs to its inner toggle. Make the
+            # duplicate outer node a collapsible layout wrapper, preserving
+            # the child's native handle and geometry as the click target.
+            role, name, description = "AXGroup", "", ""
+            focusable, value = False, None
         return RawNode(
             role=role,
             subrole=(
