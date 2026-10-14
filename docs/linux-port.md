@@ -305,3 +305,12 @@ then verify the selected codepoint and name in the statusbar or Character
 Details. A statusbar match describes the current selection, not a clickable
 character cell. Native drawing-area names, descriptions, and children take
 precedence over this fallback label.
+
+## Gnumeric name-box navigation
+
+Ref-based activation of Gnumeric's `AXImage` named `go-jump` is refused with an
+`unsupported` error because this name-box control has been reported to crash
+Gnumeric (#492). The guard covers accessibility activation and element pointer
+clicks. It does not substitute keyboard input or claim cell-address navigation
+succeeded. Coordinate-only clicks do not identify an accessible control and are
+not covered by this guard.
