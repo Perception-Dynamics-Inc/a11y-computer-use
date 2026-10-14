@@ -685,3 +685,13 @@ def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_erro
     assert "thunar" in exc.value.message
     assert "needs_permission" not in exc.value.message
     assert "ask the user" not in exc.value.message
+
+
+def test_installed_bundle_keeps_requested_name_when_linux_program_is_on_path() -> None:
+    resolved = resolve_launch(
+        "Krita", granted=["org.krita"], entries=[], installed_bundle="org.krita",
+        path_lookup=lambda name: "/usr/bin/krita" if name == "krita" else None,
+    )
+    assert resolved.resolved is True
+    assert resolved.launch_name == "Krita"
+    assert resolved.gate_key == "org.krita"

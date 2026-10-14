@@ -255,14 +255,20 @@ class RawNode:
     focusable: bool = False
     #: Platform text-entry signal independent of role. AT-SPI sets this only
     #: when the node itself is an editable entry: an entry, text, or password
-    #: role that is not read-only, or a contenteditable section (a div or span
-    #: with ``STATE_EDITABLE``; Chromium may omit EditableText, Firefox must
-    #: expose it). A paragraph, panel, document, or combo is not an entry, even
-    #: when Firefox reports ``STATE_EDITABLE`` or EditableText on it. An
-    #: Impress or Draw paragraph is an entry when it has ``STATE_EDITABLE``
-    #: and EditableText. Default false, so macOS, Windows, and the browser
+    #: role that is not read-only and has ``STATE_EDITABLE``, or a
+    #: contenteditable section (a div or span with ``STATE_EDITABLE``).
+    #: EditableText support is not that signal. A paragraph, panel, document,
+    #: or combo is not an entry, even when Firefox reports ``STATE_EDITABLE``
+    #: or EditableText on it. Impress and Draw paragraphs with both signals
+    #: remain editable. Default false, so macOS, Windows, and the browser
     #: stay editable only when the role is a text field.
     editable: bool = False
+    #: AT-SPI's own answer for ``editable``, or None when this tree did not
+    #: come from AT-SPI. False wins over a text-field role, so an address-bar
+    #: wrapper mapped to ``AXTextField`` without ``STATE_EDITABLE`` is not
+    #: edit. None keeps the role rule for macOS, Windows, and synthetic
+    #: snapshots.
+    platform_editable: bool | None = None
     #: Process identity of the app that owns this node. Linux sets
     #: ``pid:<pid>|start:<ticks>`` and appends ``|bus:<name>`` when the
     #: application exposes an AT-SPI bus name. None on backends that do not
@@ -283,7 +289,8 @@ class RawNode:
     screen_text: str | None = None
     #: A control the toolkit did not allocate, such as a notebook page tab
     #: while the tab bar is hidden. The snapshot keeps the name and does not
-    #: invent a box. Default false, so every other node is unchanged.
+    #: invent a box. Also used for visible Evince page text whose native
+    #: extents are unreliable. Default false on other nodes.
     unallocated: bool = False
     #: Linux only. A title read from somewhere else in the tree (the image
     #: label, or the frame title) for a surface that has no name of its own.
@@ -1336,6 +1343,52 @@ def find_elements(
             continue
         out.append(el)
     return tuple(out)
+
+
+_EXACT_NAME_ROLES = frozenset({
+    "cell", "row", "column", "listitem",
+    "button", "link", "menu", "menuitem", "menubutton",
+    "checkbox", "radiobutton", "combobox", "popupbutton",
+    "textfield", "textarea", "searchfield", "tab",
+})
+
+
+def _folded_title(title: str) -> str:
+    return title.replace("\u00a0", " ").strip().casefold()
+
+
+def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[Element, ...]:
+    """Prefer an exact name on a cell or control over a label that mentions it.
+
+    ``find_elements`` stays a substring search. ``find`` and ``scroll_to_find``
+    apply this ranking. When a cell, row, or other control is titled exactly
+    with ``text``, only those matches are returned. A label whose title merely
+    contains ``text`` is dropped. A label whose title is ``text`` stays. A
+    paragraph or other static text whose value contains ``text`` stays, and so
+    does a button or field matched by substring when no exact control exists.
+    """
+    if not matches or not isinstance(text, str) or not text.strip():
+        return tuple(matches)
+    needle = _folded_title(text)
+
+    def exact_control(el: Element) -> bool:
+        if _folded_title(el.title or "") != needle:
+            return False
+        if el.clickable:
+            return True
+        role = el.role.lower().removeprefix("ax")
+        return role in _EXACT_NAME_ROLES
+
+    exact = tuple(el for el in matches if exact_control(el))
+    if exact:
+        return exact
+
+    def mentions_label(el: Element) -> bool:
+        if el.subrole != "label" or el.role not in {"AXStaticText", "AXHeading"}:
+            return False
+        return _folded_title(el.title or "") != needle
+
+    return tuple(el for el in matches if not mentions_label(el))
 
 
 def render_matches(
@@ -2595,13 +2648,18 @@ def _empty_text_container(raw: RawNode) -> bool:
 def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """Derive (clickable, editable, secure) from role/subrole/actions.
 
-    ``raw.editable`` is the platform signal that the node itself is an
-    editable entry. A contenteditable section can carry it. A combo does not
-    become editable from its role.
+    ``platform_editable`` is AT-SPI's answer for this node, from its own
+    ``STATE_EDITABLE``. It wins over a text-field role, so an address-bar
+    wrapper that maps to ``AXTextField`` without that state is not edit.
+    None means the platform did not say (macOS, Windows, a synthetic
+    snapshot): a text-field role or a secure field stays editable.
     """
     secure = raw.role == _SECURE_ROLE or raw.subrole == _SECURE_ROLE
     clickable = bool(_PRESS_ACTIONS.intersection(raw.actions)) or raw.role in _CLICKABLE_ROLES
-    editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
+    if raw.platform_editable is not None:
+        editable = raw.platform_editable
+    else:
+        editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
     return clickable, editable, secure
 
 
@@ -2677,7 +2735,11 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             instance_id=instance_id,
             document_id=document_id,
-            subrole="terminal" if terminal else None,
+            subrole=(
+                "terminal" if terminal
+                else "label" if node.raw.subrole == "label"
+                else None
+            ),
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
             note=node.raw.note or None,

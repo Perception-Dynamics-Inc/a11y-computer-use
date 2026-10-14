@@ -10,6 +10,9 @@ structured errors (`schema.ComputerUseError`) are rendered as clear
 tool-error strings that carry the doctor hint, never raised across the wire
 as stack traces.
 
+The opt-in Linux ``files`` tool uses a host-configured filesystem root
+allowlist instead of app grants; attempts and verified effects are audited.
+
 Gating policy: ref-based actions are gated against the app of the snapshot
 that issued the ref; target-less actions (typing, keys, clipboard, raw
 coordinates, list verbs) and screen captures are gated against the frontmost
@@ -695,6 +698,21 @@ class ActionRefused(Exception):
     def __init__(self, decision: safety.Decision) -> None:
         super().__init__(decision.reason)
         self.decision = decision
+
+
+_FIND_BAR_FIELD_ROLES = frozenset({"AXTextField", "AXSearchField", "AXTextArea"})
+
+
+def _is_find_bar_chrome(element: Element) -> bool:
+    """True for the find bar's close button, frame, or Find field.
+
+    A page button titled Find is not the bar. A table cell is not the bar.
+    """
+    title = element.title or ""
+    folded = title.lstrip().lower()
+    if title == "Close find bar" or folded.startswith("find in page"):
+        return True
+    return title == "Find" and element.role in _FIND_BAR_FIELD_ROLES
 
 
 def error_text(exc: ComputerUseError) -> str:
@@ -1665,6 +1683,11 @@ def _linux_point_matches_snapshot_pid(runtime, target: Target) -> bool:
         from a11y_computer_use.drivers import _linux_system
 
         found = _linux_system.pid_at_point(point.x, point.y)
+        # Shared portal backends can own choosers for different granted apps.
+        # Their PID alone proves nothing; use the parent-derived app hit-test.
+        identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+        if identity in _linux_system._PORTAL_BACKENDS:
+            return False
     except Exception:
         return False
     return bool(found) and int(found) == int(pid)
@@ -2072,6 +2095,9 @@ class Runtime:
         self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        from a11y_computer_use.files import FileOperations
+
+        self.file_operations = FileOperations(os.environ.get("A11Y_COMPUTER_USE_FILE_ROOTS", ""), self.audit)
         #: Terminal GUI input requires the same opt-in as agent execution.
         self.allow_exec = allow_exec
         #: The OS backend. Every platform op (observe/act/capture) routes through
@@ -2868,6 +2894,14 @@ class Runtime:
                         better = _atspi.drawing_paragraph_shown(handle)
                     if better is not None:
                         readback = better
+                    settled = getattr(self.driver, "_sheet_type_readback", None)
+                    self.driver._sheet_type_readback = None
+                    if (
+                        isinstance(settled, tuple) and len(settled) == 2
+                        and settled[0] == app and isinstance(settled[1], str)
+                        and _atspi._typed_visible(previous, settled[1], requested)
+                    ):
+                        readback = settled[1]
             if readback is None:
                 readable = False
         # Chrome's contenteditable often publishes the new characters after
@@ -4203,7 +4237,9 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds."""
+        that stays off screen is reported with no bounds. When a cell,
+        row, or other control has the exact name, that control is the
+        match. A label counts only when its own title is the text."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -4232,8 +4268,11 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
-            matches = observe.find_elements(
-                snap, text=text, role=role, editable=editable, clickable=clickable
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
             )
             return observe.render_matches(snap, matches, text=text)
 
@@ -4752,6 +4791,19 @@ class Runtime:
             menu_note.append(self._dismiss_open_menu(app))
             if isinstance(act, Element):
                 self._refuse_vanished_target(act)
+                sibling_cover = getattr(self.driver, "same_app_window_cover", None)
+                cover = sibling_cover(act, app) if sibling_cover is not None else None
+                if cover:
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{act.ref} is covered by {cover}",
+                        detail={
+                            "ref": act.ref, "role": act.role,
+                            "reason": "covered", "outcome": "refused",
+                            "next": ["foreground", "ref"],
+                            "evidence": f"the window is covered by {cover}",
+                        },
+                    )
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier
@@ -6079,8 +6131,18 @@ class Runtime:
         self._run_gated(action, app, execute, input_target=live)
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
+        text = f"set {ref} = {shown!r}"
+        if getattr(self.driver, "name", None) == "linux" and live.role in {
+            "AXTextField", "AXTextArea",
+        }:
+            text += (
+                "; text read-back does not verify activation or navigation. "
+                "set_value does not guarantee keyboard focus. For GTK path entries "
+                "(Thunar/FileZilla), focus the field, select all, type the path, "
+                "then Return; verify the folder title/file list in a fresh snapshot."
+            )
         return self._conclude(
-            f"set {ref} = {shown!r}",
+            text,
             tool="select" if choice else "set_value",
             app=app, before=before, element=live, requested=value,
             had_ref=True, previous=previous,
@@ -6094,10 +6156,18 @@ class Runtime:
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
+        When a cell, row, or other control has the exact name, that control
+        is the match. A label counts only when its own title is the text,
+        so a label that merely mentions the name does not stop the search.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
         body-scroll page, not the window's tab strip.
+        An opaque container without readable contents returns
+        ``container_not_readable`` before input; the target's presence
+        cannot be determined from that accessibility tree. An unscoped text
+        search with only statusbar hits and an opaque content surface refuses
+        with ``statusbar_only_match`` rather than returning a content ref.
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
@@ -6134,12 +6204,19 @@ class Runtime:
         container's scroll offset, starts that clock again. The search
         also stops at 120 seconds from the start. ``budget_s`` of 0 stops
         before any scroll. The note names the scroll container, its
-        scroll position, and the last rows on screen. A document, a
-        table, or a list is tried with Ctrl+F first, including an
-        overflow list shorter than the window. A miss keeps the wheel.
-        After Ctrl+F, Chrome is latched and the tree is read again until
-        the page frame is back. The find bar and an empty cached frame
-        are not wheeled.
+        scroll position, and the last rows on screen. A document, a table, or
+        a list may be tried with Ctrl+F before the wheel, including an
+        overflow list shorter than the window. Those keystrokes are sent
+        only when the grant allows typing and a real find bar is
+        verified: Chromium or Firefox, or a bar already in the tree, and
+        after Ctrl+F the focused field is that bar. The query, Return,
+        and Escape are not sent when the bar does not appear, so a Swing
+        cell is not edited and a click grant sends nothing. Each
+        keystroke is gated and audited like type and key. A miss is not
+        found. The find field is not the match, and neither is an editor
+        whose value only grew by the query. After a verified find, Chrome
+        is latched and the tree is read again until the page frame is
+        back. The find bar and an empty cached frame are not wheeled.
         A paginated or virtualized table that already fits in the window
         then steps with Page Down. A table that still runs past the
         window keeps the wheel, so the last rows can come on screen.
@@ -6211,6 +6288,36 @@ class Runtime:
             display = next((item for item in snap.displays if item.is_main), snap.displays[0])
             return (0, 0, display.width, display.height)
 
+        def query_hits(shot: Snapshot) -> list[Element]:
+            """Matches for this search, without the find bar or a typed-into editor.
+
+            The Find field's value is the query, and it is not the row.
+            An editor whose value grew by that query is the cell
+            ``scroll_to_find`` must not report as found. A row whose title
+            or value is the query itself still matches.
+            """
+            hits = [
+                el for el in observe.find_elements(shot, text=text, role=role)
+                if not _is_find_bar_chrome(el)
+            ]
+            if not text:
+                return hits
+            needle = text
+            kept: list[Element] = []
+            for el in hits:
+                value = "" if el.value is None else str(el.value)
+                editor = el.role in _FIND_BAR_FIELD_ROLES or el.role == "AXComboBox"
+                appended = (
+                    editor
+                    and needle in value
+                    and value != needle
+                    and value.endswith(needle)
+                    and len(value) > len(needle)
+                )
+                if not appended:
+                    kept.append(el)
+            return kept
+
         def on_screen(el: Element, snap: Snapshot) -> bool:
             """True when ``el``'s center sits inside the window.
 
@@ -6229,9 +6336,38 @@ class Runtime:
             center_y = bounds.y + bounds.height / 2
             return left <= center_x < right and top <= center_y < bottom
 
+        def search_matches(snap: Snapshot) -> tuple[Element, ...]:
+            matches = tuple(query_hits(snap))
+            if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
+                return observe.prefer_exact_targets(matches, text)
+            by_ref = {el.ref: el for el in snap.elements}
+
+            def in_statusbar(el: Element) -> bool:
+                seen: set[str] = set()
+                while el.ref not in seen:
+                    seen.add(el.ref)
+                    if el.role == "AXStatusBar":
+                        return True
+                    if el.parent not in by_ref:
+                        break
+                    el = by_ref[el.parent]
+                return False
+
+            if all(in_statusbar(el) for el in matches) and any(
+                el.role == observe.OPAQUE_ROLE for el in snap.elements
+            ):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "only the statusbar matches; the content surface remains opaque, "
+                    "so accessibility search cannot verify a content target or return "
+                    "an actionable content ref",
+                    detail={"reason": "statusbar_only_match", "content_readable": False},
+                )
+            return observe.prefer_exact_targets(matches, text)
+
         def visible_matches(snap: Snapshot) -> list[Element]:
             return [
-                el for el in observe.find_elements(snap, text=text, role=role)
+                el for el in search_matches(snap)
                 if on_screen(el, snap)
             ]
 
@@ -6243,7 +6379,7 @@ class Runtime:
             no match in this snapshot. A document table keeps rows that have
             already left the viewport, so a name in the tree is not a hit.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = search_matches(snap)
             located = [el for el in found if el.bounds is not None]
             if not located:
                 return "missing"
@@ -6302,7 +6438,7 @@ class Runtime:
             many viewports below never arrives one line at a time, so
             the search keeps the five-line burst until the row is close.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = search_matches(snap)
             box = viewport_box(snap)
             if not found or box is None:
                 return False
@@ -6417,6 +6553,40 @@ class Runtime:
                 if budget_s > 0 and (rows_moved or offset_moved):
                     stall_deadline = time.monotonic() + budget_s
 
+            def container_not_readable(shot: Snapshot, anchor: Element | None) -> bool:
+                """An opaque surface without readable content in this container.
+
+                Empty virtualized lists can acquire children after scrolling;
+                require an actual opaque surface rather than just missing rows.
+                Names outside this container do not make its contents readable.
+                """
+                if anchor is None:
+                    return False
+                under = {anchor.ref}
+                children: dict[str, list[str]] = {}
+                for el in shot.elements:
+                    if el.parent:
+                        children.setdefault(el.parent, []).append(el.ref)
+                stack = [anchor.ref]
+                while stack:
+                    for child in children.get(stack.pop(), ()):
+                        if child not in under:
+                            under.add(child)
+                            stack.append(child)
+                opaque = False
+                for el in shot.elements:
+                    if el.ref not in under:
+                        continue
+                    if el.role == observe.OPAQUE_ROLE:
+                        opaque = True
+                    elif el.role == "AXGroup" and el.value is not None and str(el.value).strip():
+                        return False
+                    elif el.ref != anchor.ref and el.role not in (
+                        "AXScrollBar", "AXScrollArea", "AXGroup", "AXSplitter",
+                    ) and ((el.title or "").strip() or (el.value is not None and str(el.value).strip())):
+                        return False
+                return opaque
+
             def expired_cap() -> float | None:
                 """The cap that has run out, or None while the search may continue.
 
@@ -6473,6 +6643,15 @@ class Runtime:
                 visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
                 return visible <= 80
 
+            # Native viewers share these roles, but Escape may close their
+            # window rather than a find bar. Require a recognized browser or
+            # a driver that can verify find support before sending any keys.
+            chromium_find = bundle.casefold() in {
+                "chrome", "chrome.exe", "google-chrome", "google-chrome-stable",
+                "chromium", "chromium.exe", "chromium-browser",
+                "com.google.chrome", "org.chromium.chromium",
+            } or callable(getattr(self.driver, "supports_in_page_find", None))
+
             def wants_in_page_find(_shot: Snapshot, anchor: Element | None) -> bool:
                 """Ctrl+F once before the wheel, for a document, a table, or a list.
 
@@ -6482,7 +6661,7 @@ class Runtime:
                 budget. A miss falls through to the wheel. A tall list, the
                 document group, or a scroll area is the same find.
                 """
-                if not text or "\n" in text or len(text) > 80 or anchor is None:
+                if not chromium_find or not text or "\n" in text or len(text) > 80 or anchor is None:
                     return False
                 if not callable(getattr(self.driver, "key_chord", None)):
                     return False
@@ -6507,7 +6686,7 @@ class Runtime:
                 return f"{float(value):g}"
 
             def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
-                           budget_cap: float | None = None) -> str:
+                           budget_cap: float | None = None, unreadable: bool = False) -> str:
                 names = row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
@@ -6517,9 +6696,18 @@ class Runtime:
                     container = f"{anchor.role}{title} ref={anchor.ref}"
                 shown_budget = budget_s if budget_cap is None else budget_cap
                 why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
-                return (
+                heading = (
                     f"not found after {count} scroll(s){why}: "
-                    f"no element matches text={text!r} role={role!r}\n"
+                    f"no element matches text={text!r} role={role!r}"
+                )
+                if unreadable:
+                    heading = (
+                        f"container_not_readable after {count} scroll(s): "
+                        "the container exposes an opaque surface but no readable contents; "
+                        "accessibility search cannot determine whether the target is present"
+                    )
+                return (
+                    f"{heading}\n"
                     f"container: {container}\n"
                     f"scroll_position: {read_offset(anchor)}\n"
                     f"last_rows: {tail}"
@@ -6587,33 +6775,140 @@ class Runtime:
                     time.sleep(0.12)
                 return False
 
-            def try_in_page_find(anchor: Element) -> str | None:
-                """Ctrl+F once. The match is returned only when a later snapshot shows it.
+            def _snapshot_shows_find_bar(shot: Snapshot | None) -> bool:
+                if shot is None:
+                    return False
+                return any(_is_find_bar_chrome(el) for el in shot.elements)
 
-                Escape closes the find bar before that snapshot, so the ref
-                is the page. The Chrome process is latched and the tree is
-                read again until that page frame is back. A miss does not
-                count as a scroll.
+            def _find_typing_allowed() -> bool:
+                """FULL tier for the query. A refusal is audited and sends no keys.
+
+                A test double returns None and does not raise. That is allowed.
+                A click grant raises ActionRefused after the deny row.
                 """
-                if not text or "\n" in text or len(text) > 80:
+                query = text
+                if not isinstance(query, str) or not query:
+                    return False
+                try:
+                    decision = self._require_permission(TypeText(text=query), bundle)
+                except ActionRefused:
+                    return False
+                if decision is not None and not getattr(decision, "allowed", False):
+                    return False
+                return True
+
+            def _find_host(shot: Snapshot | None) -> bool:
+                """Chromium, Firefox, or a find bar already in this snapshot."""
+                if _snapshot_shows_find_bar(shot):
+                    return True
+                probe = getattr(self.driver, "supports_in_page_find", None)
+                if not callable(probe):
+                    return False
+                try:
+                    return probe(bundle) is True
+                except Exception:
+                    return False
+
+            def _send_find_chord(chord: str) -> bool:
+                def execute_chord() -> None:
+                    self.driver.key_chord(chord)
+
+                try:
+                    self._run_gated(KeyChord(chord=chord), bundle, execute_chord)
+                except ActionRefused:
+                    return False
+                except Exception:
+                    return False
+                return True
+
+            def _send_find_query() -> bool:
+                query = text
+                if not isinstance(query, str) or not query:
+                    return False
+
+                def execute_query() -> None:
+                    self.driver.type_text(query)
+
+                try:
+                    self._run_gated(TypeText(text=query), bundle, execute_query)
+                except ActionRefused:
+                    return False
+                except Exception:
+                    return False
+                return True
+
+            def _find_bar_verified() -> bool:
+                """True when the find field has focus, or the snapshot shows the bar.
+
+                The Linux driver answers from the focused node. A snapshot of
+                an open Chrome find bar is the empty cached frame, so that
+                driver is not snapshotted here. A fake driver with no probe
+                is read once.
+                """
+                if _snapshot_shows_find_bar(self._current):
+                    return True
+                probe = getattr(self.driver, "find_bar_focused", None)
+                if callable(probe):
+                    for attempt in range(12):
+                        try:
+                            seen = probe(bundle)
+                        except Exception:
+                            return False
+                        if seen is True:
+                            return True
+                        if attempt >= 11:
+                            break
+                        time.sleep(0.05)
+                    return False
+                if getattr(self.driver, "name", None) == "linux":
+                    return False
+                try:
+                    fresh = self.driver.snapshot(Scope(scope), bundle)
+                except Exception:
+                    return False
+                if not isinstance(fresh, Snapshot):
+                    return False
+                self._current = fresh
+                return _snapshot_shows_find_bar(fresh)
+
+            def try_in_page_find(anchor: Element) -> str | None:
+                """Ctrl+F once, only into a verified find bar the grant allows.
+
+                The query is not typed unless focus is in that bar. A Swing
+                table has no bar, so the selected cell is left alone and the
+                search reports not found. A click grant audits a denial and
+                sends no key. Escape closes the bar before the confirming
+                snapshot, so the ref is the page. Chrome is latched and the
+                tree is read again until that page frame is back. A miss
+                does not count as a scroll.
+                """
+                if not chromium_find or not text or "\n" in text or len(text) > 80:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
-                try:
-                    self.driver.key_chord("ctrl+f")
-                    self.driver.type_text(text)
-                    self.driver.key_chord("Return")
-                    time.sleep(0.2)
-                except Exception:
-                    try:
-                        self.driver.key_chord("Escape")
-                    except Exception:
-                        pass
+                if not _find_typing_allowed():
                     return None
-                try:
-                    self.driver.key_chord("Escape")
-                except Exception:
-                    pass
+                if not _find_host(self._current):
+                    return None
+                already_open = _snapshot_shows_find_bar(self._current)
+                if not already_open:
+                    if not _send_find_chord("ctrl+f"):
+                        return None
+                    if not _find_bar_verified():
+                        # Ctrl+F on a browser can open the bar before the
+                        # focus probe sees it. Escape closes that bar.
+                        # Swing never reaches this: it is not a find host.
+                        _send_find_chord("Escape")
+                        latch_once()
+                        return None
+                if not _send_find_query():
+                    _send_find_chord("Escape")
+                    return None
+                if not _send_find_chord("Return"):
+                    _send_find_chord("Escape")
+                    return None
+                time.sleep(0.2)
+                _send_find_chord("Escape")
                 # The confirming read is the cache clear. A short page that
                 # does not name the target stops there. Another snapshot and
                 # a pause miss the 12s bound. A tall table, or a row that is
@@ -6713,7 +7008,9 @@ class Runtime:
                     else:
                         same_rows = 0
                     previous_rows = seen
-                matches = observe.find_elements(snap, text=text, role=role)
+                matches = search_matches(snap)
+                if not matches and container_not_readable(snap, anchor_now):
+                    return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
@@ -7563,7 +7860,9 @@ class Runtime:
                 launch_argv = None
             else:
                 launch_name, gate_key, launch_argv = self._prepare_launch(name)
-                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
+                self._reject_terminal(
+                    AppOp(verb=verb, app=launch_name), launch_name, input_target=launch_argv,
+                )
 
             def launch() -> str | None:
                 before: list = []
@@ -8132,6 +8431,15 @@ class Runtime:
         return self._frontmost()
 
     @_serialized
+    def files(self, action: str, path: str, destination: str | None = None) -> str:
+        """Explicit filesystem operations authorized by the host's root allowlist.
+
+        No app grant or UI focus is involved. Every attempt is audit logged;
+        mutations return success only after filesystem verification.
+        """
+        return json.dumps(self.file_operations.run(action, path, destination))
+
+    @_serialized
     def notes(self, action: str, text: str | None = None) -> str:
         """The agent's scratchpad. ``add`` records a fact, ``list`` returns the
         numbered notes, ``clear`` empties them. Notes are injected into every
@@ -8209,7 +8517,7 @@ class Runtime:
     #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
     #: need a live snapshot epoch, which a one-shot process never has.
     RUN_ONCE_TOOLS = frozenset(
-        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog"}
+        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog", "files"}
     )
 
     @_serialized
@@ -8254,6 +8562,7 @@ class Runtime:
             "clipboard": self.clipboard,
             "menu": partial(self.menu, confirm=confirm),
             "file_dialog": self.file_dialog,
+            "files": self.files,
             "notes": self.notes,
             "wait_until": self.wait_until,
             "webmcp": partial(self.webmcp, confirm=confirm),
@@ -8735,7 +9044,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches). A
+        (text past the 200 characters kept on the element still matches). When
+        a cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. A
         terminal's shown value is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
@@ -9124,7 +9435,10 @@ def build_server(
         an editable element from the latest desktop_snapshot/find. Falls back to
         focus+type when the app exposes no settable value. On Linux, a ref that
         is not an editable text element is an error saying it is not editable,
-        and that call sends no keystrokes, clicks, or focus changes. A Firefox
+        and that call sends no keystrokes, clicks, or focus changes. The edit
+        flag uses the node's own STATE_EDITABLE, not EditableText support.
+        Failed or refused writes restore the previous caret and selection,
+        including on the document. A Firefox
         paragraph, document, or select is not an editable entry, even when
         AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
         before any select-all. An Impress slide or Draw page paragraph that
@@ -9151,9 +9465,17 @@ def build_server(
         range is named. No keystrokes are sent for that conversion. A Chrome date, time, or month segment is typed, and
         the read-back is that segment's displayed text, not the Value float.
         An editable Linux field succeeds when the value read
-        back matches. A mismatch is an error, not a success. Gated at tier 'full';
-        refuses secure/password fields (secrets are entered by the human, never
-        this tool). Ideal for filling forms fast. The text is unchanged.
+        back matches. A mismatch is an error, not a success.
+        Text read-back does not verify activation or navigation, and an API
+        write does not guarantee keyboard focus. GTK path entries such as
+        Thunar's location bar and FileZilla's Local site field may display
+        the new path without navigating, even after Return. For those entries,
+        focus the field, select all, type the path, then Return. Verify the
+        folder title/file list in a fresh desktop_snapshot; Return without
+        target focus can activate a different control. set_value does not
+        send Return or activate the field automatically.
+        Gated at tier 'full'; refuses secure/password fields (secrets are
+        entered by the human, never this tool). Ideal for filling forms fast.
         Structured content adds outcome, next, and evidence. A combo, popup,
         or list is the select action: the same sentence, judged by read-back."""
         return _publish(await run(runtime.set_value, ref, value, _outcome=True, _tool="set_value"))
@@ -9168,18 +9490,29 @@ def build_server(
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
         Give text (substring of title or the field's full value, including
-        text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
+        text past the 200 characters a snapshot keeps) and/or role. When a
+        cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. budget_s is how long the
+        matching ref(s) or a not-found note. An opaque container with no
+        readable contents returns container_not_readable before sending input;
+        this does not establish that the target is absent. An unscoped text search
+        with only statusbar hits and an opaque content surface returns an
+        unsupported statusbar_only_match error. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
         A step that changes either one starts that clock again. The search
         also stops at 120 seconds. It reports the container, its scroll
         position, and the last rows seen. A document, a table, or a list
-        is searched with Ctrl+F first, including an overflow list shorter
-        than the window. After Ctrl+F, Chrome is latched and the tree is
-        read again until the page frame is back. The find bar and an
-        empty cached frame are not wheeled. A paginated
+        may be searched with Ctrl+F before the wheel, including an
+        overflow list shorter than the window, only when the grant allows
+        typing and a real find bar is verified. Chromium and Firefox open
+        that bar; a Swing table does not, and the query is not typed into
+        the selected cell. A click grant audits a denial and sends no
+        key. A miss is not found. The find field, and an editor whose
+        value only grew by the query, are not the match. After a verified
+        find, Chrome is latched and the tree is read again until the page
+        frame is back. The find bar and an empty cached frame are not wheeled. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
         window keeps the wheel. A large GTK table is searched once
@@ -9367,6 +9700,19 @@ def build_server(
         the page's file input has to show the file. Windows and the
         browser also return unsupported."""
         return await run(runtime.file_dialog, action, path, app)
+
+    @server.tool(name="files")
+    async def files_tool(action: str, path: str, destination: str | None = None) -> str:
+        """Linux file operations for file managers whose items are inaccessible.
+        action: list, mkdir, rename, move. Use absolute paths inside the host's
+        A11Y_COMPUTER_USE_FILE_ROOTS allowlist. Disabled unless configured.
+        list returns at most 200 names. mkdir creates one directory; rename
+        requires a destination in the same parent; move accepts an exact
+        destination path (including the name). Parents must already exist.
+        No overwrites, symlinks, special files, or cross-filesystem moves.
+        Mutations are audit logged and verified. This changes files directly;
+        it does not select items or inject clicks into the file manager."""
+        return await run(runtime.files, action, path, destination)
 
     @server.tool(name="notes")
     async def notes_tool(action: str, text: str | None = None) -> str:
