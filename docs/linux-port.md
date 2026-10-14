@@ -48,6 +48,8 @@ Same move as the Windows adapter (`_uia.py`): `_atspi.py` maps AT-SPI role names
 
 Coordinates need no projection either: `AtspiComponent.get_extents(SCREEN)` returns physical pixels with a top-left origin, so `primary_geometry()` (Xlib screen size, `$A11Y_COMPUTER_USE_SCREEN` fallback) uses `scale=1.0` and the engine's point→pixel projection is an identity, the same as the Windows adapter.
 
+AT-SPI `heading` maps to `AXHeading`, so `find(role="heading")` includes headings from Firefox and WebKitGTK. Snapshots preserve a positive integer `level` object attribute as `heading_level` and print `(level N)` beside the heading. Missing or invalid levels stay unknown; ordinary static text remains `AXStaticText`. Chromium’s heading wrapper around a single same-named button retains its existing static-text label ref and verified click behavior. This mapping and text matching are covered by synthetic tests; Firefox and Yelp live runs were not performed for this change.
+
 ## Chromium pages
 
 A Chrome document can hide a whole form under one zero-height section. On the Figma login page the raw AT-SPI tree is `document web` "Login | Figma" (1279 by 812) → `section` with height 0 (1279 by 0) → `section` (1279 by 812) → `section` → `form` → entry "EMAIL", password text "PASSWORD", push buttons "Continue with Google" and "Log in", and links. The snapshot used to print only `group "Login | Figma"` with no children. The pruner dropped any node whose bounds were zero-size, and the zero-height section took the painted form with it. Chrome does expose those children.
@@ -315,7 +317,10 @@ strings and missing layout replies require human handoff. An empty rendered
 line with a zero character count and no masking signal is unknown rather than
 secure: ref-based type/set_value may write it once using private boolean
 verification. The action result and audit input are redacted even if the entry
-subsequently proves visible. A fresh snapshot classifies the rendered line:
+subsequently proves visible. The set_value write carries its private success
+signal through caret restoration and the driver to the Runtime receipt, even
+if the earlier visibility probe missed it; failed private verification includes
+no input excerpts. A fresh snapshot classifies the rendered line:
 bullets become secure, matching plain text permits readback. GTK 3 and multiline
 editors keep their existing text path. State and toolkit attributes are read once
 within each security probe; the layout call is limited to GTK single-line
