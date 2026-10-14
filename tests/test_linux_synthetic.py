@@ -13976,6 +13976,9 @@ def test_web_input_combo_uses_verified_text_path(fake_atspi, monkeypatch, attrs)
     """ARIA and datalist inputs accept arbitrary text without option children."""
     combo = _Acc("combo box", name="Fruit", width=120, height=30,
                  states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    app = _Acc("application", name="Chromium")
+    app.get_toolkit_name = lambda: "Chromium"
+    combo.get_application = lambda: app
     combo.get_attributes = lambda: attrs
     combo.text = ""
     combo.get_text_iface = lambda: combo
@@ -14024,9 +14027,39 @@ def test_web_input_combo_uses_verified_text_path(fake_atspi, monkeypatch, attrs)
 ])
 def test_select_style_combo_remains_blocked_for_text(fake_atspi, tag, states, has_text):
     combo = _Acc("combo box", states=states)
+    combo.get_application = lambda: _Acc("application", name="Chromium")
     combo.get_attributes = lambda: {"tag": tag}
     if has_text:
         combo.get_text_iface = lambda: combo
     assert not _atspi.editable_entry(combo)
     assert _atspi._blocks_text_replace(combo)
     assert _atspi.control_kind(combo) == "combo"
+
+
+@pytest.mark.parametrize("role,tag", [
+    ("combo box", "input"),
+    ("combo box", "select"),
+    ("paragraph", "p"),
+])
+def test_firefox_input_combo_wrapper_and_static_text_are_not_editable(fake_atspi, role, tag):
+    """Gecko's address-bar wrapper is not an editor despite its input tag."""
+    app = _Acc("application", name="Firefox")
+    app.get_toolkit_name = lambda: "Gecko"
+    node = _Acc(role, name="Search with Google or enter address", width=120, height=30,
+                states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    node.get_application = lambda: app
+    node.get_attributes = lambda: {"tag": tag, "xml-roles": "combobox"}
+    node.get_text_iface = lambda: node
+    node.get_editable_text_iface = lambda: node
+    node.get_text = lambda *_args: "unchanged"
+    node.get_character_count = lambda: 9
+    window = _adopt(_Acc("frame", name="Firefox", width=400, height=300), node)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="firefox", pid=623, geometry=_geometry())
+    field, = [el for el in snap.elements if el.title == node.name]
+    assert field.editable is False
+    assert not _atspi.editable_entry(node)
+    assert _atspi._blocks_text_replace(node)
+    assert _atspi.set_text(node, "replacement") is False
+    if role == "combo box":
+        assert _atspi.control_kind(node) == "combo"

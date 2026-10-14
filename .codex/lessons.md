@@ -89,3 +89,5 @@
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
 - 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
+
+- 2026-10-14 (PR #623 CI repair): Firefox address-bar combo wrappers can expose an input tag, Text, and EDITABLE together. Those signals alone do not identify the Chromium ARIA/datalist editor from #582. Scope that exception to Chromium and preserve Gecko wrapper, select, and paragraph refusals; verify both the Firefox live regression and hermetic tests with GI imports blocked.

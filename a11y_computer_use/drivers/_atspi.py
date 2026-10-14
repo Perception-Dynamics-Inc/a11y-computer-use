@@ -7753,7 +7753,7 @@ def editable_entry(
     An entry, password, text, or spin-button role is an entry only when this
     node is ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
     whose tag is ``div`` or ``span`` and whose own state is ``EDITABLE``.
-    An input-tagged combobox with Text and EDITABLE is also an entry.
+    A Chromium input-tagged combobox with Text and EDITABLE is also an entry.
     Chromium often has no EditableText (#221). Firefox's roleless
     contenteditable is the same section and does not need the interface
     either. A paragraph is not that section.
@@ -7766,8 +7766,12 @@ def editable_entry(
     if role in {"paragraph", "heading"}:
         return bool(drawing)
     if role in {"combo box", "combo-box"}:
-        # ARIA autocomplete and datalist inputs own their text; their popup
+        # Chromium ARIA autocomplete and datalist inputs own their text; their popup
         # options are not children and do not constrain the input value.
+        # Gecko address-bar wrappers also report input, Text, and EDITABLE;
+        # those wrappers must retain the select-style classification.
+        if not _chromium_app(acc):
+            return False
         if attrs is None:
             attrs = _get_attributes(acc)
         if state_editable is None:
