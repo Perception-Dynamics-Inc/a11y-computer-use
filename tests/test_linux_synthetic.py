@@ -14410,3 +14410,24 @@ def test_firefox_visibility_keeps_fresh_parent_wrappers(monkeypatch, stable_keys
     else:
         monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "Other tab")
     assert _atspi._hidden_gecko_browser(Proxy(0))
+
+
+@pytest.mark.parametrize("text", ["Cursor size", "cursor size", "Cursor", "size:"])
+def test_find_and_scroll_to_find_keep_gtk_form_label_with_colon(
+    fake_atspi, monkeypatch, text
+) -> None:
+    """A synthetic AT-SPI form label remains discoverable without a control."""
+    from a11y_computer_use import server
+
+    label = _Acc("label", name="Cursor size:", width=100, height=24)
+    window = _Acc("frame", name="Settings", width=800, height=600)
+    _adopt(window, label)
+    _bind_gtk_app(window)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text=text)
+    assert 'statictext "Cursor size:"' in found
+    landed = runtime.scroll_to_find("treeprobe", text=text, max_scrolls=0)
+    assert landed.startswith("found after 0 scroll")
+    assert 'statictext "Cursor size:"' in landed
