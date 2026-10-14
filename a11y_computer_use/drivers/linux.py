@@ -1460,9 +1460,10 @@ class LinuxDriver:
         # Preserve the existing process-startup grace: GTK4 can map its
         # window before registering its tree. Older non-office apps get one
         # short retry, since a window alone does not promise a bridge.
-        if root is None and (
+        waiting_for_registration = root is None and (
             _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
-        ):
+        )
+        if waiting_for_registration:
             office = _atspi.libreoffice_app(app) or _atspi.libreoffice_app(resolved)
             wait = (_atspi.ATSPI_REGISTER_WAIT_S if office
                     else _atspi.ATSPI_REGISTER_POLL_S)
@@ -1499,7 +1500,12 @@ class LinuxDriver:
                         "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
                     },
                 )
-            if _atspi.app_listed(app) or _atspi.app_listed(resolved):
+            # A window can map between the registration check and this
+            # final listing. It has not received even the short retry yet;
+            # leave it retryable rather than diagnosing a missing bridge.
+            if waiting_for_registration and (
+                _atspi.app_listed(app) or _atspi.app_listed(resolved)
+            ):
                 raise _no_accessibility_tree(resolved)
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
