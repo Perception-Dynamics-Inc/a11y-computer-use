@@ -97,3 +97,4 @@
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
 - 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
+- 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.

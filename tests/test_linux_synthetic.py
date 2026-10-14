@@ -13897,6 +13897,47 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("name", ["Main Menu", "Open"])
+@pytest.mark.parametrize("case", ["duplicate", "outer_action", "different_name", "different_bounds", "missing_bounds", "two_children", "not_gtk4", "no_child_action", "not_toggle"])
+def test_gtk4_menu_button_snapshot_keeps_native_toggle(monkeypatch, name, case):
+    """Only a measured duplicate wrapper folds; the click ref is the real child."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda node: case != "not_gtk4")
+    outer = _Acc("push button", name=name, width=34, height=35)
+    inner = _Acc("push button" if case == "not_toggle" else "toggle button",
+                 name="Other" if case == "different_name" else name, width=34, height=35)
+    if case == "different_bounds":
+        inner.component._rect.x = 1
+    if case == "missing_bounds":
+        outer.component = None
+    monkeypatch.setattr(_atspi, "_action_names", lambda node: (
+        ("AXPress",) if (node is inner and case != "no_child_action")
+        or (node is outer and case == "outer_action") else ()
+    ))
+    _adopt(outer, inner)
+    if case == "two_children":
+        _adopt(outer, inner, _Acc("label", name="Extra"))
+    root = _adopt(_Acc("frame", name="Editor", width=800, height=600), outer)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.APP,
+                          app="editor", pid=1, geometry=_geometry())
+    matches = observe.find_elements(snap, text=name)
+    if case == "duplicate":
+        assert len(matches) == 1
+        assert matches[0].clickable
+        assert observe.ax_handle_for(snap.snapshot_id, matches[0].ref) is inner
+        assert matches[0].bounds == Bounds(0, 0, 0, 34, 35)
+    else:
+        assert _atspi.ATSPIAccessor().read(outer).role == "AXButton"
+        if case == "missing_bounds":
+            # The shared pruner already omits controls with no geometry.
+            assert matches == ()
+        else:
+            assert observe.ax_handle_for(snap.snapshot_id, matches[0].ref) is outer
+            assert matches[0].role == "AXButton"
+
+
 @pytest.mark.parametrize("windows,expected", [
     ([{"pid": 123, "app": "python3", "wm_class": "cuaoutcome"}], 14.0),
     ([{"pid": 123, "app": "python3", "title": "cuaoutcome"}], 0.0),
