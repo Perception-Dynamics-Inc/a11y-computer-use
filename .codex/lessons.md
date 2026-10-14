@@ -145,3 +145,5 @@
 - 2026-10-14 (PR #467 repair): Set DISPLAY and a unique writable XDG_CACHE_HOME before starting dbus-run-session, not only inside its child script. D-Bus-activated AT-SPI services inherit the session daemon environment and otherwise can bind the wrong display or abort on a read-only home cache. Validate Geany symbol jumps and Scintilla search together with CI-sized Openbox geometry.
 
 - 2026-10-14 (PR #467 repair): A repository fetch refspec may omit cursor branches. Explicitly fetch the PR branch and compare its remote head before conflict repair so existing repair commits and regressions are retained.
+
+- 2026-10-14 (#643): Refuse writes to already observed secure fields before live ref resolution; GTK4 PasswordEntry may rebuild its inner accessible. Treat native password-text parent/child boundaries as secure before Text reads. Never reuse an old secure handle to perform an action; non-secure refs still need live resolution.
