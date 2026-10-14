@@ -29,12 +29,22 @@
 
 - 2026-10-14 (#560 repair): EditableText alone does not prove a GTK text view is writable; preserve the native EDITABLE recheck and the shared read_only override when merging observation changes. Refresh the PR branch from origin before resolving main conflicts so existing repairs are retained.
 - 2026-10-14 (#560 validation): In a sandbox with a read-only home cache, AT-SPI bus activation aborts Python subprocesses even in hermetic CLI tests. Set XDG_CACHE_HOME to a writable temporary directory and run under dbus-run-session; an Xvfb session alone does not fix the cache path.
+
+- 2026-10-14 (#501 repair): Xournal++ zoom uses `log(percent / 100 - 0.20753)` and requires both raw Value and displayed percent read-back. In isolated Chrome live tests, a D-Bus keyring prompt can steal keyboard focus; reproduce with CI's window manager and prevent unrelated credential prompts in the temporary desktop session before diagnosing an input regression.
 - 2026-10-14 (#578): GTK 4 masked Gtk.Entry can expose neither password role nor protected state nor visibility metadata. Positive-offset Text reads after an empty sentinel must stay private to boolean write verification; publishing them leaks secrets even when is_secure is false.
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
 
 - 2026-10-14 (#464 repair): When combining Calc commit fixes, marshal the editor commit and individual native reads to the event thread, but keep both the post-commit pause and the grid verification loop on the caller. Regression tests should assert that events can run between operations as well as that native reads retain thread ownership.
+- 2026-10-14 (#478): Kate’s painted gutter has no accessible line labels. Scope its contextual name to native editor siblings and retain the opaque-region limitation; never infer line targets from the strip’s bounds. When merging surface-label branches, keep each application’s recognition condition independent.
+- 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.
 
 - 2026-10-14 (#560 merge repair): A sandboxed test process can see desktop windows with host PIDs that differ from subprocess PIDs. Such a session cannot validate live window ownership; run hermetic checks without DISPLAY/WAYLAND_DISPLAY and use CI for native verification. Keep the live ownership assertions intact.
 
 - 2026-10-14 (#570 repair): Writable worktree files do not guarantee writable linked Git metadata or protected lesson files. If those mounts refuse writes, use a writable temporary clone of the current remote PR branch, merge main there, and push normally to preserve branch history.
+
+- 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
+
+- 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
+
+- 2026-10-14 (PR #570 conflict repair): Refresh the remote PR head before merging main; an older local branch can miss repairs already pushed. Resolve independently appended regression tests by retaining both complete test blocks and check the resulting diff against main.
