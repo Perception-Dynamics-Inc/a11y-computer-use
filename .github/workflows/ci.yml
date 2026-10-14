@@ -224,11 +224,12 @@ jobs:
             exit 1
           fi
       # gnome-calculator and gnome-text-editor cover the GTK 4 bounds
-      # live tests and the empty-field check. A separate step, so the
+      # live tests and the empty-field check. The Python entry fixtures
+      # also need GTK 4 introspection bindings. A separate step, so the
       # shared apt list stays as it is.
       - name: install GTK 4 calculator and text editor
         run: |
-          sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor
+          sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor gir1.2-gtk-4.0
           command -v gnome-calculator
           command -v gnome-text-editor
       # evince is the PDF page-text and side-pane thumbnail live tests.

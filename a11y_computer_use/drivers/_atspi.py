@@ -328,6 +328,40 @@ def process_in_startup(pid: int | None) -> bool:
     return age is not None and age < ATSPI_STARTUP_GRACE_S
 
 
+def registration_startup_remaining(app: str) -> float:
+    """Remaining existing startup grace for an unambiguous window owner.
+
+    A newly mapped window can precede AT-SPI registration. Older apps and
+    owners whose age cannot be verified get no additional registration wait.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        pids = _linux_system.pids_matching(app)
+        if not pids:
+            # GTK's program name can differ from its interpreter's comm.
+            # WM_CLASS identifies the mapped window for this timing hint;
+            # titles alone never establish an owner.
+            pids = {
+                row["pid"] for row in _linux_system.windows()
+                if isinstance(row.get("pid"), int) and row["pid"] > 0
+                and _linux_system._class_matches_identifier(
+                    app, str(row.get("wm_class") or ""),
+                    str(row.get("wm_class_class") or ""),
+                )
+            }
+    except Exception:
+        # Process age is only a registration hint; unavailable X11 identity
+        # must not replace the snapshot's own accessibility result.
+        return 0.0
+    if len(pids) != 1:
+        return 0.0
+    age = process_age_s(next(iter(pids)))
+    if age is None:
+        return 0.0
+    return max(0.0, ATSPI_STARTUP_GRACE_S - age)
+
+
 def stopped_pid_for_app(app: str) -> int | None:
     """The stopped pid for ``app``, when one process is unambiguously it.
 
@@ -2248,10 +2282,11 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     return ""
 
 
-def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
-    """The readable text of a ``<div>`` whose children are inline.
+def _section_text(acc, role_str: str, attrs: dict) -> str | None:
+    """Read a text-bearing HTML section's own Text interface.
 
-    AT-SPI exposes that div as a section, and a section is a group, so the
+    Firefox and WebKitGTK expose pre, code, and quote text on sections
+    without static-text children. AT-SPI maps sections to groups, so the
     value read is skipped. Chromium's text is the sentence with one U+FFFC
     per link, and the same words are also separate static-text children, so
     find cannot match a phrase that crosses them. Firefox exposes that same
@@ -2262,7 +2297,9 @@ def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
     """
     if role_str != "section":
         return None
-    if str(attrs.get("tag") or "").lower() != "div":
+    if str(attrs.get("tag") or "").lower() not in {
+        "div", "pre", "code", "blockquote", "address", "figcaption",
+    }:
         return None
     raw = _direct_text(acc)
     if not raw.replace(_OBJECT_REPLACEMENT, "").strip():
@@ -3582,6 +3619,20 @@ class ATSPIAccessor:
         description = _plain_accessible_name(
             str(_call_first(node, ("get_description",), default="") or "")
         )
+        # Chromium publishes a heading around a button as its line-wide
+        # label, with no separate static-text child. Keep that existing label
+        # ref so an explicit label click still takes the verified control path.
+        # Ordinary headings (including Firefox/WebKitGTK) retain AXHeading.
+        if role == "AXHeading" and name and _chromium_app(node):
+            count = _child_count(node)
+            if count == 1:
+                child = _child_at(node, 0)
+                if (
+                    child is not None
+                    and _role_name(child) in {"button", "push button"}
+                    and _node_name(child) == name
+                ):
+                    role = "AXStaticText"
         # GTK 4 can expose uninitialized allocations on empty anonymous
         # panels (#503). Do not turn that filler into a clickable opaque
         # region. A side longer than the full X coordinate span (65535)
@@ -3644,8 +3695,8 @@ class ATSPIAccessor:
         # interface. That is a text control: textarea when it is multi-line.
         # Chromium's roleless contenteditable stays a group.
         role = _gecko_contenteditable_role(node, role, role_str, attrs, state_editable)
-        # Groups skip the value probe. A div is a section, and its text is
-        # the inline sentence; reading that one string is what find matches.
+        # Groups skip the value probe. Text-bearing HTML sections need their
+        # own Text string so find can match words absent from child nodes.
         # A file chooser is a dialog, but its name is the title. Probing Value
         # used to be skipped when the role was a window.
         # A PDF page is the exception: its Text interface is the page, and
@@ -3674,9 +3725,9 @@ class ATSPIAccessor:
         ):
             # An empty contenteditable can publish a Value double. The text
             # interface is the value. A number is not that text.
-            value = _div_inline_sentence(node, role_str, attrs)
+            value = _section_text(node, role_str, attrs)
         if value is None:
-            sentence = _div_inline_sentence(node, role_str, attrs)
+            sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
@@ -5615,14 +5666,40 @@ def _text_security(acc):
         visibility = _call_first(acc, ("get_visibility",))
         if visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}:
             return True, role, attrs, visibility
+        if any(str(attrs.get(key, "")).strip() not in {"", "0"}
+               for key in ("invisible-char", "invisible_char")):
+            return True, role, attrs, visibility
+        if (str(attrs.get("toolkit", "")).lower() == "gtk"
+                and not _state_flag(acc, "MULTI_LINE", drop_cache=False, states=states)
+                and _toolkit_version(acc).split(".", 1)[0] != "3"):
+            # GTK 4 GetText leaks the buffer even for visibility=False.
+            # GetStringAtOffset uses the rendered layout instead: the real
+            # bridge returns bullets for masked entries and text for plain ones.
+            # Do not infer masking from widget SHOWING/VISIBLE or text attributes.
+            api = _atspi()
+            rendered = _safe(lambda: api.Text.get_string_at_offset(
+                acc, 0, api.TextGranularity.LINE,
+            ))
+            content = getattr(rendered, "content", None)
+            if not isinstance(content, str) or not content or _entry_text_masked(role, attrs, content):
+                return True, role, attrs, visibility
+            # A custom masking glyph need not be one of the known bullets.
+            # Compare privately with the buffer; never publish a mismatch.
+            count = _safe(lambda: api.Text.get_character_count(acc))
+            buffer = _safe(lambda: api.Text.get_text(acc, 0, count)) if (
+                isinstance(count, int) and not isinstance(count, bool) and count > 0
+            ) else None
+            if content != buffer:
+                return True, role, attrs, visibility
+            visibility = True
     return False, role, attrs, visibility
 
 
 def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
-    GTK 4 can omit every masking signal; its empty sentinel must also remain
-    empty in public text readback.
+    GTK 4 layout strings expose masking even when GetText and metadata do
+    not. Ambiguous single-line GTK entries require human handoff.
     """
     return _text_security(acc)[0]
 
@@ -7686,9 +7763,12 @@ def _blocks_text_replace(acc) -> bool:
             return False
         # Synthetic transports can expose entry roles without a native
         # EDITABLE state API. Keep their existing write/read-back path;
-        # real AT-SPI nodes and Firefox wrappers still require the bit.
+        # Real AT-SPI nodes, Firefox wrappers, and text views exposing a
+        # state-set API still require the bit, even without native GI.
         native_state = _safe(lambda: _atspi().StateType.EDITABLE) is not None
-        if native_state or _gecko_app(acc):
+        if (native_state or _gecko_app(acc)
+                or (role in {"text", "editable text"}
+                    and _call_first(acc, ("get_state_set",)) is not None)):
             return not editable_entry(acc)
     return _state_has(acc, "READ_ONLY")
 
@@ -7999,11 +8079,13 @@ def _read_full_text(acc, *, count=None, verification=False):
     Chromium's bounded read can echo a write instead of the actual contents,
     so a nonempty sentinel result remains authoritative. NULL still means
     unreadable. A bounded retry may expose an unmarked masked entry, so
-    public retries require explicit text visibility and reject masking glyphs.
+    public retries require explicit visibility or a matching unmasked GTK layout
+    string, and reject masking glyphs.
     """
     secure, role, attrs, visibility = _text_security(acc)
     if secure:
-        return None
+        # Preserve the public empty-text convention for invisible-char fields.
+        return "" if any(key in attrs for key in ("invisible-char", "invisible_char")) else None
     Atspi = _atspi()
     got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
     if got == "" and count != 0 and (
@@ -8031,7 +8113,8 @@ def _full_text(acc) -> str | None:
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
     returns one. GTK 4's empty sentinel is retried only with explicit toolkit
-    text visibility; ambiguous entries and masking glyphs stay empty. A nonempty
+    text visibility or a matching unmasked GTK layout string; ambiguous entries
+    and masking glyphs stay private. A nonempty
     sentinel read is kept: on a Chromium web
     field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
