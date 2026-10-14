@@ -466,3 +466,61 @@ def test_driver_passes_the_frame_title_into_the_dom_write(monkeypatch) -> None:
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     assert driver._apply_set_value(_element(), "Grace", object()) is True
     assert seen["title"] == "cuahybrid119 - Google Chrome"
+
+
+@pytest.mark.parametrize(
+    ("role", "kind", "value"),
+    [("AXComboBox", "combo", "Kazakhstan"), ("AXSpinButton", "value", "03")],
+)
+def test_missing_browser_extra_keeps_native_select_and_set_value(
+    monkeypatch, role, kind, value,
+) -> None:
+    import sys
+    from a11y_computer_use.drivers import _cdp
+
+    monkeypatch.setitem(sys.modules, "websocket", None)
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (9333,))
+    monkeypatch.setattr(_cdp_forms, "port_for_pid", lambda pid: 9333)
+    monkeypatch.setattr(_cdp, "page_targets", lambda endpoint: [
+        {"title": "Form", "webSocketDebuggerUrl": "ws://form"},
+    ])
+    element = _element(role=role)
+    snap = _snapshot(element)
+    assert _cdp_forms.overlay_snapshot(snap) is snap
+
+    driver = LinuxDriver()
+    handle = object()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_dom_window_title", lambda node: "Form")
+    monkeypatch.setattr(driver, "_dom_pids", lambda node: (9,))
+    monkeypatch.setattr(_atspi, "is_sheet_cell", lambda node: False)
+    monkeypatch.setattr(_atspi, "control_kind", lambda node: kind)
+    written = []
+
+    def native_write(node, requested):
+        assert node is handle
+        written.append(requested)
+        return True
+
+    monkeypatch.setattr(_atspi, "set_combo_value", native_write)
+    monkeypatch.setattr(_atspi, "set_numeric_value", native_write)
+    assert driver._apply_set_value(element, value, handle) is True
+    assert written == [value]
+    # Explicit BrowserDriver use still reports the missing dependency.
+    with pytest.raises(ComputerUseError) as info:
+        _cdp.connect("ws://form")
+    assert info.value.detail["reason"] == "missing_browser_dependency"
+
+
+def test_form_connection_errors_do_not_fall_back(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _cdp
+
+    error = ComputerUseError(ErrorCode.UNSUPPORTED, "protocol failure")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(_cdp, "connect", fail)
+    with pytest.raises(ComputerUseError) as info:
+        _cdp_forms._eval_socket("ws://form", "write")
+    assert info.value is error
