@@ -417,7 +417,7 @@ class PermissionStore:
         if changed:
             self._load()
 
-    def policy(self, bundle_id: str) -> tuple[Tier | None, bool, str | None, str | None]:
+    def policy(self, bundle_id: str, *, launching: bool = False) -> tuple[Tier | None, bool, str | None, str | None]:
         """Return grant, denial, config error, and list block from one policy.
 
         The list block is ``"deny"`` when the app is on the deny list and
@@ -437,6 +437,16 @@ class PermissionStore:
             denied = self._load_error is not None or block is not None
             granted = None
             for key in keys:
+                if launching:
+                    from a11y_computer_use.app_identity import normalize
+                    editor_families = (
+                        {"mousepad", "org.xfce.mousepad"},
+                        {"gedit", "org.gnome.gedit"},
+                        {"gnome-text-editor", "org.gnome.texteditor"},
+                    )
+                    family = next((names for names in editor_families if normalize(bundle_id) in names), None)
+                    if family and normalize(key) not in family and normalize(key) != "text editor":
+                        continue
                 if key in self._tiers:
                     granted = self._tiers[key]
                     break
@@ -445,9 +455,11 @@ class PermissionStore:
     def _identity_keys(self, bundle_id: str) -> list[str]:
         """Stored keys that name ``bundle_id``, exact string first.
 
-        Case, a desktop id, and alias groups (Files/nautilus, Terminal/xterm,
-        libreoffice calc/soffice) share a grant. The caller's own string is
-        always included so an unknown app stays a miss.
+        Case, a desktop id, and alias groups share a grant. Files covers the
+        file managers, Text Editor covers mousepad, gedit, and
+        gnome-text-editor, and the Chrome names cover each other. A terminal
+        binary covers only its own aliases, not a different terminal. The
+        caller's own string is always included so an unknown app stays a miss.
         """
         from a11y_computer_use.app_identity import identity_keys
 
@@ -641,7 +653,9 @@ def check_action(action: Action, target_app: str, *, store: PermissionStore | No
         store = PermissionStore()
     required = required_tier(action)
     kind = type(action).__name__.lower()
-    granted, denied, config_error, block = store.policy(target_app)
+    granted, denied, config_error, block = store.policy(
+        target_app, launching=isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH,
+    )
     if denied:
         if config_error:
             reason = f"{config_error}; repair {store.path} before retrying"
