@@ -293,9 +293,13 @@ checks `Text.GetStringAtOffset(0, LINE)`, which the GTK 4.18 probe showed return
 the rendered text: plain text for visible entries, bullets for masked entries.
 A nonempty, unmasked layout string matching a private buffer read permits
 snapshot/find readback. Custom glyphs that differ from the buffer, masking
-strings and missing or empty layout replies require human handoff. This means
-an empty GTK 4 entry is conservatively refused. GTK 3 and multiline editors
-keep their existing text path. State and toolkit attributes are read once
+strings and missing layout replies require human handoff. An empty rendered
+line with a zero character count and no masking signal is unknown rather than
+secure: ref-based type/set_value may write it once using private boolean
+verification. The action result and audit input are redacted even if the entry
+subsequently proves visible. A fresh snapshot classifies the rendered line:
+bullets become secure, matching plain text permits readback. GTK 3 and multiline
+editors keep their existing text path. State and toolkit attributes are read once
 within each security probe; the layout call is limited to GTK single-line
 entry/text roles outside GTK 3.
 
