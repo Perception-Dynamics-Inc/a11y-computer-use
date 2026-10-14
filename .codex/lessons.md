@@ -29,9 +29,6 @@
 - 2026-10-14 (PR #535): When merging AT-SPI naming fallbacks, retain independent role-specific rules together. Relation-derived GTK menu labels must pass through the same rich-text normalization as native names; cover quoted attribute delimiters in the relation-label regression too.
 - 2026-10-14 (#446 repair): A post-commit pause inside the AT-SPI event-thread callback cannot process the editor-removal event. Commit in one driver operation, pause on the caller, then verify in the next operation; keep the existing pause bound.
 
-<<<<<<< HEAD
-- 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
-=======
 - 2026-10-14 (#515 repair): Opaque document search refusal must run before unreadable-container returns and outside Chromium-only Find eligibility; preserve the separate unreadable-list result and scope the refusal to the chosen container.
 
 - 2026-10-14 (#501 repair): Xournal++ zoom uses `log(percent / 100 - 0.20753)` and requires both raw Value and displayed percent read-back. In isolated Chrome live tests, a D-Bus keyring prompt can steal keyboard focus; reproduce with CI's window manager and prevent unrelated credential prompts in the temporary desktop session before diagnosing an input regression.
@@ -56,4 +53,5 @@
 
 - 2026-10-14 (PR #472 repair): Inkscape can expose both its SVG canvas and a childless painted filler inside the Fill tab as opaque regions. Preserve their native bounds and derive document context from the native frame title; keep the inaccessible SVG content note specific to the drawing canvas. An empty app-specific fallback must not overwrite another application's surface name.
 - 2026-10-14 (PR #472 merge repair): Concurrent isolated D-Bus test sessions need distinct writable XDG_CACHE_HOME directories. AT-SPI bus launchers share the cache socket path; ending one session can remove another session's socket and abort MCP subprocess tests. Recheck bus failures in a fresh session with its own cache before treating them as code regressions.
->>>>>>> origin/main
+
+- 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
