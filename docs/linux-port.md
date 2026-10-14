@@ -64,6 +64,8 @@ Closing that bar leaves the page scrolled to the match. Chrome then reports the 
 
 The find bar and an omnibox popup also stick in the AT-SPI client cache. A snapshot taken while the bar is open remembers that Chrome process. Typing in the find field does too, which is what ``scroll_to_find`` does: it opens the bar, types, and closes it before the next snapshot, so that snapshot would not otherwise see the find field. The next snapshot, including one after the bar closes and one after Reload, drops that cache and walks the frame that holds the selected tab rather than a leftover find-in-page or omnibox frame. A page-window snapshot that still has a cached find-in-page or omnibox frame beside it drops that cache even when the process was not remembered yet. Reload does not reuse the cached document. The address bar by itself does not remember the process.
 
+For Chrome/Electron processes that advertise a DevTools port, the Linux form overlay uses the optional `[browser]` extra to read and write matching DOM controls. Without `websocket-client`, snapshots and form writes retain the native AT-SPI path, including selection and numeric value writes. Native verification still determines success. Other CDP connection, script, and read-back failures remain errors; they do not retry a potentially completed write through AT-SPI. Selecting the standalone browser backend still requires the extra.
+
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 
 | Driver primitive | Linux (implemented) | macOS / Windows analog |
@@ -367,3 +369,5 @@ for a ref click. The driver verifies a change in the live `EXPANDED` state;
 a successful action acknowledgement or focus moving to another row is
 insufficient. A failed expansion returns an error without a pointer fallback,
 since these controls can report bounds that do not match their painted rows.
+
+Editable web combobox inputs (ARIA autocomplete and HTML datalist) retain their combobox role and expose `edit` when their native node has `tag=input`, Text, and `EDITABLE`, without `READ_ONLY`. `set_value` uses the verified text replacement path, and `type(ref=...)` uses the focus-confirmed text path; values are not restricted to popup options. Select-style combos retain option selection. This distinction is hermetic-tested; native Chrome verification remains a CI/live check.

@@ -14312,6 +14312,103 @@ def test_gtk4_tree_expander_action_mapping_is_scoped(monkeypatch, gtk4, role, ex
     assert not _atspi.gtk4_tree_expander(node)
 
 
+@pytest.mark.parametrize("attrs", [
+    {"tag": "input", "autocomplete": "list", "haspopup": "listbox", "xml-roles": "combobox"},
+    {"tag": "input", "haspopup": "listbox"},
+])
+def test_web_input_combo_uses_verified_text_path(fake_atspi, monkeypatch, attrs):
+    """ARIA and datalist inputs accept arbitrary text without option children."""
+    combo = _Acc("combo box", name="Fruit", width=120, height=30,
+                 states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    app = _Acc("application", name="Chromium")
+    app.get_toolkit_name = lambda: "Chromium"
+    combo.get_application = lambda: app
+    combo.get_attributes = lambda: attrs
+    combo.text = ""
+    combo.get_text_iface = lambda: combo
+    combo.get_text = lambda *_args: combo.text
+    combo.get_character_count = lambda: len(combo.text)
+    window = _adopt(_Acc("frame", name="Chrome", width=400, height=300), combo)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=582, geometry=_geometry())
+    field, = [el for el in snap.elements if el.role == "AXComboBox"]
+    assert field.editable
+    assert "edit" in observe.render_text(snap, mode="interactive")
+    assert _atspi.control_kind(combo) is None
+    assert not _atspi._blocks_text_replace(combo)
+    assert _atspi._editable_iface(combo) is None
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: combo)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda node: True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda node: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda node, text: setattr(node, "text", text))
+    driver = LinuxDriver()
+    assert driver.set_value(field, "Mango") is True
+    assert combo.text == "Mango"
+    monkeypatch.setattr(_atspi, "_type_into_target",
+                        lambda node, text: setattr(node, "text", node.text + text))
+    assert driver.type_into(field, "Pe") == 2
+    assert combo.text == "MangoPe"
+    combo.text = ""
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda *_args: None)
+    with pytest.raises(ComputerUseError) as mismatch:
+        driver.set_value(field, "unverified")
+    assert mismatch.value.detail["reason"] == "text_mismatch"
+    assert combo.text == ""
+    combo.states.remove("EDITABLE")
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(field, "blocked")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert combo.text == ""
+
+
+@pytest.mark.parametrize("tag,states,has_text", [
+    ("select", {"EDITABLE"}, True),
+    ("input", set(), True),
+    ("input", {"EDITABLE", "READ_ONLY"}, True),
+    ("input", {"EDITABLE"}, False),
+    ("", {"EDITABLE"}, True),
+])
+def test_select_style_combo_remains_blocked_for_text(fake_atspi, tag, states, has_text):
+    combo = _Acc("combo box", states=states)
+    combo.get_application = lambda: _Acc("application", name="Chromium")
+    combo.get_attributes = lambda: {"tag": tag}
+    if has_text:
+        combo.get_text_iface = lambda: combo
+    assert not _atspi.editable_entry(combo)
+    assert _atspi._blocks_text_replace(combo)
+    assert _atspi.control_kind(combo) == "combo"
+
+
+@pytest.mark.parametrize("role,tag", [
+    ("combo box", "input"),
+    ("combo box", "select"),
+    ("paragraph", "p"),
+])
+def test_firefox_input_combo_wrapper_and_static_text_are_not_editable(fake_atspi, role, tag):
+    """Gecko's address-bar wrapper is not an editor despite its input tag."""
+    app = _Acc("application", name="Firefox")
+    app.get_toolkit_name = lambda: "Gecko"
+    node = _Acc(role, name="Search with Google or enter address", width=120, height=30,
+                states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    node.get_application = lambda: app
+    node.get_attributes = lambda: {"tag": tag, "xml-roles": "combobox"}
+    node.get_text_iface = lambda: node
+    node.get_editable_text_iface = lambda: node
+    node.get_text = lambda *_args: "unchanged"
+    node.get_character_count = lambda: 9
+    window = _adopt(_Acc("frame", name="Firefox", width=400, height=300), node)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="firefox", pid=623, geometry=_geometry())
+    field, = [el for el in snap.elements if el.title == node.name]
+    assert field.editable is False
+    assert not _atspi.editable_entry(node)
+    assert _atspi._blocks_text_replace(node)
+    assert _atspi.set_text(node, "replacement") is False
+    if role == "combo box":
+        assert _atspi.control_kind(node) == "combo"
+
+
 def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, monkeypatch):
     """Chrome entry discovery must not traverse Calc's focus tree again."""
     field = _Acc("entry", name="Calc editor")
@@ -14384,3 +14481,24 @@ def test_firefox_visibility_keeps_fresh_parent_wrappers(monkeypatch, stable_keys
     else:
         monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "Other tab")
     assert _atspi._hidden_gecko_browser(Proxy(0))
+
+
+@pytest.mark.parametrize("text", ["Cursor size", "cursor size", "Cursor", "size:"])
+def test_find_and_scroll_to_find_keep_gtk_form_label_with_colon(
+    fake_atspi, monkeypatch, text
+) -> None:
+    """A synthetic AT-SPI form label remains discoverable without a control."""
+    from a11y_computer_use import server
+
+    label = _Acc("label", name="Cursor size:", width=100, height=24)
+    window = _Acc("frame", name="Settings", width=800, height=600)
+    _adopt(window, label)
+    _bind_gtk_app(window)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text=text)
+    assert 'statictext "Cursor size:"' in found
+    landed = runtime.scroll_to_find("treeprobe", text=text, max_scrolls=0)
+    assert landed.startswith("found after 0 scroll")
+    assert 'statictext "Cursor size:"' in landed
