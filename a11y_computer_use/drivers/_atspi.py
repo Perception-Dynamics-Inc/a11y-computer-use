@@ -75,7 +75,7 @@ _ROLE = {
     "internal frame": "AXGroup",
     "label": "AXStaticText",
     "static": "AXStaticText",
-    "heading": "AXStaticText",
+    "heading": "AXHeading",
     "paragraph": "AXStaticText",
     "caption": "AXStaticText",
     "image": "AXImage",
@@ -2795,7 +2795,7 @@ _EMPTY_TEXT_VALUE_NAMES = frozenset({
 #: Roles whose Value interface is not the text a person reads. A subnormal
 #: double on these is dropped. A filler is not here.
 _SUBNORMAL_TEXT_ROLES = frozenset({
-    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText",
+    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText", "AXHeading",
 })
 _SUBNORMAL_TEXT_ROLE_NAMES = frozenset({
     "entry", "text", "static", "label", "password text", "paragraph",
@@ -3456,6 +3456,16 @@ def _opaque_surface_role(role: str, role_str: str, attrs: dict) -> str:
     return role
 
 
+def _heading_level(attrs: dict) -> int | None:
+    """A positive heading level reported by AT-SPI, without inferring one."""
+    value = attrs.get("level")
+    try:
+        level = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return level if level > 0 else None
+
+
 def _refine_web_role(role: str, attrs: dict) -> str:
     """Upgrade a generic container role to the ARIA role its xml-roles declares,
     so ARIA-widget <div>s become real interactive elements in the snapshot."""
@@ -3740,6 +3750,20 @@ class ATSPIAccessor:
         description = _plain_accessible_name(
             str(_call_first(node, ("get_description",), default="") or "")
         )
+        # Chromium publishes a heading around a button as its line-wide
+        # label, with no separate static-text child. Keep that existing label
+        # ref so an explicit label click still takes the verified control path.
+        # Ordinary headings (including Firefox/WebKitGTK) retain AXHeading.
+        if role == "AXHeading" and name and _chromium_app(node):
+            count = _child_count(node)
+            if count == 1:
+                child = _child_at(node, 0)
+                if (
+                    child is not None
+                    and _role_name(child) in {"button", "push button"}
+                    and _node_name(child) == name
+                ):
+                    role = "AXStaticText"
         # GTK 4 can expose uninitialized allocations on empty anonymous
         # panels (#503). Do not turn that filler into a clickable opaque
         # region. A side longer than the full X coordinate span (65535)
@@ -3964,6 +3988,7 @@ class ATSPIAccessor:
             focusable, value = False, None
         return RawNode(
             role=role,
+            heading_level=_heading_level(attrs) if role == "AXHeading" else None,
             subrole=(
                 "terminal" if role_str == "terminal"
                 else "label" if role_str == "label"
@@ -14889,7 +14914,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         raise
     if not ok:
         _restore_text_points(saved)
-    return bool(ok)
+    return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
 
 
 def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
@@ -14954,8 +14979,10 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
         return False
     if text_visibility_unknown(acc):
         if _write_unknown_entry(acc, text, insert=False):
-            return True
-        raise _text_mismatch("text_mismatch", "private text write could not be verified")
+            # Boolean success only; carry privacy through the driver to receipts.
+            return _PrivateTextCount(1)
+        raise _text_mismatch("text_mismatch", "private text write could not be verified",
+                             private_text=True)
     if force:
         return _replace_editable_text(acc, text)
     # AbiWord's GtkEntry buffer is not its dialog model: EditableText can

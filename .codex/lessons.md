@@ -102,6 +102,10 @@
 - 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
+- 2026-10-14 (#577): AT-SPI heading role changes must preserve text-role filtering for uninitialized Value doubles as well as text matching. Carry only the reported positive heading level; do not infer it from HTML tags or geometry. Preserve independent HTML section regressions when merging appended tests.
+
+- 2026-10-14 (#577 repair): Chromium headings around a same-named button have no native static-text child. Preserve that existing control-label ref when mapping ordinary headings, and run the live statictext-click regression; do not synthesize child geometry or substitute an action.
+
 - 2026-10-14 (#589): GTK transient siblings can change the pruned path of an unnamed textarea without replacing it. Rebind only when the fresh snapshot contains the same AT-SPI bus/object identity and preserves process/document binding; geometry and an unnamed role alone do not identify the editor. Preserve independent appended regression tests when merging main.
 - 2026-10-14 (PR #606 repair): Gate Chromium focused-entry discovery on the already observed node’s toolkit before repeating focus discovery. Native Calc read-back must retain a single focus-tree lookup; browser-specific disambiguation must not add native tree traversals to other apps.
 
@@ -113,9 +117,13 @@
 
 - 2026-10-14 (PR #602 repair): Validate browser live failures with a running window manager before attributing them to ref matching. An extracted Openbox needs both its shared-library path and theme data; missing either can leave native window verification unavailable.
 - 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
+- 2026-10-14 (#642): Private GTK4 set_value verification must carry its boolean privacy marker through set_text caret restoration, LinuxDriver, and Runtime receipts; coercing it to bool loses redaction when preflight misses the entry. Empty-string snapshot values do not establish visibility.
+
+- 2026-10-14 (PR #608 merge repair): Recheck failed browser live cases after preserving newer main fixes before adding another workaround. The Chrome large-table search/click and Firefox web-field typing failures both pass after merging main; retain independent heading-control-label and web-combobox regression blocks together.
+- 2026-10-14 (#643): Refuse writes to already observed secure fields before live ref resolution; GTK4 PasswordEntry may rebuild its inner accessible. Treat native password-text parent/child boundaries as secure before Text reads. Never reuse an old secure handle to perform an action; non-secure refs still need live resolution.
+
+- 2026-10-14 (PR #644 repair): GTK4 secure-field refusal and unknown-visibility write redaction are complementary: preserve the early secure-ref refusal together with the private success marker reaching Runtime and audit. Keep both live regression blocks when merging these fixes.
 
 - 2026-10-14 (#647): Suppressing Kate whole-buffer Text values exposes automatic scroll-anchor fallbacks: retain the editor view ahead of sibling breadcrumb lists. Container selection cannot establish text visibility; refuse unverifiable editor text searches before wheel/Find input and preserve explicit container refs. Live v0.4.66..main bisect identifies #563 (c226b7b) as the interaction trigger, not a reason to restore whole-buffer values.
-
-- 2026-10-14 (#643): Refuse writes to already observed secure fields before live ref resolution; GTK4 PasswordEntry may rebuild its inner accessible. Treat native password-text parent/child boundaries as secure before Text reads. Never reuse an old secure handle to perform an action; non-secure refs still need live resolution.
 
 - 2026-10-14 (PR #648 repair): Editor scroll-anchor selection and secure-field pre-resolution refusals are independent server behaviors. Preserve both regression blocks when resolving appended test conflicts; the unreadable-editor refusal must still happen before wheel or Find input.

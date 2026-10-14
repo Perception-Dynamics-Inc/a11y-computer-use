@@ -314,6 +314,8 @@ class RawNode:
     #: GTK outline row only selects it. Empty everywhere else. The click is
     #: not turned into that double-click.
     note: str = ""
+    #: Native heading level, when reported; never inferred from text or geometry.
+    heading_level: int | None = None
 
 
 class TreeAccessor(Protocol):
@@ -2777,6 +2779,7 @@ def _flatten(
                 else "label" if node.raw.subrole == "label"
                 else None
             ),
+            heading_level=node.raw.heading_level,
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
             note=node.raw.note or None,
@@ -2924,6 +2927,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     parts = [el.ref, role]
     if el.title:
         parts.append(f'"{el.title}"')
+    if el.role == "AXHeading" and el.heading_level is not None:
+        parts.append(f"(level {el.heading_level})")
     if el.hint:
         parts.append("hint=" + _field_quote(el.hint))
     if el.shortcut:
