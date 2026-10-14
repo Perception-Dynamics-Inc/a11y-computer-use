@@ -49,3 +49,5 @@
 - 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
 
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
+
+- 2026-10-14 (PR #566 repair): Gnumeric opaque-surface naming and refusal of the crashing name-box go-jump control address different accessibility paths; retain both when merging their driver changes and regression tests.
