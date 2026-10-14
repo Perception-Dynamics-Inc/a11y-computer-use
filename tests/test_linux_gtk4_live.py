@@ -429,3 +429,41 @@ app.run([])
                 assert not observe.find_elements(snap, text=secret)
     finally:
         _stop_group(proc)
+
+
+@pytest.mark.parametrize("kind", ["plain", "masked"])
+def test_gtk4_set_value_private_receipt_uses_write_verification(tmp_path, monkeypatch, kind):
+    """Native private verification redacts even if preflight missed the entry.
+
+    Use the existing GTK4 launch and first-write assertions, including actual
+    read-back and nonempty audit files. The write must carry its privacy signal
+    through LinuxDriver independently of the earlier classification probe.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.setattr(LinuxDriver, "text_visibility_unknown", lambda self, el: False)
+    test_gtk4_empty_entry_first_write_is_private(tmp_path, kind, "set")
+
+
+def test_gtk4_private_set_value_signal_survives_driver(monkeypatch):
+    """Hermetic: the native boolean privacy signal must reach the Runtime."""
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi, _cdp_forms
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda call: call()
+    driver._dom_window_title = lambda handle: ""
+    driver._dom_pids = lambda handle: ()
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_atspi, "is_sheet_cell", lambda handle: False)
+    monkeypatch.setattr(_atspi, "control_kind", lambda handle: None)
+    monkeypatch.setattr(_atspi, "_capture_text_points", lambda handle: [])
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda handle: False)
+    verified = _atspi._PrivateTextCount(1)
+    monkeypatch.setattr(_atspi, "set_text", lambda handle, value: verified)
+    element = SimpleNamespace(role="AXTextArea", editable=True)
+    result = driver._apply_set_value(element, "Private642", object())
+    assert result is verified
+    assert result.private_text_verified is True
+    assert int(result) == 1  # Boolean success, not the payload or its length.

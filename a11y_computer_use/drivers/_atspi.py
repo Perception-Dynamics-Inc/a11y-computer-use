@@ -14875,7 +14875,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         raise
     if not ok:
         _restore_text_points(saved)
-    return bool(ok)
+    return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
 
 
 def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
@@ -14940,8 +14940,10 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
         return False
     if text_visibility_unknown(acc):
         if _write_unknown_entry(acc, text, insert=False):
-            return True
-        raise _text_mismatch("text_mismatch", "private text write could not be verified")
+            # Boolean success only; carry privacy through the driver to receipts.
+            return _PrivateTextCount(1)
+        raise _text_mismatch("text_mismatch", "private text write could not be verified",
+                             private_text=True)
     if force:
         return _replace_editable_text(acc, text)
     # AbiWord's GtkEntry buffer is not its dialog model: EditableText can

@@ -113,3 +113,4 @@
 
 - 2026-10-14 (PR #602 repair): Validate browser live failures with a running window manager before attributing them to ref matching. An extracted Openbox needs both its shared-library path and theme data; missing either can leave native window verification unavailable.
 - 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
+- 2026-10-14 (#642): Private GTK4 set_value verification must carry its boolean privacy marker through set_text caret restoration, LinuxDriver, and Runtime receipts; coercing it to bool loses redaction when preflight misses the entry. Empty-string snapshot values do not establish visibility.

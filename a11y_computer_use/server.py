@@ -6104,13 +6104,17 @@ class Runtime:
         action = TypeText(text=value)
         landed: list[str] = []
 
-        def execute() -> None:
+        def execute() -> object:
+            nonlocal private
             # TypeText carries no element. The field's own document is the
             # origin, so an iframe is not allowed just because the top page is.
             self._reject_domain(Click(target=live), app=app)
             self._refuse_disabled(live, verb="set_value")
             result = self.driver.set_value(live, value)  # an AX write lands on this element only
             if result:
+                private = private or getattr(result, "private_text_verified", False) is True
+                if private:
+                    return result
                 landed.append(result if isinstance(result, str) else value)
                 return
             # A combo, popup, or slider that the driver could not set must not
