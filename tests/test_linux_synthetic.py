@@ -13569,3 +13569,46 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     monkeypatch.setattr(_atspi, "sheet_grid_check", verify)
     assert driver.type_text("Item\tQ1") == len("Item\tQ1")
     assert sent == ["Item\tQ1"]
+
+
+@pytest.mark.parametrize("extra_group", [False, True])
+def test_textarea_ref_survives_transient_wrapper_with_native_identity(monkeypatch, extra_group):
+    """A new GI proxy for the same editor survives either wrapper transition."""
+    from dataclasses import replace
+
+    short = ("AXWindow", "AXGroup", "AXTextArea")
+    long = ("AXWindow", "AXGroup", "AXGroup", "AXTextArea")
+    anchor = Element("e4", "AXTextArea", "", "before", Bounds(0, 0, 0, 500, 300),
+                     "editor-old", path=short if extra_group else long,
+                     instance_id="process-1", document_id="title:/tmp/draft.txt - Text Editor")
+    current = replace(anchor, ref="e5", snapshot_id="editor-live", value="after",
+                      path=long if extra_group else short)
+    old = Snapshot("editor-old", Scope.WINDOW, "gnome-text-editor", 1, 0.0, (), (anchor,))
+    live = replace(old, snapshot_id="editor-live", elements=(current,))
+    old_proxy, new_proxy = object(), object()
+    keys = {old_proxy: (":1.12", "/editor"), new_proxy: (":1.12", "/editor")}
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda handle: keys.get(handle))
+    observe._register_epoch(old.snapshot_id, {}, {anchor.ref: old_proxy})
+    observe._register_epoch(live.snapshot_id, {}, {current.ref: new_proxy})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *_args: None)
+    assert driver.resolve_ref(old, anchor.ref, live=live) is current
+
+    # Identical role, title and geometry cannot authorize a replacement object.
+    for key in [(":1.12", "/replacement"), (":1.13", "/editor"), None]:
+        keys[new_proxy] = key
+        with pytest.raises(ComputerUseError) as exc:
+            driver.resolve_ref(old, anchor.ref, live=live)
+        assert exc.value.code is ErrorCode.STALE_REF
+    keys[new_proxy] = keys[old_proxy]
+    for changed in [replace(current, instance_id="process-2"),
+                    replace(current, document_id="title:/tmp/other.txt - Text Editor")]:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(changed,)))
+        assert exc.value.code is ErrorCode.STALE_REF
+    duplicate = replace(current, ref="e6")
+    observe._register_epoch(live.snapshot_id, {}, {current.ref: new_proxy, duplicate.ref: new_proxy})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(current, duplicate)))
+    assert exc.value.code is ErrorCode.STALE_REF

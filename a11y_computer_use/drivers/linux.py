@@ -1724,6 +1724,9 @@ class LinuxDriver:
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
         semantics as macOS, without macOS's pyobjc `observe.snapshot`.
 
+        An unnamed textarea whose pruned path changed can also resolve by
+        its AT-SPI bus/object identity in the fresh tree.
+
         A node the pruned tree dropped because its document is not showing is
         ``not_showing``, not ``stale_ref``. ``stale_ref`` stays the answer when
         the node is gone. A node that is still alive and has scrolled off the
@@ -1737,6 +1740,30 @@ class LinuxDriver:
         try:
             return observe.rematch_ref(snap, ref, live)
         except ComputerUseError as exc:
+            if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
+                anchor = snap.element(ref)
+                # GTK can retain or flatten an unnamed group as transient
+                # siblings appear. Require native identity, never geometry or
+                # a namesake, to recover an unnamed editor across that change.
+                if anchor.role == "AXTextArea" and not anchor.title and live.app == snap.app:
+                    from a11y_computer_use.drivers import _atspi
+
+                    handle = observe.ax_handle_for(snap.snapshot_id, ref)
+                    key = (
+                        self._run(lambda: _atspi._atspi_wrapper_key(handle))
+                        if handle is not None else None
+                    )
+                    if key is not None:
+                        matches = [
+                            el for el in live.elements
+                            if el.role == anchor.role and el.title == anchor.title
+                            and observe._bound_to_same_target(anchor, el)
+                            and self._run(lambda el=el: _atspi._atspi_wrapper_key(
+                                observe.ax_handle_for(live.snapshot_id, el.ref)
+                            )) == key
+                        ]
+                        if len(matches) == 1:
+                            return matches[0]
             # A quit-and-relaunched app, or a different document, must stay
             # stale_ref. Searching the new tree for a hidden namesake would
             # retarget the error onto the replacement.
