@@ -77,7 +77,8 @@ def connect(ws_url: str, *, timeout: float = 10.0) -> Transport:
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             "the CDP browser backend needs websocket-client",
-            detail={"hint": "pip install a11y_computer_use[browser]", "error": str(exc)},
+            detail={"hint": "pip install a11y_computer_use[browser]", "error": str(exc),
+                    "reason": "missing_browser_dependency"},
         ) from exc
 
     try:
