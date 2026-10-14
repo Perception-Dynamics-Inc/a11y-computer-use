@@ -50,11 +50,11 @@ def _stop_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
 
 
-def _launch(binary: str) -> subprocess.Popen:
+def _launch(binary: str, *args: str) -> subprocess.Popen:
     env = os.environ.copy()
     env["GTK_A11Y"] = "atspi"
     env["NO_AT_BRIDGE"] = "0"
-    return subprocess.Popen([binary], env=env, start_new_session=True)
+    return subprocess.Popen([binary, *args], env=env, start_new_session=True)
 
 
 def _window(driver, needle: str, timeout_s: float = 15.0):
@@ -251,8 +251,7 @@ app = Gtk.Application(application_id="org.example.Entry584")
 app.connect("activate", activate)
 app.run([])
 ''')
-    proc = subprocess.Popen(["python3", str(script)], start_new_session=True,
-                            env=dict(os.environ, GTK_A11Y="atspi", NO_AT_BRIDGE="0"))
+    proc = _launch(sys.executable, str(script))
     try:
         row = _window(driver, "entry584")
         assert row is not None, driver.windows()
