@@ -3837,18 +3837,23 @@ class ATSPIAccessor:
             sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
+        owner_name = ""
+        if role == "AXTextArea":
+            owner = _application_of(node)
+            owner_name = str(_call_first(owner, ("get_name",), default="") or "")
         qt_document = (
             role == "AXTextArea" and role_str != "terminal"
             and _qt_app(node) and _reports_multiline(node, attrs)
         )
-        if qt_document:
+        if qt_document and owner_name.casefold() != "kate":
+            # Kate already refuses document text below. Probing Qt bounded
+            # ranges anyway disrupts its accessibility bridge, hiding later
+            # controls in this walk (including the status bar).
             value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
             value = button_name
         screen_text = None
         if role == "AXTextArea":
-            owner = _application_of(node)
-            owner_name = str(_call_first(owner, ("get_name",), default="") or "")
             if owner_name.casefold() == "kate":
                 # KTextEditor publishes the whole buffer, including off-screen
                 # characters. Its widget box cannot verify substring visibility,

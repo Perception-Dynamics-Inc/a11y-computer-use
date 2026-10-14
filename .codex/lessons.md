@@ -113,3 +113,5 @@
 
 - 2026-10-14 (PR #602 repair): Validate browser live failures with a running window manager before attributing them to ref matching. An extracted Openbox needs both its shared-library path and theme data; missing either can leave native window verification unavailable.
 - 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
+
+- 2026-10-14 (#646): Real Kate 25.04.3 bisect identified #562 (e3b272f) as the missing-status-controls regression. Skip generic Qt viewport-text reads before Kate’s existing buffer-visibility refusal; a discarded probe still disrupts later accessibility traversal. Preserve other Qt editors’ viewport filtering and Kate’s off-screen text refusal.
