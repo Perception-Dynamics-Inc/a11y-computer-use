@@ -4,6 +4,8 @@
 
 **Status:** implemented; partially live-verified in CI. `tests/test_linux_live.py` (5 tests, `5 passed` on run 33436980587 at 3b331ba, `ubuntu-latest` under Xvfb + `dbus-run-session` + `at-spi-bus-launcher`) covers the driver name, an AT-SPI snapshot of a real GTK3 window, an a11y button press via `do_action`, a11y text entry via `EditableText`, and the `org.a11y.Status` flip. Coordinate click/drag/scroll, key chords, capture, `wait_for`, and `set_value` are implemented. Clipboard bytes (CR, CRLF, NUL, non-text, and invalid UTF-8) and the EWMH window verbs are live-checked under openbox by `tests/test_linux_desktop_live.py` in the Linux CI job. The Wayland matrix below reflects a manual headless-sway run and is not CI-tested. `tests/test_linux_synthetic.py` (runs on any OS, no bus) covers the role vocabulary, accessor, chord parsing, and error paths; `tests/test_linux_live.py` (Linux-only, self-skips without a reachable bus) launches a real GTK3 window (`cuatestapp`), snapshots it through the shared pruning engine, focuses its entry via AT-SPI **without moving the cursor**, and types via AT-SPI `EditableText.insert_text` (XTEST keystrokes are only the fallback when no editable was focused through the driver). A `linux` CI job (`ubuntu-latest`) runs the bus-free tests on every push and the live AT-SPI run under Xvfb + a session/a11y bus (`xvfb-run` + `dbus-run-session` + `at-spi-bus-launcher --launch-immediately`). The live step self-skips if the a11y bus is unreachable, but on the current head it runs and passes (run 33436980587 on 3b331ba: `5 passed`), mirroring how `windows-latest` verifies the Windows backend.
 
+Xournal++ zoom sliders owned by `xournalpp` or `Xournal++` accept `150%`, `150 %`, and out-of-range bare numbers as percents when the current label and Value match the application's offset natural-log scale. Conversion uses `log(percent / 100 - 0.20753)` without step snapping. In-range bare numbers remain raw values. Percent writes require both the raw Value and the displayed percent to confirm; builds that change only the adjustment return `text_mismatch` without substituting clicks or keys. This path is covered by hermetic tests; live Xournal++ verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
@@ -236,6 +238,22 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+## Kate document text search
+Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
+omit Kate textarea buffer values because the editor bounds do not establish
+character visibility. `find` and `scroll_to_find` cannot verify individual
+document text matches; even visible buffer text is excluded until character
+visibility can be established. The editor ref remains available, with a hint
+to use in-document navigation. Single-line search fields keep their values.
+This conservative behavior is covered by synthetic tests; no live Kate run
+was performed for #477.
+
+Kate's unnamed, childless filler directly left of a multiline editor is labelled
+`Kate editor gutter` when native bounds establish the shared edge and height.
+It remains opaque: AT-SPI does not expose individual line numbers, so this label
+supports finding the gutter, not targeting a particular line. Missing or ambiguous
+geometry leaves it unnamed. This recognition is covered by synthetic tests;
+Kate has not been live-verified for this change.
 
 GTK grid buttons with empty or duplicated accessible names use the nearest
 sibling label to their left with overlapping vertical extents. Explicit
@@ -254,3 +272,39 @@ Gnumeric (#492). The guard covers accessibility activation and element pointer
 clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
+
+### Masked GTK 4 entries
+
+Password roles, password/protected states, and explicit entry visibility-off
+signals are treated as secure fields and their text is not read. GTK 4 can omit
+all masking metadata for a masked `Gtk.Entry`. An empty `GetText(0, -1)`
+result therefore stays empty in snapshots, find, and action readback, even when
+the character count is positive. This also hides values for plain GTK 4 entries
+with the same empty sentinel behavior. Positive-offset reads are used only for
+private boolean write verification; their contents are never published.
+### Execution permission and launchers
+
+With `allow_exec=False` (the default), terminal launches and input require an
+explicit execution grant, independently of a FULL app grant. The same launch
+gate refuses known run dialogs/app finders, script interpreters, shells, and
+generic launch wrappers (including `exo-open`, `gtk-launch`, and `xdg-open`).
+It checks command strings before application resolution, executable symlinks,
+desktop-file Exec programs, and resolved launch arguments. Each refusal returns
+`exec_disabled` and writes an audit entry. Input to known app finders is also
+refused; a Python process hosting an ordinary GUI editor is not itself a
+terminal input target. These name-based checks are not a process sandbox.
+
+## gucharmap Character Table
+
+The reported GTK 3 Character Table exposes an unnamed drawing area with no
+AT-SPI children. The Linux driver labels it `gucharmap Character Table` and
+explains that its ref identifies the whole opaque table. It does not publish
+character cells, names, codepoints, or inferred glyph positions. `find` and
+`scroll_to_find` cannot target the painted characters; scrolling may change
+selection. A click on the table cannot confirm a requested character.
+
+Use `Search > Find` or the `Go` menu only as separate requested operations,
+then verify the selected codepoint and name in the statusbar or Character
+Details. A statusbar match describes the current selection, not a clickable
+character cell. Native drawing-area names, descriptions, and children take
+precedence over this fallback label.
