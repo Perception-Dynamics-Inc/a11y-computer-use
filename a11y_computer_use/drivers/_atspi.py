@@ -5878,14 +5878,40 @@ def _text_security(acc):
         visibility = _call_first(acc, ("get_visibility",))
         if visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}:
             return True, role, attrs, visibility
+        if any(str(attrs.get(key, "")).strip() not in {"", "0"}
+               for key in ("invisible-char", "invisible_char")):
+            return True, role, attrs, visibility
+        if (str(attrs.get("toolkit", "")).lower() == "gtk"
+                and not _state_flag(acc, "MULTI_LINE", drop_cache=False, states=states)
+                and _toolkit_version(acc).split(".", 1)[0] != "3"):
+            # GTK 4 GetText leaks the buffer even for visibility=False.
+            # GetStringAtOffset uses the rendered layout instead: the real
+            # bridge returns bullets for masked entries and text for plain ones.
+            # Do not infer masking from widget SHOWING/VISIBLE or text attributes.
+            api = _atspi()
+            rendered = _safe(lambda: api.Text.get_string_at_offset(
+                acc, 0, api.TextGranularity.LINE,
+            ))
+            content = getattr(rendered, "content", None)
+            if not isinstance(content, str) or not content or _entry_text_masked(role, attrs, content):
+                return True, role, attrs, visibility
+            # A custom masking glyph need not be one of the known bullets.
+            # Compare privately with the buffer; never publish a mismatch.
+            count = _safe(lambda: api.Text.get_character_count(acc))
+            buffer = _safe(lambda: api.Text.get_text(acc, 0, count)) if (
+                isinstance(count, int) and not isinstance(count, bool) and count > 0
+            ) else None
+            if content != buffer:
+                return True, role, attrs, visibility
+            visibility = True
     return False, role, attrs, visibility
 
 
 def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
-    GTK 4 can omit every masking signal; its empty sentinel must also remain
-    empty in public text readback.
+    GTK 4 layout strings expose masking even when GetText and metadata do
+    not. Ambiguous single-line GTK entries require human handoff.
     """
     return _text_security(acc)[0]
 
@@ -7949,9 +7975,12 @@ def _blocks_text_replace(acc) -> bool:
             return False
         # Synthetic transports can expose entry roles without a native
         # EDITABLE state API. Keep their existing write/read-back path;
-        # real AT-SPI nodes and Firefox wrappers still require the bit.
+        # Real AT-SPI nodes, Firefox wrappers, and text views exposing a
+        # state-set API still require the bit, even without native GI.
         native_state = _safe(lambda: _atspi().StateType.EDITABLE) is not None
-        if native_state or _gecko_app(acc):
+        if (native_state or _gecko_app(acc)
+                or (role in {"text", "editable text"}
+                    and _call_first(acc, ("get_state_set",)) is not None)):
             return not editable_entry(acc)
     return _state_has(acc, "READ_ONLY")
 
@@ -8262,11 +8291,13 @@ def _read_full_text(acc, *, count=None, verification=False):
     Chromium's bounded read can echo a write instead of the actual contents,
     so a nonempty sentinel result remains authoritative. NULL still means
     unreadable. A bounded retry may expose an unmarked masked entry, so
-    public retries require explicit text visibility and reject masking glyphs.
+    public retries require explicit visibility or a matching unmasked GTK layout
+    string, and reject masking glyphs.
     """
     secure, role, attrs, visibility = _text_security(acc)
     if secure:
-        return None
+        # Preserve the public empty-text convention for invisible-char fields.
+        return "" if any(key in attrs for key in ("invisible-char", "invisible_char")) else None
     Atspi = _atspi()
     got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
     if got == "" and count != 0 and (
@@ -8294,7 +8325,8 @@ def _full_text(acc) -> str | None:
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
     returns one. GTK 4's empty sentinel is retried only with explicit toolkit
-    text visibility; ambiguous entries and masking glyphs stay empty. A nonempty
+    text visibility or a matching unmasked GTK layout string; ambiguous entries
+    and masking glyphs stay private. A nonempty
     sentinel read is kept: on a Chromium web
     field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while

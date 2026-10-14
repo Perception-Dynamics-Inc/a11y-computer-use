@@ -13087,6 +13087,52 @@ def test_find_scrolls_a_scintilla_match_into_the_widget(fake_atspi, monkeypatch)
     assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
 
 
+@pytest.mark.parametrize("editable", [False, True])
+def test_text_view_requires_editable_state_before_set_value(fake_atspi, monkeypatch, editable):
+    """GtkTextView exposes EditableText even when the display is read-only."""
+    states = {"ENABLED", "FOCUSABLE", "MULTI_LINE", "SENSITIVE", "SHOWING", "VISIBLE"}
+    if editable:
+        states.add("EDITABLE")
+    display = _Acc("text", states=states, width=120, height=40)
+    display.text = "42"
+    display.get_editable_text_iface = lambda: display
+    display.get_text_iface = lambda: display
+    display.get_text = lambda *_args: display.text
+    display.get_character_count = lambda: len(display.text)
+    window = _adopt(_Acc("frame", name="galculator", width=400, height=300), display)
+    accessor = _atspi.ATSPIAccessor()
+    snap = build_snapshot(window, accessor, scope=Scope.WINDOW,
+                          app="galculator", pid=560, geometry=_geometry())
+    fields = tuple(el for el in snap.elements if el.role in {"AXTextArea", "AXTextField"})
+    assert len(fields) == 1
+    field = fields[0]
+    assert field.value == "42"
+    assert field.editable is editable
+    assert observe.find_elements(snap, editable=True) == ((field,) if editable else ())
+    assert ("edit" in observe.render_text(snap, mode="interactive")) is editable
+
+    mutations = []
+    def write(handle, value):
+        mutations.append(value)
+        handle.text = value
+        return True
+    monkeypatch.setattr(_atspi, "set_text", write)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: display)
+    driver = LinuxDriver()
+    if editable:
+        assert driver.set_value(field, "51") is True
+        assert mutations == ["51"]
+        assert display.text == "51"
+        # The live state must override even a previously editable snapshot.
+        display.states.remove("EDITABLE")
+        mutations.clear()
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(field, "52")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert mutations == []
+    assert display.text == ("51" if editable else "42")
+
+
 @pytest.mark.parametrize("value", ["150%", "150 %", "150", "200%", "100%"])
 def test_xournal_zoom_percent_uses_offset_log_on_driver_path(fake_atspi, monkeypatch, value):
     slider = _Acc("slider", name="185%", value=0.5,

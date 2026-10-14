@@ -251,6 +251,8 @@ to use in-document navigation. Single-line search fields keep their values.
 This conservative behavior is covered by synthetic tests; no live Kate run
 was performed for #477.
 
+GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
+
 Kate's unnamed, childless filler directly left of a multiline editor is labelled
 `Kate editor gutter` when native bounds establish the shared edge and height.
 It remains opaque: AT-SPI does not expose individual line numbers, so this label
@@ -270,13 +272,22 @@ galculator-shaped regression tests; no local live verification.
 
 ### Masked GTK 4 entries
 
-Password roles, password/protected states, and explicit entry visibility-off
-signals are treated as secure fields and their text is not read. GTK 4 can omit
-all masking metadata for a masked `Gtk.Entry`. An empty `GetText(0, -1)`
-result therefore stays empty in snapshots, find, and action readback, even when
-the character count is positive. This also hides values for plain GTK 4 entries
-with the same empty sentinel behavior. Positive-offset reads are used only for
-private boolean write verification; their contents are never published.
+Password roles, password/protected/invisible states, visibility-off, and
+invisible-character attributes classify an entry as `securetextfield`. Its
+value is omitted, and type/set_value are refused without echoing the input.
+
+GTK 4 can omit those signals and expose the plaintext buffer through bounded
+`GetText` even when the entry is masked. For GTK 4 single-line entries the driver
+checks `Text.GetStringAtOffset(0, LINE)`, which the GTK 4.18 probe showed returns
+the rendered text: plain text for visible entries, bullets for masked entries.
+A nonempty, unmasked layout string matching a private buffer read permits
+snapshot/find readback. Custom glyphs that differ from the buffer, masking
+strings and missing or empty layout replies require human handoff. This means
+an empty GTK 4 entry is conservatively refused. GTK 3 and multiline editors
+keep their existing text path. State and toolkit attributes are read once
+within each security probe; the layout call is limited to GTK single-line
+entry/text roles outside GTK 3.
+
 ### Execution permission and launchers
 
 With `allow_exec=False` (the default), terminal launches and input require an
