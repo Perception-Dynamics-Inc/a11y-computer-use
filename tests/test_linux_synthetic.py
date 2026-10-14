@@ -14257,3 +14257,59 @@ def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, 
                         lambda *args, **kwargs: pytest.fail("Chrome lookup on native editor"))
     assert _atspi.focused_text("soffice") == "Item"
     assert lookups == ["soffice"]
+
+
+@pytest.mark.parametrize("stable_keys", [False, True])
+@pytest.mark.parametrize("check", ["showing", "tab_title"])
+def test_firefox_visibility_keeps_fresh_parent_wrappers(monkeypatch, stable_keys, check):
+    """Recycled proxy ids must not hide the active Firefox document (#632)."""
+    import weakref
+
+    # Model allocator reuse deterministically: an id is reusable only after
+    # its wrapper has been collected. No timing or GI dependency is involved.
+    slots = []
+
+    class Proxy:
+        def __init__(self, depth):
+            self.depth = depth
+
+    def proxy_id(node):
+        for index, held in enumerate(slots):
+            if held() is node:
+                return index
+        for index, held in enumerate(slots):
+            if held() is None:
+                slots[index] = weakref.ref(node)
+                return index
+        slots.append(weakref.ref(node))
+        return len(slots) - 1
+
+    def role(node):
+        if node.depth == 0:
+            return "document web"
+        if node.depth == 6:
+            return "internal frame" if check == "showing" else "document web"
+        if node.depth == 7:
+            return "frame"
+        return "panel"
+
+    monkeypatch.setattr(_atspi, "id", proxy_id, raising=False)
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node:
+                        (":1.632", f"/node/{node.depth}") if stable_keys else None)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda node:
+                        Proxy(node.depth + 1) if node.depth < 7 else None)
+    monkeypatch.setattr(_atspi, "_role_name", role)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state:
+                        state == "SHOWING" and node.depth in ({6} if check == "showing" else {0}))
+    monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "cuapara")
+    monkeypatch.setattr(_atspi, "_node_name", lambda node:
+                        "Child frame" if check == "tab_title" and node.depth == 0 else "cuapara")
+
+    assert not _atspi._hidden_gecko_browser(Proxy(0))
+
+    # The fix must still omit a genuinely hidden/background document.
+    if check == "showing":
+        monkeypatch.setattr(_atspi, "_state_has", lambda node, state: False)
+    else:
+        monkeypatch.setattr(_atspi, "_selected_tab_name", lambda node: "Other tab")
+    assert _atspi._hidden_gecko_browser(Proxy(0))
