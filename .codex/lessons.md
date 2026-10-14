@@ -61,6 +61,12 @@
 
 - 2026-10-14 (PR #539 merge repair): In a sandbox sharing a desktop, GTK live tests can enumerate a launched window yet fail their on-screen/process-family match. Reproduce the same assertion from an unchanged main checkout before attributing it to a merged server change; do not relax window ownership checks.
 - 2026-10-14 (#552 repair): Opaque-search refusals must remain before input when merging verified Find support; retain the FULL grant gate and focused find-bar verification as independent requirements.
+- 2026-10-14 (PR #562 repair): When merging viewport text reads with app-specific snapshot fixes, retain both native visibility helpers and independent label/value handling. Run Qt, AT-SPI cache, and shared server regressions; whole-buffer Text values do not establish substring visibility.
+- 2026-10-14 (#542): Omit clipped prefixes and suffixes from Qt viewport text, adding separators only between visible fragments. Placeholder prefixes can make a genuine newly visible token look like text appended to an editor query and prevent shared scroll-search confirmation.
+- 2026-10-14 (#542 repair): Qt line edits can map to AXTextArea without a SINGLE_LINE state. Require native MULTI_LINE or a multiline attribute before viewport text reads; probing GetBoundedRanges on ordinary Qt controls can stall snapshots when Qt cannot marshal QSpiTextRange replies.
+- 2026-10-14 (PR #562 CI repair): urllib HTTPSHandler eagerly creates a TLS context even in an HTTP-only opener. Initialize the shared HTTP handler directly when an overridden https_open already creates its verified context; otherwise native trust-store loading can exhaust a short HTTP observation deadline before the request. Test that HTTP probes never load TLS settings.
+- 2026-10-14 (PR #562 merge repair): Preserve Kate's app-specific document visibility refusal after generic Qt viewport reads. Cover both Kate and FeatherPad with an available viewport result so a successful generic read cannot silently override the conservative KTextEditor behavior.
+
 - 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
 
@@ -83,6 +89,8 @@
 - 2026-10-14 (PR #472 merge repair): Concurrent isolated D-Bus test sessions need distinct writable XDG_CACHE_HOME directories. AT-SPI bus launchers share the cache socket path; ending one session can remove another session's socket and abort MCP subprocess tests. Recheck bus failures in a fresh session with its own cache before treating them as code regressions.
 - 2026-10-14 (PR #549 repair): A supplied worktree can lag its tracking branch even when its files are clean. Fetch and preserve the current remote PR head before merging main, so a plain repair push retains prior repair commits.
 
+- 2026-10-14 (PR #562 repair): Qt viewport text filtering must coexist with application-specific visibility restrictions such as Kate, Evince page handling, and independent button labels. Preserve both sides of appended regression conflicts and compare the resolved patch against main.
+- 2026-10-14 (PR #562 repair): Trim clipped-character placeholders at the edges of Qt viewport text, while retaining internal separators. Leading placeholders otherwise trigger the shared appended-query guard when the visible viewport contains exactly the requested token.
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
 
 - 2026-10-14 (PR #566 repair): Appended test conflicts can contain regressions already present earlier in main. Preserve each test once and compare the resolved diff against main before validation.
@@ -92,4 +100,5 @@
 - 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
+- 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
 - 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
