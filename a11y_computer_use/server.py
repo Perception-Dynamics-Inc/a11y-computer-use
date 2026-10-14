@@ -6198,6 +6198,10 @@ class Runtime:
         checks again. The ref and the bounds are from that confirming
         snapshot, not from the pre-scroll one.
 
+        In-app find is refused before input for containers with opaque
+        regions, whose matches cannot be verified and could leave document
+        text selected.
+
         The search stops after ``budget_s`` seconds with no progress (15
         by default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). A step
         that shows different on-screen rows, or that changes the
@@ -6806,6 +6810,33 @@ class Runtime:
                     time.sleep(0.12)
                 return False
 
+            def refuse_opaque_find(anchor: Element) -> None:
+                """Refuse a search whose native Find effect cannot be verified."""
+                # An opaque drawing area cannot expose a confirming match.
+                # Native Find may still select document text, so refusing
+                # must happen before Ctrl+F or any query text is injected.
+                shot = self._current
+                if shot is not None:
+                    by_ref = {el.ref: el for el in shot.elements}
+                    for el in shot.elements:
+                        if el.role != "opaque_region":
+                            continue
+                        seen: set[str] = set()
+                        node = el
+                        while node.ref not in seen:
+                            seen.add(node.ref)
+                            if node.ref == anchor.ref:
+                                raise ComputerUseError(
+                                    ErrorCode.UNSUPPORTED,
+                                    "cannot verify an in-app find in an opaque container; "
+                                    "find was not opened and no query was typed",
+                                    detail={"reason": "opaque_find_unverifiable", "ref": anchor.ref},
+                                )
+                            parent = by_ref.get(node.parent)
+                            if parent is None:
+                                break
+                            node = parent
+
             def _snapshot_shows_find_bar(shot: Snapshot | None) -> bool:
                 if shot is None:
                     return False
@@ -6917,6 +6948,7 @@ class Runtime:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
+                refuse_opaque_find(anchor)
                 if not _find_typing_allowed():
                     return None
                 if not _find_host(self._current):
@@ -7040,6 +7072,8 @@ class Runtime:
                         same_rows = 0
                     previous_rows = seen
                 matches = search_matches(snap)
+                if not matches and document_anchor(anchor_now):
+                    refuse_opaque_find(anchor_now)
                 if not matches and container_not_readable(snap, anchor_now):
                     return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if matches:
@@ -9472,7 +9506,10 @@ def build_server(
         an editable element from the latest desktop_snapshot/find. Falls back to
         focus+type when the app exposes no settable value. On Linux, a ref that
         is not an editable text element is an error saying it is not editable,
-        and that call sends no keystrokes, clicks, or focus changes. A Firefox
+        and that call sends no keystrokes, clicks, or focus changes. The edit
+        flag uses the node's own STATE_EDITABLE, not EditableText support.
+        Failed or refused writes restore the previous caret and selection,
+        including on the document. A Firefox
         paragraph, document, or select is not an editable entry, even when
         AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
         before any select-all. An Impress slide or Draw page paragraph that
@@ -9535,6 +9572,9 @@ def build_server(
         unsupported statusbar_only_match error. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
+        In-app find is refused before input for containers with opaque
+        regions, whose matches cannot be verified and could leave document
+        text selected.
         A step that changes either one starts that clock again. The search
         also stops at 120 seconds. It reports the container, its scroll
         position, and the last rows seen. A document, a table, or a list
