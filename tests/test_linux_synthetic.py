@@ -13691,3 +13691,41 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     monkeypatch.setattr(_atspi, "sheet_grid_check", verify)
     assert driver.type_text("Item\tQ1") == len("Item\tQ1")
     assert sent == ["Item\tQ1"]
+
+@pytest.mark.parametrize("method", ["press_element", "click"])
+def test_gnumeric_go_jump_refused_before_activation(fake_atspi, monkeypatch, method):
+    app = _Acc("application", name="Gnumeric")
+    image = _Acc("image", name="go-jump")
+    image.get_application = lambda: app
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: image)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "do_press", lambda *_args: pytest.fail("dangerous action sent"))
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer click sent"))
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: pytest.fail("window raised"))
+    element = Element("e492", "AXImage", "go-jump", None,
+                      Bounds(0, 20, 30, 16, 16), "snap492", clickable=True)
+
+    with pytest.raises(ComputerUseError) as exc:
+        getattr(driver, method)(element)
+
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "gnumeric_go_jump_crash"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "crash" in str(exc.value)
+
+
+@pytest.mark.parametrize("app_name,role,title", [
+    ("Firefox", "AXImage", "go-jump"),
+    ("Gnumeric", "AXButton", "go-jump"),
+    ("Gnumeric", "AXImage", "other-image"),
+])
+def test_gnumeric_crash_guard_is_scoped_to_named_image(fake_atspi, monkeypatch, app_name, role, title):
+    app = _Acc("application", name=app_name)
+    image = _Acc("image", name=title)
+    image.get_application = lambda: app
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e492", role, title, None, None, "snap492", clickable=True)
+    driver._refuse_gnumeric_go_jump(element, image)

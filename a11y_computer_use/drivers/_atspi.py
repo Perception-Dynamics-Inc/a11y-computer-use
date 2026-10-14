@@ -5660,7 +5660,11 @@ def _text_security(acc):
     role = _role_name(acc)
     if role == "password text":
         return True, role, {}, None
-    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED", "INVISIBLE")):
+    # State sets stay uncached across probes: masking can change after input.
+    # Within this probe all three flags come from the same native reply.
+    states = _call_first(acc, ("get_state_set",))
+    if any(_state_flag(acc, name, drop_cache=False, states=states)
+           for name in ("PASSWORD", "PROTECTED", "INVISIBLE")):
         return True, role, {}, None
     attrs = _get_attributes(acc)
     if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
@@ -7760,16 +7764,18 @@ def _state_has(acc, name: str) -> bool:
     return _state_flag(acc, name, drop_cache=True)
 
 
-def _state_flag(acc, name: str, *, drop_cache: bool) -> bool:
+def _state_flag(acc, name: str, *, drop_cache: bool, states=_CACHE_MISS) -> bool:
     """Whether the state set contains ``name``.
 
     ``drop_cache`` is false when the caller is about to read text on this
     same node. ``clear_cache_single`` on a Chromium contenteditable makes
-    the following ``get_text`` return NULL.
+    the following ``get_text`` return NULL. ``states`` may supply the fresh
+    reply shared by the flags of one security probe; it is never cached
+    across probes.
     """
     if drop_cache:
         _drop_cached_properties(acc)
-    sset = _call_first(acc, ("get_state_set",))
+    sset = _call_first(acc, ("get_state_set",)) if states is _CACHE_MISS else states
     if sset is None:
         return False
     names = getattr(sset, "names", None)

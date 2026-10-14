@@ -280,3 +280,44 @@ def test_known_empty_text_does_not_retry_bounded_read(monkeypatch):
     field.get_attributes = lambda: {"visibility": "true"}
     assert _atspi._read_full_text(field, count=0) == ""
     assert field.reads == [(0, -1)]
+
+
+@pytest.mark.parametrize("protected", [None, "PASSWORD", "PROTECTED", "INVISIBLE"])
+@pytest.mark.parametrize("native", [False, True])
+def test_text_security_reads_one_fresh_state_set_per_probe(monkeypatch, protected, native):
+    """All masking flags share one read, but a later probe sees changed state."""
+    from types import SimpleNamespace
+
+    field = _Entry("entry", "private")
+    calls = []
+    state = {"flag": protected}
+
+    members = SimpleNamespace(PASSWORD=1, PROTECTED=2, INVISIBLE=3)
+
+    def get_states():
+        calls.append(state["flag"])
+        if native:
+            member = getattr(members, state["flag"], None) if state["flag"] else None
+            return SimpleNamespace(contains=lambda candidate: member is not None and candidate == member)
+        return SimpleNamespace(names={state["flag"]} if state["flag"] else set())
+
+    field.get_state_set = get_states
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(StateType=members))
+    with _atspi.read_cache():
+        assert _atspi.is_secure(field) is (protected is not None)
+        assert len(calls) == 1
+        state["flag"] = "PROTECTED" if protected is None else None
+        assert _atspi.is_secure(field) is (protected is None)
+        assert len(calls) == 2
+
+
+def test_text_security_does_not_retry_a_missing_state_set(monkeypatch):
+    """A missing reply is shared within this probe and retried by the next."""
+    field = _Entry("entry", "visible")
+    calls = []
+    field.get_state_set = lambda: calls.append("states")
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Api)
+    assert _atspi.is_secure(field) is False
+    assert calls == ["states"]
+    assert _atspi.is_secure(field) is False
+    assert calls == ["states", "states"]
