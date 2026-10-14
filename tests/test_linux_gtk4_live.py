@@ -286,3 +286,76 @@ app.run([])
                 assert "ProbeSecret584" not in str(caught.value)
     finally:
         _stop_group(proc)
+
+
+@pytest.mark.parametrize("kind", ["plain", "masked", "password"])
+@pytest.mark.parametrize("operation", ["type", "set"])
+def test_gtk4_empty_entry_first_write_is_private(tmp_path, kind, operation):
+    """An empty unknown entry allows one privately verified, redacted write."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "entry584.py"
+    script.write_text(f'''
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="Entry584")
+    entry = Gtk.PasswordEntry() if {kind!r} == "password" else Gtk.Entry()
+    if {kind!r} == "masked":
+        entry.set_visibility(False)
+
+    entry.update_property([Gtk.AccessibleProperty.LABEL], ["Field584"])
+    window.set_child(entry)
+    window.present()
+app = Gtk.Application(application_id="org.example.Entry584")
+app.connect("activate", activate)
+app.run([])
+''')
+    proc = _launch(sys.executable, str(script))
+    try:
+        row = _window(driver, "entry584")
+        assert row is not None, driver.windows()
+        driver.focus_window(int(row["window_id"]))
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 15
+        while True:
+            runtime.desktop_snapshot(str(row["app"]))
+            snap = runtime._current
+            fields = [el for el in snap.elements if el.title == "Field584"] if snap else []
+            if fields or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        assert len(fields) == 1
+        field = fields[0]
+        secret = "FirstWrite584"
+        if kind == "password":
+            assert field.secure
+            for operation in (lambda: runtime.type_text(secret, ref=field.ref),
+                              lambda: runtime.set_value(field.ref, secret)):
+                with pytest.raises(ComputerUseError) as caught:
+                    operation()
+                assert caught.value.code is ErrorCode.SECURE_FIELD
+                assert secret not in str(caught.value)
+        else:
+            assert not field.secure
+            result = (runtime.type_text(secret, ref=field.ref) if operation == "type"
+                      else runtime.set_value(field.ref, secret))
+            assert result.outcome == "confirmed"
+            assert secret not in str(result) + repr(result.as_dict())
+            assert secret not in (tmp_path / "audit.jsonl").read_text()
+            runtime.desktop_snapshot(str(row["app"]))
+            snap = runtime._current
+            field = next(el for el in snap.elements if el.title == "Field584")
+            if kind == "plain":
+                assert field.value == secret
+                assert observe.find_elements(snap, text=secret)
+            else:
+                assert field.secure and field.value is None
+                assert secret not in repr(snap)
+                assert not observe.find_elements(snap, text=secret)
+    finally:
+        _stop_group(proc)

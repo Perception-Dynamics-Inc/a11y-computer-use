@@ -5619,7 +5619,12 @@ def _text_security(acc):
                 acc, 0, api.TextGranularity.LINE,
             ))
             content = getattr(rendered, "content", None)
-            if not isinstance(content, str) or not content or _entry_text_masked(role, attrs, content):
+            if content == "":
+                count = _safe(lambda: api.Text.get_character_count(acc))
+                if isinstance(count, int) and not isinstance(count, bool) and count == 0:
+                    return False, role, attrs, "unknown"
+                return True, role, attrs, visibility
+            if not isinstance(content, str) or _entry_text_masked(role, attrs, content):
                 return True, role, attrs, visibility
             # A custom masking glyph need not be one of the known bullets.
             # Compare privately with the buffer; never publish a mismatch.
@@ -5637,9 +5642,48 @@ def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
     GTK 4 layout strings expose masking even when GetText and metadata do
-    not. Ambiguous single-line GTK entries require human handoff.
+    not. Empty GTK entries without masking metadata remain unknown until written.
     """
     return _text_security(acc)[0]
+
+
+def text_visibility_unknown(acc) -> bool:
+    """An empty GTK 4 entry with no real masking or visibility signal."""
+    return _text_security(acc)[3] == "unknown"
+
+
+class _PrivateTextCount(int):
+    """A verified character count whose receipt and audit must stay redacted."""
+
+    private_text_verified = True
+
+
+def _write_unknown_entry(acc, text: str, *, insert: bool) -> bool:
+    """Write an empty unknown entry once; expose only a verified boolean.
+
+    The rendered layout may become masked after this write. Buffer reads here
+    must never reach a snapshot, error detail, or action result.
+    """
+    api = _atspi()
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    if insert:
+        method = getattr(eti, "insert_text", None) or getattr(eti, "insertText", None)
+        if method is None:
+            return False
+        _call_first(eti, ("insert_text", "insertText"), 0, text,
+                    _insert_length(method, text, acc), default=False)
+    else:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        _call_first(acc, ("clear_cache", "clearCache"))
+        count = _safe(lambda: api.Text.get_character_count(acc))
+        if count == len(text) and _safe(lambda: api.Text.get_text(acc, 0, count)) == text:
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    return False
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -7851,10 +7895,15 @@ def insert_text(acc, text: str) -> int | None:
     embedded NUL, so the text alone can look right while the widget holds
     extra characters.
     """
+    typed = text.replace("\r\n", "\n")
+    if text_visibility_unknown(acc):
+        if _write_unknown_entry(acc, typed, insert=True):
+            return _PrivateTextCount(len(typed))
+        raise _text_mismatch("text_mismatch", "private text write could not be verified",
+                             private_text=True)
     eti = _editable_iface(acc)
     if eti is None:
         return None
-    typed = text.replace("\r\n", "\n")
     # A Writer document's own text stays empty. The paragraphs are the
     # read-back, captured before the insert so a later poll can see them
     # arrive. An entry is not this document and does not walk.
@@ -14625,6 +14674,10 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
         return False
+    if text_visibility_unknown(acc):
+        if _write_unknown_entry(acc, text, insert=False):
+            return True
+        raise _text_mismatch("text_mismatch", "private text write could not be verified")
     if force:
         return _replace_editable_text(acc, text)
     # AbiWord's GtkEntry buffer is not its dialog model: EditableText can
