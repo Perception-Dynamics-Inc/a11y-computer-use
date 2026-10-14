@@ -1694,16 +1694,18 @@ def _model_changes(
 ) -> dict[str, tuple]:
     """State the model must see. Sub-pixel bounds jitter is not a change."""
     changes = dict(_state_changes(old, new))
-    # `_state_changes` ignores display_id. A move to another display is still
-    # a change the model has to see. Jitter within `_BOUNDS_MOVE_PX` is not.
-    moved = "bounds" in changes or old.bounds.display_id != new.bounds.display_id
-    changes.pop("bounds", None)
-    if moved and _bounds_matter(old.bounds, new.bounds):
-        ab, bb = old.bounds, new.bounds
-        changes["bounds"] = (
-            f"{ab.width}x{ab.height}@{ab.display_id}:{ab.x},{ab.y}",
-            f"{bb.width}x{bb.height}@{bb.display_id}:{bb.x},{bb.y}",
-        )
+    ab, bb = old.bounds, new.bounds
+    if ab is not None and bb is not None:
+        # `_state_changes` ignores display_id. A move to another display is still
+        # a change the model has to see. Jitter within `_BOUNDS_MOVE_PX` is not.
+        changes.pop("bounds", None)
+        if _bounds_matter(ab, bb):
+            changes["bounds"] = (
+                f"{ab.width}x{ab.height}@{ab.display_id}:{ab.x},{ab.y}",
+                f"{bb.width}x{bb.height}@{bb.display_id}:{bb.x},{bb.y}",
+            )
+    # Missing bounds have no jitter to compare. Keep availability transitions
+    # from `_state_changes`, and leave two missing bounds unchanged.
     old_more = _EPOCHS.get(old_snap.snapshot_id, {}).get(old.ref, 0)
     new_more = _EPOCHS.get(new_snap.snapshot_id, {}).get(new.ref, 0)
     if old_more != new_more:
