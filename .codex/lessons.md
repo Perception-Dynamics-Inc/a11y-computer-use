@@ -76,3 +76,5 @@
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
 
 - 2026-10-14 (PR #566 repair): Appended test conflicts can contain regressions already present earlier in main. Preserve each test once and compare the resolved diff against main before validation.
+
+- 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.

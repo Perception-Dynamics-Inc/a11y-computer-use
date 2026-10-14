@@ -11,9 +11,12 @@ import dataclasses
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pytest
+
 from a11y_computer_use.agent.models.base import ToolCall
 from a11y_computer_use.agent.models.scripted import ScriptedModel
 from a11y_computer_use.observe import (
+    _model_changes,
     align_refs,
     build_snapshot,
     project_model_observation,
@@ -771,3 +774,29 @@ def _watch(snap: Snapshot) -> tuple[str, str]:
             return element.role, element.title
     element = snap.elements[0]
     return element.role, element.title
+
+
+@pytest.mark.parametrize(
+    "old_bounds,new_bounds,expected",
+    [
+        (None, None, {}),
+        (None, Bounds(0, 10, 20, 80, 24), {"bounds": (None, (10, 20))}),
+        (Bounds(0, 10, 20, 80, 24), None, {"bounds": ((10, 20), None)}),
+    ],
+)
+def test_model_diff_handles_missing_bounds(old_bounds, new_bounds, expected):
+    """Unmeasured elements stay diffable when geometry appears or disappears."""
+    old = el("e2", "AXTextArea", "Note", bounds=old_bounds, value="before")
+    new = dataclasses.replace(old, bounds=new_bounds)
+    basis, current = _snap([old], sid="before"), _snap([new], sid="after")
+    assert _model_changes(old, new, basis, current) == expected
+    text = render_model_diff(basis, current)
+    if expected:
+        assert "bounds" in text
+        assert "(no change)" not in text
+    else:
+        assert "(no change)" in text
+    changed = dataclasses.replace(new, value="after")
+    assert _model_changes(old, changed, basis, _snap([changed], sid="changed")) == {
+        **expected, "value": ("before", "after"),
+    }
