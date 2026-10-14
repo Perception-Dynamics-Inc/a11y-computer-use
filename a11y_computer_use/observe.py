@@ -255,14 +255,20 @@ class RawNode:
     focusable: bool = False
     #: Platform text-entry signal independent of role. AT-SPI sets this only
     #: when the node itself is an editable entry: an entry, text, or password
-    #: role that is not read-only, or a contenteditable section (a div or span
-    #: with ``STATE_EDITABLE``; Chromium may omit EditableText, Firefox must
-    #: expose it). A paragraph, panel, document, or combo is not an entry, even
-    #: when Firefox reports ``STATE_EDITABLE`` or EditableText on it. An
-    #: Impress or Draw paragraph is an entry when it has ``STATE_EDITABLE``
-    #: and EditableText. Default false, so macOS, Windows, and the browser
+    #: role that is not read-only and has ``STATE_EDITABLE``, or a
+    #: contenteditable section (a div or span with ``STATE_EDITABLE``).
+    #: EditableText support is not that signal. A paragraph, panel, document,
+    #: or combo is not an entry, even when Firefox reports ``STATE_EDITABLE``
+    #: or EditableText on it. Impress and Draw paragraphs with both signals
+    #: remain editable. Default false, so macOS, Windows, and the browser
     #: stay editable only when the role is a text field.
     editable: bool = False
+    #: AT-SPI's own answer for ``editable``, or None when this tree did not
+    #: come from AT-SPI. False wins over a text-field role, so an address-bar
+    #: wrapper mapped to ``AXTextField`` without ``STATE_EDITABLE`` is not
+    #: edit. None keeps the role rule for macOS, Windows, and synthetic
+    #: snapshots.
+    platform_editable: bool | None = None
     #: Process identity of the app that owns this node. Linux sets
     #: ``pid:<pid>|start:<ticks>`` and appends ``|bus:<name>`` when the
     #: application exposes an AT-SPI bus name. None on backends that do not
@@ -292,6 +298,11 @@ class RawNode:
     #: childless panel still becomes an opaque region. The pruner copies it
     #: onto that region's title. Empty on macOS, Windows, and the browser.
     surface_name: str = ""
+    #: Linux only. A sentence such as ``canvas content isn't accessible``
+    #: when a drawing area has no text and no children. Empty when the
+    #: toolkit exposed that content. The pruner copies it onto the element.
+    #: It does not invent a box for a shape inside the canvas.
+    content_note: str = ""
     #: Tooltip sentence split off a multiline accessible name. Empty when
     #: the name was a single line. The snapshot prints it as ``hint=``, not
     #: inside the name.
@@ -934,12 +945,29 @@ def _children_map(snap: Snapshot) -> dict[str | None, list[Element]]:
     return children
 
 
+def _canvas_note_lines(snap: Snapshot) -> list[tuple[str, bool]]:
+    """One line per distinct canvas note, so a miss is not silent.
+
+    The same sentence is also on the canvas element. A snapshot with no
+    such canvas contributes nothing.
+    """
+    seen: list[str] = []
+    for el in snap.elements:
+        note = el.content_note
+        if note and note not in seen:
+            seen.append(note)
+    return [(note, False) for note in seen]
+
+
 def _full_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str, bool]]:
     """(line, is_element_line) pairs for the full view."""
     elisions = _EPOCHS.get(snap.snapshot_id, {})
     children = _children_map(snap)
     bounds: bool | None = True if include_bounds else None
-    entries = [(f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value})", False)]
+    entries = [
+        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value})", False),
+        *_canvas_note_lines(snap),
+    ]
 
     def emit(el: Element, depth: int) -> None:
         entries.append(("  " * depth + _render_line(el, bounds=bounds), True))
@@ -1030,7 +1058,8 @@ def _interactive_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str
     kept = interactive_view(snap)
     kept_refs = {el.ref for el in kept}
     entries = [
-        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value}) interactive", False)
+        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value}) interactive", False),
+        *_canvas_note_lines(snap),
     ]
 
     def folded_text(el: Element) -> tuple[list[str], int, int]:
@@ -1339,6 +1368,52 @@ def find_elements(
     return tuple(out)
 
 
+_EXACT_NAME_ROLES = frozenset({
+    "cell", "row", "column", "listitem",
+    "button", "link", "menu", "menuitem", "menubutton",
+    "checkbox", "radiobutton", "combobox", "popupbutton",
+    "textfield", "textarea", "searchfield", "tab",
+})
+
+
+def _folded_title(title: str) -> str:
+    return title.replace("\u00a0", " ").strip().casefold()
+
+
+def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[Element, ...]:
+    """Prefer an exact name on a cell or control over a label that mentions it.
+
+    ``find_elements`` stays a substring search. ``find`` and ``scroll_to_find``
+    apply this ranking. When a cell, row, or other control is titled exactly
+    with ``text``, only those matches are returned. A label whose title merely
+    contains ``text`` is dropped. A label whose title is ``text`` stays. A
+    paragraph or other static text whose value contains ``text`` stays, and so
+    does a button or field matched by substring when no exact control exists.
+    """
+    if not matches or not isinstance(text, str) or not text.strip():
+        return tuple(matches)
+    needle = _folded_title(text)
+
+    def exact_control(el: Element) -> bool:
+        if _folded_title(el.title or "") != needle:
+            return False
+        if el.clickable:
+            return True
+        role = el.role.lower().removeprefix("ax")
+        return role in _EXACT_NAME_ROLES
+
+    exact = tuple(el for el in matches if exact_control(el))
+    if exact:
+        return exact
+
+    def mentions_label(el: Element) -> bool:
+        if el.subrole != "label" or el.role not in {"AXStaticText", "AXHeading"}:
+            return False
+        return _folded_title(el.title or "") != needle
+
+    return tuple(el for el in matches if not mentions_label(el))
+
+
 def render_matches(
     snap: Snapshot, matches: Sequence[Element], *, text: str | None = None,
 ) -> str:
@@ -1348,10 +1423,13 @@ def render_matches(
 
     ``text`` is the substring ``find`` searched for. A VTE match that sits only
     in the buffer, not in the on-screen value, is marked above the view or
-    off-screen.
+    off-screen. A snapshot whose canvas has no accessible content says so
+    when nothing matched, instead of a bare miss.
     """
     if not matches:
-        return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match"
+        note = next((el.content_note for el in snap.elements if el.content_note), "")
+        suffix = f" ({note})" if note else ""
+        return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match{suffix}"
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
     for el in matches:
         line = _render_line(el)
@@ -2596,13 +2674,18 @@ def _empty_text_container(raw: RawNode) -> bool:
 def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """Derive (clickable, editable, secure) from role/subrole/actions.
 
-    ``raw.editable`` is the platform signal that the node itself is an
-    editable entry. A contenteditable section can carry it. A combo does not
-    become editable from its role.
+    ``platform_editable`` is AT-SPI's answer for this node, from its own
+    ``STATE_EDITABLE``. It wins over a text-field role, so an address-bar
+    wrapper that maps to ``AXTextField`` without that state is not edit.
+    None means the platform did not say (macOS, Windows, a synthetic
+    snapshot): a text-field role or a secure field stays editable.
     """
     secure = raw.role == _SECURE_ROLE or raw.subrole == _SECURE_ROLE
     clickable = bool(_PRESS_ACTIONS.intersection(raw.actions)) or raw.role in _CLICKABLE_ROLES
-    editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
+    if raw.platform_editable is not None:
+        editable = raw.platform_editable
+    else:
+        editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
     return clickable, editable, secure
 
 
@@ -2678,10 +2761,15 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             instance_id=instance_id,
             document_id=document_id,
-            subrole="terminal" if terminal else None,
+            subrole=(
+                "terminal" if terminal
+                else "label" if node.raw.subrole == "label"
+                else None
+            ),
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
             note=node.raw.note or None,
+            content_note=node.raw.content_note,
         )
     )
     if node.elided:
@@ -2868,6 +2956,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     b = el.bounds
     if b is not None and (bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None)):
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
+    if el.content_note:
+        parts.append(f"({el.content_note})")
     return " ".join(parts)
 
 
