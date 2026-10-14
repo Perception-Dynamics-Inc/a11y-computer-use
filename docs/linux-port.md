@@ -360,3 +360,10 @@ Gnumeric (#492). The guard covers accessibility activation and element pointer
 clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
+
+GTK 4 tree-expander buttons exposing `listitem.toggle-expand` (or the
+state-appropriate `listitem.expand` / `listitem.collapse`) use that native action
+for a ref click. The driver verifies a change in the live `EXPANDED` state;
+a successful action acknowledgement or focus moving to another row is
+insufficient. A failed expansion returns an error without a pointer fallback,
+since these controls can report bounds that do not match their painted rows.
