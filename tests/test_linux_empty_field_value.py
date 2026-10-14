@@ -226,3 +226,10 @@ def test_writer_document_keeps_its_dedicated_replace_path(fake_atspi, monkeypatc
     assert writes == [(field, "Writer text")]
     assert field.writes == []
     assert field.focused_attempts == 0
+
+
+def test_heading_keeps_text_and_drops_uninitialized_value(fake_atspi) -> None:
+    heading = _Node("heading", value=_JUNK, text="Second Topic")
+    assert _atspi._value_text(heading, "AXHeading", "heading") == "Second Topic"
+    heading.text_missing = True
+    assert _atspi._value_text(heading, "AXHeading", "heading") is None
