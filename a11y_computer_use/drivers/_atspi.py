@@ -1980,6 +1980,23 @@ def _action_iface(acc):
     return _call_first(acc, ("get_action_iface", "get_action"))
 
 
+def _gtk4_menu_button_wrapper(acc) -> bool:
+    """Recognize an actionless duplicate around one native GTK 4 toggle."""
+    if not _gtk4_app(acc) or _action_names(acc) or _child_count(acc) != 1:
+        return False
+    child = _call_first(acc, ("get_child_at_index",), 0)
+    if child is None or _role_name(child) != "toggle button":
+        return False
+    if "AXPress" not in _action_names(child) or _node_name(acc) != _node_name(child):
+        return False
+    position, size = _extents(acc, keep_zero=True)
+    return (
+        position is not None and size is not None
+        and size[0] > 0 and size[1] > 0
+        and (position, size) == _extents(child, keep_zero=True)
+    )
+
+
 def _action_names(acc) -> tuple[str, ...]:
     """AX action names for this node, mapped from its AT-SPI actions."""
     action = _action_iface(acc)
@@ -2660,13 +2677,26 @@ def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
     Adding the recovered content origin fixes body widgets, but does not
-    make these negative WINDOW coordinates reliable pointer targets (#502).
-    Use the control's activation action rather than guessing another offset.
+    make boxes outside the frame reliable pointer targets (#502). The frame
+    itself can start at a negative WINDOW offset; a body row fully inside
+    that reported frame is still a valid target (#617). Missing frame bounds
+    leave the negative-origin guard in place.
     """
     if acc is None or not _gtk4_app(acc):
         return False
     window = _raw_rect(acc, "WINDOW")
-    return window is not None and (window[0] < 0 or window[1] < 0)
+    if window is None or (window[0] >= 0 and window[1] >= 0):
+        return False
+    frame = _frame_ancestor(acc)
+    frame_box = _raw_rect(frame, "WINDOW") if frame is not None else None
+    if (frame_box is not None and all(math.isfinite(value) for value in frame_box)
+            and frame_box[2] > 0 and frame_box[3] > 0):
+        x, y, width, height = window
+        fx, fy, fw, fh = frame_box
+        if (width > 0 and height > 0 and fx <= x and fy <= y
+                and x + width <= fx + fw and y + height <= fy + fh):
+            return False
+    return True
 
 
 def published_origin_untrusted(acc) -> bool:
@@ -3800,6 +3830,12 @@ class ATSPIAccessor:
             node, role_str=role_str, attrs=attrs, state_editable=state_editable,
             drawing=self._drawing_paragraph(node, role_str, state_editable),
         )
+        if role_str == "push button" and _gtk4_menu_button_wrapper(node):
+            # GtkMenuButton's Action belongs to its inner toggle. Make the
+            # duplicate outer node a collapsible layout wrapper, preserving
+            # the child's native handle and geometry as the click target.
+            role, name, description = "AXGroup", "", ""
+            focusable, value = False, None
         return RawNode(
             role=role,
             subrole=(
@@ -5656,7 +5692,12 @@ def _text_security(acc):
                 acc, 0, api.TextGranularity.LINE,
             ))
             content = getattr(rendered, "content", None)
-            if not isinstance(content, str) or not content or _entry_text_masked(role, attrs, content):
+            if content == "":
+                count = _safe(lambda: api.Text.get_character_count(acc))
+                if isinstance(count, int) and not isinstance(count, bool) and count == 0:
+                    return False, role, attrs, "unknown"
+                return True, role, attrs, visibility
+            if not isinstance(content, str) or _entry_text_masked(role, attrs, content):
                 return True, role, attrs, visibility
             # A custom masking glyph need not be one of the known bullets.
             # Compare privately with the buffer; never publish a mismatch.
@@ -5674,9 +5715,48 @@ def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
     GTK 4 layout strings expose masking even when GetText and metadata do
-    not. Ambiguous single-line GTK entries require human handoff.
+    not. Empty GTK entries without masking metadata remain unknown until written.
     """
     return _text_security(acc)[0]
+
+
+def text_visibility_unknown(acc) -> bool:
+    """An empty GTK 4 entry with no real masking or visibility signal."""
+    return _text_security(acc)[3] == "unknown"
+
+
+class _PrivateTextCount(int):
+    """A verified character count whose receipt and audit must stay redacted."""
+
+    private_text_verified = True
+
+
+def _write_unknown_entry(acc, text: str, *, insert: bool) -> bool:
+    """Write an empty unknown entry once; expose only a verified boolean.
+
+    The rendered layout may become masked after this write. Buffer reads here
+    must never reach a snapshot, error detail, or action result.
+    """
+    api = _atspi()
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    if insert:
+        method = getattr(eti, "insert_text", None) or getattr(eti, "insertText", None)
+        if method is None:
+            return False
+        _call_first(eti, ("insert_text", "insertText"), 0, text,
+                    _insert_length(method, text, acc), default=False)
+    else:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        _call_first(acc, ("clear_cache", "clearCache"))
+        count = _safe(lambda: api.Text.get_character_count(acc))
+        if count == len(text) and _safe(lambda: api.Text.get_text(acc, 0, count)) == text:
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    return False
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -7888,10 +7968,15 @@ def insert_text(acc, text: str) -> int | None:
     embedded NUL, so the text alone can look right while the widget holds
     extra characters.
     """
+    typed = text.replace("\r\n", "\n")
+    if text_visibility_unknown(acc):
+        if _write_unknown_entry(acc, typed, insert=True):
+            return _PrivateTextCount(len(typed))
+        raise _text_mismatch("text_mismatch", "private text write could not be verified",
+                             private_text=True)
     eti = _editable_iface(acc)
     if eti is None:
         return None
-    typed = text.replace("\r\n", "\n")
     # A Writer document's own text stays empty. The paragraphs are the
     # read-back, captured before the insert so a later poll can see them
     # arrive. An entry is not this document and does not walk.
@@ -14662,6 +14747,10 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
         return False
+    if text_visibility_unknown(acc):
+        if _write_unknown_entry(acc, text, insert=False):
+            return True
+        raise _text_mismatch("text_mismatch", "private text write could not be verified")
     if force:
         return _replace_editable_text(acc, text)
     # AbiWord's GtkEntry buffer is not its dialog model: EditableText can

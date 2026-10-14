@@ -2282,6 +2282,16 @@ class LinuxDriver:
             },
         ) from exc
 
+    def text_visibility_unknown(self, element: Element) -> bool:
+        """Whether this write needs private verification and a redacted receipt."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role not in {"AXTextField", "AXTextArea"} or element.value is not None:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        return handle is not None and self._run(lambda: _atspi.text_visibility_unknown(handle))
+
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
