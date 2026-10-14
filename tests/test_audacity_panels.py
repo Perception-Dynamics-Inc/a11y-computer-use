@@ -91,6 +91,34 @@ def test_toolbar_tool_is_a_findable_clickable_button(description):
     assert matches[0].clickable
 
 
+@pytest.mark.parametrize("toolbar,description", [
+    ("Transport", "Play (Space) / Play Once (Shift+Space)"),
+    ("Transport", "Pause (P)"), ("Transport", "Stop"),
+    ("Transport", "Record (R) / Record New Track (Shift+R)"),
+    ("Edit", "Zoom In"), ("Tools", "Selection Tool"),
+])
+def test_toolbar_sibling_grip_identifies_buttons(toolbar, description):
+    grip = _Node("panel", description=f"Audacity {toolbar} Toolbar", size=(10.0, 63.0))
+    tool = _Node("panel", description=description)
+    frame = _frame(_Node("panel", children=[grip, tool]))
+    matches = observe.find_elements(_snapshot(frame), role="button")
+    assert [el.title for el in matches] == [description]
+    assert matches[0].clickable
+    assert _atspi.ATSPIAccessor().read(grip).role == "AXGroup"
+
+
+@pytest.mark.parametrize("case", ["other_app", "dialog", "separate_container", "named", "children"])
+def test_toolbar_grip_does_not_reclassify_unrelated_panels(case):
+    grip = _Node("panel", description="Audacity Transport Toolbar")
+    tool = _Node("panel", "Named" if case == "named" else "", description="Play (Space)",
+                 children=[_Node("label", "Child")] if case == "children" else [])
+    containers = ([_Node("panel", children=[grip]), _Node("panel", children=[tool])]
+                  if case == "separate_container" else [_Node("panel", children=[grip, tool])])
+    _frame(*containers, app="other" if case == "other_app" else "audacity",
+           role="dialog" if case == "dialog" else "frame")
+    assert _atspi.ATSPIAccessor().read(tool).role == "AXGroup"
+
+
 def test_track_and_clock_remain_opaque_with_surface_notes():
     track = _Node("panel", size=(1096.0, 436.0), focusable=True)
     clock = _Node("panel", size=(230.0, 41.0))
@@ -166,3 +194,36 @@ def test_tooltip_outside_toolbar_is_not_a_button():
     panel = _Node("panel", description="Play (Space)")
     _frame(panel)
     assert _atspi.ATSPIAccessor().read(panel).role == "AXGroup"
+
+
+@pytest.mark.parametrize("app,role,label,expected", [
+    ("audacity", "frame", "Audacity Time Toolbar", True),
+    ("other", "frame", "Audacity Time Toolbar", False),
+    ("audacity", "dialog", "Audacity Time Toolbar", False),
+    ("audacity", "frame", "Audacity Selection Toolbar", False),
+])
+def test_time_clock_with_sibling_grip_label(app, role, label, expected):
+    grip = _Node("panel", description=label, size=(10.0, 41.0))
+    clock = _Node("panel", size=(230.0, 41.0))
+    resize_grip = _Node("panel", size=(10.0, 41.0))
+    toolbar = _Node("panel", children=[grip, clock, resize_grip], size=(250.0, 41.0))
+    unrelated = _Node("panel", size=(230.0, 41.0))
+    frame = _frame(toolbar, unrelated, app=app, role=role)
+    raw = _atspi.ATSPIAccessor().read(clock)
+    assert raw.surface_name == ("Audacity Time clock" if expected else "")
+    assert raw.note == ("Clock reading is not exposed by AT-SPI." if expected else "")
+    assert raw.value is None
+    assert raw.role == "AXGroup"
+    for panel in (grip, resize_grip, unrelated):
+        assert _atspi.ATSPIAccessor().read(panel).surface_name == ""
+    matches = observe.find_elements(_snapshot(frame), role="opaque_region", text="Audacity Time clock")
+    assert len(matches) == int(expected)
+
+
+def test_time_clock_sibling_fallback_preserves_published_controls():
+    grip = _Node("panel", description="Audacity Time Toolbar")
+    clock = _Node("panel", "Published clock", children=[_Node("label", "00h00m00s")])
+    _frame(_Node("panel", children=[grip, clock, _Node("panel")]))
+    raw = _atspi.ATSPIAccessor().read(clock)
+    assert raw.title == "Published clock"
+    assert raw.surface_name == ""

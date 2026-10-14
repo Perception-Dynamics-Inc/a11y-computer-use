@@ -8,7 +8,6 @@ removed before either file is written.
 from __future__ import annotations
 
 import json
-import os
 import re
 import tempfile
 import threading
@@ -113,14 +112,15 @@ class Trace:
         """Append one lifecycle event and make it visible before the step blocks.
 
         ``steps.jsonl`` is written when a step finishes. A cancel test has to
-        see that a step has started, so this line is flushed and synced first.
+        see that a step has started, so this line is flushed first. Flushing
+        makes it visible to other processes; syncing it to physical storage
+        is unnecessary and can stall the agent on Windows.
         """
         line = json.dumps(entry, default=str, ensure_ascii=False)
         with self._lock:
             with self.events_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
-                os.fsync(handle.fileno())
 
     def record(self, entry: dict, step: dict) -> None:
         line_entry = json.dumps(entry, default=str, ensure_ascii=False)

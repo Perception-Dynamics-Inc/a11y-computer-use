@@ -283,8 +283,15 @@ class Element:
     #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
     #: text, or the tail of a longer buffer, with a leading ellipsis when
     #: older output was omitted. ``find`` still searches the whole buffer.
+    #: ``label`` for an AT-SPI label. ``find`` keeps that label when its
+    #: title is the search text, and leaves it out when the title only
+    #: mentions the text and a cell or control has the exact name.
     #: None for every other role.
     subrole: str | None = None
+    #: Set when a canvas has no accessible text and no children. The
+    #: snapshot and a find that misses print this sentence. Empty when the
+    #: toolkit exposed the content, and on every other role. It is not a box.
+    content_note: str = ""
     #: Tooltip sentence that was glued onto a control's accessible name.
     #: Empty when the name was a single line. ``find`` searches it. The
     #: rendered name does not include it.
