@@ -14486,6 +14486,53 @@ def test_find_and_scroll_to_find_keep_gtk_form_label_with_colon(
     assert 'statictext "Cursor size:"' in landed
 
 
+@pytest.mark.parametrize("owner_name", ["kate", "Kate"])
+def test_kate_status_controls_survive_without_document_viewport_probe(
+    fake_atspi, monkeypatch, owner_name,
+) -> None:
+    """KTextEditor viewport reads must not disrupt the later status-bar walk."""
+    app = _Acc("application", name=owner_name)
+    app.get_toolkit_name = lambda: "Qt"
+    editor = _Acc("text", name="document.txt", width=700, height=400,
+                  states={"MULTI_LINE", "EDITABLE"})
+    editor.text = "TOP\nOFFSCREEN_TOKEN"
+    names = ("1:1", "INSERT", "Soft Tabs: 4", "UTF-8", "Normal", "Output", "Diagnostics", "Search")
+    controls = [
+        _Acc("push button menu" if name in {"UTF-8", "Normal"} else
+             "check box" if name in {"Output", "Diagnostics", "Search"} else
+             "push button", name=name, width=80, height=23)
+        for name in names
+    ]
+    status = _adopt(_Acc("panel", width=700, height=23), *controls)
+    window = _adopt(_Acc("frame", name="document.txt", width=800, height=600),
+                    editor, status)
+    _adopt(app, window)
+    for node in (window, editor, status, *controls):
+        node.get_application = lambda: app
+    monkeypatch.setattr(_atspi, "_state_flags",
+                        lambda acc: (True, False, None, False, None, True, True))
+
+    def disruptive_probe(node):
+        # Model the live Qt bridge: a viewport request makes later children
+        # unavailable. This is unnecessary because Kate's value is refused.
+        status.children.clear()
+        return "TOP"
+
+    monkeypatch.setattr(_atspi, "_qt_viewport_text", disruptive_probe)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app=owner_name, pid=646, geometry=_geometry())
+    for name in names:
+        found = observe.find_elements(snap, text=name)
+        assert len(found) == 1
+        assert found[0].title == name
+        assert found[0].ref
+    document, = observe.find_elements(snap, role="textarea")
+    assert document.value is None
+    assert "in-document Find" in document.hint
+    assert not observe.find_elements(snap, text="OFFSCREEN_TOKEN")
+    assert editor.text == "TOP\nOFFSCREEN_TOKEN"
+
+
 @pytest.mark.parametrize("side,role", [("wrapper", "entry"), ("child", "entry"),
                                        ("child", "text"), ("ordinary", "entry")])
 def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, side, role):
