@@ -189,8 +189,9 @@ jobs:
       # Qt fixture for the live line-edit, combo, and value test. The fixture
       # also accepts PySide6 and PyQt5. This job installs PyQt6: Ubuntu 24.04's
       # Qt 5 build ships no AT-SPI adaptor, so a PyQt5 window never appears
-      # on the bus. pcmanfm and xterm are the Files and Terminal binaries the
-      # agent grant test launches. Without one of each family that test skips.
+      # on the bus. pcmanfm, xterm, and mousepad are the Files, Terminal, and
+      # Text Editor binaries the agent grant tests launch. Without one of each
+      # family that test skips.
       # pcmanfm, not thunar: thunar pulls libxfce4ui and xfconf, and the live
       # step on that image never saw a Firefox AT-SPI tree. mousepad is the
       # key-outcome check: its document sits under a tab group.
