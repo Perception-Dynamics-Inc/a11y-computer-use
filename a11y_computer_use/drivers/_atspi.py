@@ -479,12 +479,17 @@ def call_went_unanswered() -> bool:
     )
 
 
-def _safe(fn, default=None):
+def _safe(fn, default=None, *, marshal=True):
     watch = _current_watch()
     start = time.monotonic()
     failed = False
     try:
-        result = fn()
+        # Direct native calls (e.g. Table.get_accessible_at) need the same
+        # thread ownership as version-tolerant getters. Keep waits on the
+        # caller so the GLib loop can process replies between reads.
+        from a11y_computer_use.drivers import _atspi_events
+
+        result = _atspi_events.run(fn) if marshal else fn()
     except ComputerUseError:
         raise
     except Exception:
@@ -789,13 +794,14 @@ def _call_first(obj, names, *args, default=None):
 
 
 def _call_first_inline(obj, names, *args, default=None):
+    # _call_first already marshaled the entire getter/cache operation.
     for name in names:
         method = getattr(obj, name, None)
         if method is None:
             continue
         if _is_mutator(name):
             _drop_read_cache()
-            return _safe(lambda m=method: m(*args), default)
+            return _safe(lambda m=method: m(*args), default, marshal=False)
         key = _cache_key(name, args)
         if key is not None and _read_cache_stack():
             cached = _lookup_read_cache(obj, key)
@@ -803,7 +809,7 @@ def _call_first_inline(obj, names, *args, default=None):
                 _reply_local.last_failed = False
                 _reply_local.last_elapsed = 0.0
                 return cached
-        result = _safe(lambda m=method: m(*args), default)
+        result = _safe(lambda m=method: m(*args), default, marshal=False)
         if (
             key is not None
             and _read_cache_stack()
@@ -1183,6 +1189,43 @@ def _audacity_track_area(container) -> bool:
 
     return walk(container, 0)
 
+
+def _gucharmap_character_surface(node) -> tuple[str, str]:
+    """Identify the empty painted Character Table without inventing glyph cells."""
+    if _child_count(node) != 0:
+        return "", ""
+    parent = _parent_of(node)
+    if not parent or _role_name(parent) != "scroll pane":
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "gucharmap":
+        return "", ""
+    character_table = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if not character_table:
+                break
+            return (
+                "gucharmap Character Table",
+                "Individual characters are not exposed by AT-SPI. This ref identifies "
+                "the whole painted table, not a character; find and scroll_to_find cannot "
+                "target its glyphs by codepoint or name, and clicking it cannot confirm "
+                "a requested character. Scrolling may change the selection. Use Search > "
+                "Find or the Go menu as separate requested operations; verify the selected "
+                "character in the statusbar or Character Details.",
+            )
+        character_table = character_table or (
+            role == "page tab" and _node_name(parent).casefold() == "character table"
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
+
 def _okular_thumbnail_surface(node) -> tuple[str, str]:
     """Label an empty thumbnail strip from its native sidebar context.
 
@@ -1221,6 +1264,52 @@ def _okular_thumbnail_surface(node) -> tuple[str, str]:
         )
         parent = _parent_of(parent)
     return "", ""
+
+def _kate_gutter(node, position, size) -> bool:
+    """Recognize Kate's childless gutter beside an accessible text editor.
+
+    Use only native boxes and immediate siblings. Missing geometry or an
+    ambiguous editor leaves the filler unnamed; no line positions are inferred.
+    """
+    if position is None or size is None or _child_count(node) != 0:
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "kate":
+        return False
+    parent = _parent_of(node)
+    if parent is None or _frame_ancestor(node) is None:
+        return False
+    ancestor = parent
+    for _ in range(20):
+        if ancestor is None or _role_name(ancestor) == "dialog":
+            return False
+        if _role_name(ancestor) in {"frame", "window"}:
+            break
+        ancestor = _parent_of(ancestor)
+    else:
+        return False
+    count = _child_count(parent)
+    if not isinstance(count, int) or isinstance(count, bool) or not 0 < count <= 64:
+        return False
+    matches = 0
+    x, y = position
+    width, height = size
+    if width <= 0 or height <= width:
+        return False
+    for index in range(count):
+        sibling = _child_at(parent, index)
+        if sibling is None or _role_name(sibling) != "text":
+            continue
+        if not _state_has(sibling, "MULTI_LINE"):
+            continue
+        editor_pos, editor_size = _extents(sibling)
+        if editor_pos is None or editor_size is None:
+            continue
+        ex, ey = editor_pos
+        ew, eh = editor_size
+        if ew > width and abs(x + width - ex) <= 1 and abs(y - ey) <= 1 and abs(height - eh) <= 1:
+            matches += 1
+    return matches == 1
 
 
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
@@ -1941,6 +2030,8 @@ def _image_text_label(acc) -> str:
     pruner can still fold the icon. The read is bounded. ``get_text`` is
     not asked for ``-1``.
     """
+    if is_secure(acc):
+        return ""
     try:
         Atspi = _atspi()
     except ImportError:
@@ -2002,6 +2093,8 @@ def _text_is_blank(text: str | None) -> bool:
 
 
 def _direct_text(acc) -> str:
+    if is_secure(acc):
+        return ""
     got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
     return got if isinstance(got, str) else ""
 
@@ -2061,7 +2154,7 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     contributes its name when that name is not already in the surrounding
     words, so ``<p><input aria-label="Bare para input"></p>`` is not blank.
     """
-    if obj is None or depth > 6:
+    if obj is None or depth > 6 or is_secure(obj):
         return ""
     role_name = _role_name(obj)
     role = _ROLE.get(role_name, "AXGroup")
@@ -2176,6 +2269,8 @@ def _expand_embedded(acc, text: str, depth: int = 0) -> str:
 
 
 def _option_label(node) -> str:
+    if is_secure(node):
+        return ""
     label = _node_name(node)
     if label:
         return label
@@ -2849,6 +2944,8 @@ def _page_text(acc) -> str | None:
     longer. ``None`` is a missing interface or a blank page. An embedded
     object character is expanded the same way a paragraph's is.
     """
+    if is_secure(acc):
+        return None
     try:
         Atspi = _atspi()
     except ImportError:
@@ -2898,8 +2995,8 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
     Text, or the accessible name, is what those roles show. Value is read for
     a slider, spin button, or progress bar, and only when Qt's minimum and
-    maximum are a real range. GTK's fallback for a non-range control is
-    unchanged, except a dialog or a checkbox whose CurrentValue is a
+    maximum are a real range. GTK's fallback for a non-range control requires
+    a Value interface. A dialog or a checkbox whose CurrentValue is a
     subnormal double: that reading is absent. Zero and a small normalized
     value on those roles stay. An empty entry, text field, or paragraph
     (character count 0) has no value either: Chromium's empty input
@@ -2911,7 +3008,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     character count, a subnormal on a text role is absent too, and zero
     and a small normalized value stay when the interface is present.
     """
-    if role == "AXSecureTextField":
+    if role == "AXSecureTextField" or is_secure(acc):
         return None
     Atspi = _atspi()
     if role_name is None:
@@ -2986,11 +3083,11 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
         return None
-    # GTK 4 text (the calculator display, a new text-editor document) has
-    # Text and no Value. Reading CurrentValue is an uninitialized double.
+    # GTK 4 text and popover menu items have no Value. Reading CurrentValue
+    # without that interface can return an uninitialized double.
     # ``_value_interface_present`` is false only when the accessible reports
     # the interface missing. A test double with no getter still reads Value.
-    if role_name in _TEXT_ROLE_NAMES and not _value_interface_present(acc):
+    if not _value_interface_present(acc):
         return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is None:
@@ -3373,6 +3470,8 @@ class ATSPIAccessor:
         # input stays a text field. Chromium entries are not matched here.
         if role == "AXTextField" and role_str == "entry" and _gecko_multiline_entry(node, attrs):
             role = "AXTextArea"
+        if is_secure(node):
+            role = "AXSecureTextField"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
@@ -3415,6 +3514,14 @@ class ATSPIAccessor:
             position, size = (-1.0, -1.0), (-1.0, -1.0)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
+        if role == "AXMenuItem" and not str(name).strip():
+            # GTK 4 Gio.Menu labels live on LABELLED_BY targets, sometimes
+            # only as Text rather than an accessible name.
+            for target in _relation_targets(node, "labelled_by"):
+                label = _node_name(target) or _direct_text(target).strip()
+                if label:
+                    name = _plain_accessible_name(label)
+                    break
         button_name = str(name)
         if role_str == "push button":
             name = _gtk_button_row_name(node, button_name)
@@ -3491,6 +3598,18 @@ class ATSPIAccessor:
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
             value = button_name
         screen_text = None
+        if role == "AXTextArea":
+            owner = _application_of(node)
+            owner_name = str(_call_first(owner, ("get_name",), default="") or "")
+            if owner_name.casefold() == "kate":
+                # KTextEditor publishes the whole buffer, including off-screen
+                # characters. Its widget box cannot verify substring visibility,
+                # even for a document containing one long line. Keep the ref.
+                value = None
+                description = (
+                    f"{description} Document text visibility unavailable; "
+                    "use in-document navigation to locate text."
+                ).strip()
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
@@ -3498,10 +3617,39 @@ class ATSPIAccessor:
         surface_name = ""
         panel_note = ""
         if (
+            role_str == "drawing area"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _gucharmap_character_surface(node)
+        if (
             role_str == "filler" and role == "AXGroup"
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            not surface_name
+            and role_str == "filler"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _kate_gutter(node, position, size)
+        ):
+            surface_name = "Kate editor gutter"
+            panel_note = "Line numbers are not exposed by AT-SPI; individual lines cannot be targeted here."
+        if (
+            role_str == "drawing area"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _child_count(node) == 0
+            and _parent_of(node)
+        ):
+            app = _application_ancestor(node)
+            if app is not None and _node_name(app).casefold() == "gnumeric":
+                surface_name = "Gnumeric drawing area"
+                panel_note = (
+                    "Cell content is not exposed by AT-SPI on this surface. "
+                    "The formula bar exposes only the active cell; inspect it to read "
+                    "that cell. Other cells require visual inspection."
+                )
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
@@ -3517,6 +3665,10 @@ class ATSPIAccessor:
             label = _selected_icon_name(node)
             if label:
                 name = label
+        entry = editable_entry(
+            node, role_str=role_str, attrs=attrs, state_editable=state_editable,
+            drawing=self._drawing_paragraph(node, role_str, state_editable),
+        )
         return RawNode(
             role=role,
             subrole=(
@@ -3539,10 +3691,8 @@ class ATSPIAccessor:
             expanded=expanded,
             stable_id=_stable_id(node, attrs),
             atspi_web=atspi_web_kind(role_str),
-            editable=editable_entry(
-                node, role_str=role_str, attrs=attrs, state_editable=state_editable,
-                drawing=self._drawing_paragraph(node, role_str, state_editable),
-            ),
+            editable=entry,
+            platform_editable=entry,
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
             # Only a group can be suppressed as browser chrome. A button,
@@ -5113,6 +5263,33 @@ def find_root(app: str, scope) -> object | None:
         raise
     except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
         pids = set()
+    # A portal process can contain dialogs for several apps. Bind only its
+    # active, explicitly parented window, never its whole application tree.
+    portal = None
+    try:
+        row = _linux_system.active_window()
+        if row and row.get("app", "").lower() == needle:
+            pid = int(row.get("pid") or 0)
+            identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+            if identity in _linux_system._PORTAL_BACKENDS and row["app"] != identity:
+                rows = [r for r in _linux_system.windows()
+                        if r.get("pid") == pid and r.get("title") == row.get("title")]
+                if row.get("title") and len(rows) == 1:
+                    portal = row
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - unavailable X11 cannot authorize a portal
+        pass
+    if portal is not None:
+        for i in range(int(count)):
+            candidate = _call_first(desktop, ("get_child_at_index",), i)
+            if candidate is None or pid_of(candidate) != portal["pid"]:
+                continue
+            frames = [f for f in _frames(candidate)
+                      if _call_first(f, ("get_name",), default="") == portal["title"]]
+            if len(frames) == 1 and _is_active(frames[0]):
+                return frames[0]
+        return None
     best = None
     best_rank = -1
     hinted = next(iter(pids)) if len(pids) == 1 else None
@@ -5210,6 +5387,12 @@ def showing_toplevels(node) -> list:
     app = _application_of(node)
     if app is None:
         return [node]
+    from a11y_computer_use.drivers import _linux_system
+
+    pid = pid_of(app)
+    identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+    if identity in _linux_system._PORTAL_BACKENDS:
+        return [node]
     count = _child_count(app)
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         count = 0
@@ -5306,10 +5489,32 @@ def desktop_application_roots() -> DesktopApplications:
     return DesktopApplications(ready, silent)
 
 
+def _text_security(acc):
+    """Read security metadata once; visibility is meaningful only for entries."""
+    role = _role_name(acc)
+    if role == "password text":
+        return True, role, {}, None
+    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED", "INVISIBLE")):
+        return True, role, {}, None
+    attrs = _get_attributes(acc)
+    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
+           for key in ("password", "protected")):
+        return True, role, attrs, None
+    visibility = None
+    if role in {"entry", "text"}:
+        visibility = _call_first(acc, ("get_visibility",))
+        if visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}:
+            return True, role, attrs, visibility
+    return False, role, attrs, visibility
+
+
 def is_secure(acc) -> bool:
-    """Whether ``acc`` is a password field (AT-SPI role name ``password text``,
-    the role the engine maps to ``AXSecureTextField``)."""
-    return _role_name(acc) == "password text"
+    """Recognize password roles, protected states, and explicit masking.
+
+    GTK 4 can omit every masking signal; its empty sentinel must also remain
+    empty in public text readback.
+    """
+    return _text_security(acc)[0]
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -5468,6 +5673,60 @@ _BROWSER_BAR_CLEARED: set[int] = set()
 # of that opening must not schedule another cache clear: clearing on every
 # read walks an empty document and blows the scroll budget.
 _BROWSER_BAR_OPEN: set[int] = set()
+
+
+_FIND_ENTRY_ROLES = frozenset({
+    "text", "entry", "password text", "edit bar", "paragraph",
+})
+
+
+def focused_find_field(acc) -> bool:
+    """True when ``acc`` is a browser find field, not a page control or a cell.
+
+    Chrome names that field ``Find`` and gives it an entry role with no HTML
+    tag. A page input titled Find has a tag. A push button titled Find, a
+    table cell, and a Swing editor are not this field. A find-in-page frame
+    that itself holds focus counts too.
+    """
+    if acc is None:
+        return False
+    try:
+        name = _node_name(acc) or ""
+    except Exception:
+        return False
+    folded = name.lstrip().lower()
+    if folded.startswith("find in page"):
+        return True
+    if name != "Find":
+        return False
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        attrs = {}
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip()
+    if tag:
+        return False
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role in {"push button", "toggle button", "link", "menu item", "table cell", "cell"}:
+        return False
+    return role in _FIND_ENTRY_ROLES or role == "entry" or "text" in role
+
+
+def app_supports_in_page_find(root) -> bool:
+    """True for Chromium and Firefox, which open a find bar on Ctrl+F.
+
+    Java, Swing, GTK, Qt, and a tree with no toolkit are false. A failed
+    read is false, so the caller does not type into a table cell.
+    """
+    if root is None:
+        return False
+    try:
+        return bool(_chromium_app(root) or _gecko_app(root))
+    except Exception:
+        return False
 
 
 def snapshot_shows_browser_bar(elements) -> bool:
@@ -7225,6 +7484,10 @@ _STATIC_REPLACE_ROLES = frozenset({
 })
 _ENTRY_ROLE_NAMES = frozenset({
     "entry", "password text", "text", "editable text", "terminal", "document text",
+    # A GTK spin and an <input type=number> are spin buttons. They are entries
+    # only when this node itself is STATE_EDITABLE. A date segment is still
+    # written by set_text; the block check lets that through.
+    "spin button",
 })
 _CONTENTEDITABLE_TAGS = frozenset({"div", "span"})
 
@@ -7239,18 +7502,20 @@ def editable_entry(
 ) -> bool:
     """True when this node itself is an editable text entry.
 
-    Firefox reports ``STATE_EDITABLE``, and exposes EditableText, on
-    document and static nodes. Those are not entries. A paragraph, panel,
-    document, or combo/select is not an entry. A read-only node is not.
-    ``drawing`` is the one exception: an Impress or Draw paragraph that has
-    ``STATE_EDITABLE`` and EditableText. The snapshot sets that only for a
-    LibreOffice tree. A browser paragraph stays false.
+    The positive signal is ``STATE_EDITABLE`` on this node. EditableText
+    support is not that signal: Firefox exposes the interface on paragraphs,
+    documents, and address-bar wrappers that are not editors. A paragraph,
+    panel, document, or combo/select is not an entry even when it reports
+    ``STATE_EDITABLE``. A read-only node is not.
 
-    An entry, password, or text role is an entry when it has EditableText or
-    ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
-    whose tag is ``div`` or ``span`` and whose state is ``EDITABLE``.
-    Chromium often has no EditableText (#221). Firefox's own roleless
-    contenteditable has EditableText. A browser paragraph is not that section.
+    An entry, password, text, or spin-button role is an entry only when this
+    node is ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
+    whose tag is ``div`` or ``span`` and whose own state is ``EDITABLE``.
+    Chromium often has no EditableText (#221). Firefox's roleless
+    contenteditable is the same section and does not need the interface
+    either. A paragraph is not that section.
+    An Impress or Draw paragraph with STATE_EDITABLE and EditableText
+    is also an entry when drawing is true. Browser paragraphs stay refused.
     """
     if acc is None:
         return False
@@ -7264,9 +7529,7 @@ def editable_entry(
             return False
         if state_editable is None:
             state_editable = _state_has(acc, "EDITABLE")
-        if state_editable:
-            return True
-        return _editable_iface(acc) is not None
+        return bool(state_editable)
     if role != "section":
         return False
     if attrs is None:
@@ -7281,9 +7544,7 @@ def editable_entry(
         state_editable = _state_has(acc, "EDITABLE")
     if not state_editable or _state_has(acc, "READ_ONLY"):
         return False
-    if _chromium_app(acc):
-        return True
-    return bool(_gecko_app(acc) and _editable_iface(acc) is not None)
+    return bool(_chromium_app(acc) or _gecko_app(acc))
 
 
 def _blocks_text_replace(acc) -> bool:
@@ -7297,12 +7558,28 @@ def _blocks_text_replace(acc) -> bool:
     role = _role_name(acc)
     if role == "":
         return False
+    if is_writer_document(acc):
+        return False
+    if _chrome_date_segment(acc):
+        return False
     if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
         return False
     if role in _STATIC_REPLACE_ROLES:
         return True
     if role == "section":
         return not (editable_entry(acc) or _chromium_contenteditable(acc))
+    if role in _ENTRY_ROLE_NAMES and role != "spin button":
+        # A spin button's own EditableText is the number field, not the
+        # page. Clearing one must stay on set_text. An entry or text role
+        # without STATE_EDITABLE is a wrapper and is not typed into.
+        if _chromium_contenteditable(acc):
+            return False
+        # Synthetic transports can expose entry roles without a native
+        # EDITABLE state API. Keep their existing write/read-back path;
+        # real AT-SPI nodes and Firefox wrappers still require the bit.
+        native_state = _safe(lambda: _atspi().StateType.EDITABLE) is not None
+        if native_state or _gecko_app(acc):
+            return not editable_entry(acc)
     return _state_has(acc, "READ_ONLY")
 
 
@@ -7579,29 +7856,71 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
-def _read_full_text(acc, *, count=None):
-    """Retry GTK 4's empty sentinel result with a positive end offset.
+def _entry_text_visible(role, attrs, visibility) -> bool:
+    """Require an explicit toolkit text-visibility signal before retrying."""
+    if role not in {"entry", "text"}:
+        return False
+    return str(attrs.get("visibility", "")).strip().lower() in {"true", "1"} or visibility is True
+
+
+def _entry_text_masked(role, attrs, text) -> bool:
+    """Treat bullets and toolkit invisible characters as masked text."""
+    if role not in {"entry", "text"} or not isinstance(text, str) or not text:
+        return False
+    glyphs = set("●•*◦○∙⋅▪▫■□⬤\u200b\u200c\u200d\u2060\ufeff")
+    for key in ("invisible-char", "invisible_char"):
+        char = str(attrs.get(key, ""))
+        if len(char) == 1:
+            glyphs.add(char)
+        elif char.isdecimal():
+            codepoint = int(char)
+            if 0 < codepoint <= 0x10ffff:
+                glyphs.add(chr(codepoint))
+    return any(char in glyphs for char in text) and all(
+        char in glyphs or char.isspace() for char in text
+    )
+
+
+def _read_full_text(acc, *, count=None, verification=False):
+    """Keep ambiguous GTK 4 sentinel text empty outside boolean verification.
 
     Chromium's bounded read can echo a write instead of the actual contents,
     so a nonempty sentinel result remains authoritative. NULL still means
-    unreadable; only an empty string with a positive count gets a retry.
+    unreadable. A bounded retry may expose an unmarked masked entry, so
+    public retries require explicit text visibility and reject masking glyphs.
     """
+    secure, role, attrs, visibility = _text_security(acc)
+    if secure:
+        return None
     Atspi = _atspi()
     got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
-    if got == "":
+    if got == "" and count != 0 and (
+        verification or _entry_text_visible(role, attrs, visibility)
+    ):
         if count is None:
             count = _safe(lambda: Atspi.Text.get_character_count(acc))
         if isinstance(count, int) and not isinstance(count, bool) and count > 0:
             got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    if not verification and _entry_text_masked(role, attrs, got):
+        return ""
     return got
+
+
+def _verification_matches(acc, text: str) -> bool:
+    """Compare a private read without returning its contents."""
+    if is_secure(acc):
+        return False
+    _call_first(acc, ("clear_cache", "clearCache"))
+    return _texts_match(_read_full_text(acc, verification=True), text)
 
 
 def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. GTK 4's empty sentinel read is retried with a positive
-    character count. A nonempty sentinel read is kept: on a Chromium web
+    returns one. GTK 4's empty sentinel is retried only with explicit toolkit
+    text visibility; ambiguous entries and masking glyphs stay empty. A nonempty
+    sentinel read is kept: on a Chromium web
     field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
     ``get_text(0, -1)`` still has the previous contents. The client text cache
@@ -8054,10 +8373,12 @@ def _content_is_blank(acc) -> bool:
 
 
 def _confirm_text(acc, text: str) -> bool:
+    if is_secure(acc):
+        return False
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
         blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
-        if (blank or _texts_match(shown, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
+        if (blank or _verification_matches(acc, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -11136,7 +11457,7 @@ def _collect_options(acc) -> list[tuple[str, object, object, int]]:
             if role in _OPTION_ROLE_NAMES:
                 label = _node_name(child)
                 if not label:
-                    raw = _safe(lambda c=child: _atspi().Text.get_text(c, 0, -1))
+                    raw = _direct_text(child)
                     label = _strip_objects(raw) if isinstance(raw, str) else ""
                 found.append((label, child, node, index))
                 continue
@@ -12323,6 +12644,73 @@ def _apply_log_percent(acc, value: str, low: float, high: float, before: float, 
     return _write_log_percent(acc, value, written, before)
 
 
+# ToolZoomSlider::scaleFunc/scaleFuncInv in Xournal++ 1.2.6:
+# https://github.com/xournalpp/xournalpp/blob/v1.2.6/src/core/gui/toolbarMenubar/ToolZoomSlider.cpp
+_XOURNAL_ZOOM_OFFSET = 0.20753
+
+
+def _apply_xournal_percent(acc, value: str, low: float, high: float) -> bool | None:
+    """Convert Xournal++ zoom and verify both Value and percent label.
+
+    Xournal++ truncates the displayed percent and gates document updates on
+    slider interaction. A raw-only change must not be reported as success.
+    None preserves other controls and in-range raw writes.
+    """
+    if _role_name(acc) != "slider":
+        return None
+    app = _application_of(acc)
+    if app is None or _node_name(app).casefold() not in {"xournalpp", "xournal++"}:
+        return None
+    shown = _percent_literal(_node_name(acc))
+    before = _finite_current_value(acc)
+    if shown is None or before is None:
+        return None
+    try:
+        displayed = 100 * (math.exp(before) + _XOURNAL_ZOOM_OFFSET)
+    except OverflowError:
+        return None
+    if not shown <= displayed < shown + 1:
+        return None
+    percent = _percent_literal(value)
+    if percent is None:
+        try:
+            number = _parse_number(value)
+        except ValueError:
+            return None
+        if low <= number <= high:
+            return None
+        percent = number
+    try:
+        minimum = 100 * (math.exp(low) + _XOURNAL_ZOOM_OFFSET)
+        maximum = 100 * (math.exp(high) + _XOURNAL_ZOOM_OFFSET)
+    except OverflowError:
+        return None
+    if (percent <= 100 * _XOURNAL_ZOOM_OFFSET
+            or not minimum - 1e-6 <= percent <= maximum + 1e-6):
+        raise ValueError(
+            f"value {value!r} is outside {_format_bound(minimum)}%..{_format_bound(maximum)}% "
+            f"(value scale {_format_bound(low)}..{_format_bound(high)})"
+        )
+    written = _clamp_near_bounds(
+        math.log(percent / 100 - _XOURNAL_ZOOM_OFFSET), low, high, open_upper=False,
+    )
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, written), False)
+    got = label = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _finite_current_value(acc)
+        label = _percent_literal(_node_name(acc))
+        if (got is not None and _numbers_match(got, written)
+                and label is not None and abs(label - percent) < 1):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    raise _text_mismatch(
+        "text_mismatch", "Xournal++ zoom did not confirm the requested percent",
+        expected=value, actual={"value": got, "percent": label},
+    )
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -12340,6 +12728,8 @@ def set_numeric_value(acc, value: str) -> bool | str:
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
+    Xournal++ zoom uses its offset natural-log scale for percent input;
+    both the raw Value and displayed percent must confirm the write.
     A control whose text is a percent and whose Value is ``log2`` of that
     percent (Inkscape's status zoom) accepts ``50%`` and a bare number that
     falls outside the Value range as that percent, converted with
@@ -12373,6 +12763,10 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        if not open_upper:
+            handled = _apply_xournal_percent(acc, value, low, high)
+            if handled is not None:
+                return handled
         # Some sliders (Xournal++ zoom) expose the percent only as their
         # name. That label does not establish a conversion for the raw scale.
         # Explain the mismatch before parsing, but preserve in-range raw input.
@@ -13734,6 +14128,109 @@ def _set_contenteditable_by_keys(acc, text: str) -> bool:
     return False
 
 
+_TEXT_POINT_STOP = frozenset({
+    "frame", "window", "application", "dialog", "alert", "desktop frame",
+})
+
+
+def _text_point_readable(acc) -> bool:
+    """True when ``acc`` might expose AT-SPI Text. A bare object does not."""
+    if acc is None:
+        return False
+    return any(
+        hasattr(acc, name)
+        for name in ("get_role_name", "get_text", "text", "get_editable_text_iface", "get_editable_text")
+    )
+
+
+def _read_text_point(acc):
+    """(caret, ranges) for ``acc``, or None when it has no Text interface.
+
+    A missing method is not a caret. Offsets come from ``get_caret_offset``
+    and ``get_selection``. No keys are sent.
+    """
+    if not _text_point_readable(acc):
+        return None
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    caret_ok = isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0
+    count_ok = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+    if not caret_ok and not count_ok:
+        return None
+    ranges: list[tuple[int, int]] = []
+    if count_ok and int(count) > 0:
+        for index in range(min(int(count), 8)):
+            bounds = _selection_bounds(
+                _safe(lambda index=index: Atspi.Text.get_selection(acc, index))
+            )
+            if bounds is None:
+                continue
+            start, end = int(bounds[0]), int(bounds[1])
+            if end < start:
+                start, end = end, start
+            ranges.append((start, end))
+    return (int(caret) if caret_ok else None, tuple(ranges))
+
+
+def _capture_text_points(acc) -> list:
+    """Caret and selections on ``acc`` and the document ancestors above it.
+
+    ctrl+a on a Firefox paragraph selects the document web, not only the
+    paragraph. The frame, window, and application are not text targets.
+    """
+    saved = []
+    node = acc
+    seen: set[int] = set()
+    for _depth in range(12):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        role = _role_name(node)
+        if node is not acc and role in _TEXT_POINT_STOP:
+            break
+        point = _read_text_point(node)
+        if point is not None:
+            saved.append((node, point[0], point[1]))
+        if role in _TEXT_POINT_STOP:
+            break
+        node = _parent_of(node)
+    return saved
+
+
+def _restore_text_points(saved) -> None:
+    """Put a captured caret and selection back. No keys.
+
+    Current selections are removed first, including a select-all that
+    landed on the document. The saved ranges are written back, then the
+    caret. A node whose Text methods are missing is left as it is.
+    """
+    if not saved:
+        return
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return
+    for acc, caret, ranges in saved:
+        count = _safe(lambda acc=acc: Atspi.Text.get_n_selections(acc))
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            for index in range(int(count) - 1, -1, -1):
+                _safe(lambda acc=acc, index=index: Atspi.Text.remove_selection(acc, index))
+        for slot, (start, end) in enumerate(ranges):
+            placed = _safe(
+                lambda acc=acc, slot=slot, start=start, end=end: Atspi.Text.set_selection(
+                    acc, slot, start, end,
+                )
+            )
+            if not placed:
+                _safe(lambda acc=acc, start=start, end=end: Atspi.Text.add_selection(acc, start, end))
+        if caret is not None:
+            _safe(lambda acc=acc, caret=caret: Atspi.Text.set_caret_offset(acc, caret))
+
+
 def _shown_is(acc, text: str) -> bool:
     """True when a fresh snapshot read equals ``text``.
 
@@ -13920,7 +14417,27 @@ def _set_gecko_contenteditable(acc, text: str) -> bool:
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
-    GTK's ``set_text_contents`` replaces, and the snapshot read then equals
+    A false return restores the caret and text selection captured on this
+    node and its document ancestors before the write. That restore sends
+    no keys. Success leaves the caret where the write put it.
+    """
+    saved = _capture_text_points(acc)
+    try:
+        ok = _set_text_body(acc, text, force=force)
+    except Exception:
+        _restore_text_points(saved)
+        raise
+    if not ok:
+        _restore_text_points(saved)
+    return bool(ok)
+
+
+def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
+    """Replace the element's whole text via AT-SPI EditableText.
+
+    GTK's ``set_text_contents`` replaces; private bounded verification handles
+    empty GTK 4 sentinel reads without publishing their contents. On other
+    fields the snapshot read then equals
     ``text``, so nothing is deleted. Chromium's web fields implement that
     call as an insert and the editable-text adaptor still returns true. The
     success check is ``Text.get_text(0, -1)``, the same read a snapshot uses,
@@ -13969,6 +14486,8 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     table-cell path: one EditableText replace, with no selection and no
     keys. The cell writer polls until the new paragraph is the value.
     """
+    if is_secure(acc):
+        return False
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
@@ -14005,7 +14524,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
     current = _full_text(acc)
-    if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
+    if _verification_matches(acc, text) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
         if wrote:
