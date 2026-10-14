@@ -1997,6 +1997,20 @@ class LinuxDriver:
             return False
         self._refuse_hidden(element, handle)
         self._raise_handle_window(handle)
+        if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
+            before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
+            sent = self._run(lambda: _atspi.click_gtk4_tree_expander(handle))
+            if sent:
+                for attempt in range(8):
+                    if self._run(lambda: _atspi._state_has(handle, "EXPANDED")) != before:
+                        return True
+                    if attempt + 1 < 8:
+                        time.sleep(0.05)
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} tree-expander click did not change the expanded state",
+                detail={"ref": element.ref, "reason": "expanded_unchanged"},
+            )
         # A Writer paragraph's action does not place the caret, and an
         # Impress or Draw shape's action does not enter text edit. The click
         # path does, and the outcome checks that result afterwards.

@@ -2039,6 +2039,8 @@ def _gtk4_menu_button_wrapper(acc) -> bool:
 
 def _action_names(acc) -> tuple[str, ...]:
     """AX action names for this node, mapped from its AT-SPI actions."""
+    if gtk4_tree_expander(acc):
+        return ("AXPress",)
     action = _action_iface(acc)
     if action is None:
         return ()
@@ -4073,15 +4075,20 @@ class ATSPIAccessor:
         if role_str == "status bar":
             try:
                 Atspi = _atspi()
+                # An empty or unavailable count is not a status-message read.
+                # Ask Text for the actual message before suppressing it; never
+                # derive a caret message from the document or selected symbol.
                 count = _safe(lambda: Atspi.Text.get_character_count(node))
-                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-                    text = _safe(lambda: Atspi.Text.get_text(node, 0, min(count, _IMAGE_LABEL_CHARS)))
-                    if isinstance(text, str) and text.strip():
-                        text = text.strip()
-                        if not str(name).strip():
-                            name = text
-                        elif text != name:
-                            status_text = text
+                end = min(count, _IMAGE_LABEL_CHARS) if (
+                    isinstance(count, int) and not isinstance(count, bool) and count > 0
+                ) else -1
+                text = _safe(lambda: Atspi.Text.get_text(node, 0, end))
+                if isinstance(text, str) and text.strip():
+                    text = text.strip()[:_IMAGE_LABEL_CHARS]
+                    if not str(name).strip():
+                        name = text
+                    elif text != name:
+                        status_text = text
             except ImportError:
                 pass
         unallocated = False
@@ -7390,6 +7397,28 @@ def qt_toggle_only_control(acc) -> bool:
         if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
             activating.add(raw)
     return activating == {"toggle"}
+
+
+def gtk4_tree_expander(acc) -> bool:
+    """GTK 4 expandable buttons with native list-item expansion actions."""
+    return (
+        _role_name(acc) in {"button", "push button"}
+        and _state_has(acc, "EXPANDABLE")
+        and _gtk4_app(acc)
+        and bool(set(_raw_action_names(acc)) & {
+            "listitem.toggle-expand",
+            "listitem.collapse" if _state_has(acc, "EXPANDED") else "listitem.expand",
+        })
+    )
+
+
+def click_gtk4_tree_expander(acc) -> bool:
+    """Send one native expansion click; the caller verifies the live state."""
+    names = _raw_action_names(acc)
+    name = "listitem.toggle-expand"
+    if name not in names:
+        name = "listitem.collapse" if _state_has(acc, "EXPANDED") else "listitem.expand"
+    return _do_action_named(acc, frozenset({name}))
 
 
 def do_press(acc) -> bool:

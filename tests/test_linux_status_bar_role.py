@@ -190,3 +190,20 @@ def test_named_status_bar_keeps_distinct_text_message(monkeypatch) -> None:
     window = (RawNode(role="AXWindow", title="Geany", position=(0.0, 0.0), size=(1280.0, 800.0)), [(raw, [])])
     snap = build_snapshot(window, _FakeAccessor(), scope=Scope.WINDOW, app="geany", pid=1, geometry=_geometry())
     assert text in observe.render_text(snap, mode="full")
+
+
+def test_status_bar_reads_message_when_character_count_is_empty(monkeypatch) -> None:
+    """A transient empty count must not suppress native status text."""
+    from types import SimpleNamespace
+
+    text = "line: 301 col: 0"
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda node: 0,
+        get_text=lambda node, start, end: text if end == -1 else text[start:end],
+    )))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: pytest.fail("probed numeric Value"))
+    raw = _atspi.ATSPIAccessor().read(_Bar("Status"))
+    assert raw.title == "Status"
+    assert raw.value == text

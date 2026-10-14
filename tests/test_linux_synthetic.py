@@ -14448,6 +14448,77 @@ def test_html_section_text_keeps_empty_wrappers_and_secrets_private(fake_atspi, 
     assert _atspi.ATSPIAccessor().read(section).value is None
 
 
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("actions", [
+    ("listitem.collapse", "listitem.expand", "listitem.toggle-expand"),
+    ("listitem.collapse", "listitem.expand"),
+])
+@pytest.mark.parametrize("effect", ["changed", "noop", "failed", "focus_other_row"])
+def test_gtk4_tree_expander_click_verifies_expansion(monkeypatch, fake_atspi, expanded, actions, effect):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    node = _Acc("button", name="96.04% ScanMe", states={"EXPANDABLE", "SHOWING"})
+    if expanded:
+        node.states.add("EXPANDED")
+    calls = []
+    other = _Acc("table row", name="home")
+
+    def do_action(index):
+        calls.append(actions[index])
+        if effect == "changed":
+            node.states.symmetric_difference_update({"EXPANDED"})
+        elif effect == "focus_other_row":
+            other.states.add("FOCUSED")
+        return effect != "failed"
+
+    node.get_action_iface = lambda: _NS(
+        get_n_actions=lambda: len(actions),
+        get_action_name=lambda index: actions[index],
+        do_action=do_action,
+    )
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda acc: acc is node)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    assert _atspi._action_names(node) == ("AXPress",)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (
+        True, False, None, False, "EXPANDED" in acc.states, False, False,
+    ))
+    raw = _atspi.ATSPIAccessor().read(node)
+    assert raw.actions == ("AXPress",)
+    assert raw.expanded is expanded
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *_args: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: node)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer sent"))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda *_args: None)
+    element = Element("e618", "AXButton", node.name, None, None, "snap618", clickable=True)
+    if effect == "changed":
+        assert driver.press_element(element) is True
+        assert _atspi._state_has(node, "EXPANDED") is not expanded
+        assert _atspi.ATSPIAccessor().read(node).expanded is not expanded
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "expanded_unchanged"
+    expected = "listitem.toggle-expand" if "listitem.toggle-expand" in actions else (
+        "listitem.collapse" if expanded else "listitem.expand"
+    )
+    assert calls == [expected]
+
+
+@pytest.mark.parametrize("gtk4,role,expandable", [(False, "button", True), (True, "table cell", True), (True, "button", False)])
+def test_gtk4_tree_expander_action_mapping_is_scoped(monkeypatch, gtk4, role, expandable):
+    node = _Acc(role, states={"EXPANDABLE"} if expandable else set())
+    node.get_action_iface = lambda: _NS(get_n_actions=lambda: 1,
+        get_action_name=lambda _index: "listitem.toggle-expand")
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda _acc: gtk4)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    assert _atspi._action_names(node) == ()
+    assert not _atspi.gtk4_tree_expander(node)
+
+
 @pytest.mark.parametrize("chromium, child_role, child_name, expected", [
     (True, "button", "Billing section", "AXStaticText"),
     (True, "push button", "Billing section", "AXStaticText"),

@@ -150,6 +150,10 @@
 - 2026-10-14 (PR #467 repair): Set DISPLAY and a unique writable XDG_CACHE_HOME before starting dbus-run-session, not only inside its child script. D-Bus-activated AT-SPI services inherit the session daemon environment and otherwise can bind the wrong display or abort on a read-only home cache. Validate Geany symbol jumps and Scintilla search together with CI-sized Openbox geometry.
 
 - 2026-10-14 (PR #467 repair): A repository fetch refspec may omit cursor branches. Explicitly fetch the PR branch and compare its remote head before conflict repair so existing repair commits and regressions are retained.
+- 2026-10-14 (#618): GTK 4 tree-expander buttons expose namespaced listitem expansion actions. Prefer toggle-expand, otherwise choose expand/collapse from the live state, and verify EXPANDED changes before success. Do not fall back to pointer input after a failed native action.
+
+- 2026-10-14 (PR #630 repair): Tree-expander regressions and Chromium combobox regressions append at the same location; preserve both complete blocks during a main merge and run the combined synthetic suite.
+
 - 2026-10-14 (#646): Real Kate 25.04.3 bisect identified #562 (e3b272f) as the missing-status-controls regression. Skip generic Qt viewport-text reads before Kate’s existing buffer-visibility refusal; a discarded probe still disrupts later accessibility traversal. Preserve other Qt editors’ viewport filtering and Kate’s off-screen text refusal.
 
 - 2026-10-14 (PR #608 merge repair): Recheck failed browser live cases after preserving newer main fixes before adding another workaround. The Chrome large-table search/click and Firefox web-field typing failures both pass after merging main; retain independent heading-control-label and web-combobox regression blocks together.
@@ -160,8 +164,11 @@
 - 2026-10-14 (PR #467 conflict repair): Globally blocking GI imports is useful for hermetic driver checks but invalidates binding tests that inject a fake GI module and CLI subprocess tests that initialize Linux. Recheck those files with native GI in a fresh Xvfb/D-Bus session before diagnosing their failures as regressions.
 
 - 2026-10-14 (PR #467 validation): A supplied linked worktree can have read-only Git metadata and lesson files despite writable source files. Validate and commit in a writable temporary clone, explicitly fetch the PR branch, preserve its current remote history, and use a plain push; do not replace the mounted .git link or force-push.
+- 2026-10-14 (PR #630 conflict repair): Preserve Chromium heading control-label regressions alongside tree-expander tests when merging appended blocks. The failed Linux run contained only the tracked Calc timing flake; inspect the complete job summary before changing unrelated action code.
 - 2026-10-14 (#647): Suppressing Kate whole-buffer Text values exposes automatic scroll-anchor fallbacks: retain the editor view ahead of sibling breadcrumb lists. Container selection cannot establish text visibility; refuse unverifiable editor text searches before wheel/Find input and preserve explicit container refs. Live v0.4.66..main bisect identifies #563 (c226b7b) as the interaction trigger, not a reason to restore whole-buffer values.
 
 - 2026-10-14 (PR #648 repair): Editor scroll-anchor selection and secure-field pre-resolution refusals are independent server behaviors. Preserve both regression blocks when resolving appended test conflicts; the unreadable-editor refusal must still happen before wheel or Find input.
 
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
+
+- 2026-10-14 (PR #467 status repair): Keep GTK status message reads independent of a positive Text character count. When the count is empty or unavailable, request the native Text endpoint (-1) and retain only actual returned text; do not infer a caret line from symbol names or document geometry. Validate the empty-count case hermetically and both Geany navigation paths live.
