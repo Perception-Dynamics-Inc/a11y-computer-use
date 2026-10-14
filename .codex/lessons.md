@@ -119,6 +119,8 @@
 - 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
 - 2026-10-14 (#642): Private GTK4 set_value verification must carry its boolean privacy marker through set_text caret restoration, LinuxDriver, and Runtime receipts; coercing it to bool loses redaction when preflight misses the entry. Empty-string snapshot values do not establish visibility.
 
+- 2026-10-14 (#646): Real Kate 25.04.3 bisect identified #562 (e3b272f) as the missing-status-controls regression. Skip generic Qt viewport-text reads before Kate’s existing buffer-visibility refusal; a discarded probe still disrupts later accessibility traversal. Preserve other Qt editors’ viewport filtering and Kate’s off-screen text refusal.
+
 - 2026-10-14 (PR #608 merge repair): Recheck failed browser live cases after preserving newer main fixes before adding another workaround. The Chrome large-table search/click and Firefox web-field typing failures both pass after merging main; retain independent heading-control-label and web-combobox regression blocks together.
 - 2026-10-14 (#643): Refuse writes to already observed secure fields before live ref resolution; GTK4 PasswordEntry may rebuild its inner accessible. Treat native password-text parent/child boundaries as secure before Text reads. Never reuse an old secure handle to perform an action; non-secure refs still need live resolution.
 
@@ -127,3 +129,5 @@
 - 2026-10-14 (#647): Suppressing Kate whole-buffer Text values exposes automatic scroll-anchor fallbacks: retain the editor view ahead of sibling breadcrumb lists. Container selection cannot establish text visibility; refuse unverifiable editor text searches before wheel/Find input and preserve explicit container refs. Live v0.4.66..main bisect identifies #563 (c226b7b) as the interaction trigger, not a reason to restore whole-buffer values.
 
 - 2026-10-14 (PR #648 repair): Editor scroll-anchor selection and secure-field pre-resolution refusals are independent server behaviors. Preserve both regression blocks when resolving appended test conflicts; the unreadable-editor refusal must still happen before wheel or Find input.
+
+- 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.

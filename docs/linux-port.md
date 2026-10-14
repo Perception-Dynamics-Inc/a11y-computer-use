@@ -270,6 +270,10 @@ character visibility. `find` and `scroll_to_find` cannot verify individual
 document text matches; even visible buffer text is excluded until character
 visibility can be established. The editor ref remains available, with a hint
 to use in-document navigation. Single-line search fields keep their values.
+Kate skips the generic Qt viewport-text probe: that discarded read disrupts
+subsequent accessibility traversal on Kate 25.04.3. Native status controls such
+as `1:1`, `INSERT`, and `UTF-8` remain available to snapshots and `find`.
+This preservation was checked with a real Kate 25.04.3 under Xvfb/D-Bus for #646.
 Automatic `scroll_to_find` selects this editor view ahead of sibling breadcrumb
 lists. Text search returns `unsupported` with reason
 `document_text_visibility_unavailable` before wheel or Find input because the
