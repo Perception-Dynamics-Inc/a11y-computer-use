@@ -3432,6 +3432,35 @@ class LinuxDriver:
             # The find field latches this process even when the open bar is
             # not in a snapshot. scroll_to_find types and closes it first.
             self._run(lambda: _atspi.note_focused_find_bar(app_id))
+        if text.endswith("\n") and text[:-1] and "\n" not in text[:-1] and "\t" not in text:
+            entry = handle
+            if entry is None and app_id:
+                entry = self._run(lambda: _atspi.focused_chromium_entry(app_id))
+            if entry is not None and self._run(
+                lambda: _atspi.chromium_single_line_entry(entry)
+            ):
+                if self._run(lambda: _atspi.is_secure(entry)):
+                    raise _secure_focus_error("focused Chromium entry is secure")
+                if _on_wayland():
+                    raise _wayland_input_error("type_text with trailing Enter")
+                payload = text[:-1]
+                before = self._run(lambda: _atspi._readable_text(entry))
+                selection = self._run(lambda: _atspi._selection_span(entry, before))
+                self._run(lambda: _atspi._type_into_target(entry, payload))
+                after = _atspi._poll_typed_text(
+                    lambda: self._run(lambda: _atspi._readable_text(entry)),
+                    before, payload, selection=selection,
+                )
+                if after is None or not _atspi._typed_visible(
+                    before, after, payload, selection=selection,
+                ):
+                    raise _atspi._text_mismatch(
+                        "text_mismatch", "the single-line entry did not confirm the text; Enter was not sent",
+                        expected=payload, actual=after,
+                    )
+                self._type_expected = after
+                self._run(lambda: _atspi._type_into_target(entry, "\n"))
+                return len(text)
         if (
             handle is not None
             and ("\t" in text or "\n" in text)
