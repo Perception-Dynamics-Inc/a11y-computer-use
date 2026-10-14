@@ -4585,3 +4585,27 @@ def test_scroll_to_find_can_still_find_header(monkeypatch):
     rt._require_permission = lambda *args, **kwargs: None
     monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
     assert "found after 0 scroll(s)" in rt.scroll_to_find("app", text="ITEM-001")
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("type", {"ref": "e4", "text": "Secret643"}),
+    ("set_value", {"ref": "e4", "value": "Secret643"}),
+])
+async def test_secure_ref_refused_before_rebuilt_child_resolution(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch, tool, args,
+) -> None:
+    """A password ref cannot go stale before its audited write refusal."""
+    store.set_tier(APP, safety.Tier.FULL)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    def rebuilt(*args, **kwargs):
+        pytest.fail("secure ref must be refused before live child resolution")
+    monkeypatch.setattr(observe, "resolve_ref", rebuilt)
+    result = await call_tool(mcp_server, tool, args)
+    assert result.isError
+    assert "secure_field" in result.content[0].text
+    assert "Secret643" not in result.content[0].text
+    rows = [row for row in audit_entries(audit_dir) if row["result"] == "secure_field"]
+    assert len(rows) == 1
+    assert rows[0]["params"] == {"ref": "e4", "role": "AXTextField"}
+    assert "Secret643" not in "".join(p.read_text() for p in audit_dir.glob("*.jsonl"))
+    assert mocked_driver["type"] == []

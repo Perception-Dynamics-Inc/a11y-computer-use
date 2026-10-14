@@ -117,3 +117,4 @@
 - 2026-10-14 (#618): GTK 4 tree-expander buttons expose namespaced listitem expansion actions. Prefer toggle-expand, otherwise choose expand/collapse from the live state, and verify EXPANDED changes before success. Do not fall back to pointer input after a failed native action.
 
 - 2026-10-14 (PR #630 repair): Tree-expander regressions and Chromium combobox regressions append at the same location; preserve both complete blocks during a main merge and run the combined synthetic suite.
+- 2026-10-14 (#643): Refuse writes to already observed secure fields before live ref resolution; GTK4 PasswordEntry may rebuild its inner accessible. Treat native password-text parent/child boundaries as secure before Text reads. Never reuse an old secure handle to perform an action; non-secure refs still need live resolution.
