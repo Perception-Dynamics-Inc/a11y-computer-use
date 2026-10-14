@@ -13938,6 +13938,8 @@ def test_textarea_ref_survives_transient_wrapper_with_native_identity(monkeypatc
     with pytest.raises(ComputerUseError) as exc:
         driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(current, duplicate)))
     assert exc.value.code is ErrorCode.STALE_REF
+
+
 @pytest.mark.parametrize("remembered", [False, True])
 @pytest.mark.parametrize("ending", ["\n", "\r\n"])
 @pytest.mark.parametrize("lands", [False, True])
