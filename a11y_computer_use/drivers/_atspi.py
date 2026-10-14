@@ -5798,6 +5798,20 @@ def _text_security(acc):
     if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
            for key in ("password", "protected")):
         return True, role, attrs, None
+    # GTK 4 PasswordEntry can expose an entry wrapper and a password-text
+    # child. Classify both sides before reading Text; the inner accessible
+    # may be rebuilt between observation and a write.
+    if (role in {"entry", "text"}
+            and str(attrs.get("toolkit", "")).lower() == "gtk"
+            and _toolkit_version(acc).split(".", 1)[0] != "3"):
+        parent = _parent_of(acc)
+        if parent is not None and _role_name(parent) == "password text":
+            return True, role, attrs, None
+        if role == "entry" and any(
+            _role_name(_child_at(acc, index)) == "password text"
+            for index in range(_child_count(acc))
+        ):
+            return True, role, attrs, None
     visibility = None
     if role in {"entry", "text"}:
         visibility = _call_first(acc, ("get_visibility",))

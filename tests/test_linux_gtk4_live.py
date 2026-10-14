@@ -467,3 +467,64 @@ def test_gtk4_private_set_value_signal_survives_driver(monkeypatch):
     assert result is verified
     assert result.private_text_verified is True
     assert int(result) == 1  # Boolean success, not the payload or its length.
+
+
+@pytest.mark.parametrize("initial", ["", "InitialSecret643"])
+def test_gtk4_password_entry_writes_refused_and_audited(tmp_path, initial):
+    """Both writes refuse empty and populated PasswordEntry without an echo."""
+    import json
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "password643.py"
+    script.write_text(f'''
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="Password643")
+    entry = Gtk.PasswordEntry()
+    entry.set_text({initial!r})
+    entry.update_property([Gtk.AccessibleProperty.LABEL], ["Field643"])
+    window.set_child(entry)
+    window.present()
+app = Gtk.Application(application_id="org.example.Password643")
+app.connect("activate", activate)
+app.run([])
+''')
+    proc = _launch(sys.executable, str(script))
+    try:
+        row = _window(driver, "password643")
+        assert row is not None, driver.windows()
+        driver.focus_window(int(row["window_id"]))
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 15
+        while True:
+            runtime.desktop_snapshot(str(row["app"]))
+            snap = runtime._current
+            fields = [el for el in snap.elements if el.title == "Field643"] if snap else []
+            if fields or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        assert len(fields) == 1
+        field = fields[0]
+        assert field.secure and field.value is None
+        assert "InitialSecret643" not in repr(snap)
+        secret = "ReplacementSecret643"
+        for operation in (lambda: runtime.type_text(secret, ref=field.ref),
+                          lambda: runtime.set_value(field.ref, secret)):
+            with pytest.raises(ComputerUseError) as caught:
+                operation()
+            assert caught.value.code is ErrorCode.SECURE_FIELD
+            assert secret not in str(caught.value)
+        audit_files = list(runtime.audit.dir_path.glob("*.jsonl"))
+        assert audit_files
+        audit_text = "".join(path.read_text() for path in audit_files)
+        rows = [json.loads(line) for line in audit_text.splitlines()]
+        refusals = [row for row in rows if row["result"] == "secure_field"]
+        assert len(refusals) == 2
+        assert all(row["params"] == {"ref": field.ref, "role": field.role} for row in refusals)
+        assert secret not in audit_text and "InitialSecret643" not in audit_text
+    finally:
+        _stop_group(proc)
