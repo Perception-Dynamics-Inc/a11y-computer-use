@@ -2282,10 +2282,11 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     return ""
 
 
-def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
-    """The readable text of a ``<div>`` whose children are inline.
+def _section_text(acc, role_str: str, attrs: dict) -> str | None:
+    """Read a text-bearing HTML section's own Text interface.
 
-    AT-SPI exposes that div as a section, and a section is a group, so the
+    Firefox and WebKitGTK expose pre, code, and quote text on sections
+    without static-text children. AT-SPI maps sections to groups, so the
     value read is skipped. Chromium's text is the sentence with one U+FFFC
     per link, and the same words are also separate static-text children, so
     find cannot match a phrase that crosses them. Firefox exposes that same
@@ -2296,7 +2297,9 @@ def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
     """
     if role_str != "section":
         return None
-    if str(attrs.get("tag") or "").lower() != "div":
+    if str(attrs.get("tag") or "").lower() not in {
+        "div", "pre", "code", "blockquote", "address", "figcaption",
+    }:
         return None
     raw = _direct_text(acc)
     if not raw.replace(_OBJECT_REPLACEMENT, "").strip():
@@ -3668,8 +3671,8 @@ class ATSPIAccessor:
         # interface. That is a text control: textarea when it is multi-line.
         # Chromium's roleless contenteditable stays a group.
         role = _gecko_contenteditable_role(node, role, role_str, attrs, state_editable)
-        # Groups skip the value probe. A div is a section, and its text is
-        # the inline sentence; reading that one string is what find matches.
+        # Groups skip the value probe. Text-bearing HTML sections need their
+        # own Text string so find can match words absent from child nodes.
         # A file chooser is a dialog, but its name is the title. Probing Value
         # used to be skipped when the role was a window.
         # A PDF page is the exception: its Text interface is the page, and
@@ -3698,9 +3701,9 @@ class ATSPIAccessor:
         ):
             # An empty contenteditable can publish a Value double. The text
             # interface is the value. A number is not that text.
-            value = _div_inline_sentence(node, role_str, attrs)
+            value = _section_text(node, role_str, attrs)
         if value is None:
-            sentence = _div_inline_sentence(node, role_str, attrs)
+            sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
