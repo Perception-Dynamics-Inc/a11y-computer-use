@@ -14478,3 +14478,29 @@ def test_kate_status_controls_survive_without_document_viewport_probe(
     assert "in-document Find" in document.hint
     assert not observe.find_elements(snap, text="OFFSCREEN_TOKEN")
     assert editor.text == "TOP\nOFFSCREEN_TOKEN"
+
+
+@pytest.mark.parametrize("side,role", [("wrapper", "entry"), ("child", "entry"),
+                                       ("child", "text"), ("ordinary", "entry")])
+def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, side, role):
+    """Native password ancestry/children establish the early refusal."""
+    acc, password = object(), object()
+    monkeypatch.setattr(_atspi, "_role_name", lambda n: "password text" if n is password else role)
+    monkeypatch.setattr(_atspi, "_call_first", lambda *a, **k: None)
+    monkeypatch.setattr(_atspi, "_state_flag", lambda *a, **k: False)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda n: {"toolkit": "GTK"})
+    monkeypatch.setattr(_atspi, "_toolkit_version", lambda n: "4.0")
+    monkeypatch.setattr(_atspi, "_parent_of", lambda n: password if side == "child" else None)
+    monkeypatch.setattr(_atspi, "_child_count", lambda n: 1 if side == "wrapper" else 0)
+    monkeypatch.setattr(_atspi, "_child_at", lambda n, index: password)
+    class Text:
+        @staticmethod
+        def get_string_at_offset(*args):
+            assert side == "ordinary", "password boundary must not read Text"
+            return type("Rendered", (), {"content": ""})()
+        @staticmethod
+        def get_character_count(*args):
+            return 0
+    api = type("API", (), {"Text": Text, "TextGranularity": type("Granularity", (), {"LINE": 0})})
+    monkeypatch.setattr(_atspi, "_atspi", lambda: api)
+    assert _atspi.is_secure(acc) is (side != "ordinary")
