@@ -12,6 +12,8 @@
 - 2026-10-13 (#488): xdg-desktop-portal backends share one process across requesting apps. Resolve the full backend name before matching it, inherit identity only from a managed `WM_TRANSIENT_FOR` parent, and bind observations to the active chooser frame. Never add a portal PID to a requesting app's `pids_matching` set, expand that frame into sibling dialogs, or treat a matching portal PID as sufficient for a pointer permission recheck: this would expose other apps under the requesting app's grant.
 - 2026-10-13 (PR #528): Show-desktop requests are asynchronous; verify foreground focus has settled before starting a short agent budget. Use a scripted monotonic clock in the setup regression so host scheduling cannot exhaust the wait, and check the hermetic tests with GI imports blocked.
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
+- 2026-10-13 (#515): AbiWord opaque document views can select text through native Find without exposing a confirming accessibility match. Refuse before Ctrl+F/query input when the search container contains an opaque region; unrelated opaque siblings must not block a verifiable container. Launch-gate tests must stub PATH and desktop entries because executable casing is intentionally canonicalized.
+
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
 
@@ -27,6 +29,8 @@
 - 2026-10-14 (PR #535): When merging AT-SPI naming fallbacks, retain independent role-specific rules together. Relation-derived GTK menu labels must pass through the same rich-text normalization as native names; cover quoted attribute delimiters in the relation-label regression too.
 - 2026-10-14 (#446 repair): A post-commit pause inside the AT-SPI event-thread callback cannot process the editor-removal event. Commit in one driver operation, pause on the caller, then verify in the next operation; keep the existing pause bound.
 
+- 2026-10-14 (#515 repair): Opaque document search refusal must run before unreadable-container returns and outside Chromium-only Find eligibility; preserve the separate unreadable-list result and scope the refusal to the chosen container.
+
 - 2026-10-14 (#501 repair): Xournal++ zoom uses `log(percent / 100 - 0.20753)` and requires both raw Value and displayed percent read-back. In isolated Chrome live tests, a D-Bus keyring prompt can steal keyboard focus; reproduce with CI's window manager and prevent unrelated credential prompts in the temporary desktop session before diagnosing an input regression.
 - 2026-10-14 (#578): GTK 4 masked Gtk.Entry can expose neither password role nor protected state nor visibility metadata. Positive-offset Text reads after an empty sentinel must stay private to boolean write verification; publishing them leaks secrets even when is_secure is false.
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
@@ -38,6 +42,7 @@
 - 2026-10-14 (#478): Kate’s painted gutter has no accessible line labels. Scope its contextual name to native editor siblings and retain the opaque-region limitation; never infer line targets from the strip’s bounds. When merging surface-label branches, keep each application’s recognition condition independent.
 - 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.
 
+- 2026-10-14 (#552 repair): Opaque-search refusals must remain before input when merging verified Find support; retain the FULL grant gate and focused find-bar verification as independent requirements.
 - 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
 
