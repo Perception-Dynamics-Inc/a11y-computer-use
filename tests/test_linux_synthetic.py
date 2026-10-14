@@ -12953,6 +12953,7 @@ def test_xournal_zoom_preserves_raw_value_input(fake_atspi):
     assert slider.value == 0.25
 
 
+
 @pytest.mark.parametrize("owner_name,role,contents,omitted", [
     ("Kate", "text", "TOP\nBOTTOM_MARKER_520", True),
     ("kate", "text", "TOP\nBOTTOM_MARKER_520", True),
@@ -13501,3 +13502,50 @@ def test_revealed_document_matches_preserve_exact_target_preference(fake_atspi, 
     )
     assert matches == (target,)
     assert not hidden
+
+def test_scintilla_reveal_refresh_preserves_exact_target_preference(fake_atspi, monkeypatch):
+    """A refreshed document search still prefers an exactly named control."""
+    from dataclasses import replace
+    from a11y_computer_use import observe, server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    original = observe.find_elements
+
+    def matches(snap, **filters):
+        found = original(snap, **filters)
+        if view["line"] > 0:
+            area = next(el for el in found if el.role == "AXTextArea")
+            return (*found, replace(area, ref="exact-target", role="AXButton", title="ROW-150", value=None))
+        return found
+
+    monkeypatch.setattr(observe, "find_elements", matches)
+    found = runtime.find("geany", text="ROW-150")
+    assert view["line"] > 0
+    assert "exact-target" in found
+    assert "textarea" not in found
+
+def test_find_keeps_exact_targets_after_scintilla_reveal(fake_atspi, monkeypatch) -> None:
+    """A refreshed document search still prefers the exact named control."""
+    from a11y_computer_use import server
+
+    window, editor, _view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    reveal = driver.reveal_buffer_match
+    button = _Acc("push button", name="ROW-150", width=80, height=24)
+    _place_row(button, 100, 80, 80, 24)
+    button.get_application = editor.get_application
+
+    def reveal_and_publish(element, text):
+        result = reveal(element, text)
+        _adopt(window, editor, button)
+        return result
+
+    monkeypatch.setattr(driver, "reveal_buffer_match", reveal_and_publish)
+    result = runtime.find("geany", text="ROW-150")
+    assert "button" in result
+    assert "textarea" not in result

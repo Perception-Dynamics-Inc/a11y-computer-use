@@ -11,7 +11,12 @@
 
 - 2026-10-13 (#467): Geany live fixtures must launch with `--new-instance`; otherwise a launch can delegate to an existing editor, so terminating the returned process leaves windows behind and contaminates later symbol/caret assertions. Verify the Scintilla and symbol-click fixtures together under AT-SPI.
 
+
+
 - 2026-10-13 (#488): xdg-desktop-portal backends share one process across requesting apps. Resolve the full backend name before matching it, inherit identity only from a managed `WM_TRANSIENT_FOR` parent, and bind observations to the active chooser frame. Never add a portal PID to a requesting app's `pids_matching` set, expand that frame into sibling dialogs, or treat a matching portal PID as sufficient for a pointer permission recheck: this would expose other apps under the requesting app's grant.
+
+
+
 - 2026-10-13 (PR #528): Show-desktop requests are asynchronous; verify foreground focus has settled before starting a short agent budget. Use a scripted monotonic clock in the setup regression so host scheduling cannot exhaust the wait, and check the hermetic tests with GI imports blocked.
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 
@@ -43,3 +48,13 @@
 - 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
 
 - 2026-10-14 (PR #467 repair): A document reveal takes a new snapshot; apply exact-target preference again after that refresh so incidental labels do not reappear as find targets. Preserve opaque-container refusals when combining visibility filters with scroll search.
+
+- 2026-10-14 (PR #467 repair): After revealing an off-screen document match, apply exact-target preference again to the refreshed snapshot. Merge the visibility filter with current search filtering so a refresh does not resurrect broad document or label matches that main excludes.
+
+- 2026-10-14 (PR #467 repair): After revealing a document match, apply exact-target preference again to the refreshed snapshot. Unnamed GTK status bars can expose their displayed message only through Text; retain the statusbar role and avoid a numeric Value fallback.
+
+
+- 2026-10-14 (#467 repair): GtkStatusbar may expose caret status only through its Text interface. Preserve that text as the unnamed bar's title while keeping numeric Value probes disabled; verify Geany symbol clicks alongside Scintilla search.
+- 2026-10-13 (#467): Refresh AT-SPI status-bar properties before reading geometry. GTK can cache the bar's unallocated startup rectangle; refreshing later in `_state_flags` leaves that snapshot with stale zero-size geometry and drops caret/status evidence. Cover the allocation transition hermetically and verify Geany symbol clicks and Scintilla find together live.
+
+- 2026-10-14 (PR #467 repair): Repair checkouts may fetch only main. Inspect remote.origin.fetch and explicitly fetch the PR branch before pushing so concurrent repairs are merged rather than overlooked.
