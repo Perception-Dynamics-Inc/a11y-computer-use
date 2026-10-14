@@ -251,6 +251,8 @@ to use in-document navigation. Single-line search fields keep their values.
 This conservative behavior is covered by synthetic tests; no live Kate run
 was performed for #477.
 
+GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
+
 Kate's unnamed, childless filler directly left of a multiline editor is labelled
 `Kate editor gutter` when native bounds establish the shared edge and height.
 It remains opaque: AT-SPI does not expose individual line numbers, so this label

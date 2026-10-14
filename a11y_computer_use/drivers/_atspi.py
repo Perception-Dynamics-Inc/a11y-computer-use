@@ -7701,9 +7701,12 @@ def _blocks_text_replace(acc) -> bool:
             return False
         # Synthetic transports can expose entry roles without a native
         # EDITABLE state API. Keep their existing write/read-back path;
-        # real AT-SPI nodes and Firefox wrappers still require the bit.
+        # Real AT-SPI nodes, Firefox wrappers, and text views exposing a
+        # state-set API still require the bit, even without native GI.
         native_state = _safe(lambda: _atspi().StateType.EDITABLE) is not None
-        if native_state or _gecko_app(acc):
+        if (native_state or _gecko_app(acc)
+                or (role in {"text", "editable text"}
+                    and _call_first(acc, ("get_state_set",)) is not None)):
             return not editable_entry(acc)
     return _state_has(acc, "READ_ONLY")
 
