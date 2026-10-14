@@ -6620,6 +6620,37 @@ class Runtime:
                         names.append(title)
                 return tuple(names)
 
+            def header_only(shot: Snapshot, anchor: Element | None) -> bool:
+                """Detect a header strip and scrollbar using reported descendants.
+
+                An empty list or a document with controls is not evidence
+                that the toolkit exposes no rows.
+                """
+                if anchor is None or anchor.role not in {"AXScrollArea", "AXGroup", "AXTable", "AXList"}:
+                    return False
+                if anchor.bounds.height <= 0:
+                    return False
+                under = {anchor.ref}
+                for _ in range(len(shot.elements)):
+                    added = {el.ref for el in shot.elements if el.parent in under} - under
+                    if not added:
+                        break
+                    under.update(added)
+                descendants = [el for el in shot.elements if el.ref in under and el.ref != anchor.ref]
+                headers = [el for el in descendants if el.role in {"AXButton", "AXColumnHeader"}]
+                if not headers or not any(el.role == "AXScrollBar" for el in descendants):
+                    return False
+                if any(el.role not in {"AXButton", "AXColumnHeader", "AXScrollBar", "AXGroup"}
+                       for el in descendants):
+                    return False
+                box = anchor.bounds
+                return all(
+                    el.bounds.width > 0 and el.bounds.height > 0
+                    and box.y <= el.bounds.y
+                    and el.bounds.y + el.bounds.height <= box.y + box.height / 4
+                    for el in headers
+                )
+
             def note_progress(shot: Snapshot, anchor: Element | None) -> None:
                 """Start the no-progress clock again when the list actually moves."""
                 nonlocal stall_deadline, progress_rows, progress_offset, progress_seen
@@ -6780,7 +6811,7 @@ class Runtime:
 
             def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
                            budget_cap: float | None = None, unreadable: bool = False) -> str:
-                names = row_names(shot, anchor)
+                names = () if header_only(shot, anchor) else row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
                     container = "unknown"
@@ -7287,6 +7318,12 @@ class Runtime:
                         issued += 1
                         stalls = 0
                         continue
+                if header_only(snap, anchor_now):
+                    return (
+                        unfinished(issued, snap, anchor_now, budget_hit=False)
+                        + "\ncontainer exposes no rows; only headers and a scrollbar are accessible. "
+                        "Use a screenshot to inspect the content."
+                    )
                 cap = expired_cap()
                 if cap is not None:
                     return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
