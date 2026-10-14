@@ -456,7 +456,10 @@ def test_gtk3_empty_entry_keeps_existing_write_path(monkeypatch):
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("operation", ["set", "type"])
 @pytest.mark.parametrize("sticks", [False, True])
-def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sticks):
+@pytest.mark.parametrize("observed_value", [None, ""])
+@pytest.mark.parametrize("preflight", [True, False])
+def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sticks,
+                                            observed_value, preflight, tmp_path):
     from types import SimpleNamespace
     from a11y_computer_use import observe, server
     from a11y_computer_use.schema import ComputerUseError, Scope
@@ -490,6 +493,8 @@ def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sti
                                   app="test", pid=1, geometry=_geometry())
     el = snap.elements[0]
     assert not el.secure and el.value is None
+    from dataclasses import replace
+    el = replace(el, value=observed_value)
     runtime = server.Runtime.__new__(server.Runtime)
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -497,6 +502,9 @@ def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sti
     driver._run = lambda call: call()
     driver.set_value = lambda el, text: _atspi.set_text(field, text)
     monkeypatch.setattr(observe, "ax_handle_for", lambda *args: field)
+    assert driver.text_visibility_unknown(el)
+    if not preflight and operation == "set":
+        driver.text_visibility_unknown = lambda el: False
     runtime.driver = driver
     runtime._resolve = lambda *args: (snap, el)
     runtime._capture = lambda *args: None
@@ -508,13 +516,21 @@ def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sti
     runtime._dismiss_open_menu = lambda *args: ""
     runtime._refuse_vanished_target = lambda *args: None
     runtime._deliver_type_at_ref = lambda el, text: _atspi.insert_text(field, text)
+    from a11y_computer_use import safety
+
+    runtime.store = safety.PermissionStore(tmp_path / "permissions.json")
+    runtime.store.set_tier("test", safety.Tier.FULL)
+    runtime.audit = safety.AuditLog(tmp_path / "audit")
+    runtime._domain_applies = lambda action: False
+    runtime._reject_terminal = lambda *args, **kwargs: None
     audit = []
+    record = runtime.audit.record_action
 
-    def gate(action, app, execute, **kwargs):
+    def record_action(action, **kwargs):
         audit.append(kwargs)
-        return execute()
+        return record(action, **kwargs)
 
-    runtime._run_gated = gate
+    runtime.audit.record_action = record_action
     secret = "Private584"
     call = (lambda: runtime.set_value(el.ref, secret)) if operation == "set" else (
         lambda: runtime.type_text(secret, ref=el.ref))
@@ -530,6 +546,9 @@ def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sti
         assert secret not in str(caught.value) + repr(caught.value.detail)
     assert len(writes) == 1
     assert audit[0]["secure"] is True
+    files = list(runtime.audit.dir_path.glob("*.jsonl"))
+    assert files
+    assert secret not in "".join(path.read_text() for path in files)
 
 
 @pytest.mark.parametrize("count", [None, False, 1])

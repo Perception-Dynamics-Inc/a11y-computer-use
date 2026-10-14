@@ -2287,7 +2287,7 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
-        if element.role not in {"AXTextField", "AXTextArea"} or element.value is not None:
+        if element.role not in {"AXTextField", "AXTextArea"} or element.value not in (None, ""):
             return False
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         return handle is not None and self._run(lambda: _atspi.text_visibility_unknown(handle))
@@ -2450,7 +2450,7 @@ class LinuxDriver:
                 detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
             )
         self._focused_editable = handle
-        return True
+        return success
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
     def _pointer(self, x: int, y: int) -> tuple[int, int]:
