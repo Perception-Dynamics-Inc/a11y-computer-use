@@ -3776,6 +3776,11 @@ class ATSPIAccessor:
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
+        if role_str == "status bar":
+            # GTK can register the bar before allocating it. Refresh before
+            # reading geometry: _state_flags refreshes later, after a cached
+            # zero-size rectangle would already have hidden the status text.
+            _drop_cached_properties(node)
         # GTK3 gives a single-line Gtk.Entry the same "text" role as a
         # Gtk.TextView. The entry carries SINGLE_LINE; the view carries
         # MULTI_LINE. A single-line entry is a text field, not a textarea.
@@ -3870,6 +3875,18 @@ class ATSPIAccessor:
             label = _image_text_label(node)
             if label:
                 name = label
+        # GtkStatusbar can expose its changing label only through Text.
+        # Keep the statusbar role and avoid probing its numeric Value interface.
+        if role_str == "status bar" and not str(name).strip():
+            try:
+                Atspi = _atspi()
+                count = _safe(lambda: Atspi.Text.get_character_count(node))
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    text = _safe(lambda: Atspi.Text.get_text(node, 0, min(count, _IMAGE_LABEL_CHARS)))
+                    if isinstance(text, str) and text.strip():
+                        name = text.strip()
+            except ImportError:
+                pass
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
@@ -3914,13 +3931,6 @@ class ATSPIAccessor:
             value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
                 node, role, role_str,
             )
-        if role_str == "status bar" and not str(name).strip():
-            # Geany publishes its caret/selection status through Text on an
-            # unnamed status bar. Preserve that text without probing Value
-            # on layout/status containers or replacing a native name.
-            count = _safe(lambda: _atspi().Text.get_character_count(node))
-            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-                name = _read_full_text(node, count=count) or name
         if (
             role_str == "section"
             and role in {"AXTextField", "AXTextArea"}
