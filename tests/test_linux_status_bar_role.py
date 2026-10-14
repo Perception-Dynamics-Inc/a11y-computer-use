@@ -72,3 +72,24 @@ def test_status_bar_snapshot_says_statusbar(monkeypatch) -> None:
     bar = next(el for el in snap.elements if el.title == title)
     assert bar.role == "AXStatusBar"
     assert bar.bounds.width == 1276 and bar.bounds.height == 19
+
+
+def test_unnamed_status_bar_preserves_native_text(monkeypatch) -> None:
+    """Geany's Text-only status includes the actual caret line after a jump."""
+    from types import SimpleNamespace
+
+    bar = _Bar("")
+    text = "line: 301 / 303   col: 0   sel: 0"
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=SimpleNamespace(get_character_count=lambda acc: len(text)),
+    ))
+    monkeypatch.setattr(_atspi, "_read_full_text", lambda acc, count: text)
+    monkeypatch.setattr(
+        _atspi, "_value_text", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probed")),
+    )
+    raw = _atspi.ATSPIAccessor().read(bar)
+    assert raw.role == "AXStatusBar"
+    assert raw.title == text
+    assert raw.value is None

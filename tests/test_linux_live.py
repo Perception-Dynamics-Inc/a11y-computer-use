@@ -1536,6 +1536,121 @@ def test_linux_scroll_to_find_reaches_a_10k_gtk_tree(tmp_path) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
 
+_LABEL_TREE_APP = "culabeltree"
+
+_GTK_LABEL_TREE_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("culabeltree")
+    ROWS = 10000
+    store = Gtk.ListStore(str, str, str)
+    for index in range(ROWS):
+        store.append(["ROW-%05d" % index, "val%d" % index, "n%d" % index])
+    win = Gtk.Window(title="culabeltree")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    header = Gtk.Label(
+        label=(
+            "Instructions mention ROW-00000, ROW-05000, and ROW-09999 "
+            "but this label is not the row."
+        )
+    )
+    tree = Gtk.TreeView(model=store)
+    tree.get_accessible().set_name("Rows")
+    for column_index, title in enumerate(("Name", "Value", "Note")):
+        column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=column_index)
+        column.set_min_width(120)
+        tree.append_column(column)
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.set_size_request(600, 500)
+    scrolled.add(tree)
+    box.pack_start(header, False, False, 0)
+    box.pack_start(scrolled, True, True, 0)
+    win.add(box)
+    win.set_default_size(700, 600)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_label_tree(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "culabeltree.py"
+    script.write_text(_GTK_LABEL_TREE_APP)
+    return subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def test_linux_find_skips_a_label_that_mentions_a_10k_tree_row(tmp_path) -> None:
+    """Live GTK3 TreeView, 10000 rows, plus a label that names three row ids.
+
+    find ROW-00000 returns the on-screen cell. scroll_to_find does not
+    stop on the label at scroll 0 while row 5000 is still off screen; a
+    later hit is the cell. find ROW-05000 returns that cell, not the label.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _LABEL_TREE_APP, "python3")
+    proc = _launch_label_tree(tmp_path)
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, _LABEL_TREE_APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                numbers = _tree_row_numbers(snap)
+                if 0 in numbers and len(set(numbers)) > 6:
+                    break
+            time.sleep(0.4)
+        assert snap is not None
+        numbers = _tree_row_numbers(snap)
+        assert 0 in numbers
+        assert 5000 not in numbers
+        listed = runtime.desktop_snapshot(_LABEL_TREE_APP)
+        assert "this label is not the row" in listed
+        assert "ROW-00000" in listed
+        top = runtime.find(_LABEL_TREE_APP, text="ROW-00000")
+        assert "no elements match" not in top
+        assert "ROW-00000" in top
+        assert "this label is not the row" not in top
+        assert "cell" in top
+        hunted = runtime.scroll_to_find(
+            _LABEL_TREE_APP, text="ROW-05000", direction="down", max_scrolls=2,
+        )
+        assert not hunted.startswith("found after 0"), hunted
+        assert "this label is not the row" not in hunted
+        if hunted.startswith("found after "):
+            assert "ROW-05000" in hunted
+            assert "cell" in hunted
+        else:
+            assert "not found" in hunted
+        deep = runtime.find(_LABEL_TREE_APP, text="ROW-05000")
+        assert "no elements match" not in deep
+        assert "this label is not the row" not in deep
+        assert "ROW-05000" in deep
+        assert "cell" in deep
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def _chrome_binary() -> str | None:
     import shutil
 
@@ -13772,7 +13887,7 @@ def test_linux_gtk_text_view_offscreen_line_is_scrolled_into_the_widget(tmp_path
 
     driver = LinuxDriver()
     _require_bus(driver)
-    runtime = _runtime_for(tmp_path, driver, _DOC_FIND_APP, "python3")
+    runtime = _runtime_for(tmp_path, driver, _DOC_FIND_APP, os.path.basename(sys.executable))
     proc = _launch_doc_find(tmp_path)
     try:
         shot = _wait_doc(
