@@ -13887,7 +13887,7 @@ def test_linux_gtk_text_view_offscreen_line_is_scrolled_into_the_widget(tmp_path
 
     driver = LinuxDriver()
     _require_bus(driver)
-    runtime = _runtime_for(tmp_path, driver, _DOC_FIND_APP, "python3")
+    runtime = _runtime_for(tmp_path, driver, _DOC_FIND_APP, os.path.basename(sys.executable))
     proc = _launch_doc_find(tmp_path)
     try:
         shot = _wait_doc(

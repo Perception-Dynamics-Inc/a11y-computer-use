@@ -4,6 +4,7 @@ Hermetic. The accessible is a fake: no display, no bus, no GTK process.
 """
 
 from __future__ import annotations
+import pytest
 
 from a11y_computer_use import observe
 from a11y_computer_use.drivers import _atspi
@@ -45,6 +46,32 @@ def test_status_bar_role_is_not_a_group() -> None:
     assert _atspi._ROLE.get("panel") == "AXGroup"
 
 
+def test_status_bar_refreshes_startup_geometry_before_reading(monkeypatch) -> None:
+    """A cached, unallocated GTK bar must not hide the current caret line."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    bar = _Bar("line: 301")
+    bar.allocated = False
+    bar.clear_cache_single = lambda: setattr(bar, "allocated", True)
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    monkeypatch.setattr(
+        _atspi, "_extents",
+        lambda acc, keep_zero=False: (
+            ((2.0, 760.0), (1276.0, 19.0)) if acc.allocated
+            else ((0.0, 0.0), (0.0, 0.0))
+        ),
+    )
+    def state_flags(acc):
+        _atspi._drop_cached_properties(acc)
+        return True, False, None, False, None, False, False
+
+    monkeypatch.setattr(_atspi, "_state_flags", state_flags)
+    raw = _atspi.ATSPIAccessor().read(bar)
+    assert raw.title == "line: 301"
+    assert raw.position == (2.0, 760.0)
+    assert raw.size == (1276.0, 19.0)
+
+
 def test_status_bar_snapshot_says_statusbar(monkeypatch) -> None:
     """The image metadata bar keeps its text and renders as statusbar."""
     monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
@@ -72,3 +99,94 @@ def test_status_bar_snapshot_says_statusbar(monkeypatch) -> None:
     bar = next(el for el in snap.elements if el.title == title)
     assert bar.role == "AXStatusBar"
     assert bar.bounds.width == 1276 and bar.bounds.height == 19
+
+
+def test_unnamed_status_bar_keeps_its_text_message(monkeypatch) -> None:
+    """Geany's unnamed caret status remains visible without a Value probe."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    from types import SimpleNamespace
+
+    text = "line: 301 col: 0"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda node: len(text),
+        get_text=lambda node, start, end: text[start:end],
+    )))
+    monkeypatch.setattr(
+        _atspi, "_value_text", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probed")),
+    )
+    raw = _atspi.ATSPIAccessor().read(_Bar(""))
+    assert raw.role == "AXStatusBar"
+    assert raw.title == "line: 301 col: 0"
+    assert raw.value is None
+    window = (
+        RawNode(role="AXWindow", title="Geany", position=(0.0, 0.0), size=(1280.0, 800.0)),
+        [(raw, [])],
+    )
+    snap = build_snapshot(
+        window, _FakeAccessor(), scope=Scope.WINDOW, app="geany", pid=1, geometry=_geometry(),
+    )
+    assert 'statusbar "line: 301 col: 0"' in observe.render_text(snap, mode="full")
+
+
+def test_unnamed_status_bar_keeps_text_interface_label(monkeypatch) -> None:
+    """Geany's caret status survives without probing numeric Value."""
+    from types import SimpleNamespace
+
+    text = "line: 301 col: 1"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda node: len(text),
+        get_text=lambda node, start, end: text[start:end],
+    )))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: pytest.fail("probed Value"))
+    raw = _atspi.ATSPIAccessor().read(_Bar(""))
+    assert raw.role == "AXStatusBar"
+    assert raw.title == text
+    assert raw.value is None
+
+
+def test_unnamed_status_bar_preserves_native_text(monkeypatch) -> None:
+    """Geany's Text-only status includes the actual caret line after a jump."""
+    from types import SimpleNamespace
+
+    bar = _Bar("")
+    text = "line: 301 / 303   col: 0   sel: 0"
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=SimpleNamespace(
+            get_character_count=lambda acc: len(text),
+            get_text=lambda acc, start, end: text[start:end],
+        ),
+    ))
+    monkeypatch.setattr(_atspi, "_read_full_text", lambda acc, count: text)
+    monkeypatch.setattr(
+        _atspi, "_value_text", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("probed")),
+    )
+    raw = _atspi.ATSPIAccessor().read(bar)
+    assert raw.role == "AXStatusBar"
+    assert raw.title == text
+    assert raw.value is None
+
+
+def test_named_status_bar_keeps_distinct_text_message(monkeypatch) -> None:
+    """A generic native name must not hide Geany's current caret line."""
+    from types import SimpleNamespace
+
+    text = "line: 301 col: 0"
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda node: len(text),
+        get_text=lambda node, start, end: text[start:end],
+    )))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: pytest.fail("probed numeric Value"))
+    raw = _atspi.ATSPIAccessor().read(_Bar("Status"))
+    assert raw.role == "AXStatusBar"
+    assert raw.title == "Status"
+    assert raw.value == text
+    window = (RawNode(role="AXWindow", title="Geany", position=(0.0, 0.0), size=(1280.0, 800.0)), [(raw, [])])
+    snap = build_snapshot(window, _FakeAccessor(), scope=Scope.WINDOW, app="geany", pid=1, geometry=_geometry())
+    assert text in observe.render_text(snap, mode="full")

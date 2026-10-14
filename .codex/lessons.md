@@ -12,8 +12,16 @@
 - 2026-10-13 (#467): Geany live fixtures must launch with `--new-instance`; otherwise a launch can delegate to an existing editor, so terminating the returned process leaves windows behind and contaminates later symbol/caret assertions. Verify the Scintilla and symbol-click fixtures together under AT-SPI.
 - 2026-10-13 (#548): A mapped GTK4 window can precede AT-SPI registration. Before reporting a missing bridge, preserve the remaining existing process-startup grace for an unambiguous owner; older apps still fail fast. Keep registration tests hermetic and run them with gi imports disabled to check non-Linux dependency isolation.
 
+
+
+
+
+
 - 2026-10-13 (#202): When merging grant aliases with desktop launch resolution, preserve GenericName program selection and exact permission gates alongside grant-selected labels. Installed bundle resolution must keep the requested spelling even if a Linux executable with a case-folded name is on PATH.
 - 2026-10-13 (#488): xdg-desktop-portal backends share one process across requesting apps. Resolve the full backend name before matching it, inherit identity only from a managed `WM_TRANSIENT_FOR` parent, and bind observations to the active chooser frame. Never add a portal PID to a requesting app's `pids_matching` set, expand that frame into sibling dialogs, or treat a matching portal PID as sufficient for a pointer permission recheck: this would expose other apps under the requesting app's grant.
+
+
+
 - 2026-10-13 (PR #528): Show-desktop requests are asynchronous; verify foreground focus has settled before starting a short agent budget. Use a scripted monotonic clock in the setup regression so host scheduling cannot exhaust the wait, and check the hermetic tests with GI imports blocked.
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 - 2026-10-13 (#496): Okular's childless PDF filler has no AT-SPI Text interface. Keep document surface labels scoped to the unnamed layered/split document pane with a scrollbar sibling; exclude dialogs and named sidebar panes. Do not treat an in-app search invocation as a verified page-text match.
@@ -74,7 +82,6 @@
 
 - 2026-10-14 (PR #549 merge repair): A reachable AT-SPI bus can enable desktop live fixtures even without a display. Run those fixtures under Xvfb with a working window manager; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS. Verify the window manager starts before diagnosing app-activation failures as code regressions.
 - 2026-10-14 (PR #539 repair): A supplied worktree can lag the remote PR branch and have read-only shared Git metadata or protected `.codex` files. Fetch into a writable checkout and start from the current remote head before merging main; a plain push must retain that remote head as an ancestor.
-- 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 
 - 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
 
@@ -91,6 +98,18 @@
 - 2026-10-14 (PR #472 merge repair): Concurrent isolated D-Bus test sessions need distinct writable XDG_CACHE_HOME directories. AT-SPI bus launchers share the cache socket path; ending one session can remove another session's socket and abort MCP subprocess tests. Recheck bus failures in a fresh session with its own cache before treating them as code regressions.
 - 2026-10-14 (PR #549 repair): A supplied worktree can lag its tracking branch even when its files are clean. Fetch and preserve the current remote PR head before merging main, so a plain repair push retains prior repair commits.
 
+- 2026-10-14 (PR #467 repair): An unnamed GTK status bar can expose its caret/selection label only through Text. Preserve that native text when mapping it to AXStatusBar; keep numeric Value probes disabled and retain any explicit accessible name. Merge Scintilla visibility filtering with exact-target selection and opaque-search refusal independently.
+- 2026-10-14 (PR #467 repair): A document reveal takes a new snapshot; apply exact-target preference again after that refresh so incidental labels do not reappear as find targets. Preserve opaque-container refusals when combining visibility filters with scroll search.
+
+- 2026-10-14 (PR #467 repair): After revealing an off-screen document match, apply exact-target preference again to the refreshed snapshot. Merge the visibility filter with current search filtering so a refresh does not resurrect broad document or label matches that main excludes.
+
+- 2026-10-14 (PR #467 repair): After revealing a document match, apply exact-target preference again to the refreshed snapshot. Unnamed GTK status bars can expose their displayed message only through Text; retain the statusbar role and avoid a numeric Value fallback.
+
+
+- 2026-10-14 (#467 repair): GtkStatusbar may expose caret status only through its Text interface. Preserve that text as the unnamed bar's title while keeping numeric Value probes disabled; verify Geany symbol clicks alongside Scintilla search.
+- 2026-10-13 (#467): Refresh AT-SPI status-bar properties before reading geometry. GTK can cache the bar's unallocated startup rectangle; refreshing later in `_state_flags` leaves that snapshot with stale zero-size geometry and drops caret/status evidence. Cover the allocation transition hermetically and verify Geany symbol clicks and Scintilla find together live.
+
+- 2026-10-14 (PR #467 repair): Repair checkouts may fetch only main. Inspect remote.origin.fetch and explicitly fetch the PR branch before pushing so concurrent repairs are merged rather than overlooked.
 - 2026-10-14 (PR #562 repair): Qt viewport text filtering must coexist with application-specific visibility restrictions such as Kate, Evince page handling, and independent button labels. Preserve both sides of appended regression conflicts and compare the resolved patch against main.
 - 2026-10-14 (PR #562 repair): Trim clipped-character placeholders at the edges of Qt viewport text, while retaining internal separators. Leading placeholders otherwise trigger the shared appended-query guard when the visible viewport contains exactly the requested token.
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
@@ -115,3 +134,14 @@
 
 - 2026-10-14 (PR #602 repair): Validate browser live failures with a running window manager before attributing them to ref matching. An extracted Openbox needs both its shared-library path and theme data; missing either can leave native window verification unavailable.
 - 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
+
+
+- 2026-10-14 (PR #467 merge validation): Validate Geany symbol navigation and Scintilla visibility in the same fresh desktop session; caret status is shared evidence for both paths. Preserve both independently appended regression blocks when merging main.
+
+- 2026-10-14 (PR #467 CI repair): A GTK status bar can have a generic accessible name such as Status and a distinct caret message in Text. Read that native message even for named bars, preserving the name and exposing the distinct message as its value without probing numeric Value.
+
+
+
+- 2026-10-14 (PR #467 repair): Set DISPLAY and a unique writable XDG_CACHE_HOME before starting dbus-run-session, not only inside its child script. D-Bus-activated AT-SPI services inherit the session daemon environment and otherwise can bind the wrong display or abort on a read-only home cache. Validate Geany symbol jumps and Scintilla search together with CI-sized Openbox geometry.
+
+- 2026-10-14 (PR #467 repair): A repository fetch refspec may omit cursor branches. Explicitly fetch the PR branch and compare its remote head before conflict repair so existing repair commits and regressions are retained.
