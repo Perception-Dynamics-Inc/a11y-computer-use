@@ -168,6 +168,7 @@ _PICK_ACTION_NAMES = frozenset({"select", "pick"})
 _MAX_CHILDREN_FETCH = 250
 
 _inited = False
+_atspi_binding = None
 
 
 def _atspi():
@@ -176,8 +177,12 @@ def _atspi():
 
     The import stays inside this function. A missing ``gi`` module, or a
     typelib ``require_version`` cannot load, is ImportError either way.
+    Reuse the successfully initialized binding, not any accessibility data.
+    A bus reconnect clears ``_inited`` and must still initialize it again.
     """
-    global _inited
+    global _inited, _atspi_binding
+    if _inited and _atspi_binding is not None and sys.modules.get("gi") is not None:
+        return _atspi_binding
     try:
         import gi
     except ImportError as exc:
@@ -202,6 +207,7 @@ def _atspi():
         # 300ms bound from the first call.
         _safe(lambda: Atspi.set_timeout(300, 0))
         _inited = True
+    _atspi_binding = Atspi
     return Atspi
 
 
@@ -6721,6 +6727,47 @@ def _focused_contenteditable(app: str, *, max_nodes: int = 400):
     return acc
 
 
+def chromium_single_line_entry(acc) -> bool:
+    """Whether native metadata identifies a Chromium single-line entry."""
+    if not _chromium_app(acc) or _role_name(acc) not in {"entry", "spin button"}:
+        return False
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    return tag in {"", "input"} and not _reports_multiline(acc, attrs)
+
+
+def focused_chromium_entry(app: str, *, max_nodes: int = 400):
+    """Find the focused entry when Chrome also marks its container focused.
+
+    Only native focused states identify the target; ambiguous entries are
+    refused by returning None.
+    """
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+        if truncated or acc is None or not _chromium_app(acc):
+            return None
+        queue = [acc]
+        entries = []
+        seen = 0
+        while queue and seen < max_nodes:
+            node = queue.pop(0)
+            seen += 1
+            if chromium_single_line_entry(node) and _state_has(node, "FOCUSED"):
+                entries.append(node)
+            n = int(_call_first(node, ("get_child_count",), default=0) or 0)
+            if n > max_nodes - seen:
+                return None
+            for index in range(n):
+                child = _call_first(node, ("get_child_at_index",), index)
+                if child is not None:
+                    queue.append(child)
+        if queue or len(entries) != 1:
+            return None
+        return entries[0]
+    except Exception:
+        return None
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -6735,6 +6782,10 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
+    if _chromium_app(acc):
+        entry = focused_chromium_entry(app, max_nodes=max_nodes)
+        if entry is not None:
+            acc = entry
     # GTK can return an empty string from Text.get_text even for a drawing
     # area without Text. That is no read-back, not a readable empty field.
     getter = getattr(acc, "get_text_iface", None)
