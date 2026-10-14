@@ -1189,6 +1189,43 @@ def _audacity_track_area(container) -> bool:
 
     return walk(container, 0)
 
+
+def _gucharmap_character_surface(node) -> tuple[str, str]:
+    """Identify the empty painted Character Table without inventing glyph cells."""
+    if _child_count(node) != 0:
+        return "", ""
+    parent = _parent_of(node)
+    if not parent or _role_name(parent) != "scroll pane":
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "gucharmap":
+        return "", ""
+    character_table = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if not character_table:
+                break
+            return (
+                "gucharmap Character Table",
+                "Individual characters are not exposed by AT-SPI. This ref identifies "
+                "the whole painted table, not a character; find and scroll_to_find cannot "
+                "target its glyphs by codepoint or name, and clicking it cannot confirm "
+                "a requested character. Scrolling may change the selection. Use Search > "
+                "Find or the Go menu as separate requested operations; verify the selected "
+                "character in the statusbar or Character Details.",
+            )
+        character_table = character_table or (
+            role == "page tab" and _node_name(parent).casefold() == "character table"
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
+
 def _okular_thumbnail_surface(node) -> tuple[str, str]:
     """Label an empty thumbnail strip from its native sidebar context.
 
@@ -1227,6 +1264,52 @@ def _okular_thumbnail_surface(node) -> tuple[str, str]:
         )
         parent = _parent_of(parent)
     return "", ""
+
+def _kate_gutter(node, position, size) -> bool:
+    """Recognize Kate's childless gutter beside an accessible text editor.
+
+    Use only native boxes and immediate siblings. Missing geometry or an
+    ambiguous editor leaves the filler unnamed; no line positions are inferred.
+    """
+    if position is None or size is None or _child_count(node) != 0:
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "kate":
+        return False
+    parent = _parent_of(node)
+    if parent is None or _frame_ancestor(node) is None:
+        return False
+    ancestor = parent
+    for _ in range(20):
+        if ancestor is None or _role_name(ancestor) == "dialog":
+            return False
+        if _role_name(ancestor) in {"frame", "window"}:
+            break
+        ancestor = _parent_of(ancestor)
+    else:
+        return False
+    count = _child_count(parent)
+    if not isinstance(count, int) or isinstance(count, bool) or not 0 < count <= 64:
+        return False
+    matches = 0
+    x, y = position
+    width, height = size
+    if width <= 0 or height <= width:
+        return False
+    for index in range(count):
+        sibling = _child_at(parent, index)
+        if sibling is None or _role_name(sibling) != "text":
+            continue
+        if not _state_has(sibling, "MULTI_LINE"):
+            continue
+        editor_pos, editor_size = _extents(sibling)
+        if editor_pos is None or editor_size is None:
+            continue
+        ex, ey = editor_pos
+        ew, eh = editor_size
+        if ew > width and abs(x + width - ex) <= 1 and abs(y - ey) <= 1 and abs(height - eh) <= 1:
+            matches += 1
+    return matches == 1
 
 
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
@@ -3534,10 +3617,24 @@ class ATSPIAccessor:
         surface_name = ""
         panel_note = ""
         if (
+            role_str == "drawing area"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _gucharmap_character_surface(node)
+        if (
             role_str == "filler" and role == "AXGroup"
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            not surface_name
+            and role_str == "filler"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _kate_gutter(node, position, size)
+        ):
+            surface_name = "Kate editor gutter"
+            panel_note = "Line numbers are not exposed by AT-SPI; individual lines cannot be targeted here."
         if (
             role_str == "drawing area"
             and not str(name).strip()
@@ -12489,6 +12586,73 @@ def _apply_log_percent(acc, value: str, low: float, high: float, before: float, 
     return _write_log_percent(acc, value, written, before)
 
 
+# ToolZoomSlider::scaleFunc/scaleFuncInv in Xournal++ 1.2.6:
+# https://github.com/xournalpp/xournalpp/blob/v1.2.6/src/core/gui/toolbarMenubar/ToolZoomSlider.cpp
+_XOURNAL_ZOOM_OFFSET = 0.20753
+
+
+def _apply_xournal_percent(acc, value: str, low: float, high: float) -> bool | None:
+    """Convert Xournal++ zoom and verify both Value and percent label.
+
+    Xournal++ truncates the displayed percent and gates document updates on
+    slider interaction. A raw-only change must not be reported as success.
+    None preserves other controls and in-range raw writes.
+    """
+    if _role_name(acc) != "slider":
+        return None
+    app = _application_of(acc)
+    if app is None or _node_name(app).casefold() not in {"xournalpp", "xournal++"}:
+        return None
+    shown = _percent_literal(_node_name(acc))
+    before = _finite_current_value(acc)
+    if shown is None or before is None:
+        return None
+    try:
+        displayed = 100 * (math.exp(before) + _XOURNAL_ZOOM_OFFSET)
+    except OverflowError:
+        return None
+    if not shown <= displayed < shown + 1:
+        return None
+    percent = _percent_literal(value)
+    if percent is None:
+        try:
+            number = _parse_number(value)
+        except ValueError:
+            return None
+        if low <= number <= high:
+            return None
+        percent = number
+    try:
+        minimum = 100 * (math.exp(low) + _XOURNAL_ZOOM_OFFSET)
+        maximum = 100 * (math.exp(high) + _XOURNAL_ZOOM_OFFSET)
+    except OverflowError:
+        return None
+    if (percent <= 100 * _XOURNAL_ZOOM_OFFSET
+            or not minimum - 1e-6 <= percent <= maximum + 1e-6):
+        raise ValueError(
+            f"value {value!r} is outside {_format_bound(minimum)}%..{_format_bound(maximum)}% "
+            f"(value scale {_format_bound(low)}..{_format_bound(high)})"
+        )
+    written = _clamp_near_bounds(
+        math.log(percent / 100 - _XOURNAL_ZOOM_OFFSET), low, high, open_upper=False,
+    )
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, written), False)
+    got = label = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _finite_current_value(acc)
+        label = _percent_literal(_node_name(acc))
+        if (got is not None and _numbers_match(got, written)
+                and label is not None and abs(label - percent) < 1):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    raise _text_mismatch(
+        "text_mismatch", "Xournal++ zoom did not confirm the requested percent",
+        expected=value, actual={"value": got, "percent": label},
+    )
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -12506,6 +12670,8 @@ def set_numeric_value(acc, value: str) -> bool | str:
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
+    Xournal++ zoom uses its offset natural-log scale for percent input;
+    both the raw Value and displayed percent must confirm the write.
     A control whose text is a percent and whose Value is ``log2`` of that
     percent (Inkscape's status zoom) accepts ``50%`` and a bare number that
     falls outside the Value range as that percent, converted with
@@ -12539,6 +12705,10 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        if not open_upper:
+            handled = _apply_xournal_percent(acc, value, low, high)
+            if handled is not None:
+                return handled
         # Some sliders (Xournal++ zoom) expose the percent only as their
         # name. That label does not establish a conversion for the raw scale.
         # Explain the mismatch before parsing, but preserve in-range raw input.
