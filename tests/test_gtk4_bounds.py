@@ -2,7 +2,7 @@
 
 The screen point is the X client origin plus the WINDOW box. A missing
 origin is not replaced with a guess, and a pointer click is not sent to
-that collapsed point. Header-bar WINDOW boxes with negative origins are
+that collapsed point. Negative WINDOW boxes outside the reported frame are
 also unreliable. Synthetic nodes and fake X windows; no live GTK.
 """
 
@@ -626,3 +626,48 @@ def test_other_dialogs_keep_pointer_click(monkeypatch, toolkit, version, nested)
     driver.click(_element(Bounds(0, 852, 447, 156, 44)))
     assert clicks == [(930, 469)]
     assert button.pressed == []
+
+
+@pytest.mark.parametrize("role", ["table row", "table cell"])
+@pytest.mark.parametrize("origin", [(320, 270), (5, 0)])
+def test_baobab_left_edge_row_keeps_recovered_pointer_click(monkeypatch, role, origin):
+    """#617: a flush GTK4 body row shares the frame's negative WINDOW x."""
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_linux_system, "gtk4_content_origin", lambda *_args: origin)
+    frame, row = _button(_App("GTK", "4.18.6"))
+    frame.window = (-5, -5, 960, 616)
+    row.role = role
+    row.name = ".config"
+    row.screen = (0, 0, 474, 35)
+    row.window = (-5, 106, 474, 35)
+    row.actions = ("listitem.scroll-to",)
+    raw = _read(monkeypatch, row)
+    assert raw.position == (origin[0] - 5, origin[1] + 106)
+    assert raw.size == (474, 35)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: row)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda _handle: None)
+    bounds = Bounds(0, *raw.position, *raw.size)
+    driver.click(_element(bounds, raw.role))
+    assert clicks == [(int(bounds.center.x), int(bounds.center.y))]
+    assert row.pressed == []
+
+
+@pytest.mark.parametrize("frame_box", [
+    None, (-5, -5, 0, 616), (-5, -5, 960, 616), (-5, -5, float("inf"), 616),
+])
+@pytest.mark.parametrize("window", [
+    (-6, 106, 474, 35), (227, -6, 34, 34),
+    (-5, 106, 961, 35), (-5, 600, 474, 35),
+])
+def test_negative_gtk4_box_without_frame_containment_stays_untrusted(
+    monkeypatch, frame_box, window,
+):
+    """No tolerance or inferred frame size may bypass the #502 guard."""
+    frame, row = _button(_App("GTK", "4.18.6"), window=window)
+    frame.window = frame_box or (0, 0, 0, 0)
+    if frame_box is None:
+        row.parent = None
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    assert _atspi.gtk4_window_origin_untrusted(row) is True
