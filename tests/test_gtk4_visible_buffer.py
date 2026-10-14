@@ -51,3 +51,19 @@ def test_gtk4_partial_or_horizontal_offscreen_line_is_not_visible(monkeypatch):
     monkeypatch.setattr(_atspi, '_atspi', lambda: NS(CoordType=NS(WINDOW=1), Text=NS(get_range_extents=lambda *args: next(rectangles))))
     monkeypatch.setattr(_atspi, '_raw_rect', lambda *args: (-5, 82, 690, 423))
     assert _atspi._gtk4_visible_buffer(object(), 'partial\nhorizontal') == ''
+
+
+@pytest.mark.parametrize("hidden", [None, 1])
+def test_gtk4_missing_range_uses_measured_character_rectangles(monkeypatch, hidden):
+    calls = []
+
+    def character(acc, offset, coord):
+        calls.append((offset, coord))
+        return NS(x=7, y=600 if offset == hidden else 96, width=9, height=16)
+
+    monkeypatch.setattr(_atspi, '_atspi', lambda: NS(
+        CoordType=NS(WINDOW=1), Text=NS(get_character_extents=character),
+    ))
+    monkeypatch.setattr(_atspi, '_raw_rect', lambda *args: (-5, 82, 690, 423))
+    assert _atspi._gtk4_visible_buffer(object(), 'abc') == ('abc' if hidden is None else '')
+    assert calls == [(0, 1), (1, 1), (2, 1)]

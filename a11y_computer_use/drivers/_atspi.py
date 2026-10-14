@@ -3223,12 +3223,24 @@ def _gtk4_visible_buffer(acc, text: str) -> str | None:
             rect = _safe(lambda: Atspi.Text.get_range_extents(
                 acc, offset, offset + len(content), coord,
             ))
+            rectangles = [rect]
             if rect is None:
-                return None
-            if (rect.width > 0 and rect.height > 0
-                    and x <= rect.x and y <= rect.y
-                    and rect.x + rect.width <= x + width
-                    and rect.y + rect.height <= y + height):
+                # Older GTK 4 bridges omit GetRangeExtents but implement
+                # GetCharacterExtents. Verify every character independently;
+                # endpoint boxes cannot establish visibility of wrapped text.
+                rectangles = [
+                    _safe(lambda index=index: Atspi.Text.get_character_extents(
+                        acc, index, coord,
+                    ))
+                    for index in range(offset, offset + len(content))
+                ]
+                if any(item is None for item in rectangles):
+                    return None
+            if all(item.width > 0 and item.height > 0
+                   and x <= item.x and y <= item.y
+                   and item.x + item.width <= x + width
+                   and item.y + item.height <= y + height
+                   for item in rectangles):
                 visible.append(content)
         offset += len(line)
     # Preserve separation even when intervening lines are off screen.

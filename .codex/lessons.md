@@ -107,3 +107,5 @@
 - 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
 - 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
 - 2026-10-14 (#588): GTK 4 text ranges can reject SCREEN coordinates and point-to-offset queries while WINDOW range extents work. Compare ranges and widget bounds in WINDOW space; keep full-buffer write verification separate from visible snapshot values.
+
+- 2026-10-14 (PR #626 repair): GTK 4 bridges can omit WINDOW GetRangeExtents while supporting GetCharacterExtents. Keep unavailable geometry unreadable, but verify every character through the native fallback rather than relying on endpoint boxes for wrapped lines.

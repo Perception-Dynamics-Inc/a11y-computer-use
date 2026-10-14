@@ -364,6 +364,7 @@ not covered by this guard.
 GTK 4 multiline text values include only complete lines whose AT-SPI text range
 fits inside the widget's WINDOW-coordinate rectangle. This avoids whole-buffer
 matches in `find` and `scroll_to_find` when SCREEN text coordinates and
-point-to-offset queries are unsupported. Missing range geometry leaves the
-value unreadable; partially clipped or horizontally overflowing lines are
-conservatively excluded. This does not change full-buffer write verification.
+point-to-offset queries are unsupported. When range extents are unavailable,
+each character must have measured WINDOW extents inside the widget. Missing
+geometry leaves the value unreadable; partially clipped or horizontally
+overflowing lines are conservatively excluded. This does not change full-buffer write verification.
