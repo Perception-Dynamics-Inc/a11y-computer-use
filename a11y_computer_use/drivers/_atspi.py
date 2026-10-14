@@ -75,7 +75,7 @@ _ROLE = {
     "internal frame": "AXGroup",
     "label": "AXStaticText",
     "static": "AXStaticText",
-    "heading": "AXStaticText",
+    "heading": "AXHeading",
     "paragraph": "AXStaticText",
     "caption": "AXStaticText",
     "image": "AXImage",
@@ -2688,7 +2688,7 @@ _EMPTY_TEXT_VALUE_NAMES = frozenset({
 #: Roles whose Value interface is not the text a person reads. A subnormal
 #: double on these is dropped. A filler is not here.
 _SUBNORMAL_TEXT_ROLES = frozenset({
-    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText",
+    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText", "AXHeading",
 })
 _SUBNORMAL_TEXT_ROLE_NAMES = frozenset({
     "entry", "text", "static", "label", "password text", "paragraph",
@@ -3288,6 +3288,16 @@ def _opaque_surface_role(role: str, role_str: str, attrs: dict) -> str:
     return role
 
 
+def _heading_level(attrs: dict) -> int | None:
+    """A positive heading level reported by AT-SPI, without inferring one."""
+    value = attrs.get("level")
+    try:
+        level = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return level if level > 0 else None
+
+
 def _refine_web_role(role: str, attrs: dict) -> str:
     """Upgrade a generic container role to the ARIA role its xml-roles declares,
     so ARIA-widget <div>s become real interactive elements in the snapshot."""
@@ -3765,6 +3775,7 @@ class ATSPIAccessor:
         )
         return RawNode(
             role=role,
+            heading_level=_heading_level(attrs) if role == "AXHeading" else None,
             subrole=(
                 "terminal" if role_str == "terminal"
                 else "label" if role_str == "label"

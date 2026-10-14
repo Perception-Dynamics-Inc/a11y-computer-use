@@ -37,6 +37,7 @@ def test_role_map_covers_common_atspi_roles() -> None:
     assert r["push button"] == "AXButton"
     assert r["entry"] == "AXTextField"
     assert r["password text"] == "AXSecureTextField"
+    assert r["heading"] == "AXHeading"
     assert r["link"] == "AXLink"
     assert r["check box"] == "AXCheckBox"
     assert r["table cell"] == "AXCell"
@@ -13607,3 +13608,32 @@ def test_gnumeric_crash_guard_is_scoped_to_named_image(fake_atspi, monkeypatch, 
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     element = Element("e492", role, title, None, None, "snap492", clickable=True)
     driver._refuse_gnumeric_go_jump(element, image)
+
+
+@pytest.mark.parametrize("level, expected", [("1", 1), ("2", 2), ("7", 7), (None, None), ("bad", None), ("0", None), ("-1", None)])
+def test_atspi_heading_role_level_and_text_survive_snapshot(monkeypatch, level, expected) -> None:
+    """Firefox/WebKit heading metadata survives reading, pruning and find."""
+    node = _NS(role="heading", attrs={"level": level})
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: acc.role)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: acc.attrs)
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 9.0), (120.0, 80.0)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_call_first", lambda acc, names, *args, default=None: "PreHeading" if names == ("get_name",) else default)
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: "PreHeading")
+    raw = _atspi.ATSPIAccessor().read(node)
+    assert raw.role == "AXHeading"
+    assert raw.heading_level == expected
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="firefox-esr", pid=577, geometry=_geometry())
+    headings = observe.find_elements(snap, role="heading")
+    assert len(headings) == 1
+    assert headings[0].heading_level == expected
+    assert headings[0].value == "PreHeading"
+    assert observe.find_elements(snap, text="PreHeading") == headings
+    for mode in ("full", "interactive"):
+        rendered = observe.render_text(snap, mode=mode)
+        assert 'heading "PreHeading"' in rendered
+        assert (f"(level {expected})" in rendered) if expected else "(level " not in rendered
+    node.role = "static"
+    assert _atspi.ATSPIAccessor().read(node).heading_level is None
