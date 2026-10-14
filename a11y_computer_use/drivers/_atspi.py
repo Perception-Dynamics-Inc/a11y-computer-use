@@ -5489,24 +5489,32 @@ def desktop_application_roots() -> DesktopApplications:
     return DesktopApplications(ready, silent)
 
 
+def _text_security(acc):
+    """Read security metadata once; visibility is meaningful only for entries."""
+    role = _role_name(acc)
+    if role == "password text":
+        return True, role, {}, None
+    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED", "INVISIBLE")):
+        return True, role, {}, None
+    attrs = _get_attributes(acc)
+    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
+           for key in ("password", "protected")):
+        return True, role, attrs, None
+    visibility = None
+    if role in {"entry", "text"}:
+        visibility = _call_first(acc, ("get_visibility",))
+        if visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}:
+            return True, role, attrs, visibility
+    return False, role, attrs, visibility
+
+
 def is_secure(acc) -> bool:
     """Recognize password roles, protected states, and explicit masking.
 
     GTK 4 can omit every masking signal; its empty sentinel must also remain
     empty in public text readback.
     """
-    if _role_name(acc) == "password text":
-        return True
-    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED")):
-        return True
-    attrs = _get_attributes(acc)
-    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
-           for key in ("password", "protected")):
-        return True
-    if _role_name(acc) in {"entry", "text"}:
-        visibility = _call_first(acc, ("get_visibility",))
-        return visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}
-    return False
+    return _text_security(acc)[0]
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -7848,23 +7856,53 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
+def _entry_text_visible(role, attrs, visibility) -> bool:
+    """Require an explicit toolkit text-visibility signal before retrying."""
+    if role not in {"entry", "text"}:
+        return False
+    return str(attrs.get("visibility", "")).strip().lower() in {"true", "1"} or visibility is True
+
+
+def _entry_text_masked(role, attrs, text) -> bool:
+    """Treat bullets and toolkit invisible characters as masked text."""
+    if role not in {"entry", "text"} or not isinstance(text, str) or not text:
+        return False
+    glyphs = set("●•*◦○∙⋅▪▫■□⬤\u200b\u200c\u200d\u2060\ufeff")
+    for key in ("invisible-char", "invisible_char"):
+        char = str(attrs.get(key, ""))
+        if len(char) == 1:
+            glyphs.add(char)
+        elif char.isdecimal():
+            codepoint = int(char)
+            if 0 < codepoint <= 0x10ffff:
+                glyphs.add(chr(codepoint))
+    return any(char in glyphs for char in text) and all(
+        char in glyphs or char.isspace() for char in text
+    )
+
+
 def _read_full_text(acc, *, count=None, verification=False):
     """Keep ambiguous GTK 4 sentinel text empty outside boolean verification.
 
     Chromium's bounded read can echo a write instead of the actual contents,
     so a nonempty sentinel result remains authoritative. NULL still means
     unreadable. A bounded retry may expose an unmarked masked entry, so
-    only private boolean write verification may request it.
+    public retries require explicit text visibility and reject masking glyphs.
     """
-    if is_secure(acc):
+    secure, role, attrs, visibility = _text_security(acc)
+    if secure:
         return None
     Atspi = _atspi()
     got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
-    if got == "" and verification:
+    if got == "" and count != 0 and (
+        verification or _entry_text_visible(role, attrs, visibility)
+    ):
         if count is None:
             count = _safe(lambda: Atspi.Text.get_character_count(acc))
         if isinstance(count, int) and not isinstance(count, bool) and count > 0:
             got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    if not verification and _entry_text_masked(role, attrs, got):
+        return ""
     return got
 
 
@@ -7880,8 +7918,8 @@ def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. GTK 4's empty sentinel stays empty because a bounded
-    read can expose a masked entry without any security signal. A nonempty
+    returns one. GTK 4's empty sentinel is retried only with explicit toolkit
+    text visibility; ambiguous entries and masking glyphs stay empty. A nonempty
     sentinel read is kept: on a Chromium web
     field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
