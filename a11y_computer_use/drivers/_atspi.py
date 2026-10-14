@@ -7086,6 +7086,15 @@ def checked_state_flipped(acc, before: bool) -> bool:
     return False
 
 
+def qt_quick_checkable(acc) -> bool:
+    """Qt Quick checkables expose Toggle plus a nonfunctional Press action."""
+    return (
+        _qt_app(acc)
+        and _role_name(acc) in {"check box", "radio button", "toggle button"}
+        and set(_raw_action_names(acc)) - {"setfocus"} == {"toggle", "press"}
+    )
+
+
 def qt_toggle_only_control(acc) -> bool:
     """Qt buttons and list items whose only activating action is Toggle.
 

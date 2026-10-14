@@ -3448,16 +3448,29 @@ def test_qt_toggle_click_uses_the_visible_part_of_the_bounds(fake_atspi, monkeyp
 
 @pytest.mark.parametrize("action", ["Press", "Click", "activate", "select"])
 @pytest.mark.parametrize("toggle_first", [False, True])
-def test_qt_control_with_another_activating_action_keeps_atspi(
+def test_qt_control_with_another_action_uses_pointer_only_for_press_pair(
     fake_atspi, monkeypatch, action, toggle_first,
 ):
     actions = ("Toggle", "SetFocus", action) if toggle_first else (action, "Toggle", "SetFocus")
     driver, control, element, action_log, events = _toggle_click_target(
         monkeypatch, actions=actions,
     )
-    assert driver.press_element(element) is True
-    assert action_log == [actions[0]]
-    assert events == [("raise", control)]
+    if action == "Press":
+        def pointer_click(x, y, *, button="left", count=1):
+            events.append(("click", x, y, button, count))
+            control.states.symmetric_difference_update({"CHECKED"})
+            control.handler_ran = True
+
+        monkeypatch.setattr(_linux_input, "click", pointer_click)
+        assert driver.press_element(element) is True
+        assert action_log == []
+        assert control.handler_ran is True
+        assert "CHECKED" in control.states
+        assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+    else:
+        assert driver.press_element(element) is True
+        assert action_log == [actions[0]]
+        assert events == [("raise", control)]
 
 
 def test_qt_toggle_on_wayland_keeps_atspi(fake_atspi, monkeypatch):
@@ -14557,3 +14570,77 @@ def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, 
     api = type("API", (), {"Text": Text, "TextGranularity": type("Granularity", (), {"LINE": 0})})
     monkeypatch.setattr(_atspi, "_atspi", lambda: api)
     assert _atspi.is_secure(acc) is (side != "ordinary")
+
+
+@pytest.mark.parametrize("role", ["check box", "toggle button", "radio button"])
+@pytest.mark.parametrize("checked", [False, True])
+@pytest.mark.parametrize("changes", [False, True])
+def test_qt_quick_checkable_click_verifies_handler_effect(
+    fake_atspi, monkeypatch, role, checked, changes,
+):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role=role, actions=("Toggle", "Press", "SetFocus"),
+    )
+    if checked:
+        control.states.add("CHECKED")
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+
+    def pointer_click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        if changes:
+            control.states.symmetric_difference_update({"CHECKED"})
+            control.handler_ran = True
+
+    monkeypatch.setattr(_linux_input, "click", pointer_click)
+    if changes:
+        assert driver.press_element(element) is True
+        assert control.handler_ran is True
+        assert ("CHECKED" in control.states) is not checked
+    else:
+        with pytest.raises(ComputerUseError, match="did not change the checked state") as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "checked_unchanged"
+    assert action_log == []
+    assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("bounds,wayland", [
+    (None, False), (Bounds(0, 40, 60, 0, 20), False),
+    (Bounds(0, -200, 60, 100, 20), False),
+    (Bounds(0, 40, 60, 100, 20), True),
+])
+def test_qt_quick_checkable_refuses_without_pointer_input(fake_atspi, monkeypatch, bounds, wayland):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=("Toggle", "Press", "SetFocus"), bounds=bounds,
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: wayland)
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("role", ["push button", "list item"])
+@pytest.mark.parametrize("toolkit", ["Qt", "gtk"])
+def test_qt_quick_action_pair_does_not_redirect_other_controls(fake_atspi, monkeypatch, role, toolkit):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit=toolkit, role=role, actions=("Press", "Toggle", "SetFocus"),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["Press"]
+    assert events == [("raise", control)]
+
+
+def test_qt_quick_pointer_failure_never_falls_back(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=("Toggle", "Press", "SetFocus"),
+    )
+
+    def failed_click(*args, **kwargs):
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "pointer input failed")
+
+    monkeypatch.setattr(_linux_input, "click", failed_click)
+    with pytest.raises(ComputerUseError, match="pointer input failed"):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
