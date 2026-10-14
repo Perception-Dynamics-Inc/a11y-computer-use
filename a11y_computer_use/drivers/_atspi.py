@@ -168,6 +168,7 @@ _PICK_ACTION_NAMES = frozenset({"select", "pick"})
 _MAX_CHILDREN_FETCH = 250
 
 _inited = False
+_atspi_binding = None
 
 
 def _atspi():
@@ -176,8 +177,12 @@ def _atspi():
 
     The import stays inside this function. A missing ``gi`` module, or a
     typelib ``require_version`` cannot load, is ImportError either way.
+    Reuse the successfully initialized binding, not any accessibility data.
+    A bus reconnect clears ``_inited`` and must still initialize it again.
     """
-    global _inited
+    global _inited, _atspi_binding
+    if _inited and _atspi_binding is not None and sys.modules.get("gi") is not None:
+        return _atspi_binding
     try:
         import gi
     except ImportError as exc:
@@ -202,6 +207,7 @@ def _atspi():
         # 300ms bound from the first call.
         _safe(lambda: Atspi.set_timeout(300, 0))
         _inited = True
+    _atspi_binding = Atspi
     return Atspi
 
 
