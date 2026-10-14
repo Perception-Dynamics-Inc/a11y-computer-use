@@ -223,3 +223,67 @@ def test_gtk4_text_editor_set_value_is_not_covered(tmp_path) -> None:
         assert shown.value == "hello", shown.value
     finally:
         _stop_group(proc)
+
+
+@pytest.mark.parametrize("kind", ["plain", "masked", "password"])
+def test_gtk4_entry_visibility_snapshot_find_and_writes(tmp_path, kind):
+    """Real layout strings distinguish Gtk.Entry masking, unlike GetText."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "entry584.py"
+    script.write_text(f'''
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="Entry584")
+    entry = Gtk.PasswordEntry() if {kind!r} == "password" else Gtk.Entry()
+    if {kind!r} == "masked":
+        entry.set_visibility(False)
+    entry.set_text("ProbeSecret584")
+    entry.update_property([Gtk.AccessibleProperty.LABEL], ["Field584"])
+    window.set_child(entry)
+    window.present()
+app = Gtk.Application(application_id="org.example.Entry584")
+app.connect("activate", activate)
+app.run([])
+''')
+    proc = subprocess.Popen(["python3", str(script)], start_new_session=True,
+                            env=dict(os.environ, GTK_A11Y="atspi", NO_AT_BRIDGE="0"))
+    try:
+        row = _window(driver, "entry584")
+        assert row is not None, driver.windows()
+        driver.focus_window(int(row["window_id"]))
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 15
+        while True:
+            runtime.desktop_snapshot(str(row["app"]))
+            snap = runtime._current
+            fields = [el for el in snap.elements if el.title == "Field584"] if snap else []
+            if fields or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        assert len(fields) == 1
+        field = fields[0]
+        if kind == "plain":
+            assert field.value == "ProbeSecret584"
+            assert observe.find_elements(snap, text="ProbeSecret584")
+        else:
+            assert field.role == "AXSecureTextField"
+            assert field.value is None
+            assert "ProbeSecret584" not in repr(snap)
+            assert not observe.find_elements(snap, text="ProbeSecret584")
+            for operation in (
+                lambda: runtime.set_value(field.ref, "ReplacementSecret584"),
+                lambda: runtime.type_text("ReplacementSecret584", ref=field.ref),
+            ):
+                with pytest.raises(ComputerUseError) as caught:
+                    operation()
+                assert caught.value.code is ErrorCode.SECURE_FIELD
+                assert "ReplacementSecret584" not in str(caught.value)
+                assert "ProbeSecret584" not in str(caught.value)
+    finally:
+        _stop_group(proc)
