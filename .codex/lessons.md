@@ -157,3 +157,5 @@
 - 2026-10-14 (PR #644 repair): GTK4 secure-field refusal and unknown-visibility write redaction are complementary: preserve the early secure-ref refusal together with the private success marker reaching Runtime and audit. Keep both live regression blocks when merging these fixes.
 
 - 2026-10-14 (PR #467 conflict repair): Globally blocking GI imports is useful for hermetic driver checks but invalidates binding tests that inject a fake GI module and CLI subprocess tests that initialize Linux. Recheck those files with native GI in a fresh Xvfb/D-Bus session before diagnosing their failures as regressions.
+
+- 2026-10-14 (PR #467 validation): A supplied linked worktree can have read-only Git metadata and lesson files despite writable source files. Validate and commit in a writable temporary clone, explicitly fetch the PR branch, preserve its current remote history, and use a plain push; do not replace the mounted .git link or force-push.
