@@ -26,6 +26,40 @@ from a11y_computer_use.schema import ComputerUseError, ErrorCode
 _MARGIN_S = 0.75
 
 
+def test_http_probe_does_not_load_tls_trust_store(monkeypatch) -> None:
+    """An unused HTTPS handler must not consume an HTTP probe's deadline."""
+    import http.server
+
+    def unexpected_context(*args, **kwargs):
+        pytest.fail("HTTP probe loaded the TLS trust store")
+
+    monkeypatch.setattr(ssl, "create_default_context", unexpected_context)
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", unexpected_context)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            port = server.server_port
+            infos = socket.getaddrinfo("127.0.0.1", port, type=socket.SOCK_STREAM)
+            observed = []
+            assert conditions._exchange(
+                f"http://127.0.0.1:{port}/missing", infos, 0.3, observed.append,
+            ) == (404, None)
+            assert observed and set(observed) == {404}
+        finally:
+            server.shutdown()
+            worker.join()
+
+
 def _assert_bounded(started: float, timeout_s: float) -> float:
     elapsed = time.monotonic() - started
     assert elapsed <= timeout_s + _MARGIN_S, elapsed
