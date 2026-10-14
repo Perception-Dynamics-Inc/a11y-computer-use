@@ -9437,7 +9437,10 @@ def build_server(
         an editable element from the latest desktop_snapshot/find. Falls back to
         focus+type when the app exposes no settable value. On Linux, a ref that
         is not an editable text element is an error saying it is not editable,
-        and that call sends no keystrokes, clicks, or focus changes. A Firefox
+        and that call sends no keystrokes, clicks, or focus changes. The edit
+        flag uses the node's own STATE_EDITABLE, not EditableText support.
+        Failed or refused writes restore the previous caret and selection,
+        including on the document. A Firefox
         paragraph, document, or select is not an editable entry, even when
         AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
         before any select-all. An Impress slide or Draw page paragraph that
