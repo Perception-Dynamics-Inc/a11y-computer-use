@@ -21,6 +21,7 @@
 
 - 2026-10-13 (PR #528): Show-desktop requests are asynchronous; verify foreground focus has settled before starting a short agent budget. Use a scripted monotonic clock in the setup regression so host scheduling cannot exhaust the wait, and check the hermetic tests with GI imports blocked.
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
+- 2026-10-13 (#496): Okular's childless PDF filler has no AT-SPI Text interface. Keep document surface labels scoped to the unnamed layered/split document pane with a scrollbar sibling; exclude dialogs and named sidebar panes. Do not treat an in-app search invocation as a verified page-text match.
 - 2026-10-13 (#515): AbiWord opaque document views can select text through native Find without exposing a confirming accessibility match. Refuse before Ctrl+F/query input when the search container contains an opaque region; unrelated opaque siblings must not block a verifiable container. Launch-gate tests must stub PATH and desktop entries because executable casing is intentionally canonicalized.
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
@@ -50,6 +51,7 @@
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
 - 2026-10-14 (#472 repair): Inkscape exposes empty dock content as an opaque filler beside its SVG drawing area. Preserve existing surface labels when adding canvas facts; an empty dock may use the real window/document label, but must not inherit the SVG canvas's inaccessible-content note. Verify with a real Inkscape snapshot as well as synthetic drawing areas.
 
+- 2026-10-14 (PR #549 repair): When merging adjacent app-specific surface labels, retain each app recognizer and avoid overwriting an already recognized surface with an unrelated fallback. Run both applications' synthetic snapshot tests after resolving the conflict.
 - 2026-10-14 (PR #539 repair): A failed-looking PR check can be a cancelled job with no failed step or retained log. Inspect the Actions jobs API conclusion and steps before attributing it to a platform regression.
 - 2026-10-14 (#464 repair): When combining Calc commit fixes, marshal the editor commit and individual native reads to the event thread, but keep both the post-commit pause and the grid verification loop on the caller. Regression tests should assert that events can run between operations as well as that native reads retain thread ownership.
 - 2026-10-14 (PR #259): Keep native AT-SPI EDITABLE-state enforcement distinct from synthetic transports that have no native state API. Preserve the latter's verified write/focus fallback, and forward internal keyword arguments (such as Writer's force=True) when wrapping a write to restore caret/selection on failure.
@@ -66,9 +68,16 @@
 
 - 2026-10-14 (PR #539 merge repair): In a sandbox sharing a desktop, GTK live tests can enumerate a launched window yet fail their on-screen/process-family match. Reproduce the same assertion from an unchanged main checkout before attributing it to a merged server change; do not relax window ownership checks.
 - 2026-10-14 (#552 repair): Opaque-search refusals must remain before input when merging verified Find support; retain the FULL grant gate and focused find-bar verification as independent requirements.
+- 2026-10-14 (PR #562 repair): When merging viewport text reads with app-specific snapshot fixes, retain both native visibility helpers and independent label/value handling. Run Qt, AT-SPI cache, and shared server regressions; whole-buffer Text values do not establish substring visibility.
+- 2026-10-14 (#542): Omit clipped prefixes and suffixes from Qt viewport text, adding separators only between visible fragments. Placeholder prefixes can make a genuine newly visible token look like text appended to an editor query and prevent shared scroll-search confirmation.
+- 2026-10-14 (#542 repair): Qt line edits can map to AXTextArea without a SINGLE_LINE state. Require native MULTI_LINE or a multiline attribute before viewport text reads; probing GetBoundedRanges on ordinary Qt controls can stall snapshots when Qt cannot marshal QSpiTextRange replies.
+- 2026-10-14 (PR #562 CI repair): urllib HTTPSHandler eagerly creates a TLS context even in an HTTP-only opener. Initialize the shared HTTP handler directly when an overridden https_open already creates its verified context; otherwise native trust-store loading can exhaust a short HTTP observation deadline before the request. Test that HTTP probes never load TLS settings.
+- 2026-10-14 (PR #562 merge repair): Preserve Kate's app-specific document visibility refusal after generic Qt viewport reads. Cover both Kate and FeatherPad with an available viewport result so a successful generic read cannot silently override the conservative KTextEditor behavior.
+
 - 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
 
+- 2026-10-14 (PR #549 merge repair): A reachable AT-SPI bus can enable desktop live fixtures even without a display. Run those fixtures under Xvfb with a working window manager; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS. Verify the window manager starts before diagnosing app-activation failures as code regressions.
 - 2026-10-14 (PR #539 repair): A supplied worktree can lag the remote PR branch and have read-only shared Git metadata or protected `.codex` files. Fetch into a writable checkout and start from the current remote head before merging main; a plain push must retain that remote head as an ancestor.
 - 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 
@@ -85,6 +94,7 @@
 
 - 2026-10-14 (PR #472 repair): Inkscape can expose both its SVG canvas and a childless painted filler inside the Fill tab as opaque regions. Preserve their native bounds and derive document context from the native frame title; keep the inaccessible SVG content note specific to the drawing canvas. An empty app-specific fallback must not overwrite another application's surface name.
 - 2026-10-14 (PR #472 merge repair): Concurrent isolated D-Bus test sessions need distinct writable XDG_CACHE_HOME directories. AT-SPI bus launchers share the cache socket path; ending one session can remove another session's socket and abort MCP subprocess tests. Recheck bus failures in a fresh session with its own cache before treating them as code regressions.
+- 2026-10-14 (PR #549 repair): A supplied worktree can lag its tracking branch even when its files are clean. Fetch and preserve the current remote PR head before merging main, so a plain repair push retains prior repair commits.
 
 - 2026-10-14 (PR #467 repair): An unnamed GTK status bar can expose its caret/selection label only through Text. Preserve that native text when mapping it to AXStatusBar; keep numeric Value probes disabled and retain any explicit accessible name. Merge Scintilla visibility filtering with exact-target selection and opaque-search refusal independently.
 - 2026-10-14 (PR #467 repair): A document reveal takes a new snapshot; apply exact-target preference again after that refresh so incidental labels do not reappear as find targets. Preserve opaque-container refusals when combining visibility filters with scroll search.
@@ -98,6 +108,8 @@
 - 2026-10-13 (#467): Refresh AT-SPI status-bar properties before reading geometry. GTK can cache the bar's unallocated startup rectangle; refreshing later in `_state_flags` leaves that snapshot with stale zero-size geometry and drops caret/status evidence. Cover the allocation transition hermetically and verify Geany symbol clicks and Scintilla find together live.
 
 - 2026-10-14 (PR #467 repair): Repair checkouts may fetch only main. Inspect remote.origin.fetch and explicitly fetch the PR branch before pushing so concurrent repairs are merged rather than overlooked.
+- 2026-10-14 (PR #562 repair): Qt viewport text filtering must coexist with application-specific visibility restrictions such as Kate, Evince page handling, and independent button labels. Preserve both sides of appended regression conflicts and compare the resolved patch against main.
+- 2026-10-14 (PR #562 repair): Trim clipped-character placeholders at the edges of Qt viewport text, while retaining internal separators. Leading placeholders otherwise trigger the shared appended-query guard when the visible viewport contains exactly the requested token.
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
 
 - 2026-10-14 (PR #566 repair): Appended test conflicts can contain regressions already present earlier in main. Preserve each test once and compare the resolved diff against main before validation.
@@ -107,6 +119,9 @@
 - 2026-10-14 (PR #614 CI repair): AuditLog accepts a directory and writes daily JSONL files inside it. Live redaction assertions must read those files, require nonempty audit output, and never call read_text on the audit directory, even when it was named audit.jsonl.
 - 2026-10-14 (#612): Element bounds are optional in model observation diffs. Compare movement thresholds only when both rectangles exist; preserve missing/present transitions and unrelated state changes without dereferencing missing geometry.
 
+- 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
 - 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
 
 - 2026-10-14 (PR #467 merge validation): Validate Geany symbol navigation and Scintilla visibility in the same fresh desktop session; caret status is shared evidence for both paths. Preserve both independently appended regression blocks when merging main.
+
+- 2026-10-14 (PR #467 CI repair): A GTK status bar can have a generic accessible name such as Status and a distinct caret message in Text. Read that native message even for named bars, preserving the name and exposing the distinct message as its value without probing numeric Value.

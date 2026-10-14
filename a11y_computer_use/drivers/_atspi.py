@@ -1373,6 +1373,40 @@ def _okular_thumbnail_surface(node) -> tuple[str, str]:
         parent = _parent_of(parent)
     return "", ""
 
+
+def _okular_page_surface(node) -> bool:
+    """Recognize Okular's opaque document viewport from its tree context."""
+    if _child_count(node) != 0 or not _parent_of(node):
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "okular":
+        return False
+    parent = _parent_of(node)
+    if parent is None:
+        return False
+    count = _child_count(parent)
+    if not isinstance(count, int) or count <= 0:
+        return False
+    if not any(_role_name(_child_at(parent, i)) == "scroll bar" for i in range(count)):
+        return False
+    layered = False
+    split = False
+    for _ in range(20):
+        if parent is None:
+            return False
+        role = _role_name(parent)
+        if role in {"dialog", "tool bar", "page tab", "page tab list"}:
+            return False
+        if role in {"frame", "window"}:
+            return layered and split
+        if role == "application" or _node_name(parent).strip():
+            return False
+        layered = layered or role == "layered pane"
+        split = split or role == "split pane"
+        parent = _parent_of(parent)
+    return False
+
+
 def _kate_gutter(node, position, size) -> bool:
     """Recognize Kate's childless gutter beside an accessible text editor.
 
@@ -3067,6 +3101,67 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _qt_viewport_text(acc) -> str | None:
+    """Only native text ranges inside a Qt editor's measured viewport.
+
+    Qt Text.get_text exposes the whole document, including off-screen lines.
+    An unavailable bounded-range interface is not evidence of visibility.
+    """
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
+    if clip is None:
+        return None
+    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
+        acc, *map(int, box), coord, clip, clip,
+    ))
+    if not ranges:
+        # Qt commonly leaves GetBoundedRanges unimplemented. Use native
+        # point offsets and character rectangles instead, never the buffer
+        # alone. These reads are repeated after every scroll.
+        left, top, width, height = map(int, box)
+        offsets = [
+            _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
+            for x in (left, left + width - 1)
+            for y in (top, top + height - 1)
+        ]
+        if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
+            return None
+        start, end = min(offsets), max(offsets) + 1
+        text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
+        if not isinstance(text, str):
+            return None
+        visible = []
+        clipped = False
+        for index, char in enumerate(text):
+            rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
+                acc, start + index, coord,
+            ))
+            hits = _rect_hits_box(rect, box)
+            if hits is None:
+                return None
+            # Keep a separator at clipped characters so two disconnected
+            # visible fragments cannot manufacture a substring match.
+            if hits:
+                if clipped and visible:
+                    visible.append("\n")
+                visible.append(char)
+                clipped = False
+            else:
+                clipped = True
+        return "".join(visible)
+    try:
+        contents = [span.content for span in ranges]
+        if not all(isinstance(content, str) for content in contents):
+            return None
+        return "\n".join(contents)
+    except (AttributeError, TypeError):
+        return None
+
+
 def _evince_page(node) -> bool:
     """Evince PDF pages have reliable SHOWING state, but drifting extents."""
     if _role_name(node) != "page":
@@ -3944,14 +4039,19 @@ class ATSPIAccessor:
                 name = label
         # GtkStatusbar can expose its changing label only through Text.
         # Keep the statusbar role and avoid probing its numeric Value interface.
-        if role_str == "status bar" and not str(name).strip():
+        status_text = None
+        if role_str == "status bar":
             try:
                 Atspi = _atspi()
                 count = _safe(lambda: Atspi.Text.get_character_count(node))
                 if isinstance(count, int) and not isinstance(count, bool) and count > 0:
                     text = _safe(lambda: Atspi.Text.get_text(node, 0, min(count, _IMAGE_LABEL_CHARS)))
                     if isinstance(text, str) and text.strip():
-                        name = text.strip()
+                        text = text.strip()
+                        if not str(name).strip():
+                            name = text
+                        elif text != name:
+                            status_text = text
             except ImportError:
                 pass
         unallocated = False
@@ -3998,6 +4098,8 @@ class ATSPIAccessor:
             value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
                 node, role, role_str,
             )
+        if status_text is not None:
+            value = status_text
         if (
             role_str == "section"
             and role in {"AXTextField", "AXTextArea"}
@@ -4010,6 +4112,12 @@ class ATSPIAccessor:
             sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
+        qt_document = (
+            role == "AXTextArea" and role_str != "terminal"
+            and _qt_app(node) and _reports_multiline(node, attrs)
+        )
+        if qt_document:
+            value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
             value = button_name
         screen_text = None
@@ -4029,6 +4137,10 @@ class ATSPIAccessor:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        if qt_document and value is None:
+            hint = (hint + "; " if hint else "") + (
+                "Visible document text unavailable; use in-document Find or line navigation"
+            )
         surface_name = ""
         content_note = ""
         panel_note = ""
@@ -4042,6 +4154,21 @@ class ATSPIAccessor:
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            not surface_name
+            and role_str in {"filler", "panel"}
+            and role == "AXGroup"
+            and not str(name).strip()
+            and not str(description).strip()
+            and value is None
+            and _okular_page_surface(node)
+            and not _has_text_interface(node)
+        ):
+            surface_name = "Okular document / page view"
+            panel_note = (
+                "Page text is not exposed by AT-SPI; find and scroll_to_find cannot read it. "
+                "Use Okular's Ctrl+F Find bar explicitly and verify the result in the UI."
+            )
         if (
             not surface_name
             and role_str == "filler"
@@ -4066,7 +4193,7 @@ class ATSPIAccessor:
                     "The formula bar exposes only the active cell; inspect it to read "
                     "that cell. Other cells require visual inspection."
                 )
-        if role_str == "panel" and role == "AXGroup":
+        if role_str == "panel" and role == "AXGroup" and not surface_name:
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
                 role = panel_role

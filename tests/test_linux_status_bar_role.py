@@ -169,3 +169,24 @@ def test_unnamed_status_bar_preserves_native_text(monkeypatch) -> None:
     assert raw.role == "AXStatusBar"
     assert raw.title == text
     assert raw.value is None
+
+
+def test_named_status_bar_keeps_distinct_text_message(monkeypatch) -> None:
+    """A generic native name must not hide Geany's current caret line."""
+    from types import SimpleNamespace
+
+    text = "line: 301 col: 0"
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda node: len(text),
+        get_text=lambda node, start, end: text[start:end],
+    )))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: pytest.fail("probed numeric Value"))
+    raw = _atspi.ATSPIAccessor().read(_Bar("Status"))
+    assert raw.role == "AXStatusBar"
+    assert raw.title == "Status"
+    assert raw.value == text
+    window = (RawNode(role="AXWindow", title="Geany", position=(0.0, 0.0), size=(1280.0, 800.0)), [(raw, [])])
+    snap = build_snapshot(window, _FakeAccessor(), scope=Scope.WINDOW, app="geany", pid=1, geometry=_geometry())
+    assert text in observe.render_text(snap, mode="full")
