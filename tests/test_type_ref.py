@@ -292,6 +292,9 @@ def test_linux_type_into_inserts_only_after_focus_is_confirmed(monkeypatch) -> N
         _atspi, "_confirm_focus_on_target", lambda _acc: order.append("confirm") or True,
     )
     monkeypatch.setattr(_atspi, "peer_field_texts", lambda _acc: {})
+    # This test checks focus/insert ordering on a synthetic handle, so the
+    # pre-insert read must not load the platform's PyGObject binding.
+    monkeypatch.setattr(_atspi, "_readable_text", lambda _acc: "")
     monkeypatch.setattr(
         _atspi, "insert_text", lambda _acc, text: order.append(f"insert:{text}") or len(text),
     )
