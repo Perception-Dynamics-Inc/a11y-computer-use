@@ -1921,6 +1921,28 @@ class LinuxDriver:
         except Exception:
             return
 
+    def _refuse_gnumeric_go_jump(self, element: Element, handle) -> None:
+        """Refuse the name-box image whose activation crashes Gnumeric (#492)."""
+        if element.role != "AXImage" or element.title != "go-jump" or handle is None:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        def owner_name():
+            app = _atspi._application_of(handle)
+            return _atspi._call_first(app, ("get_name", "getName"), default="") or ""
+
+        if str(self._run(owner_name)).casefold() != "gnumeric":
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "Gnumeric's name-box go-jump image can crash the application; activation was refused",
+            detail={
+                "ref": element.ref, "role": element.role,
+                "reason": "gnumeric_go_jump_crash", "outcome": "refused",
+                "hint": "Cell-address navigation through this control is unsupported (issue #492).",
+            },
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -1935,6 +1957,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_gnumeric_go_jump(element, handle)
         pressed = _cdp_forms.press_checkable(
             element,
             window_title=self._dom_window_title(handle),
@@ -2440,6 +2463,7 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_gnumeric_go_jump(target, handle)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
             if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
