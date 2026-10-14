@@ -3142,6 +3142,38 @@ def _page_text(acc) -> str | None:
     return text or None
 
 
+def _gtk4_visible_buffer(acc, text: str) -> str | None:
+    """Read complete lines verified inside the widget in WINDOW coordinates.
+
+    GTK 4 can reject SCREEN ranges and point-to-offset queries. Missing
+    geometry must not make the whole buffer searchable as visible text.
+    """
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "WINDOW", None)
+    box = _raw_rect(acc, "WINDOW")
+    if coord is None or box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    x, y, width, height = box
+    visible = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if content:
+            rect = _safe(lambda: Atspi.Text.get_range_extents(
+                acc, offset, offset + len(content), coord,
+            ))
+            if rect is None:
+                return None
+            if (rect.width > 0 and rect.height > 0
+                    and x <= rect.x and y <= rect.y
+                    and rect.x + rect.width <= x + width
+                    and rect.y + rect.height <= y + height):
+                visible.append(content)
+        offset += len(line)
+    # Preserve separation even when intervening lines are off screen.
+    return "\n".join(visible)
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -3194,6 +3226,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         got = _read_full_text(acc, count=count)
         if isinstance(got, str) and got:
+            if (_gtk4_app(acc) and role_name in {"text", "editable text", "entry"}
+                    and (_reports_multiline(acc, _get_attributes(acc)) or "\n" in got)):
+                return _gtk4_visible_buffer(acc, got)
             if _OBJECT_REPLACEMENT in got:
                 if _is_choice_role(role, role_name or ""):
                     cleaned = _strip_objects(got)
