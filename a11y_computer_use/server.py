@@ -2576,6 +2576,7 @@ class Runtime:
         ``input_target`` carries the addressed element for text actions,
         whose schema intentionally contains only the text, to the exec gate.
         """
+        self._private_text_result = False
         if self._domain_applies(action):
             self._reject_domain(action, app=app)
         self._reject_terminal(action, app, input_target=input_target)
@@ -2608,6 +2609,11 @@ class Runtime:
             self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
+            # Linux can discover an unknown focused entry during implicit type.
+            # Its private verification returns a count, never the buffer text.
+            if isinstance(action, TypeText) and getattr(result, "private_text_verified", False) is True:
+                secure = True
+                self._private_text_result = True
             duration_ms = (time.perf_counter() - started) * 1000.0
         except ComputerUseError as exc:
             self.audit.record_action(
@@ -2615,7 +2621,8 @@ class Runtime:
                 app=app,
                 decision=decision,
                 result=exc.code.value,
-                secure=secure or exc.code is ErrorCode.SECURE_FIELD,
+                secure=secure or exc.code is ErrorCode.SECURE_FIELD
+                or (isinstance(action, TypeText) and (exc.detail or {}).get("private_text") is True),
                 metrics={"security_violation": "exec_disabled"}
                 if exc.code is ErrorCode.EXEC_DISABLED else None,
             )
@@ -3092,6 +3099,10 @@ class Runtime:
         cover_click: bool = False,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
+        if tool == "type" and getattr(self, "_private_text_result", False):
+            self._private_text_result = False
+            text = "typed into field (text redacted)"
+            verdict = ("confirmed", "private boolean text verification succeeded")
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
@@ -5602,6 +5613,7 @@ class Runtime:
                 "refusing to type into a secure field; secrets are entered by the human",
                 detail={"ref": ref, "role": live.role},
             )
+        private = bool(getattr(self.driver, "text_visibility_unknown", lambda el: False)(live))
         action = TypeText(text=text)
         note: list[str] = []
 
@@ -5613,7 +5625,12 @@ class Runtime:
             self._refuse_vanished_target(live)
             return self._deliver_type_at_ref(live, text)
 
-        count = self._run_gated(action, gate, execute, input_target=live)
+        count = self._run_gated(action, gate, execute, input_target=live, secure=private)
+        if private:
+            return self._conclude(
+                "typed into field (text redacted)", tool="type", app=gate,
+                had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
+            )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
         return self._conclude(
             f"typed {shown} characters into {ref}{''.join(note)}",
@@ -6161,6 +6178,7 @@ class Runtime:
                 "refusing to set a secure field; secrets are entered by the human",
                 detail={"ref": ref, "role": live.role},
             )
+        private = bool(getattr(self.driver, "text_visibility_unknown", lambda el: False)(live))
         action = TypeText(text=value)
         landed: list[str] = []
 
@@ -6206,7 +6224,12 @@ class Runtime:
             self._recheck_target(app, live)  # HID typing: the classic guard, right before injection
             self.driver.type_text(value)
 
-        self._run_gated(action, app, execute, input_target=live)
+        self._run_gated(action, app, execute, input_target=live, secure=private)
+        if private:
+            return self._conclude(
+                "set field (text redacted)", tool="set_value", app=app,
+                had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
+            )
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
         text = f"set {ref} = {shown!r}"
@@ -9475,7 +9498,10 @@ def build_server(
         Gated at tier 'full' against the target app; refuses with
         secure_field when a password field has focus or the ref is a secure
         field — secrets are typed by the human, never by this tool. The
-        text is unchanged. In a LibreOffice Writer document a newline is
+        text is unchanged. An empty GTK 4 entry with no masking signal accepts
+        type(ref) with a redacted result and private boolean verification;
+        a fresh snapshot then classifies its rendered text.
+        In a LibreOffice Writer document a newline is
         Return, a new paragraph; U+2028 stays a line break. Line breaks
         where paragraphs were requested are not confirmed. In a Chrome
         contenteditable a newline matches a paragraph or block boundary in
@@ -9665,7 +9691,10 @@ def build_server(
         target focus can activate a different control. set_value does not
         send Return or activate the field automatically.
         Gated at tier 'full'; refuses secure/password fields (secrets are
-        entered by the human, never this tool). Ideal for filling forms fast.
+        entered by the human, never this tool). An empty GTK 4 entry without
+        masking signals accepts a privately verified write with a redacted
+        result; a fresh snapshot then classifies its rendered text.
+        Ideal for filling forms fast.
         Structured content adds outcome, next, and evidence. A combo, popup,
         or list is the select action: the same sentence, judged by read-back."""
         return _publish(await run(runtime.set_value, ref, value, _outcome=True, _tool="set_value"))

@@ -40,6 +40,19 @@ from a11y_computer_use.schema import (
 )
 
 
+def _no_accessibility_tree(app: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{app!r} is running but exposes no AT-SPI accessibility tree",
+        detail={
+            "app": app,
+            "reason": "no_accessibility_bridge",
+            "hint": "Use a screenshot and explicit coordinates, or enable the app's "
+                    "accessibility bridge. If the app is still starting, retry.",
+        },
+    )
+
+
 def _hint_pid(app: str) -> int | None:
     """The only X11 pid for ``app``, or None when the name is not unique.
 
@@ -1444,17 +1457,23 @@ class LinuxDriver:
         # other case: the caller says LibreOffice and the bus says
         # soffice.bin, so the comm is used only after the given name misses.
         resolved, root = self._root_for_snapshot(app, scope)
-        # The X window is in app list and window list before the application
-        # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
-        # the list still shows the app, or a LibreOffice process in this
-        # session is up, and stop at ATSPI_REGISTER_WAIT_S. A name that is
-        # not listed does not wait, including a soffice process on another
-        # display. The missing gtk3 bridge is reported after that deadline,
-        # not during the registration gap.
-        if root is None and (
+        # Preserve the existing process-startup grace: GTK4 can map its
+        # window before registering its tree. Older non-office apps get one
+        # short retry, since a window alone does not promise a bridge.
+        waiting_for_registration = root is None and (
             _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
-        ):
-            deadline = time.monotonic() + _atspi.ATSPI_REGISTER_WAIT_S
+        )
+        if waiting_for_registration:
+            office = _atspi.libreoffice_app(app) or _atspi.libreoffice_app(resolved)
+            wait = (_atspi.ATSPI_REGISTER_WAIT_S if office
+                    else _atspi.ATSPI_REGISTER_POLL_S)
+            if not office:
+                wait = max(wait, min(
+                    _atspi.ATSPI_REGISTER_WAIT_S,
+                    max(_atspi.registration_startup_remaining(app),
+                        _atspi.registration_startup_remaining(resolved)),
+                ))
+            deadline = time.monotonic() + wait
             while root is None and time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1467,10 +1486,8 @@ class LinuxDriver:
                     _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
                 ):
                     break
-        # An empty tree is a running app with nothing to show. No AT-SPI
-        # application at all is the same answer menu list already gives:
-        # the app is not running. An empty snapshot there told the agent
-        # the app was open and custom-drawn.
+        # A listed app without a root is running but currently inaccessible.
+        # Keep genuinely absent apps distinct from a missing bridge.
         if root is None:
             if _atspi.libreoffice_without_bridge(resolved):
                 raise ComputerUseError(
@@ -1483,6 +1500,13 @@ class LinuxDriver:
                         "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
                     },
                 )
+            # A window can map between the registration check and this
+            # final listing. It has not received even the short retry yet;
+            # leave it retryable rather than diagnosing a missing bridge.
+            if waiting_for_registration and (
+                _atspi.app_listed(app) or _atspi.app_listed(resolved)
+            ):
+                raise _no_accessibility_tree(resolved)
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {resolved!r}",
@@ -2230,6 +2254,16 @@ class LinuxDriver:
                 "evidence": "another field changed during set_value",
             },
         ) from exc
+
+    def text_visibility_unknown(self, element: Element) -> bool:
+        """Whether this write needs private verification and a redacted receipt."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role not in {"AXTextField", "AXTextArea"} or element.value is not None:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        return handle is not None and self._run(lambda: _atspi.text_visibility_unknown(handle))
 
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
@@ -4775,6 +4809,8 @@ class LinuxDriver:
         except ImportError as exc:
             raise _missing_atspi_bindings(exc) from exc
         if root is None:
+            if _atspi.app_listed(app):
+                raise _no_accessibility_tree(app)
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {app!r}",
