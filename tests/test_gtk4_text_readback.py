@@ -321,3 +321,266 @@ def test_text_security_does_not_retry_a_missing_state_set(monkeypatch):
     assert calls == ["states"]
     assert _atspi.is_secure(field) is False
     assert calls == ["states", "states"]
+
+
+@pytest.mark.parametrize("kind", ["plain", "masked", "password", "unreadable", "custom-mask"])
+def test_real_gtk4_layout_signal(monkeypatch, kind):
+    """Mirror GTK 4.18 probe: GetText leaks; layout strings show bullets."""
+    from types import SimpleNamespace
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Scope
+    from tests.test_linux_synthetic import _geometry
+
+    calls = {"states": 0, "attrs": 0, "layout": 0}
+    field = _Entry("password text" if kind == "password" else "text", "ProbeSecret584")
+    field.get_name = lambda: "Field"
+
+    def states():
+        calls["states"] += 1
+        return SimpleNamespace(names={"EDITABLE", "FOCUSABLE", "SENSITIVE", "SHOWING", "VISIBLE"})
+
+    def attrs():
+        calls["attrs"] += 1
+        return {"toolkit": "GTK"}
+
+    class Text(_Text):
+        @staticmethod
+        def get_string_at_offset(acc, offset, granularity):
+            calls["layout"] += 1
+            assert offset == 0 and granularity == "LINE"
+            return SimpleNamespace(content=(field.text if kind == "plain" else
+                                           "x" * len(field.text) if kind == "custom-mask" else
+                                           "•" * len(field.text) if kind != "unreadable" else None))
+
+    field.get_state_set = states
+    field.get_attributes = attrs
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=Text, TextGranularity=SimpleNamespace(LINE="LINE")))
+    assert _atspi.is_secure(field) is (kind != "plain")
+    assert calls == ({"states": 0, "attrs": 0, "layout": 0} if kind == "password"
+                     else {"states": 1, "attrs": 1, "layout": 1})
+    raw = _atspi.ATSPIAccessor().read(field)
+    assert (raw.role == "AXSecureTextField") is (kind != "plain")
+    snap = observe.build_snapshot(field, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                                  app="test", pid=1, geometry=_geometry())
+    assert bool(observe.find_elements(snap, text=field.text)) is (kind == "plain")
+    if kind != "plain":
+        assert field.text not in repr(snap)
+        assert not _atspi.set_text(field, "ReplacementSecret584")
+        assert not _atspi._verification_matches(field, field.text)
+        assert not field.writes
+        if kind == "custom-mask":
+            assert field.reads and all(end > 0 for _, end in field.reads)
+        else:
+            assert not field.reads
+
+
+@pytest.mark.parametrize("operation", ["set", "type"])
+def test_layout_masked_field_runtime_refuses_without_echo(monkeypatch, operation):
+    from types import SimpleNamespace
+    from a11y_computer_use import observe, server
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
+    from tests.test_linux_synthetic import _geometry
+
+    field = _Entry("text", "OriginalSecret584")
+    field.get_attributes = lambda: {"toolkit": "GTK"}
+    field.get_state_set = lambda: SimpleNamespace(names={"EDITABLE", "SENSITIVE", "VISIBLE", "SHOWING"})
+
+    class Text(_Text):
+        @staticmethod
+        def get_string_at_offset(acc, offset, granularity):
+            return SimpleNamespace(content="•" * len(acc.text))
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=Text, TextGranularity=SimpleNamespace(LINE="LINE")))
+    snap = observe.build_snapshot(field, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                                  app="test", pid=1, geometry=_geometry())
+    el = snap.elements[0]
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime._resolve = lambda *args: (snap, el)
+    runtime._capture = lambda *args: None
+    runtime._cover_owner = lambda *args: None
+    runtime._type_target_error = lambda *args: None
+    audit = []
+    runtime._record_failure = lambda *args, **kwargs: audit.append(kwargs)
+    with pytest.raises(ComputerUseError) as caught:
+        if operation == "set":
+            runtime.set_value(el.ref, "ReplacementSecret584")
+        else:
+            runtime.type_text("ReplacementSecret584", ref=el.ref)
+    assert caught.value.code is ErrorCode.SECURE_FIELD
+    for secret in (field.text, "ReplacementSecret584"):
+        assert secret not in str(caught.value)
+        assert secret not in repr(caught.value.detail)
+        assert secret not in repr(audit)
+    assert audit[0]["result"] == "secure_field"
+    assert not field.reads and not field.writes
+
+
+def test_gtk_layout_masking_rechecked_and_multiline_not_probed(monkeypatch):
+    from types import SimpleNamespace
+
+    field = _Entry("text", "Visible584")
+    field.get_attributes = lambda: {"toolkit": "GTK"}
+    state = {"multiline": False, "masked": False}
+    field.get_state_set = lambda: SimpleNamespace(names={"MULTI_LINE"} if state["multiline"] else set())
+    calls = []
+
+    class Text(_Text):
+        @staticmethod
+        def get_string_at_offset(acc, offset, granularity):
+            calls.append(state["masked"])
+            return SimpleNamespace(content="•" * len(acc.text) if state["masked"] else acc.text)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=Text, TextGranularity=SimpleNamespace(LINE="LINE")))
+    with _atspi.read_cache():
+        assert not _atspi.is_secure(field)
+        state["masked"] = True
+        assert _atspi.is_secure(field)
+        state["multiline"] = True
+        assert not _atspi.is_secure(field)
+    assert calls == [False, True]
+
+
+def test_gtk3_empty_entry_keeps_existing_write_path(monkeypatch):
+    field = _Entry("text", "")
+    field.get_attributes = lambda: {"toolkit": "GTK"}
+    field.get_toolkit_version = lambda: "3.24.49"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Api)
+    assert not _atspi.is_secure(field)
+    assert _atspi.set_text(field, "Visible584")
+    assert field.writes == ["Visible584"]
+
+
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("operation", ["set", "type"])
+@pytest.mark.parametrize("sticks", [False, True])
+def test_empty_gtk4_unknown_write_is_private(monkeypatch, masked, operation, sticks):
+    from types import SimpleNamespace
+    from a11y_computer_use import observe, server
+    from a11y_computer_use.schema import ComputerUseError, Scope
+    from tests.test_linux_synthetic import _geometry
+
+    field = _Entry("text", "")
+    field.get_attributes = lambda: {"toolkit": "GTK"}
+    field.get_name = lambda: "Field584"
+    field.get_state_set = lambda: SimpleNamespace(names={"EDITABLE", "SENSITIVE"})
+    writes = []
+
+    def write(text):
+        writes.append(text)
+        if sticks:
+            field.text = text
+        return True
+
+    field.set_text_contents = write
+    field.insert_text = lambda offset, text, length: write(text)
+
+    class Text(_Text):
+        @staticmethod
+        def get_string_at_offset(acc, offset, granularity):
+            return SimpleNamespace(content="•" * len(acc.text) if masked else acc.text)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=Text, TextGranularity=SimpleNamespace(LINE="LINE")))
+    assert not _atspi.is_secure(field)
+    assert _atspi.text_visibility_unknown(field)
+    snap = observe.build_snapshot(field, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                                  app="test", pid=1, geometry=_geometry())
+    el = snap.elements[0]
+    assert not el.secure and el.value is None
+    runtime = server.Runtime.__new__(server.Runtime)
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda call: call()
+    driver.set_value = lambda el, text: _atspi.set_text(field, text)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: field)
+    runtime.driver = driver
+    runtime._resolve = lambda *args: (snap, el)
+    runtime._capture = lambda *args: None
+    runtime._cover_owner = lambda *args: None
+    runtime._type_target_error = lambda *args: None
+    runtime._reject_domain = lambda *args, **kwargs: None
+    runtime._refuse_disabled = lambda *args, **kwargs: None
+    runtime._guard_user = lambda *args: None
+    runtime._dismiss_open_menu = lambda *args: ""
+    runtime._refuse_vanished_target = lambda *args: None
+    runtime._deliver_type_at_ref = lambda el, text: _atspi.insert_text(field, text)
+    audit = []
+
+    def gate(action, app, execute, **kwargs):
+        audit.append(kwargs)
+        return execute()
+
+    runtime._run_gated = gate
+    secret = "Private584"
+    call = (lambda: runtime.set_value(el.ref, secret)) if operation == "set" else (
+        lambda: runtime.type_text(secret, ref=el.ref))
+    if sticks:
+        result = call()
+        assert result.outcome == "confirmed"
+        assert secret not in str(result) + repr(result.as_dict())
+        assert _atspi.is_secure(field) is masked
+        assert _atspi._full_text(field) == (None if masked else secret)
+    else:
+        with pytest.raises(ComputerUseError) as caught:
+            call()
+        assert secret not in str(caught.value) + repr(caught.value.detail)
+    assert len(writes) == 1
+    assert audit[0]["secure"] is True
+
+
+@pytest.mark.parametrize("count", [None, False, 1])
+def test_empty_layout_requires_real_zero_count_to_allow_writes(monkeypatch, count):
+    from types import SimpleNamespace
+
+    class Text(_Text):
+        @staticmethod
+        def get_character_count(acc):
+            return count
+
+        @staticmethod
+        def get_string_at_offset(acc, offset, granularity):
+            return SimpleNamespace(content="")
+
+    field = _Entry("text", "")
+    field.get_attributes = lambda: {"toolkit": "GTK"}
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        Text=Text, TextGranularity=SimpleNamespace(LINE="LINE")))
+    assert _atspi.is_secure(field)
+    assert not _atspi.text_visibility_unknown(field)
+    assert not _atspi.set_text(field, "Private584")
+    assert not field.writes and not field.reads
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_implicit_unknown_type_redacts_audit_and_receipt(monkeypatch, success):
+    from types import SimpleNamespace
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import ComputerUseError, TypeText
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = SimpleNamespace(name="linux")
+    runtime._domain_applies = lambda action: False
+    runtime._reject_terminal = lambda *args, **kwargs: None
+    runtime._require_permission = lambda *args, **kwargs: None
+    recorded = []
+    runtime.audit = SimpleNamespace(record_action=lambda *args, **kwargs: recorded.append(kwargs))
+    monkeypatch.setattr(server, "CONFIRMATION_GATE", False)
+
+    def execute():
+        if success:
+            return _atspi._PrivateTextCount(10)
+        raise _atspi._text_mismatch("text_mismatch", "private write not verified", private_text=True)
+
+    if success:
+        runtime._run_gated(TypeText(text="Private584"), "test", execute)
+        result = runtime._conclude("must be redacted Private584", tool="type")
+        assert result.outcome == "confirmed"
+        assert "Private584" not in str(result) + repr(result.as_dict())
+    else:
+        with pytest.raises(ComputerUseError):
+            runtime._run_gated(TypeText(text="Private584"), "test", execute)
+    assert recorded[0]["secure"] is True

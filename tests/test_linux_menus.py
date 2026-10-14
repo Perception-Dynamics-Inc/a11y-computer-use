@@ -806,6 +806,7 @@ def test_missing_app_is_app_not_found_for_snapshot_and_menus(monkeypatch) -> Non
         assert name == "xfce4-terminal"
         return None
 
+    monkeypatch.setattr("a11y_computer_use.drivers._atspi.app_listed", lambda _name: False)
     monkeypatch.setattr("a11y_computer_use.drivers._atspi.find_root", find_root)
     driver = LinuxDriver()
     for call in (

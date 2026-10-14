@@ -95,6 +95,14 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 
 **App identity** on Linux is the process **comm name** (`/proc/<pid>/comm`, exe-basename fallback), the analog of a macOS bundle id / Windows exe for permission-keying and the safety layer's app gating.
 
+HTML `section` nodes tagged `div`, `pre`, `code`, `blockquote`, `address`,
+or `figcaption` expose their own AT-SPI Text as snapshot values, including
+when Gecko or WebKitGTK provides no static-text children. This makes those
+words available to `find` and snapshot-based `scroll_to_find`. Sections containing
+only embedded controls stay valueless, and protected text stays private.
+This mapping is covered by synthetic tests; Firefox/Yelp live verification
+has not been performed for this change.
+
 ## Linux-specific concerns (no macOS analog)
 
 - Qt on X11 joins the accessibility tree through the X root-window property `AT_SPI_BUS` (type `STRING`, 8-bit) or through `org.a11y.Bus` on the session bus. `at-spi-bus-launcher` writes that property when it starts. Tester launched a PyQt6 window with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` before the property existed, and the window never appeared in the tree. The live Qt fixture reads `org.a11y.Bus.GetAddress` and writes that address onto the root before the process starts. It does not export `AT_SPI_BUS_ADDRESS`: on Qt 6.4 that variable makes the bridge emit its enable signal before the slot is connected, and the application never registers. Set the root property, and leave the variable unset, when you launch Qt outside the fixture.
@@ -102,6 +110,7 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 - A ref click on a file-manager side pane, or on a tree or list row that opens a folder, uses that row's own activation. A Thunar shortcut cell's `activate` action and Return leave the folder where it was; the click is a pointer click at the row. A tree or list row whose own action is `activate` uses that action. Return is sent only when the row has no box and no activate action. The click is `confirmed` only when the location entry or the path bar changed. A row that was only selected is `partial`. A file row inside the folder view's tab still selects and does not open. A GTK tree with no location bar still selects through the parent's Selection interface.
 - A ref click on a Qt table cell is a pointer click at the cell's center. `Toggle` and `Selection.select_child` add the cell and leave `currentItem` where it was, so a later Delete or key would hit every selected cell and the old current cell. The click is a success only when that cell is the only selected cell and it is focused, which is the current cell. The outcome is `confirmed` when the accessibility state changed to that, and `refused` with `selection_unchanged` when the click did not. A tree item stays on `Toggle`, which selects the row and does not expand it.
 - Accessibility must be ENABLED; it is the key runtime requirement. This is the exact opposite of the Grok-desktop default, which ships with a11y OFF and drives everything by vision+coordinates. a11y-computer-use's a11y-first path needs the AT-SPI2 registry reachable, which means: `at-spi2-core` installed and running (the `org.a11y.Bus` name present on the session bus), toolkits bridging into it (`gsettings set org.gnome.desktop.interface toolkit-accessibility true`; for non-GNOME sessions export `GTK_MODULES=gail:atk-bridge`), and Chromium/Electron apps launched with `--force-renderer-accessibility` (they otherwise expose an empty tree). `ensure_trusted` (`a11y_computer_use/drivers/linux.py`) checks only the first of these: it best-effort sets `org.a11y.Status.IsEnabled`/`ScreenReaderEnabled` true on the session bus (`_atspi.enable_a11y_status`, result not checked; opt out with `A11Y_COMPUTER_USE_NO_WEB_A11Y=1`) and then probes `Atspi.get_desktop(0)`; if the bindings fail to import or the desktop is unreachable it raises a structured `permission_denied_accessibility` error whose hint lists the apt, gsettings, and `--force-renderer-accessibility` steps. It does not verify that toolkits are bridged (gsettings / `GTK_MODULES`) or that Chromium/Electron apps were launched with `--force-renderer-accessibility`; an app whose tree is empty for those reasons still yields an empty snapshot, not an error. Turning an accessibility-OFF Linux desktop into an accessibility-FIRST one is the whole point of this backend.
+- A running app that appears in app/window lists but has no AT-SPI root returns `unsupported` with `reason: no_accessibility_bridge` from app-scoped snapshots, find, and menu listing. A window first listed after the registration eligibility check remains `app_not_found` for that observation so the next call can retry registration. Snapshots preserve the remaining existing 15 s startup grace for an unambiguous newly started window owner, so a GTK4 window may register its tree after it maps. A distinct GTK program name may identify that owner through WM_CLASS when the process runs under an interpreter; a window title alone does not establish ownership. Older non-LibreOffice apps get one short registration retry; LibreOffice retains its 15 s registration grace period. This also covers an app connected to the accessibility bus without exporting a root. The hint suggests screenshots with explicit coordinates, enabling the bridge, or retrying if the app is still starting. A registered app with an empty tree remains a valid snapshot; an app absent from both AT-SPI and the lists remains `app_not_found`.
 - A frozen application does not answer AT-SPI. libatspi waits 300ms per call, and a walk of a stopped process (Mousepad under `SIGSTOP`) used to take about 19s and then succeed with an empty tree plus the custom-drawn `screen_text` note. `screen_text` has no engine on Linux. Snapshot now bounds that wait per application. A read that returns, however slow, is a live app: Firefox, Chrome, and LibreOffice cross 300ms on startup and on large documents. `app_not_responding` is raised only with evidence of a hang. The process state in `/proc/<pid>/stat` is `T` or `t` (stopped) and a query went unanswered, which fails on that first miss so a `SIGSTOP` stays inside one D-Bus timeout. The pid is the window owner when that comm matches, or the one stopped process whose command line contains the AT-SPI program name when the comm is different (`cuatestapp` on `python`). Otherwise the process is still scheduled, and the error is raised only when a cheap ping (`get_name` / `get_process_id`, retried, on a longer timeout than the walk) gets no reply across several seconds of consecutive misses. A process younger than the registration wait is not failed for those misses; the snapshot wait retries it. The note is not added. `Scope.DISPLAY` skips an application that does not answer and still returns the others. After the process continues, the next snapshot is the tree again. Ref re-resolution is unchanged: a missing anchor is still `stale_ref`, and a node that is only scrolled off or not showing keeps the code it had.
 - No batch read. AT-SPI is a D-Bus protocol with **no batch/prefetch**: every property and every `get_child_at_index` is its own cross-process round-trip (the weakness it has vs UIA's `CacheRequest` and AX's multi-attribute reads). Two mitigations in `_atspi.py`: every read is defensive (`_safe`/`_call_first`: a flaky read degrades to a sane default, never crashes the walk), and children fetched per node are capped at `_MAX_CHILDREN_FETCH` (250); the engine only walks the first `_MAX_WALK_CHILDREN` (200) anyway, so fetching a virtualized 10k-row list one round-trip at a time would be ruinous for nothing. A Chromium list is the exception in `ATSPIAccessor.children`: it returns the on-screen named rows, and when the child count is above that cap the walk starts at the first child whose box reaches the viewport. Rows the tree does not expose are not added. A subtree cache/diff is the perf follow-up.
 - PyGObject interface-method collision. Reading a text field's contents must use the explicit interface class form `Atspi.Text.get_text(acc, 0, -1)`. The instance form `acc.get_text_iface().get_text(a, b)` resolves to `Atspi.Accessible.get_text` (a 1-arg method) and raises `TypeError`, which, swallowed by the defensive readers, silently blanks every field value. (`get_character_count` and the EditableText/Action methods don't collide.) `_value_text` uses the explicit form.
@@ -251,6 +260,8 @@ to use in-document navigation. Single-line search fields keep their values.
 This conservative behavior is covered by synthetic tests; no live Kate run
 was performed for #477.
 
+GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
+
 Kate's unnamed, childless filler directly left of a multiline editor is labelled
 `Kate editor gutter` when native bounds establish the shared edge and height.
 It remains opaque: AT-SPI does not expose individual line numbers, so this label
@@ -270,13 +281,26 @@ galculator-shaped regression tests; no local live verification.
 
 ### Masked GTK 4 entries
 
-Password roles, password/protected states, and explicit entry visibility-off
-signals are treated as secure fields and their text is not read. GTK 4 can omit
-all masking metadata for a masked `Gtk.Entry`. An empty `GetText(0, -1)`
-result therefore stays empty in snapshots, find, and action readback, even when
-the character count is positive. This also hides values for plain GTK 4 entries
-with the same empty sentinel behavior. Positive-offset reads are used only for
-private boolean write verification; their contents are never published.
+Password roles, password/protected/invisible states, visibility-off, and
+invisible-character attributes classify an entry as `securetextfield`. Its
+value is omitted, and type/set_value are refused without echoing the input.
+
+GTK 4 can omit those signals and expose the plaintext buffer through bounded
+`GetText` even when the entry is masked. For GTK 4 single-line entries the driver
+checks `Text.GetStringAtOffset(0, LINE)`, which the GTK 4.18 probe showed returns
+the rendered text: plain text for visible entries, bullets for masked entries.
+A nonempty, unmasked layout string matching a private buffer read permits
+snapshot/find readback. Custom glyphs that differ from the buffer, masking
+strings and missing layout replies require human handoff. An empty rendered
+line with a zero character count and no masking signal is unknown rather than
+secure: ref-based type/set_value may write it once using private boolean
+verification. The action result and audit input are redacted even if the entry
+subsequently proves visible. A fresh snapshot classifies the rendered line:
+bullets become secure, matching plain text permits readback. GTK 3 and multiline
+editors keep their existing text path. State and toolkit attributes are read once
+within each security probe; the layout call is limited to GTK single-line
+entry/text roles outside GTK 3.
+
 ### Execution permission and launchers
 
 With `allow_exec=False` (the default), terminal launches and input require an
