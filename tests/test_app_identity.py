@@ -695,3 +695,16 @@ def test_installed_bundle_keeps_requested_name_when_linux_program_is_on_path() -
     assert resolved.resolved is True
     assert resolved.launch_name == "Krita"
     assert resolved.gate_key == "org.krita"
+
+
+def test_installed_bundle_keeps_requested_spelling_despite_linux_path() -> None:
+    resolution = resolve_launch(
+        "Mousepad",
+        installed_bundle="com.example.Mousepad",
+        granted=["com.example.Mousepad"],
+        entries=[],
+        path_lookup=lambda name: "/usr/bin/mousepad" if name == "mousepad" else None,
+    )
+    assert resolution.resolved is True
+    assert resolution.launch_name == "Mousepad"
+    assert resolution.gate_key == "com.example.Mousepad"
