@@ -3101,6 +3101,67 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _qt_viewport_text(acc) -> str | None:
+    """Only native text ranges inside a Qt editor's measured viewport.
+
+    Qt Text.get_text exposes the whole document, including off-screen lines.
+    An unavailable bounded-range interface is not evidence of visibility.
+    """
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
+    if clip is None:
+        return None
+    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
+        acc, *map(int, box), coord, clip, clip,
+    ))
+    if not ranges:
+        # Qt commonly leaves GetBoundedRanges unimplemented. Use native
+        # point offsets and character rectangles instead, never the buffer
+        # alone. These reads are repeated after every scroll.
+        left, top, width, height = map(int, box)
+        offsets = [
+            _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
+            for x in (left, left + width - 1)
+            for y in (top, top + height - 1)
+        ]
+        if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
+            return None
+        start, end = min(offsets), max(offsets) + 1
+        text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
+        if not isinstance(text, str):
+            return None
+        visible = []
+        clipped = False
+        for index, char in enumerate(text):
+            rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
+                acc, start + index, coord,
+            ))
+            hits = _rect_hits_box(rect, box)
+            if hits is None:
+                return None
+            # Keep a separator at clipped characters so two disconnected
+            # visible fragments cannot manufacture a substring match.
+            if hits:
+                if clipped and visible:
+                    visible.append("\n")
+                visible.append(char)
+                clipped = False
+            else:
+                clipped = True
+        return "".join(visible)
+    try:
+        contents = [span.content for span in ranges]
+        if not all(isinstance(content, str) for content in contents):
+            return None
+        return "\n".join(contents)
+    except (AttributeError, TypeError):
+        return None
+
+
 def _evince_page(node) -> bool:
     """Evince PDF pages have reliable SHOWING state, but drifting extents."""
     if _role_name(node) != "page":
@@ -3805,6 +3866,12 @@ class ATSPIAccessor:
             sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
+        qt_document = (
+            role == "AXTextArea" and role_str != "terminal"
+            and _qt_app(node) and _reports_multiline(node, attrs)
+        )
+        if qt_document:
+            value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
             value = button_name
         screen_text = None
@@ -3824,6 +3891,10 @@ class ATSPIAccessor:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        if qt_document and value is None:
+            hint = (hint + "; " if hint else "") + (
+                "Visible document text unavailable; use in-document Find or line navigation"
+            )
         surface_name = ""
         content_note = ""
         panel_note = ""
@@ -6404,6 +6475,47 @@ def _focused_contenteditable(app: str, *, max_nodes: int = 400):
     return acc
 
 
+def chromium_single_line_entry(acc) -> bool:
+    """Whether native metadata identifies a Chromium single-line entry."""
+    if not _chromium_app(acc) or _role_name(acc) not in {"entry", "spin button"}:
+        return False
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    return tag in {"", "input"} and not _reports_multiline(acc, attrs)
+
+
+def focused_chromium_entry(app: str, *, max_nodes: int = 400):
+    """Find the focused entry when Chrome also marks its container focused.
+
+    Only native focused states identify the target; ambiguous entries are
+    refused by returning None.
+    """
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+        if truncated or acc is None or not _chromium_app(acc):
+            return None
+        queue = [acc]
+        entries = []
+        seen = 0
+        while queue and seen < max_nodes:
+            node = queue.pop(0)
+            seen += 1
+            if chromium_single_line_entry(node) and _state_has(node, "FOCUSED"):
+                entries.append(node)
+            n = int(_call_first(node, ("get_child_count",), default=0) or 0)
+            if n > max_nodes - seen:
+                return None
+            for index in range(n):
+                child = _call_first(node, ("get_child_at_index",), index)
+                if child is not None:
+                    queue.append(child)
+        if queue or len(entries) != 1:
+            return None
+        return entries[0]
+    except Exception:
+        return None
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -6418,6 +6530,10 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
+    if _chromium_app(acc):
+        entry = focused_chromium_entry(app, max_nodes=max_nodes)
+        if entry is not None:
+            acc = entry
     # GTK can return an empty string from Text.get_text even for a drawing
     # area without Text. That is no read-back, not a readable empty field.
     getter = getattr(acc, "get_text_iface", None)
