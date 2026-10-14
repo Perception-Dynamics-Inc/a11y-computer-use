@@ -142,6 +142,72 @@ def test_gtk4_calculator_click_lands_on_the_button(tmp_path) -> None:
         _stop_group(proc)
 
 
+def test_gtk4_column_view_left_edge_row_activates(tmp_path) -> None:
+    """A Baobab-like flush row click updates a real GTK4 activation label."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "column617.py"
+    script.write_text('''
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="Column617")
+    window.set_default_size(640, 400)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    status = Gtk.Label(label="Home Folder")
+    model = Gtk.SingleSelection.new(Gtk.StringList.new(["Folder617", "Other617"]))
+    view = Gtk.ColumnView.new(model)
+    factory = Gtk.SignalListItemFactory()
+    factory.connect("setup", lambda factory, item: item.set_child(Gtk.Label(xalign=0)))
+    factory.connect("bind", lambda factory, item: item.get_child().set_label(item.get_item().get_string()))
+    column = Gtk.ColumnViewColumn.new("Folder", factory)
+    column.set_expand(True)
+    view.append_column(column)
+    view.set_single_click_activate(True)
+    view.connect("activate", lambda view, index: status.set_label("Opened " + model.get_item(index).get_string()))
+    box.append(status)
+    box.append(view)
+    window.set_child(box)
+    window.present()
+app = Gtk.Application(application_id="org.example.Column617")
+app.connect("activate", activate)
+app.run([])
+''')
+    proc = _launch(sys.executable, str(script))
+    try:
+        row = _window(driver, "column617")
+        assert row is not None, driver.windows()
+        assert int(row.get("pid") or 0) == proc.pid, row
+        driver.move_window(int(row["window_id"]), 200, 100)
+        driver.focus_window(int(row["window_id"]))
+        runtime = _runtime(tmp_path, driver)
+        app = str(row["app"])
+        deadline = time.monotonic() + 15
+        target = None
+        while time.monotonic() < deadline:
+            runtime.desktop_snapshot(app)
+            snap = runtime._current
+            target = next((el for el in snap.elements
+                           if el.role == "AXRow" and "Folder617" in el.title), None) if snap else None
+            if target is not None:
+                break
+            time.sleep(0.2)
+        assert target is not None, snap
+        runtime.click(target.ref)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, app)
+            if any(el.title == "Opened Folder617" for el in shot.elements):
+                break
+            time.sleep(0.2)
+        assert any(el.title == "Opened Folder617" for el in shot.elements), shot
+    finally:
+        _stop_group(proc)
+
+
 def _largest_editable(elements):
     """The document, not a smaller field that appears while the window is opening."""
     areas = [el for el in elements if el.role == "AXTextArea" and el.editable]
