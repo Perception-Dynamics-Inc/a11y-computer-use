@@ -13607,3 +13607,38 @@ def test_gnumeric_crash_guard_is_scoped_to_named_image(fake_atspi, monkeypatch, 
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     element = Element("e492", role, title, None, None, "snap492", clickable=True)
     driver._refuse_gnumeric_go_jump(element, image)
+
+
+@pytest.mark.parametrize("tag", ["div", "pre", "code", "blockquote", "address", "figcaption"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_html_section_text_survives_snapshot_and_find(fake_atspi, tag, nested):
+    """Model Gecko leaves and WebKitGTK's pre/code nesting without text children."""
+    section = _Acc("section", width=400, height=80)
+    section.text = "pre-block-alpha\nsecond-line quote-gamma"
+    section.get_attributes = lambda: {"tag": tag}
+    if nested:
+        code = _Acc("section", width=400, height=80)
+        code.text = section.text
+        code.get_attributes = lambda: {"tag": "code", "xml-roles": "code"}
+        _adopt(section, code)
+    root = _adopt(_Acc("frame", name="Help", width=800, height=600), section)
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.read(section).value == section.text
+    snap = build_snapshot(root, accessor, scope=Scope.WINDOW,
+                          app="help", pid=576, geometry=_geometry())
+    for query in ("pre-block-alpha", "second-line", "quote-gamma"):
+        matches = observe.find_elements(snap, text=query)
+        assert matches
+        assert all(query in el.value for el in matches)
+    assert "pre-block-alpha" in observe.render_text(snap, mode="interactive")
+
+
+@pytest.mark.parametrize("tag", ["div", "pre", "code", "blockquote", "address", "figcaption"])
+@pytest.mark.parametrize("text", ["", "\ufffc", " \ufffc ", "secret"])
+def test_html_section_text_keeps_empty_wrappers_and_secrets_private(fake_atspi, tag, text):
+    """An embedded control alone is not section text; protected text stays private."""
+    section = _Acc("section", states=("PROTECTED",) if text == "secret" else ())
+    section.text = text
+    section.get_attributes = lambda: {"tag": tag}
+    _adopt(section, _Acc("push button", name="Run"))
+    assert _atspi.ATSPIAccessor().read(section).value is None

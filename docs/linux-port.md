@@ -95,6 +95,14 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 
 **App identity** on Linux is the process **comm name** (`/proc/<pid>/comm`, exe-basename fallback), the analog of a macOS bundle id / Windows exe for permission-keying and the safety layer's app gating.
 
+HTML `section` nodes tagged `div`, `pre`, `code`, `blockquote`, `address`,
+or `figcaption` expose their own AT-SPI Text as snapshot values, including
+when Gecko or WebKitGTK provides no static-text children. This makes those
+words available to `find` and snapshot-based `scroll_to_find`. Sections containing
+only embedded controls stay valueless, and protected text stays private.
+This mapping is covered by synthetic tests; Firefox/Yelp live verification
+has not been performed for this change.
+
 ## Linux-specific concerns (no macOS analog)
 
 - Qt on X11 joins the accessibility tree through the X root-window property `AT_SPI_BUS` (type `STRING`, 8-bit) or through `org.a11y.Bus` on the session bus. `at-spi-bus-launcher` writes that property when it starts. Tester launched a PyQt6 window with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` before the property existed, and the window never appeared in the tree. The live Qt fixture reads `org.a11y.Bus.GetAddress` and writes that address onto the root before the process starts. It does not export `AT_SPI_BUS_ADDRESS`: on Qt 6.4 that variable makes the bridge emit its enable signal before the slot is connected, and the application never registers. Set the root property, and leave the variable unset, when you launch Qt outside the fixture.
