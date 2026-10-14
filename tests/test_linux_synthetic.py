@@ -13897,6 +13897,114 @@ def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("remembered", [False, True])
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+@pytest.mark.parametrize("lands", [False, True])
+def test_chromium_single_line_type_verifies_before_enter(
+    fake_atspi, monkeypatch, remembered, ending, lands,
+) -> None:
+    """Synthetic Chrome input: Enter is sent once, only after verified text."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    field = _KeyClearedWebField("")
+    _mark_toolkit(field, "Chromium", "Chrome")
+    field.get_role_name = lambda: "entry"
+    field.get_attributes = lambda: {"tag": "input"}
+    field.focused = True
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("chrome", 7))
+    monkeypatch.setattr(driver, "_verify_remembered_editable", lambda acc: "chrome")
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_chromium_entry", lambda app: field)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda seconds: None)
+    sent = []
+
+    def type_string(text):
+        sent.append(text)
+        if text == "\n":
+            assert field.text == "hello"
+        elif lands:
+            field.text += text
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    if remembered:
+        driver._focused_editable = field
+    if lands:
+        assert driver.type_text("hello" + ending) == 6
+        assert driver._type_expected == "hello"
+        assert sent.count("\n") == 1
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.type_text("hello" + ending)
+        assert exc.value.detail["reason"] == "text_mismatch"
+        assert "\n" not in sent
+
+
+@pytest.mark.parametrize("tag,multiline,expected", [
+    ("input", False, True), ("", False, True),
+    ("textarea", False, False), ("div", False, False),
+    ("input", True, False),
+])
+def test_chromium_single_line_entry_metadata(fake_atspi, monkeypatch, tag, multiline, expected):
+    field = _Acc("entry", states=("FOCUSED",))
+    _mark_toolkit(field, "Chromium", "Chrome")
+    field.get_attributes = lambda: {"tag": tag, "aria-multiline": str(multiline).lower()}
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    assert _atspi.chromium_single_line_entry(field) is expected
+
+
+def test_chromium_focused_readback_uses_entry_inside_focused_toolbar(fake_atspi, monkeypatch):
+    toolbar = _Acc("tool bar", states=("FOCUSED",))
+    field = _Acc("entry", states=("FOCUSED",))
+    _adopt(toolbar, field)
+    for node in (toolbar, field):
+        _mark_toolkit(node, "Chromium", "Chrome")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app, **kwargs: (toolbar, False))
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "7" if acc is field else "Toolbar7/12Zoom")
+    assert _atspi.focused_chromium_entry("chrome") is field
+    assert _atspi.focused_text("chrome") == "7"
+    second = _Acc("entry", states=("FOCUSED",))
+    _mark_toolkit(second, "Chromium", "Chrome")
+    _adopt(toolbar, field, second)
+    assert _atspi.focused_chromium_entry("chrome") is None
+
+
+def test_chromium_single_line_enter_verifies_selection_replacement(fake_atspi, monkeypatch):
+    """Synthetic PDF toolbar entry replaces ctrl+a's selection before Enter."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    field = _KeyClearedWebField("12")
+    _mark_toolkit(field, "Chromium", "Chrome")
+    field.get_role_name = lambda: "entry"
+    field.focused = True
+    driver = LinuxDriver()
+    driver._focused_editable = field
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_verify_remembered_editable", lambda acc: "chrome")
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_selection_span", lambda acc, before: (0, 2))
+    sent = []
+
+    def type_string(text):
+        sent.append(text)
+        if text == "7":
+            field.text = "7"
+        else:
+            assert text == "\n" and field.text == "7"
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    assert driver.type_text("7\n") == 2
+    assert sent == ["7", "\n"]
+    assert driver._type_expected == "7"
+
+
 @pytest.mark.parametrize("name", ["Main Menu", "Open"])
 @pytest.mark.parametrize("case", ["duplicate", "outer_action", "different_name", "different_bounds", "missing_bounds", "two_children", "not_gtk4", "no_child_action", "not_toggle"])
 def test_gtk4_menu_button_snapshot_keeps_native_toggle(monkeypatch, name, case):
@@ -14088,3 +14196,21 @@ def test_html_section_text_keeps_empty_wrappers_and_secrets_private(fake_atspi, 
     section.get_attributes = lambda: {"tag": tag}
     _adopt(section, _Acc("push button", name="Run"))
     assert _atspi.ATSPIAccessor().read(section).value is None
+
+
+def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, monkeypatch):
+    """Chrome entry discovery must not traverse Calc's focus tree again."""
+    field = _Acc("entry", name="Calc editor")
+    _mark_toolkit(field, "gtk", "LibreOffice")
+    lookups = []
+
+    def focused(app, **kwargs):
+        lookups.append(app)
+        return field, False
+
+    monkeypatch.setattr(_atspi, "_focused_node", focused)
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: "Item")
+    monkeypatch.setattr(_atspi, "focused_chromium_entry",
+                        lambda *args, **kwargs: pytest.fail("Chrome lookup on native editor"))
+    assert _atspi.focused_text("soffice") == "Item"
+    assert lookups == ["soffice"]
