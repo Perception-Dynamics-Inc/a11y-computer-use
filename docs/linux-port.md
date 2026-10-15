@@ -402,3 +402,13 @@ pointer click at the visible center of the reported bounds and require a stable
 checked-state change. Missing or off-screen bounds, native Wayland, and an
 unchanged checked state return an error; no AT-SPI Toggle follows the click.
 This path is covered by hermetic tests; a live QML run has not been performed.
+
+## Qt Quick combo selection
+
+For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable
+Text display children as write targets. It opens the combo with one click at
+its measured center and selects the exact option from a newly shown menu in
+that native frame. Success requires the display Text to match and the popup
+to close. Missing geometry, ambiguous popups, and uncommitted selections return
+errors. Editable Qt entries retain their text-write path. This behavior is
+hermetic-tested; native Qt Quick verification remains a CI/live check.
