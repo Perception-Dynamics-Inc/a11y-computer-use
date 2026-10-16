@@ -14903,6 +14903,52 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
     assert timeline == (expected or [("sync", 1)])
 
 
+def test_gtk_unnamed_entries_find_sibling_row_labels(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    labels = ["Your name", "Your email address", "Your organization"]
+    entries = [_place_row(_Acc("text", states=("SINGLE_LINE", "EDITABLE")),
+                          220, 100 + i * 40, 240, 30) for i in range(3)]
+    texts = [_place_row(_Acc("label", name=name + ":"), 20, 105 + i * 40, 180, 20)
+             for i, name in enumerate(labels)]
+    panel = _adopt(_place_row(_Acc("panel"), 0, 80, 500, 200),
+                   *reversed(entries), *reversed(texts))
+    root = _adopt(_place_row(_Acc("frame", name="Setup Wizard"), 0, 0, 600, 400), panel)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="claws-mail", pid=605, geometry=_geometry())
+    for i, label in enumerate(labels):
+        found = observe.find_elements(snap, text=label, role="textfield")
+        assert len(found) == 1
+        assert found[0].title == label
+        assert found[0].bounds == Bounds(0, 220, 100 + i * 40, 240, 30)
+        assert observe.ax_handle_for(snap.snapshot_id, found[0].ref) is entries[i]
+
+
+@pytest.mark.parametrize("case", ["named", "description", "relation", "non_gtk", "missing",
+                                  "other_row", "right", "two_labels", "two_entries", "multiline"])
+def test_gtk_entry_row_names_require_unambiguous_native_evidence(fake_atspi, monkeypatch, case):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: "Explicit:" if case == "relation" else "")
+    entry = _place_row(_Acc("text", name="Native" if case == "named" else "",
+                            states=("MULTI_LINE",) if case == "multiline" else ("SINGLE_LINE",)),
+                       220, 100, 240, 30)
+    if case == "description":
+        entry.get_description = lambda: "Description"
+    label = _place_row(_Acc("label", name="Your name:"),
+                       500 if case == "right" else 20, 200 if case == "other_row" else 105, 180, 20)
+    children = [entry, label]
+    if case == "missing":
+        entry.component = None
+    if case == "two_labels":
+        children.append(_place_row(_Acc("label", name="Other:"), 30, 105, 160, 20))
+    if case == "two_entries":
+        children.append(_place_row(_Acc("entry"), 500, 100, 100, 30))
+    _adopt(_Acc("panel"), *children)
+    raw = _atspi.ATSPIAccessor().read(entry)
+    assert raw.title == {"named": "Native", "relation": "Explicit"}.get(case, "")
+    if case == "description":
+        assert raw.description == "Description"
+
+
 @pytest.mark.parametrize("mode", ["auto", "manual", "hint", "false", "", "true"])
 def test_html_popover_panel_keeps_top_layer_role(monkeypatch, mode):
     """#609: ispopup describes the panel, not the opener's haspopup flag."""
@@ -15102,3 +15148,97 @@ def test_gtk_numeric_controls_use_stable_labels(fake_atspi, monkeypatch, role, c
             snap = build_snapshot(control, accessor, scope=Scope.WINDOW,
                                   app="demo", pid=639, geometry=_geometry())
             assert len(observe.find_elements(snap, text="Threshold")) == 1
+
+
+@pytest.mark.parametrize("failure", ["marshalling", "exception", "timeout", "no_answer", "malformed", "empty_content", "invalid_content"])
+@pytest.mark.parametrize("read_path", ["bounded", "sentinel", "chunks", "unavailable"])
+def test_qt_failed_ranges_recover_native_text(monkeypatch, failure, read_path):
+    """A broken QSpiTextRangeList must still reach working Text reads."""
+    text = "QTDOC_684 hello" + "x" * 300
+    reads = []
+    checked = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def ranges(*args):
+        if failure == "marshalling":
+            raise RuntimeError("Marshalling failed: Unregistered type QSpiTextRangeList")
+        if failure == "exception":
+            raise ValueError("invalid D-Bus reply")
+        if failure == "timeout":
+            raise TimeoutError("Did not receive a reply")
+        if failure == "empty_content":
+            return [_NS(content="")]
+        if failure == "invalid_content":
+            return [_NS(content=None)]
+        return [object()] if failure == "malformed" else None
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        if read_path == "unavailable":
+            raise RuntimeError("Text unavailable")
+        if read_path == "sentinel" and end != -1:
+            raise RuntimeError("Explicit range failed")
+        if read_path == "chunks" and (end == -1 or end - start > 256):
+            raise RuntimeError("Large range failed")
+        return text[start:] if end == -1 else text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        return _NS(x=20, y=40 if offset < 15 else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(get_bounded_ranges=ranges,
+                 get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text),
+                 get_text=get_text, get_character_extents=rectangle),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    if read_path == "unavailable":
+        assert value is None
+        assert checked == []
+    else:
+        assert value == text[:15]
+        assert checked == list(range(len(text)))
+        raw = RawNode(role="AXTextArea", value=value)
+        snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                              app="scribus", pid=1, geometry=_geometry())
+        assert observe.find_elements(snap, text="QTDOC_684")
+    assert reads[0] == (0, len(text))
+    if read_path == "sentinel":
+        assert reads == [(0, len(text)), (0, -1)]
+    elif read_path in {"chunks", "unavailable"}:
+        assert reads[:3] == [(0, len(text)), (0, -1), (0, 256)]
+        assert len(reads) <= 4
+
+
+@pytest.mark.parametrize("chunk_failure", [False, True])
+def test_qt_range_recovery_never_requests_unbounded_large_document(monkeypatch, chunk_failure):
+    text = "QTDOC_684 hello" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        assert end != -1
+        assert 0 <= start <= end <= _atspi._PAGE_TEXT_CHARS
+        if end - start > 256 or (chunk_failure and start > 0):
+            raise RuntimeError("Range read failed")
+        return text[start:end]
+
+    def ranges(*args):
+        raise RuntimeError("Unregistered type QSpiTextRangeList")
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(get_bounded_ranges=ranges,
+                 get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text), get_text=get_text,
+                 get_character_extents=lambda *args: _NS(x=20, y=40, width=8, height=16)),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    if chunk_failure:
+        assert value is None
+    else:
+        assert value == text[:_atspi._PAGE_TEXT_CHARS]
+    assert len(reads) <= 1 + (_atspi._PAGE_TEXT_CHARS + 255) // 256

@@ -350,10 +350,12 @@ Qt line edits retain their text without requesting document viewport ranges.
 Snapshot values and text searches use `Text.get_bounded_ranges`
 inside the measured editor bounds, falling back to native point offsets and
 verified character rectangles when Qt omits bounded ranges. If that query
-fails or times out and point offsets are unavailable (as on Qt 5.15), a raw
-Text prefix capped at 4000 characters is read and each character's native
-rectangle is checked against the viewport. Unverified and off-screen characters
-remain excluded from search. Each scroll re-reads
+fails, times out, or returns malformed ranges and point offsets are unavailable
+(as on Qt 5.15), a raw Text prefix capped at 4000 characters is read. Failed
+explicit text reads retry `getText(0,-1)` only when the native character count
+fits that cap, then try 256-character chunks within the same cap. Each
+character's native rectangle is checked against the viewport. Unverified and
+off-screen characters remain excluded from search. Each scroll re-reads
 these ranges, so an off-screen match becomes searchable when it enters the
 viewport. When neither interface establishes visibility, the document value is
 omitted and its hint recommends in-document Find or line navigation. `find` and
@@ -445,8 +447,11 @@ not been live-verified for this change.
 
 For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable
 Text display children as write targets. It opens the combo with one click at
-its measured center and selects the exact option from a newly shown menu in
-that native frame. Success requires the display Text to match and the popup
+its measured center, then polls native popup readiness within the existing
+menu deadline. Each probe runs on the AT-SPI thread while waits leave that
+thread free to process events. Options may belong to a newly shown menu in
+that native frame or to the combobox descendants. It selects the exact option
+only after rows appear. Success requires the display Text to match and the popup
 to close. Missing geometry, ambiguous popups, and uncommitted selections return
 errors. Editable Qt entries retain their text-write path. This behavior is
 hermetic-tested; native Qt Quick verification remains a CI/live check.
@@ -458,6 +463,13 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+Unnamed GTK single-line text fields can use a sibling label when its measured
+box lies to the left and fully within the field's row. This fallback requires
+one label and no other text editor on that row; missing or ambiguous geometry
+leaves the name empty. Existing names, descriptions, and explicit label
+relations take precedence. It changes naming only and retains the native entry
+handle and bounds (including Claws Mail's Setup Wizard fields).
 
 Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
 `manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
