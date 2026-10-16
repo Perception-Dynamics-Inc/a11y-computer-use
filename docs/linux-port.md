@@ -575,3 +575,10 @@ refs, capabilities, and bounds are retained. Missing ownership or geometry
 evidence produces no cover claim. Clicks still recheck coverage at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
+
+GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
+button and a popover of ordinary buttons/checkboxes without a menu bar. Menu
+listing and paths remain unsupported for that shape; the error points to
+`desktop_snapshot`, clicking the menu button's ref, and a fresh snapshot's
+popover control refs. If already open, use the current popover refs directly.
+Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
