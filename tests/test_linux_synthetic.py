@@ -2679,6 +2679,45 @@ def test_click_button_and_count(xtest_recorder) -> None:
     assert events[1:] == [(_X_BPRESS, 3, 0, 0), (_X_BRELEASE, 3, 0, 0)] * 2
 
 
+@pytest.mark.parametrize("count", [1, 2, 3])
+@pytest.mark.parametrize("button, number", [("left", 1), ("right", 3), ("middle", 2)])
+def test_click_delivers_pairs_with_an_inter_click_gap(
+    xtest_recorder, monkeypatch, count, button, number,
+) -> None:
+    """Timestamp delivered events, so sleeping before a final-only sync fails."""
+    import time
+
+    events, display = xtest_recorder
+    now = 0.0
+    delivered = []
+    sleeps = []
+    sent = 0
+
+    def sync():
+        nonlocal sent
+        delivered.extend((event, now) for event in events[sent:])
+        sent = len(events)
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(display, "sync", sync)
+    monkeypatch.setattr(time, "sleep", sleep)
+    _linux_input.click(406, 465, button=button, count=count)
+
+    assert delivered[0] == ((_X_MOTION, 0, 406, 465), 0.0)
+    assert [event for event, _ in delivered[1:]] == [
+        (_X_BPRESS, number, 0, 0), (_X_BRELEASE, number, 0, 0),
+    ] * count
+    assert [timestamp for _, timestamp in delivered[1:]] == pytest.approx([
+        index * 0.03 for index in range(count) for _ in range(2)
+    ])
+    assert sleeps == [0.03] * (count - 1)
+    assert now == pytest.approx((count - 1) * 0.03)
+
+
 def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder, monkeypatch) -> None:
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
     monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
@@ -15479,6 +15518,41 @@ def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
     ))
     assert _atspi._qt_viewport_text(object()) == "VISIBLE"
     assert drained == []
+
+
+def test_calc_viewport_bands_are_explicitly_synthetic(fake_atspi, monkeypatch) -> None:
+    """The native sheet stays distinct from snapshot-only cell groups."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi)
+    try:
+        accessor = _atspi.ATSPIAccessor()
+        bands = accessor.children(table)
+        assert len(bands) > 1
+        assert all(isinstance(band, _atspi._OnScreenBand) for band in bands)
+        native_cells = _atspi._sheet_window_cells(table)
+        assert [cell for band in bands for cell in accessor.children(band)] == native_cells
+        snap = _sheet_snapshot(table)
+        tables = [el for el in snap.elements if el.role == "AXTable"]
+        assert len(tables) == len(bands) + 1
+        assert tables[0].title == "Sheet"
+        assert all(el.title == "Visible cells (synthetic viewport band)" for el in tables[1:])
+        assert 'table "Visible cells (synthetic viewport band)"' in observe.render_text(snap, mode="full")
+        assert len([el for el in snap.elements if el.role == "AXCell"]) == 29 * 16
+        found = observe.find_elements(snap, text="A29")
+        assert len(found) == 1 and found[0].bounds is not None
+    finally:
+        del fake_atspi.Table
+
+
+def test_short_calc_sheet_does_not_add_synthetic_bands(fake_atspi, monkeypatch) -> None:
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, visible_rows=3, visible_cols=4)
+    try:
+        snap = _sheet_snapshot(table)
+        assert [el.title for el in snap.elements if el.role == "AXTable"] == ["Sheet"]
+        assert len([el for el in snap.elements if el.role == "AXCell"]) == 12
+    finally:
+        del fake_atspi.Table
 
 
 @pytest.mark.parametrize("count", [24, 25, 26, 48, 49])
