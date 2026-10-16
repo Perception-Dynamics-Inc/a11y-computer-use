@@ -3385,6 +3385,9 @@ class LinuxDriver:
         self._raise_handle_window(handle)
         if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
             raise _not_editable(element)
+        # Ref typing goes through type_into, not type_text; announce here so
+        # type(ref=...) shows the same overlay as click/scroll/set_value.
+        self._visible_action(element, "Type")
         if self._run(lambda: _atspi.drawing_text_editable(handle)):
             # The paragraph often has no Component. Focus lands on it or on
             # the shape panel, and EditableText inserts on the paragraph.

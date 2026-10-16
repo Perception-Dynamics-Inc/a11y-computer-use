@@ -85,6 +85,45 @@ def test_glide_eight_steps_budget(feedback, monkeypatch):
     assert len(moves) == 8
 
 
+def test_type_into_ref_announces_type_not_typed_text(monkeypatch):
+    """type(ref=...) uses type_into; it must show Type, never the payload."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = LinuxDriver()
+    bounds = Bounds(0, 10, 20, 100, 24)
+    element = SimpleNamespace(
+        secure=False,
+        snapshot_id="s",
+        ref="e1",
+        bounds=bounds,
+        title="Name",
+        role="entry",
+        editable=True,
+    )
+    handle = object()
+    announces = []
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: handle)
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *args: None)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *args: None)
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda h: False)
+    monkeypatch.setattr(_atspi, "drawing_text_editable", lambda h: False)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda h: True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda h: True)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda h: {})
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_type_confirmed_handle", lambda h, t: len(t))
+    monkeypatch.setattr(driver, "_raise_if_peers_changed", lambda *args: None)
+
+    def capture(kind, label, b, config=None, *, secure=False):
+        announces.append((kind, label, b, secure))
+
+    monkeypatch.setattr(visible.visible_actions, "prepare", capture)
+    assert driver.type_into(element, "secret-payload") == len("secret-payload")
+    assert announces == [("Type", "Name", bounds, False)]
+    assert all("secret-payload" not in str(item) for item in announces)
+
+
 def test_set_value_preserves_native_dispatch_even_on_overlay_failure(monkeypatch):
     from a11y_computer_use import observe
     driver = LinuxDriver()

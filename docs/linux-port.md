@@ -604,7 +604,7 @@ for this change.
 ### Visible actions (X11 prototype)
 
 With `DISPLAY` set, Linux actions schedule cosmetic feedback in a daemon worker:
-click, type, set_value and scroll keep their existing dispatch and verification.
+click, type (focused ``type_text`` and ref ``type_into``), set_value and scroll keep their existing dispatch and verification.
 An override-redirect XShape window shows a border and short action/target label
 for approximately 300 ms. The interior is transparent even without a compositor;
 the input shape is empty, so the window cannot intercept clicks or take focus.
