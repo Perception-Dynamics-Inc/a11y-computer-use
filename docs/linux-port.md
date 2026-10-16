@@ -454,3 +454,8 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
+Submit queries (`submit` or `submit form`) also match these buttons, and button
+role searches rank them first. No default is inferred from labels or geometry;
+the marker does not change click behavior or safety checks.
