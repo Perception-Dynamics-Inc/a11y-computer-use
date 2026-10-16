@@ -14643,6 +14643,70 @@ def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, 
     assert _atspi.is_secure(acc) is (side != "ordinary")
 
 
+@pytest.mark.parametrize("role_name", ["slider", "spin button", "progress bar", "level bar"])
+@pytest.mark.parametrize("garbage", [0.0, 6.9e-310, 40.0])
+def test_range_observation_never_reads_a_missing_value_interface(
+    fake_atspi, monkeypatch, role_name, garbage,
+):
+    """Missing Value can return even another widget's valid number (#619)."""
+    node = _Acc(role_name, value=garbage)
+    node.get_value_iface = lambda: None
+    reads = []
+
+    def unexpected_read(acc):
+        reads.append(acc)
+        return garbage
+
+    for method in ("get_current_value", "get_minimum_value", "get_maximum_value"):
+        monkeypatch.setattr(fake_atspi.Value, method, unexpected_read)
+    assert _atspi._value_text(node, _atspi._ROLE[role_name], role_name) is None
+    assert reads == []
+
+
+def test_aria_spin_observation_preserves_valuetext_without_value(fake_atspi, monkeypatch):
+    """The displayed ARIA text is usable, but missing numeric Value is not."""
+    spin = _Acc("spin button", value=40)
+    spin.get_value_iface = lambda: None
+    attrs = {"valuetext": "Medium"}
+    monkeypatch.setattr(_atspi, "_aria_spinbutton", lambda *_args: True)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda _acc: attrs)
+    reads = []
+    monkeypatch.setattr(fake_atspi.Value, "get_current_value", lambda acc: reads.append(acc) or 40)
+    assert _atspi._value_text(spin, "AXSpinButton", "spin button") == "Medium"
+    attrs.clear()
+    assert _atspi._value_text(spin, "AXSpinButton", "spin button") is None
+    assert reads == []
+
+
+def test_gtk_meters_snapshot_preserves_real_values_range_and_child_label(fake_atspi):
+    """Synthetic GTK4 repro: real meters and the Baobab percentage cell."""
+    root = _Acc("frame", name="GTK4 Meters", width=400, height=200, states=("ENABLED",))
+    progress = _Acc("progress bar", value=0.96, width=400, height=20)
+    progress.get_value_iface = lambda: progress
+    level = _Acc("level bar", value=52400701440, minimum=0, maximum=135152996352,
+                 width=400, height=11)
+    level.get_value_iface = lambda: level
+    level.component._rect.y = 30
+    custom = _Acc("progress bar", value=40, width=400, height=20)
+    custom.get_value_iface = lambda: None
+    custom.component._rect.y = 60
+    label = _Acc("label", name=" 96.04%", width=100, height=20)
+    label.component._rect.y = 60
+    label.get_value_iface = lambda: None
+    _adopt(root, progress, level, _adopt(custom, label))
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="baobab", pid=619, geometry=_geometry())
+    meters = [el for el in snap.elements if el.role == "AXProgressIndicator"]
+    assert [el.value for el in meters] == [
+        "0.96", "52400701440 (min 0, max 135152996352)", None,
+    ]
+    assert any(el.title.strip() == "96.04%" and el.parent == meters[2].ref
+               for el in snap.elements)
+    rendered = observe.render_text(snap)
+    assert 'progressindicator ="52400701440 (min 0, max 135152996352)"' in rendered
+    assert "96.04%" in rendered
+
+
 @pytest.mark.parametrize("role", ["check box", "toggle button", "radio button"])
 @pytest.mark.parametrize("checked", [False, True])
 @pytest.mark.parametrize("changes", [False, True])
