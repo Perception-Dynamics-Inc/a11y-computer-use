@@ -3272,6 +3272,21 @@ def _qt_viewport_text(acc) -> str | None:
                 return "\n".join(contents)
         except Exception:
             pass
+    return _qt_character_viewport_text(acc, box)
+
+
+def _qt_character_viewport_text(acc, box=None) -> str | None:
+    """Read text verified by native character boxes without GetBoundedRanges.
+
+    KTextEditor cannot marshal bounded ranges reliably; keep that request
+    off its bridge while retaining native visibility checks.
+    """
+    if box is None:
+        box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     # Qt commonly leaves GetBoundedRanges unimplemented. Use native
     # point offsets and character rectangles instead, never the buffer
     # alone. These reads are repeated after every scroll.
@@ -4162,9 +4177,8 @@ class ATSPIAccessor:
             and _qt_app(node) and _reports_multiline(node, attrs)
         )
         if qt_document and owner_name.casefold() != "kate":
-            # Kate already refuses document text below. Probing Qt bounded
-            # ranges anyway disrupts its accessibility bridge, hiding later
-            # controls in this walk (including the status bar).
+            # Kate uses character geometry below. Probing bounded ranges
+            # disrupts its bridge, hiding later controls in this walk.
             value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
             value = button_name
@@ -4174,15 +4188,18 @@ class ATSPIAccessor:
                 # KTextEditor publishes the whole buffer, including off-screen
                 # characters. Its widget box cannot verify substring visibility,
                 # even for a document containing one long line. Keep the ref.
-                value = None
-                description = (
-                    f"{description} Document text visibility unavailable; "
-                    "use in-document navigation to locate text."
-                ).strip()
+                value = _qt_character_viewport_text(node) if qt_document else None
+                if value is None:
+                    description = (
+                        f"{description} Document text visibility unavailable; "
+                        "use in-document navigation to locate text."
+                    ).strip()
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        if qt_document and owner_name.casefold() == "kate" and value is not None:
+            hint = (hint + "; " if hint else "") + "Native character viewport text"
         if qt_document and value is None:
             hint = (hint + "; " if hint else "") + (
                 "Visible document text unavailable; use in-document Find or line navigation"

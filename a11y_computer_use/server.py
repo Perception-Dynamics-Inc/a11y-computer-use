@@ -866,9 +866,10 @@ def _scroll_anchor(snap):
     if not candidates:
         return None
 
-    # A suppressed document buffer still identifies the editor view. Do not
-    # let a sibling breadcrumb list become the search container instead.
-    editors = [el for el in candidates if _document_text_unavailable(el)
+    # Keep document editors ahead of sibling breadcrumb lists, including
+    # Kate after native character geometry makes its text searchable.
+    editors = [el for el in candidates if (_document_text_unavailable(el)
+               or (el.role == "AXTextArea" and "Native character viewport text" in el.hint))
                and el.enabled and not el.secure and _positive_box(el)]
     if editors:
         focused = [el for el in editors if el.focused]
@@ -6320,9 +6321,10 @@ class Runtime:
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
-        body-scroll page, not the window's tab strip. An editor with unavailable
-        visible text is preferred over sibling lists and text search refuses
-        before input because a visible match cannot be verified.
+        body-scroll page, not the window's tab strip. Kate's editor is preferred
+        over sibling lists and searched using native character visibility.
+        Editors with unavailable visible text refuse text search before input
+        because a visible match cannot be verified.
         An opaque container without readable contents returns
         ``container_not_readable`` before input; the target's presence
         cannot be determined from that accessibility tree. An unscoped text
@@ -9748,9 +9750,10 @@ def build_server(
         control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. Automatic selection prefers an
-        editor with unavailable visible text over sibling lists; text search
-        there returns unsupported document_text_visibility_unavailable before
-        input. An explicit ref overrides automatic selection.
+        Kate editor or an editor with unavailable visible text over sibling
+        lists. Kate uses native character visibility; unavailable text returns
+        unsupported document_text_visibility_unavailable before input.
+        An explicit ref overrides automatic selection.
         An opaque container with no
         readable contents returns container_not_readable before sending input;
         this does not establish that the target is absent. An unscoped text search

@@ -289,24 +289,18 @@ page text supplied by the application remain unchanged.
 
 ## Kate document text search
 Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
-omit Kate textarea buffer values because the editor bounds do not establish
-character visibility. `find` and `scroll_to_find` cannot verify individual
-document text matches; even visible buffer text is excluded until character
-visibility can be established. The editor ref remains available, with a hint
-to use in-document navigation. Single-line search fields keep their values.
-Kate skips the generic Qt viewport-text probe: that discarded read disrupts
-subsequent accessibility traversal on Kate 25.04.3. Native status controls such
-as `1:1`, `INSERT`, and `UTF-8` remain available to snapshots and `find`.
-This preservation was checked with a real Kate 25.04.3 under Xvfb/D-Bus for #646.
-Automatic `scroll_to_find` selects this editor view ahead of sibling breadcrumb
-lists. Text search returns `unsupported` with reason
-`document_text_visibility_unavailable` before wheel or Find input because the
-accessibility tree cannot confirm a visible match. An explicit container `ref`
-still selects that container. Editor selection and refusal were checked against
-Kate 25.04.3 under an isolated Xvfb/D-Bus session for #647.
+publish only text verified inside the measured editor viewport by native
+point offsets and character rectangles. They bypass `GetBoundedRanges`, whose
+Qt reply can disrupt subsequent accessibility traversal. Unavailable character
+geometry keeps the document value excluded and search returns `unsupported`
+with reason `document_text_visibility_unavailable` before input.
 
-The buffer suppression is covered by synthetic tests; no live Kate run
-was performed for #477.
+Automatic `scroll_to_find` selects the editor ahead of sibling breadcrumb lists,
+scrolls that view, and checks fresh visible text before reporting a match. A
+miss returns not found within the requested scroll budget; an explicit container
+`ref` still selects that container. Single-line search fields keep their values.
+This path is covered by synthetic regressions; no live Kate run was performed
+for #664.
 
 GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
 
