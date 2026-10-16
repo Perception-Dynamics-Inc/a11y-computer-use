@@ -65,9 +65,9 @@ def test_dom_submit_ownership_and_session_isolation():
 @pytest.mark.parametrize("native", [False, True])
 def test_atspi_default_state(monkeypatch, native):
     token = object()
-    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(StateType=SimpleNamespace(DEFAULT=token) if native else None))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(StateType=SimpleNamespace(IS_DEFAULT=token) if native else None))
     for marked in [True, False]:
-        states = SimpleNamespace(names={"default"} if marked else set(), contains=lambda value: marked and value is token)
+        states = SimpleNamespace(names={"is-default"} if marked else set(), contains=lambda value: marked and value is token)
         node = SimpleNamespace(get_state_set=lambda: states)
         assert _atspi._has_default_state(node) is marked
 
@@ -95,7 +95,7 @@ def test_browser_driver_publishes_dom_submit_marker():
     assert not any(method.startswith("Input.") for method, _ in transport.sent)
 
 
-@pytest.mark.parametrize("names, expected", [(None, False), (set(), False), ({"default"}, True)])
+@pytest.mark.parametrize("names, expected", [(None, False), (set(), False), ({"is-default"}, True)])
 def test_atspi_default_state_without_optional_binding(monkeypatch, names, expected):
     def unavailable():
         raise ImportError("PyGObject is not installed")
@@ -104,3 +104,51 @@ def test_atspi_default_state_without_optional_binding(monkeypatch, names, expect
     node = SimpleNamespace(get_state_set=lambda: SimpleNamespace(names=names))
     assert _atspi._has_default_state(node) is expected
     assert not _atspi._has_default_state(SimpleNamespace())
+
+
+def test_atspi_is_default_without_names_ranks_register_before_minimize(monkeypatch):
+    """Real StateSet exposes contains(IS_DEFAULT), with no names attribute."""
+    token = object()
+    monkeypatch.setattr(
+        _atspi, "_atspi",
+        lambda: SimpleNamespace(StateType=SimpleNamespace(IS_DEFAULT=token)),
+    )
+
+    class StateSet:
+        def __init__(self, marked):
+            self.marked = marked
+
+        def contains(self, member):
+            assert member is token
+            return self.marked
+
+    nodes = [
+        observe.RawNode(role="AXWindow", title="Chrome", position=(0, 0), size=(600, 400)),
+    ]
+    for title in ("Minimize", "Cancel", "Register", "Clear", "Preview"):
+        states = StateSet(title == "Register")
+        native = SimpleNamespace(get_state_set=lambda states=states: states)
+        nodes.append(observe.RawNode(
+            role="AXButton", title=title, actions=("AXPress",),
+            position=(10, 10), size=(80, 30),
+            default=_atspi._has_default_state(native),
+        ))
+
+    class Accessor:
+        def read(self, index):
+            return nodes[index]
+
+        def children(self, index):
+            return list(range(1, len(nodes))) if index == 0 else []
+
+    snap = observe.build_snapshot(
+        0, Accessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=GEOMETRY,
+    )
+    assert [el.title for el in snap.elements if el.default] == ["Register"]
+    assert [el.title for el in observe.find_elements(snap, role="button")] == [
+        "Register", "Minimize", "Cancel", "Clear", "Preview",
+    ]
+    matches = observe.find_elements(snap, text="submit")
+    assert [el.title for el in matches] == ["Register"]
+    assert "default" in observe.render_matches(snap, matches)
+    assert [el.title for el in observe.find_elements(snap, text="Minimize")] == ["Minimize"]
