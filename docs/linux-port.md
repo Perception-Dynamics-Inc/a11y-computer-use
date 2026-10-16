@@ -571,6 +571,14 @@ accessibility registration. Screenshots and explicitly requested coordinate
 actions are separate tools; the backend does not substitute them for ref or
 menu actions, invent refs, or infer control geometry.
 
+Unnamed GTK sliders and spin buttons use their AT-SPI `labelled-by` label as
+their title, before the description fallback. Without a relation, a measured
+left-hand label in the same parent and row supplies the title when the nearest
+candidate is unambiguous. Explicit accessible names remain authoritative; numeric
+values and descriptions remain separate from the title. This naming behavior is
+covered by synthetic tests; native GTK verification is pending.
+
+
 ### Same-app window covers in discovery
 
 Multi-window AT-SPI snapshots annotate clickable and editable controls with
