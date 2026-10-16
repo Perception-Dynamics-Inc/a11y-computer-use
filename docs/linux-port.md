@@ -13,6 +13,13 @@ allocation remain hidden, without bounds or click actions; use the wizard's
 Next/Previous buttons to change pages. This naming fallback is hermetic-tested;
 live Claws Mail verification is pending.
 
+Large Calc sheets group visible cells into tables named `Visible cells (synthetic
+viewport band)` to retain the viewport through snapshot pruning. These groups
+are snapshot-only, not native sheets or nested AT-SPI tables. The real sheet
+retains its native name, and cells retain their native handles and measured
+bounds. Short visible cell lists remain flat. This labeling is covered by
+hermetic snapshot and find tests; live Calc verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
