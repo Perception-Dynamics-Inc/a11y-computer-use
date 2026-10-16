@@ -1603,6 +1603,7 @@ def test_linux_set_value_path_readback_does_not_claim_navigation(app) -> None:
     assert calls == [("set_value", "e1", "/new")]
     assert "set e1 = '/new'" in result
     assert "text read-back does not verify activation or navigation" in result
+    assert "create the missing folder from the nearest existing parent" in result
     assert "does not guarantee keyboard focus" in result
     assert "focus the field, select all, type the path, then Return" in result
     assert "verify the folder title/file list in a fresh snapshot" in result
@@ -4688,3 +4689,89 @@ def test_terminal_refusal_is_final_and_points_to_gui_routes(tmp_path, allowed):
         assert len(rows) == 1
         assert rows[0]["result"] == "exec_disabled"
         assert rows[0]["metrics"]["security_violation"] == "exec_disabled"
+
+
+@pytest.mark.parametrize("addressed", [False, True])
+@pytest.mark.parametrize("chord", ["Return", "KP_Enter"])
+@pytest.mark.parametrize("error,title_changed", [(True, False), (True, True), (False, False), (False, True)])
+def test_thunar_location_return_reports_missing_path(monkeypatch, addressed, chord, error, title_changed):
+    """An error icon is a failed navigation, even though the tree changed."""
+    rt = server.Runtime.__new__(server.Runtime)
+    def snapshot(epoch, title, icon=False):
+        window = Element("w", "AXWindow", title, None, None, epoch, path=("AXWindow",))
+        bar = Element("b", "AXToolbar", "", None, None, epoch, parent="w")
+        entry = Element("e", "AXTextField", "", "/missing", None, epoch,
+                        parent="b", focused=True, editable=True)
+        elements = [window, bar, entry]
+        if icon:
+            elements.append(Element("i", "AXImage", "dialog-error-symbolic", None, None, epoch, parent="e"))
+        return Snapshot(epoch, Scope.WINDOW, "thunar", None, 0, (), tuple(elements))
+    before = snapshot("before", "home - Thunar")
+    after = snapshot("after", "destination - Thunar" if title_changed else "home - Thunar", error)
+    rt._current = before
+    calls = []
+    class Driver:
+        name = "linux"
+        def key_chord(self, chord):
+            calls.append(chord)
+    rt.driver = Driver()
+    monkeypatch.setattr(rt, "_reread", lambda *a: after)
+    monkeypatch.setattr(rt, "_process_died", lambda *a: False)
+    monkeypatch.setattr(rt, "_key_focus_probe", lambda *a: None)
+    monkeypatch.setattr(rt, "_linux_addressed_app", lambda app: app if addressed else None)
+    monkeypatch.setattr(rt, "_linux_keyboard_window", lambda app: ("thunar", {}, []))
+    monkeypatch.setattr(rt, "_ensure_linux_window", lambda *a: False)
+    monkeypatch.setattr(rt, "_background_target", lambda *a: None)
+    monkeypatch.setattr(rt, "_frontmost", lambda: "thunar")
+    monkeypatch.setattr(rt, "_open_menu_app", lambda *a: None)
+    monkeypatch.setattr(rt, "_open_mnemonic_menu", lambda *a: False)
+    monkeypatch.setattr(rt, "_guard_user", lambda *a: None)
+    monkeypatch.setattr(rt, "_run_gated", lambda action, app, execute, **kw: execute())
+    result = rt.key(chord, app="thunar" if addressed else None)
+    assert calls == [chord]
+    if error or not title_changed:
+        assert result.outcome == "suspected_noop"
+        assert result.startswith("location not opened:")
+        assert "Create the missing folder from the nearest existing parent, or check the path." in result
+        assert ("entry shows an error icon" in result) == error
+    else:
+        assert result.startswith(f"pressed {chord}")
+        assert result.outcome == "confirmed"
+
+
+@pytest.mark.parametrize("app,toolbar,focused", [("other", True, True), ("thunar", False, True), ("thunar", True, False)])
+def test_location_return_does_not_classify_unrelated_fields(app, toolbar, focused):
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = type("Driver", (), {"name": "linux"})()
+    elements = (
+        Element("w", "AXWindow", "unchanged", None, None, "s"),
+        Element("b", "AXToolbar" if toolbar else "AXDialog", "", None, None, "s", parent="w"),
+        Element("e", "AXTextField", "", "/path", None, "s", parent="b", focused=focused),
+    )
+    snap = Snapshot("s", Scope.WINDOW, app, None, 0, (), elements)
+    assert rt._location_return_failure(snap, snap) is None
+
+
+def test_linux_keypad_enter_keeps_native_keysym():
+    from a11y_computer_use.drivers import _linux_input
+
+    assert _linux_input._parse_chord("KP_Enter") == ([], 0xFF8D)
+
+
+def test_thunar_location_return_ignores_unchanged_error_icon_after_navigation():
+    """Thunar can expose its entry icon even before successful navigation."""
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = type("Driver", (), {"name": "linux"})()
+
+    def snapshot(title):
+        return Snapshot("s", Scope.WINDOW, "thunar", None, 0, (), (
+            Element("w", "AXWindow", title, None, None, "s", path=("AXWindow",)),
+            Element("b", "AXToolbar", "", None, None, "s", parent="w"),
+            Element("e", "AXTextField", "", "/destination", None, "s",
+                    parent="b", focused=True, editable=True),
+            Element("i", "AXImage", "dialog-error-symbolic", None, None, "s", parent="e"),
+        ))
+
+    before = snapshot("home - Thunar")
+    assert rt._location_return_failure(before, snapshot("destination - Thunar")) is None
+    assert "window title did not change" in rt._location_return_failure(before, before)

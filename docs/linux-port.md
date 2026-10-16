@@ -482,3 +482,14 @@ acknowledge a no-op, and page navigation is not verified by this path. This
 restriction also applies to fully visible thumbnails. Use a screenshot to choose
 a coordinate inside the visible thumbnail and check the viewer's page number
 after clicking. No scrolling or alternate action is substituted for the ref click.
+
+### Thunar location-entry failures
+
+After Return or KP_Enter in a focused Thunar toolbar location textfield, the
+runtime checks the post-action snapshot. A `dialog-error-symbolic` image child
+or an unchanged window title returns `suspected_noop` with `location not opened`
+and guidance to check the path or create missing folders from the nearest
+existing parent. An unchanged title alone does not prove that an error icon
+exists, so the result names the observed evidence. Successful navigation keeps
+the usual key result. Text read-back from `set_value` does not establish that a
+folder exists.
