@@ -9,6 +9,7 @@ when the Runtime provides ``screen_text``).
 Condition shapes (one key selects the kind; the rest are options)::
 
     {"file_exists": "~/Downloads/car.mp4", "min_bytes": 1000000}
+    {"dir_exists": "~/Projects/2026"}
     {"file_stable": "~/Movies/render.mp4", "seconds": 5, "min_bytes": 1}
     {"url_status": "https://example.com/", "status": 200}
     {"snapshot_text": "Render complete", "app": "com.adobe.AfterEffects"}
@@ -26,6 +27,9 @@ regular file, or a glob whose matches are all non-files, raises ``ValueError``
 on the first look (the MCP layer reports that as ``invalid_arguments``). A
 directory never counts, and the call does not wait out ``timeout_s``. A path
 that is not there yet keeps waiting, so a download can still appear.
+
+``dir_exists`` checks a literal directory path, including empty directories,
+with the same home-directory restriction. It accepts no file-size or content options.
 
 File paths may contain ``~`` and glob characters; the newest regular file
 wins. Paths outside the user's home are refused unless
@@ -73,7 +77,7 @@ from pathlib import Path
 from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 #: The kinds ``wait_until`` understands; exactly one of these keys selects it.
-KINDS = ("file_exists", "file_stable", "url_status", "snapshot_text", "screen_text", "settle")
+KINDS = ("dir_exists", "file_exists", "file_stable", "url_status", "snapshot_text", "screen_text", "settle")
 
 #: Ceiling for a single wait (seconds). Renders and deploys take minutes;
 #: nothing an agent waits for should take longer than half an hour.
@@ -649,6 +653,15 @@ class Checker:
             elapsed = time.monotonic() - started
             state["last"] = {"elapsed_s": round(elapsed, 2), "settle_s": seconds}
             return f"settled for {seconds:g}s" if elapsed >= seconds else None
+        if kind == "dir_exists":
+            if set(condition) != {"dir_exists"}:
+                raise ValueError("dir_exists accepts only a directory path")
+            path = _allowed_path(condition["dir_exists"])
+            exists = path.exists()
+            state["last"] = {"exists": exists, "path": str(path)}
+            if exists and not path.is_dir():
+                raise ValueError(f"{str(path)!r} exists but is not a directory")
+            return f"directory {path}" if path.is_dir() else None
         if kind == "file_exists":
             pattern = _allowed_path(condition["file_exists"])
             min_bytes = int(condition.get("min_bytes", 1))
