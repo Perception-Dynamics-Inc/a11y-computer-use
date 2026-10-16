@@ -2967,6 +2967,56 @@ def _gtk_button_row_name(acc, name: str) -> str:
     return _strip_label_colon(candidates[0][1]) or name
 
 
+def _gtk_entry_row_name(acc) -> str:
+    """Recover an unnamed single-line GTK entry's unambiguous row label."""
+    if "gtk" not in _toolkit_name(acc):
+        return ""
+    label = _labelled_by_name(acc)
+    if label:
+        return _strip_label_colon(_plain_accessible_name(label))
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) not in {"panel", "filler", "grouping"}:
+        return ""
+
+    def box(node):
+        pos, size = _extents(node)
+        if pos is None or size is None:
+            return None
+        if not all(math.isfinite(v) for v in (*pos, *size)) or min(size) <= 0:
+            return None
+        return (*pos, *size)
+
+    target = box(acc)
+    if target is None:
+        return ""
+    x, y, _, height = target
+    siblings = [_child_at(parent, i) for i in range(_child_count(parent))]
+    candidates = []
+    for child in siblings:
+        if child is None or _role_name(child) not in {"label", "static", "static text"}:
+            continue
+        text = _plain_accessible_name(_node_name(child)).strip()
+        rect = box(child)
+        if not text or rect is None:
+            continue
+        left, top, w, h = rect
+        if left + w <= x and y <= top and top + h <= y + height:
+            candidates.append(text)
+    if len(candidates) != 1:
+        return ""
+    # Multiple editors on one row do not establish which owns the label.
+    for child in siblings:
+        if child is None or child == acc or _role_name(child) not in {"entry", "text", "password text"}:
+            continue
+        rect = box(child)
+        if rect is None:
+            return ""
+        _, top, _, h = rect
+        if top < y + height and top + h > y:
+            return ""
+    return _strip_label_colon(candidates[0])
+
+
 def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
     """True for a Chromium custom ``role=spinbutton``, not a native number input.
 
@@ -3851,6 +3901,13 @@ class ATSPIAccessor:
             and _child_count(node) == 0
         ):
             position, size = (-1.0, -1.0), (-1.0, -1.0)
+        if (
+            role == "AXTextField"
+            and role_str in {"entry", "text"}
+            and not name.strip()
+            and not description.strip()
+        ):
+            name = _gtk_entry_row_name(node)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if role == "AXMenuItem" and not str(name).strip():

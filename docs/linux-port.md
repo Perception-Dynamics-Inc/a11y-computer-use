@@ -447,3 +447,10 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+Unnamed GTK single-line text fields can use a sibling label when its measured
+box lies to the left and fully within the field's row. This fallback requires
+one label and no other text editor on that row; missing or ambiguous geometry
+leaves the name empty. Existing names, descriptions, and explicit label
+relations take precedence. It changes naming only and retains the native entry
+handle and bounds (including Claws Mail's Setup Wizard fields).
