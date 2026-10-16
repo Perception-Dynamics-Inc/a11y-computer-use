@@ -4200,6 +4200,25 @@ class ATSPIAccessor:
         if (
             role_str == "panel" and role == "AXGroup"
             and not str(name).strip() and not str(description).strip()
+            and value is None and _child_count(node) == 0
+            and _application_name(node).casefold() == "pcmanfm"
+            and _role_name(_parent_of(node)) == "scroll pane"
+            and _node_name(_parent_of(node)).casefold() == "view of folder contents"
+            and not _has_text_interface(node)
+        ):
+            # A painted file surface, even when its box duplicates the scroll pane.
+            role = "AXCanvas"
+            surface_name = "PCManFM folder contents"
+            panel_note = (
+                "File and folder icons are not exposed by AT-SPI; find and "
+                "scroll_to_find cannot read or target them. This ref identifies "
+                "the whole pane. Explicitly switch to Detailed List View for "
+                "accessible named rows."
+            )
+
+        if (
+            role_str == "panel" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
             and value is None and _claws_list_surface(node)
         ):
             surface_name = "Claws Mail folder / message list"

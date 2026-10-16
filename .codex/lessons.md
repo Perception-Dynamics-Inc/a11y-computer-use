@@ -225,3 +225,5 @@
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
 
 - 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
+
+- 2026-10-17 (#670): PCManFM Icon View can expose no file children at all. Label only the childless folder panel under the native folder-content scroll pane; keep Detailed List View rows native and never infer icons from status counts.
