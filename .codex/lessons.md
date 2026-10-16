@@ -176,3 +176,8 @@
 - 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
 
 - 2026-10-16 (PR #667 validation): Run the full suite through `python -m pytest`: invoking pytest from stdin breaks multiprocessing spawn because `<stdin>` is not an importable file. Limit forced missing-GI checks to hermetic backend tests; Linux CLI, menu, and live checks can require the installed native binding even without a display.
+- 2026-10-16 (#610): Chromium HTML popovers expose panel + ispopup and DETAILS_FOR opener relations. Preserve their container boundary before descendant ref matching; dismissed descendants can otherwise receive reorder hints naming unrelated browser chrome. Snapshot absence alone does not prove how a popover was dismissed.
+
+- 2026-10-16 (PR #692 repair): Preserve SHOWING-gated HTML popover mapping when adding opener metadata and stale descendant guidance; hidden panels must retain ordinary group behavior so containment checks cannot treat a dismissed popup as open.
+
+- 2026-10-16 (#610 repair): Runtime click verification can pass a target-only snapshot to rematch_ref. Ancestor inspection must tolerate omitted parents while retaining containment checks for ancestors present in a full snapshot.

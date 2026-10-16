@@ -508,6 +508,14 @@ exists, so the result names the observed evidence. Successful navigation keeps
 the usual key result. Text read-back from `set_value` does not establish that a
 folder exists.
 
+Showing HTML popover panels reporting AT-SPI `ispopup=auto|manual|hint`
+appear as `popover` containers. Their notes report native SHOWING state and opener
+labels from DETAILS_FOR relations when available. If a saved ref's containing
+popover disappears from the fresh snapshot, resolution refuses with
+`stale_ref` (`reason=popover_closed`) and asks to reopen and re-observe it,
+without suggesting unrelated controls at the old tree position. Absence from
+the snapshot does not prove the dismissal mechanism.
+
 ### GTK icon-view ref clicks
 
 GTK icon-view children can report native AT-SPI `icon` or `image` roles; both
@@ -515,3 +523,31 @@ appear as `AXImage` in snapshots. Their `activate` action opens the item rather
 than selecting it. Ref clicks use one pointer click at the item's measured
 bounds and require that it becomes the only selected child. An unavailable
 pointer path or unverified selection returns an error without invoking activate.
+
+### GTK2 HexChat bridge limitation
+
+[Issue #678](https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues/678)
+reports HexChat 2.16.2 windows listed and focusable on X11 but absent from
+the AT-SPI desktop, even with `GTK_MODULES=gail:atk-bridge`.
+This remains a known limitation: without a registered tree, snapshot,
+find, and accessibility menus cannot operate.
+
+GTK2 needs both GAIL and the GTK2 ATK-to-AT-SPI bridge module.
+[Debian's accessibility guide](https://wiki.debian.org/accessibility-devel)
+names `libgail-common` and `libatk-adaptor`. Setting `GTK_MODULES` alone
+does not install these modules. On Debian/Ubuntu, check these prerequisites:
+
+```bash
+sudo apt install libgail-common libatk-adaptor
+# Fully quit the existing HexChat process first; use the same desktop session.
+GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 hexchat
+```
+
+These are troubleshooting steps, not a verified recovery for the reported
+HexChat environment. Verify that HexChat appears on the AT-SPI desktop and
+a snapshot returns its tree before treating it as accessible. If it remains
+absent, the backend continues to return `unsupported` with
+`reason: no_accessibility_bridge`. A listed/focusable window does not prove
+accessibility registration. Screenshots and explicitly requested coordinate
+actions are separate tools; the backend does not substitute them for ref or
+menu actions, invent refs, or infer control geometry.
