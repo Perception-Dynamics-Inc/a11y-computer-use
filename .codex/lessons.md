@@ -162,6 +162,7 @@
 - 2026-10-16 (PR #677 conflict repair): GTK sibling-row entry naming and native DEFAULT submit discovery are independent observation hints. Preserve both documentation blocks and test their combined synthetic behavior after merging main.
 
 
+- 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
 - 2026-10-16 (PR #677 merge): Claws Mail opaque list labels and wizard entry row labels are independent fallbacks. Preserve both complete regression blocks when merging their adjacent additions.

@@ -3536,18 +3536,18 @@ def _range_value(acc):
 
 
 def _has_default_state(acc) -> bool:
-    """Read explicit native DEFAULT state without inferring a submit action."""
+    """Read explicit native IS_DEFAULT state without inferring a submit action."""
     states = _call_first(acc, ("get_state_set",))
     try:
         state_type = getattr(_atspi(), "StateType", None)
     except ImportError:
         state_type = None
-    member = getattr(state_type, "DEFAULT", None)
+    member = getattr(state_type, "IS_DEFAULT", None)
     if member is not None:
         return bool(_safe(lambda: states.contains(member), False))
     names = getattr(states, "names", ())
-    return isinstance(names, (set, frozenset, list, tuple)) and "DEFAULT" in {
-        str(name).upper() for name in names
+    return isinstance(names, (set, frozenset, list, tuple)) and "IS_DEFAULT" in {
+        str(name).upper().replace("-", "_") for name in names
     }
 
 
