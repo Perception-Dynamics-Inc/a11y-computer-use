@@ -15206,3 +15206,62 @@ def test_qt_range_recovery_never_requests_unbounded_large_document(monkeypatch, 
     else:
         assert value == text[:_atspi._PAGE_TEXT_CHARS]
     assert len(reads) <= 1 + (_atspi._PAGE_TEXT_CHARS + 255) // 256
+
+
+def test_qt_unanswered_bounded_ranges_clears_libatspi_hang_before_reading(monkeypatch):
+    """#684: Scribus never answers GetBoundedRanges (QSpiTextRangeList is not
+    registered). libatspi then reports the app as hung until its pending
+    replies are dispatched; the editor text must still be read afterwards."""
+    text = "Hello Scribus 12345"
+    hung = {"on": False}
+    drained = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (150, 150, 460, 237))
+
+    def guarded(fn):
+        def call(*args):
+            if hung["on"]:
+                raise RuntimeError("atspi_error: The process appears to be hung. (1)")
+            return fn(*args)
+        return call
+
+    def bounded(*args):
+        hung["on"] = True
+        raise RuntimeError("atspi_error: Did not receive a reply.")
+
+    def drain(*args, **kwargs):
+        drained.append(True)
+        hung["on"] = False
+
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", drain)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=guarded(lambda *args: -1),
+            get_character_count=guarded(lambda acc: len(text)),
+            # Qt returns "" for an end offset past the character count.
+            get_text=guarded(lambda acc, start, end: (
+                text if end == -1 else ("" if end > len(text) else text[start:end]))),
+            get_character_extents=guarded(
+                lambda acc, offset, coord: _NS(x=155 + 8 * offset, y=155, width=8, height=17)),
+        ),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    assert drained == [True]
+    assert value == text
+    raw = RawNode(role="AXTextArea", value=value)
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="scribus", pid=1, geometry=_geometry())
+    assert observe.find_elements(snap, text="Scribus 123")
+
+
+def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
+    drained = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda *a, **k: drained.append(True))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(get_bounded_ranges=lambda *args: [_NS(content="VISIBLE")]),
+    ))
+    assert _atspi._qt_viewport_text(object()) == "VISIBLE"
+    assert drained == []

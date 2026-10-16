@@ -3209,6 +3209,26 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _drain_atspi_replies(budget_s: float = 0.25) -> None:
+    """Dispatch pending D-Bus replies (such as libatspi's hang-check ping).
+
+    Bounded: at most ``budget_s`` seconds, non-blocking iterations only.
+    """
+    try:
+        from gi.repository import GLib
+    except ImportError:
+        return
+    ctx = GLib.MainContext.default()
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if ctx.pending():
+            ctx.iteration(False)
+        else:
+            time.sleep(0.01)
+            if not ctx.pending():
+                break
+
+
 def _qt_viewport_text(acc) -> str | None:
     """Only native text ranges inside a Qt editor's measured viewport.
 
@@ -3226,6 +3246,18 @@ def _qt_viewport_text(acc) -> str | None:
         ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
             acc, *map(int, box), coord, clip, clip,
         ))
+    if clip is not None and _reply_local.last_failed:
+        # Qt 5 cannot marshal QSpiTextRangeList, so GetBoundedRanges never
+        # answers. libatspi then marks the whole application hung until its
+        # follow-up Peer.Ping reply is dispatched, which fails every later
+        # read of this editor (and of the rest of the walk) at once.
+        try:
+            from a11y_computer_use.drivers import _atspi_events
+
+            # Iterate the context on the thread that owns libatspi.
+            _atspi_events.run(_drain_atspi_replies)
+        except Exception:
+            pass
     if ranges:
         # A malformed/marshalling-failed reply is as unusable as no reply.
         try:
