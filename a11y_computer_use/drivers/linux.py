@@ -4104,13 +4104,14 @@ class LinuxDriver:
 
         if not app_id:
             return None
-        text = self._run(lambda: _atspi.focused_text(app_id))
-        if not _atspi.libreoffice_app(app_id):
-            return text
-        editor = self._run(lambda: _atspi.sheet_editor_text(app_id))
-        if editor:
-            return editor
-        return text
+        # The editor takes precedence over focused text. Read it first so
+        # an open Calc editor does not pay for a focus-tree walk whose result
+        # would be discarded. Each read still runs live, on its own operation.
+        if _atspi.libreoffice_app(app_id):
+            editor = self._run(lambda: _atspi.sheet_editor_text(app_id))
+            if editor:
+                return editor
+        return self._run(lambda: _atspi.focused_text(app_id))
 
     def _write_sheet_cell(self, handle, value: str) -> None:
         """Type ``value`` into a Calc cell and commit it with Return."""

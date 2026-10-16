@@ -219,3 +219,5 @@
 
 - 2026-10-17 (#652): Okular TOC QTreeView cells expose selection-only Toggle without CHECKABLE. Highlighting a row does not verify page navigation; refuse ref activation before mutation until navigation can be verified, and keep grid-cell and other tree-item handling separate.
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
+
+- 2026-10-17 (#665): Calc type read-back prefers the transient cell editor over focused text. Probe that editor first to avoid a discarded focus-tree traversal; preserve the focused-text fallback for empty/missing editors and keep every read live across input. Standalone native call counts are instrumentation evidence, not proof of the loaded five-second CI bound.
