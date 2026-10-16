@@ -12780,9 +12780,10 @@ def test_ref_with_large_extents_and_addressable_center_keeps_its_click():
 
 @pytest.mark.parametrize("effect", ["exclusive", "unchanged", "additive", "no_bounds"])
 @pytest.mark.parametrize("named", [True, False])
-def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named):
+@pytest.mark.parametrize("native_role", ["image", "icon"])
+def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named, native_role):
     driver, icon, element, actions, events = _toggle_click_target(
-        monkeypatch, toolkit="gtk", role="image", actions=("activate",),
+        monkeypatch, toolkit="gtk", role=native_role, actions=("activate",),
     )
     icon.name = "Cherry" if named else ""
     previous = _Acc("image", states=("SELECTED",))
@@ -15095,6 +15096,24 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
     assert timeline == (expected or [("sync", 1)])
 
 
+@pytest.mark.parametrize("mode", ["auto", "manual", "hint", "false", "", "true"])
+def test_html_popover_panel_keeps_top_layer_role(monkeypatch, mode):
+    """#609: ispopup describes the panel, not the opener's haspopup flag."""
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: acc.role)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {"ispopup": mode})
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8., 9.), (120., 80.)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_call_first", lambda acc, names, *args, default=None: "")
+    accessor = _atspi.ATSPIAccessor()
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state == "SHOWING")
+    expected = "AXPopover" if mode in {"auto", "manual", "hint"} else "AXGroup"
+    assert accessor.read(_NS(role="panel")).role == expected
+    assert accessor.read(_NS(role="push button")).role == "AXButton"
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: False)
+    assert accessor.read(_NS(role="panel")).role == "AXGroup"
+
+
 @pytest.mark.parametrize("case", [
     "folder", "message", "other_app", "dialog", "no_split", "not_scroll",
     "children", "named", "described", "text",
@@ -15263,3 +15282,57 @@ def test_geany_double_click_waits_for_navigation_without_substituting_input(
         assert error.value.detail["outcome"] == "unconfirmed"
         assert len(polls) == _atspi._FOCUS_CONFIRM_POLLS
     assert len([event for event in events if event[0] == _X_BPRESS]) == 2
+
+
+@pytest.mark.parametrize("failure", ["timeout", "no_answer"])
+@pytest.mark.parametrize("geometry", ["visible", "offscreen", "missing", "split"])
+def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, failure, geometry):
+    """Qt 5's broken bounded reply must not hide verifiably visible text."""
+    text = "QTDOC_1135 hello" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    checked = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def bounded(*args):
+        if failure == "timeout":
+            raise TimeoutError("Did not receive a reply")
+        return None
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        return text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        if geometry == "missing":
+            return None
+        visible = geometry != "offscreen" and offset < 16
+        if geometry == "split" and offset == 5:
+            visible = False
+        return _NS(x=20, y=40 if visible else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=lambda *args: -1,
+            get_character_count=lambda acc: len(text),
+            get_text=get_text,
+            get_character_extents=rectangle,
+        ),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    assert reads == [(0, _atspi._PAGE_TEXT_CHARS)]
+    assert len(checked) <= _atspi._PAGE_TEXT_CHARS
+    if geometry == "missing":
+        assert value is None
+    elif geometry == "offscreen":
+        assert value == ""
+    elif geometry == "split":
+        assert value == "QTDOC\n1135 hello"
+    else:
+        assert value == "QTDOC_1135 hello"
+        raw = RawNode(role="AXTextArea", value=value)
+        snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                              app="scribus", pid=1, geometry=_geometry())
+        assert observe.find_elements(snap, text="QTDOC_1135")

@@ -349,7 +349,11 @@ AT-SPI Text. Native multiline states or attributes select this path; ordinary
 Qt line edits retain their text without requesting document viewport ranges.
 Snapshot values and text searches use `Text.get_bounded_ranges`
 inside the measured editor bounds, falling back to native point offsets and
-verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+verified character rectangles when Qt omits bounded ranges. If that query
+fails or times out and point offsets are unavailable (as on Qt 5.15), a raw
+Text prefix capped at 4000 characters is read and each character's native
+rectangle is checked against the viewport. Unverified and off-screen characters
+remain excluded from search. Each scroll re-reads
 these ranges, so an off-screen match becomes searchable when it enters the
 viewport. When neither interface establishes visibility, the document value is
 omitted and its hint recommends in-document Find or line navigation. `find` and
@@ -455,6 +459,15 @@ unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
 
+Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
+`manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
+Ref clicks and crops refuse with `not_visible` / `covered` when another
+popover's measured bounds contain the ref's center. Controls inside their own
+popover remain eligible; dismiss the covering popover before retrying a covered
+ref. This check uses the accessibility tree because Chrome's accessible
+hit test can return the underlying control.
+
+
 Claws Mail's GTK folder and message lists can expose only childless panels
 inside scroll panes in the main split-pane layout. These opaque regions are
 labelled `Claws Mail folder / message list` with a note that folder rows and
@@ -489,3 +502,11 @@ existing parent. An unchanged title alone does not prove that an error icon
 exists, so the result names the observed evidence. Successful navigation keeps
 the usual key result. Text read-back from `set_value` does not establish that a
 folder exists.
+
+### GTK icon-view ref clicks
+
+GTK icon-view children can report native AT-SPI `icon` or `image` roles; both
+appear as `AXImage` in snapshots. Their `activate` action opens the item rather
+than selecting it. Ref clicks use one pointer click at the item's measured
+bounds and require that it becomes the only selected child. An unavailable
+pointer path or unverified selection returns an error without invoking activate.

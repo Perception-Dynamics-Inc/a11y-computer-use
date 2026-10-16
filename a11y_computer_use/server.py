@@ -4679,7 +4679,9 @@ class Runtime:
                 f"the ref does not intersect display {display.display_id} "
                 f"({display.width}x{display.height})",
             )
-        cover = self._cover_owner(element, self._current.app if self._current is not None else None)
+        cover = self._popover_cover(element, refresh=True) or self._cover_owner(
+            element, self._current.app if self._current is not None else None,
+        )
         if cover == "off_screen":
             raise _not_visible(ref, "off_screen", bounds, "the ref is outside the visible viewport")
         if cover == "covered":
@@ -4727,8 +4729,34 @@ class Runtime:
                 return display
         raise ValueError(unknown_display_message(bounds.display_id, found))
 
+    def _popover_cover(self, element: Element, *, refresh: bool = False) -> str | None:
+        """Name a reported top-layer popover covering this ref's center."""
+        snap = getattr(self, "_current", None)
+        if snap is None:
+            return None
+        if refresh and self.driver.name == "linux" and callable(getattr(self.driver, "snapshot", None)):
+            # Resolve against the same fresh tree used for cover geometry;
+            # opening a popover can change refs since the issued snapshot.
+            from dataclasses import replace
+
+            fresh = self.driver.snapshot(snap.scope, snap.app)
+            anchor = replace(snap, snapshot_id=element.snapshot_id, elements=(element,))
+            element = observe.rematch_ref(anchor, element.ref, fresh)
+            snap = fresh
+        ancestors = outcome._ancestor_refs(snap, element)
+        center = outcome._center_of(element)
+        for cover in snap.elements:
+            if (cover.role == "AXPopover" and cover.ref != element.ref
+                    and cover.ref not in ancestors
+                    and outcome._contains_center(cover.bounds, center)):
+                return "popover" + (f" {cover.title!r}" if cover.title else "")
+        return None
+
     def _cover_owner(self, element: Element, app: str | None) -> str | None:
         """None when the element's center is this app. ``off_screen`` or a cover name otherwise."""
+        popover = self._popover_cover(element)
+        if popover:
+            return popover
         fn = getattr(self.driver, "occlusion", None)
         if callable(fn):
             try:
@@ -4952,6 +4980,10 @@ class Runtime:
                     activated.append(proxy)
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, act)
+            if isinstance(act, Element):
+                cover = self._popover_cover(act, refresh=True)
+                if cover:
+                    raise _not_visible(act.ref, "covered", act.bounds, f"the ref is covered by {cover}")
             menu_note.append(self._dismiss_open_menu(app))
             if isinstance(act, Element):
                 self._refuse_vanished_target(act)

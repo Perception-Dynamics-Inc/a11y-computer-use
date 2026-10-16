@@ -200,7 +200,17 @@
 
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
+
+
 - 2026-10-16 (PR #467/#626 merge repair): Scintilla match visibility and GTK 4 visible-buffer snapshot filtering are complementary. Preserve both helper blocks when their insertion points conflict, and verify Geany symbol navigation together with Scintilla search under the CI window manager before adding a workaround for an older failed run.
+
+
+- 2026-10-16 (#609): Chrome's accessible hit test can return the underlying control through a top-layer HTML popover. Use showing `ispopup` panels and measured bounds to identify covers, and keep the mapped `AXPopover` in the container no-value set to avoid numeric interface reads.
+
+- 2026-10-16 (PR #679 repair): HTML popover mapping and Claws Mail wizard tab naming have independent appended regressions. Preserve both complete test blocks when merging main, including native unknown-geometry assertions for hidden wizard tabs.
+
+
+
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
 
 - 2026-10-16 (PR #467 Geany verification): XSync confirms X server delivery, not completion of symbol navigation. After the requested double-click, poll Geany's native status line on separate AT-SPI operations; status may be exposed through Name or Text. Keep waits on the caller, preserve both pointer clicks, and return an unconfirmed error if the reported destination never appears.
@@ -208,6 +218,11 @@
 - 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
+- 2026-10-16 (PR #679 merge repair): Preserve Claws Mail opaque-list labels and HTML popover coverage as independent behaviors when merging adjacent documentation and synthetic regressions. Inspect the complete Linux failure summary before changing code for the tracked Calc timing flake.
+
+- 2026-10-16 (test isolation): Concurrent D-Bus test sessions need distinct writable XDG_CACHE_HOME directories; sharing the AT-SPI socket path can close a remote-runtime subprocess connection when the other session exits.
 - 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
 
 - 2026-10-16 (PR #467 repair): A Geany navigation or show-desktop CI failure can disappear in a clean desktop session. Reproduce both failed cases alongside Scintilla search under isolated D-Bus, Xvfb, and Openbox before changing pointer behavior or verification bounds.
+
+- 2026-10-16 (PR #467 conflict repair): Independently appended Geany navigation, GTK icon selection, and Qt viewport regressions must all survive conflict resolution. Reproduce older failed checks at the current merged head: Geany navigation and Scintilla visibility, and terminal-grant cleanup followed by the short-budget agent test, pass in fresh isolated desktop sessions.
