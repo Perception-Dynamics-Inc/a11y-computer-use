@@ -725,6 +725,26 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     mismatch = _identity_mismatch(anchor, live)
     if mismatch is not None:
         _raise_identity_stale(snap, ref, anchor, live, mismatch)
+    # A dismissed popup can leave its old path occupied by browser chrome.
+    # Click verification can supply a target-only snapshot without its parents.
+    ancestors = {element.ref: element for element in snap.elements}
+    parent = ancestors.get(anchor.parent)
+    while parent is not None:
+        if parent.role == "AXPopover":
+            container, _ = _match_anchor(parent, live)
+            if container is None or (
+                parent.stable_id and container.stable_id != parent.stable_id
+            ):
+                context = f" ({parent.note})" if parent.note else ""
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    f"{ref} ({anchor.role} {anchor.title!r}) belonged to a popover"
+                    f"{context} that is no longer present; it may have closed. "
+                    "Reopen the popover and take a new snapshot before acting.",
+                    detail={"ref": ref, "reason": "popover_closed", "candidates": [],
+                            "next": ["ref"], "popover_ref": parent.ref},
+                )
+        parent = ancestors.get(parent.parent)
     match, reason = _match_anchor(anchor, live)
     if match is None:
         message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
