@@ -1595,6 +1595,29 @@ def _hidden_page_tab(node) -> bool:
     return _negative_extent(size)
 
 
+def _claws_wizard_page_title(node) -> str:
+    """Read the leading page label of Claws Mail's hidden wizard notebook."""
+    if _application_name(node).casefold() not in {"claws-mail", "claws mail"}:
+        return ""
+    if "setup wizard" not in _frame_accessible_name(node).casefold():
+        return ""
+    # Only descend through leading layout children. Later labels include
+    # explanatory prose and field captions, not the page title. Never borrow
+    # a label from another page or substitute the shared wizard window title.
+    current = node
+    for _ in range(8):
+        kids = _direct_children(current)
+        if not kids:
+            return ""
+        current = kids[0]
+        role = _role_name(current)
+        if role == "label":
+            return _plain_accessible_name(_node_name(current))
+        if role not in {"panel", "filler", "section"}:
+            return ""
+    return ""
+
+
 def _direct_children(node) -> list:
     """Immediate children, without the snapshot's page-tab hoist."""
     count = _child_count(node)
@@ -3695,6 +3718,22 @@ def _range_value(acc):
     return cur
 
 
+def _has_default_state(acc) -> bool:
+    """Read explicit native DEFAULT state without inferring a submit action."""
+    states = _call_first(acc, ("get_state_set",))
+    try:
+        state_type = getattr(_atspi(), "StateType", None)
+    except ImportError:
+        state_type = None
+    member = getattr(state_type, "DEFAULT", None)
+    if member is not None:
+        return bool(_safe(lambda: states.contains(member), False))
+    names = getattr(states, "names", ())
+    return isinstance(names, (set, frozenset, list, tuple)) and "DEFAULT" in {
+        str(name).upper() for name in names
+    }
+
+
 def _state_flags(acc):
     """(enabled, focused, checked, selected, expanded, focusable, editable).
 
@@ -4170,7 +4209,11 @@ class ATSPIAccessor:
             # menu or the page, so this control stays hidden: named, with
             # no bounds and no press action.
             label = str(name).strip()
-            if not label:
+            if not label and not str(description).strip():
+                label = _claws_wizard_page_title(node)
+                if label:
+                    role = "AXTab"
+            if not label and not str(description).strip():
                 label = _frame_accessible_name(node)
             name = label
             position, size = None, None
@@ -4377,6 +4420,7 @@ class ATSPIAccessor:
             description=str(description),
             enabled=enabled,
             focused=focused,
+            default=role == "AXButton" and _has_default_state(node),
             focusable=focusable,
             position=position,
             size=size,
@@ -14899,6 +14943,42 @@ def _gtk_outline_parent(acc):
     except Exception:
         return None
     return None
+
+
+def geany_symbol_destination(acc) -> tuple[int, list] | None:
+    """Read a Geany symbol's reported line and the window's native status bars.
+
+    These are observation handles only. No selection, activation, or caret
+    movement is performed to make a pointer double-click succeed.
+    """
+    if _application_name(acc).casefold() != "geany" or not outline_double_click_note(acc):
+        return None
+    match = re.search(r"\[(\d+)\]$", _node_name(acc).strip())
+    if match is None:
+        return None
+    frame = _frame_ancestor(acc)
+    pending = [frame] if frame is not None else []
+    statuses = []
+    for _ in range(512):
+        if not pending:
+            break
+        node = pending.pop()
+        if _role_name(node) == "status bar":
+            statuses.append(node)
+        else:
+            pending.extend(_direct_children(node))
+    return int(match.group(1)), statuses
+
+
+def geany_symbol_arrived(destination: tuple[int, list]) -> bool:
+    """Verify navigation using Geany's native status, never the row label."""
+    line, statuses = destination
+    for status in statuses:
+        message = f"{_node_name(status)} {_direct_text(status)}"
+        match = re.search(r"\bline:\s*(\d+)\s*/", message)
+        if match is not None and int(match.group(1)) == line:
+            return True
+    return False
 
 
 def outline_double_click_note(acc) -> str:

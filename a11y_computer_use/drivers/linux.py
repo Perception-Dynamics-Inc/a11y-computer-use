@@ -2621,10 +2621,27 @@ class LinuxDriver:
         ):
             self._focused_editable = handle
             return None
+        destination = None
+        if handle is not None and button is MouseButton.LEFT and count == 2 and not modifiers:
+            destination = self._run(lambda: _atspi.geany_symbol_destination(handle))
         px, py = self._pointer(x, y)
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         self._note_pointer(x, y)
+        if destination is not None:
+            # XSync acknowledges delivery to X, not Geany's navigation. Wait
+            # on the caller so the AT-SPI event thread can process the change.
+            for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
+                if self._run(lambda: _atspi.geany_symbol_arrived(destination)):
+                    break
+                if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
+                    time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
+            else:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_LOST,
+                    "Geany did not confirm navigation to the double-clicked symbol",
+                    detail={"reason": "navigation_unconfirmed", "outcome": "unconfirmed"},
+                )
         if gtk4_text and button is MouseButton.LEFT:
             # Wait for the pointer event to be processed; never replace a
             # missed click with grab_focus or a widget activation action.

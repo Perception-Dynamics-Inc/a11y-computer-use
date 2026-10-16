@@ -6,6 +6,13 @@
 
 Xournal++ zoom sliders owned by `xournalpp` or `Xournal++` accept `150%`, `150 %`, and out-of-range bare numbers as percents when the current label and Value match the application's offset natural-log scale. Conversion uses `log(percent / 100 - 0.20753)` without step snapping. In-range bare numbers remain raw values. Percent writes require both the raw Value and the displayed percent to confirm; builds that change only the adjustment return `text_mismatch` without substituting clicks or keys. This path is covered by hermetic tests; live Xournal++ verification is pending.
 
+Claws Mail's Setup Wizard notebook pages with empty names can use their leading
+native page-title label as a tab name. The fallback is limited to that application's
+Setup Wizard window and does not use later field captions. Tabs without a native
+allocation remain hidden, without bounds or click actions; use the wizard's
+Next/Previous buttons to change pages. This naming fallback is hermetic-tested;
+live Claws Mail verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
@@ -447,3 +454,10 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
+Submit queries (`submit` or `submit form`) also match these buttons, and button
+role searches rank them first. No default is inferred from labels or geometry;
+the marker does not change click behavior or safety checks.
+
+Geany Symbols rows marked `activates on double-click` retain single-click selection. An explicit double-click sends two pointer clicks at the measured row bounds and waits for Geany's native status line to report the symbol's line. Unverified navigation returns an error without a replacement action.

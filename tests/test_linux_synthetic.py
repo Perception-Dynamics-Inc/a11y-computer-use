@@ -15054,3 +15054,136 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
             expected.append(("sleep", 0.12))
         expected.append(("sync", 1 + 2 * (index + 1)))
     assert timeline == (expected or [("sync", 1)])
+
+
+@pytest.mark.parametrize("selected_index", [0, 1])
+def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index):
+    titles = ["Welcome to Claws Mail", "About You", "Receiving mail"]
+    tabs = []
+    for title in titles:
+        page = _PageNode("panel", children=[
+            _PageNode("label", f"<b>{title}</b>"),
+            _PageNode("label", "Explanatory text, not the title"),
+        ])
+        tabs.append(_PageNode(
+            "page tab", box=((-1.0, -1.0), (-1.0, -1.0)), children=[page],
+        ))
+    notebook = _PageNode("page tab list", children=tabs)
+    frame = _PageNode("frame", "Claws Mail Setup Wizard", children=[notebook])
+    monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box or ((0., 0.), (500., 500.)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
+        True, False, None, node is tabs[selected_index], None, False, False,
+    ))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *a, **kw: None)
+    accessor = _atspi.ATSPIAccessor()
+    for index, tab in enumerate(tabs):
+        raw = accessor.read(tab)
+        assert raw.role == "AXTab"
+        assert raw.title == titles[index]
+        assert raw.selected == (index == selected_index)
+        assert raw.unallocated
+        assert raw.position is None and raw.size is None
+        assert raw.actions == ()
+        assert accessor.children(tab) == []
+    snap = build_snapshot(
+        frame, accessor, scope=Scope.WINDOW, app="claws-mail", pid=1, geometry=_geometry(),
+    )
+    pages = [el for el in snap.elements if el.role == "AXTab"]
+    assert [el.title for el in pages] == titles
+    assert all(el.bounds is None and not el.clickable and not el.actionable for el in pages)
+    rendered = observe.render_text(snap)
+    assert "Welcome to Claws Mail" in rendered and "About You" in rendered
+    assert len([el for el in snap.elements if el.title == "Explanatory text, not the title"]) == 3
+
+
+@pytest.mark.parametrize("app,window,first_role", [
+    ("Other App", "Setup Wizard", "label"),
+    ("Claws Mail", "Inbox", "label"),
+    ("Claws Mail", "Setup Wizard", "entry"),
+])
+def test_claws_wizard_page_title_does_not_borrow_unrelated_labels(monkeypatch, app, window, first_role):
+    page = _PageNode("panel", children=[
+        _PageNode(first_role, "First field"), _PageNode("label", "Later caption"),
+    ])
+    tab = _PageNode("page tab", children=[page])
+    _PageNode("frame", window, children=[_PageNode("page tab list", children=[tab])])
+    monkeypatch.setattr(_atspi, "_application_name", lambda node: app)
+    assert _atspi._claws_wizard_page_title(tab) == ""
+
+
+def test_geany_symbol_destination_uses_native_status_text(fake_atspi, monkeypatch) -> None:
+    symbol = _outline_cell("target_fn [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="Status")
+    _adopt(window, window.children[0], status)
+    destination = _atspi.geany_symbol_destination(symbol)
+    assert destination == (301, [status])
+    for message, arrived in [
+        ("", False), ("target_fn [301]", False),
+        ("line: 1 / 303", False), ("line: 301 / 303\t col: 0", True),
+    ]:
+        monkeypatch.setattr(_atspi, "_direct_text", lambda node: message if node is status else "")
+        assert _atspi.geany_symbol_arrived(destination) is arrived
+    status.name = "line: 301 / 303"
+    monkeypatch.setattr(_atspi, "_direct_text", lambda _node: "")
+    assert _atspi.geany_symbol_arrived(destination) is True
+    window.get_application().name = "other-editor"
+    assert _atspi.geany_symbol_destination(symbol) is None
+
+
+@pytest.mark.parametrize("arrives", [True, False])
+def test_geany_double_click_waits_for_navigation_without_substituting_input(
+    fake_atspi, monkeypatch, xtest_recorder, arrives,
+) -> None:
+    from a11y_computer_use import observe
+
+    symbol = _outline_cell("target_fn [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="Status")
+    _adopt(window, window.children[0], status)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    shot = driver.snapshot(Scope.WINDOW, "geany")
+    cell = next(el for el in shot.elements if "target_fn" in el.title)
+    assert observe.ax_handle_for(cell.snapshot_id, cell.ref) is symbol
+    polls = []
+    sleeps = []
+    in_native_call = False
+    real_run = driver._run
+
+    def run(fn):
+        nonlocal in_native_call
+        in_native_call = True
+        try:
+            return real_run(fn)
+        finally:
+            in_native_call = False
+
+    def read(node):
+        assert in_native_call
+        assert node is status
+        polls.append(node)
+        return "line: 301 / 303" if arrives and len(polls) > 1 else "line: 1 / 303"
+
+    def pause(seconds):
+        assert not in_native_call
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(driver, "_run", run)
+    monkeypatch.setattr(_atspi, "_direct_text", read)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", pause)
+    monkeypatch.setattr(_atspi, "do_named_action", lambda *_args: pytest.fail("substituted activation"))
+    events, _display = xtest_recorder
+    events.clear()
+    if arrives:
+        driver.click(cell, count=2)
+        assert len(polls) == 2
+        assert sleeps == [_atspi._FOCUS_CONFIRM_PAUSE_S]
+    else:
+        with pytest.raises(ComputerUseError, match="did not confirm navigation") as error:
+            driver.click(cell, count=2)
+        assert error.value.detail["outcome"] == "unconfirmed"
+        assert len(polls) == _atspi._FOCUS_CONFIRM_POLLS
+    assert len([event for event in events if event[0] == _X_BPRESS]) == 2
