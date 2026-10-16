@@ -14805,3 +14805,27 @@ def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, 
     api = type("API", (), {"Text": Text, "TextGranularity": type("Granularity", (), {"LINE": 0})})
     monkeypatch.setattr(_atspi, "_atspi", lambda: api)
     assert _atspi.is_secure(acc) is (side != "ordinary")
+
+
+def test_geany_fixture_initializes_caret_until_native_status_is_ready() -> None:
+    """Welcome text is not caret evidence; setup stops before tested actions."""
+    from types import SimpleNamespace
+    from tests.test_linux_live import _geany_initial_line
+
+    calls = []
+    driver = SimpleNamespace(
+        activate_app=lambda app: calls.append(("activate", app)),
+        key_chord=lambda chord: calls.append(("key", chord)),
+    )
+    bar = SimpleNamespace(role="AXStatusBar", title="This is Geany 2.0.", value=None)
+    snap = SimpleNamespace(elements=(bar,))
+    assert not _geany_initial_line(driver, snap)
+    assert calls == [("activate", "geany"), ("key", "ctrl+Home")]
+    # An editor buffer containing the phrase cannot establish readiness.
+    bar.role = "AXTextArea"
+    bar.title = "line: 1 / 303"
+    assert not _geany_initial_line(driver, snap)
+    bar.role = "AXStatusBar"
+    calls.clear()
+    assert _geany_initial_line(driver, snap)
+    assert calls == []

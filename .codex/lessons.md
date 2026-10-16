@@ -172,3 +172,5 @@
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
 
 - 2026-10-14 (PR #467 status repair): Keep GTK status message reads independent of a positive Text character count. When the count is empty or unavailable, request the native Text endpoint (-1) and retain only actual returned text; do not infer a caret line from symbol names or document geometry. Validate the empty-count case hermetically and both Geany navigation paths live.
+
+- 2026-10-16 (#467 CI repair): Geany 2.0's startup welcome message masks caret statistics even after its symbol tree/editor is accessible. Statistics refresh on editor input, so initialize the fixture caret with Ctrl+Home and require the real initial line status within the existing startup deadline before testing navigation. Stop setup input once ready and preserve all final caret/visibility assertions; Text probes and geometry refreshes cannot reveal statistics the application is not displaying yet.

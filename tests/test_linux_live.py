@@ -13468,6 +13468,23 @@ def test_linux_swing_column_headers_keep_their_own_names(tmp_path) -> None:
         _stop(proc)
 
 
+def _geany_initial_line(driver, snap) -> bool:
+    """Initialize the fixture caret and wait for Geany's real line statistics.
+
+    The welcome message masks statistics briefly. Geany refreshes them on
+    editor input, so polling snapshots alone cannot establish readiness.
+    This setup runs before the clicks or searches under test.
+    """
+    if any(
+        el.role == "AXStatusBar" and "line: 1 " in f"{el.title or ''} {el.value or ''}"
+        for el in snap.elements
+    ):
+        return True
+    driver.activate_app("geany")
+    driver.key_chord("ctrl+Home")
+    return False
+
+
 def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> None:
     """Live Geany Symbols row. Not a synthetic tree.
 
@@ -13510,10 +13527,17 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
         shot = _wait_named_tree(
             driver,
             "geany",
-            lambda snap: any("target_fn_row150" in (el.title or "") for el in snap.elements),
+            # Geany's startup message temporarily masks the caret status.
+            # Wait for the actual initial line before testing navigation;
+            # an available symbol tree alone does not mean status is ready.
+            lambda snap: (
+                any("target_fn_row150" in (el.title or "") for el in snap.elements)
+                and _geany_initial_line(driver, snap)
+            ),
             timeout_s=20,
         )
         assert shot is not None and proc.poll() is None, "geany never listed the symbol"
+        assert "line: 1 " in _element_blob(shot), "Geany initial caret status never became ready"
         listed = runtime.desktop_snapshot("geany")
         assert "(activates on double-click)" in listed
         shot = runtime._current
@@ -13983,9 +14007,15 @@ def test_linux_geany_scintilla_offscreen_line_is_scrolled_into_the_widget(tmp_pa
         shot = _wait_doc(
             driver,
             "geany",
-            lambda snap: _document_area(snap, "ROW-150") is not None,
+            # The welcome message can mask line statistics even after the
+            # document is accessible. Require initial caret evidence too.
+            lambda snap: (
+                _document_area(snap, "ROW-150") is not None
+                and _geany_initial_line(driver, snap)
+            ),
         )
         assert shot is not None and proc.poll() is None, "geany never exposed the document"
+        assert "line: 1 " in _element_blob(shot), "Geany initial caret status never became ready"
         blob = _element_blob(shot)
         assert "line: 151" not in blob, blob
         area = _document_area(shot, "ROW-150")
