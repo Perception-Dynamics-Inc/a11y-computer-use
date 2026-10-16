@@ -533,7 +533,9 @@ or an unchanged window title returns `suspected_noop` with `location not opened`
 and guidance to check the path or create missing folders from the nearest
 existing parent. An unchanged title alone does not prove that an error icon
 exists, so the result names the observed evidence. Successful navigation keeps
-the usual key result. Text read-back from `set_value` does not establish that a
+the usual key result: a changed window title naming the requested folder,
+together with a matching live location entry, overrides even a newly appearing
+error icon. Text read-back from `set_value` does not establish that a
 folder exists.
 
 Showing HTML popover panels reporting AT-SPI `ispopup=auto|manual|hint`
@@ -602,6 +604,14 @@ ancestors. This cache ends with the snapshot. Clicks still recheck coverage
 at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
+
+Top-level application children are enumerated with the native child cache disabled
+for both window-root selection and showing-window discovery. This prevents a
+new Qt window, such as Scribus's Story Editor, from remaining absent behind a
+stale cached application child list. The existing cache-mask helper keeps the
+count and indexed reads on the event thread and restores the default mask after
+the read. Regression coverage is synthetic; this change has not been live-verified
+against Scribus.
 
 GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
 button and a popover of ordinary buttons/checkboxes without a menu bar. Menu

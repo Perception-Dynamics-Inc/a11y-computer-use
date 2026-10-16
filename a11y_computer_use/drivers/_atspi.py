@@ -6154,15 +6154,7 @@ def find_root(app: str, scope) -> object | None:
     active = getattr(st, "ACTIVE", None)
 
     def _frames(acc):
-        n = _child_count(acc)
-        if n < 0:
-            n = 0
-        out = []
-        for j in range(int(n)):
-            frame = _call_first(acc, ("get_child_at_index",), j)
-            if frame is not None:
-                out.append(frame)
-        return out
+        return _fresh_application_children(acc)
 
     def _is_active(frame) -> bool:
         sset = _call_first(frame, ("get_state_set",))
@@ -6296,6 +6288,23 @@ def _toplevel_of(node):
     return None
 
 
+def _fresh_application_children(app) -> list:
+    """Read top-level children without libatspi's stale application cache.
+
+    A newly opened Qt window can be absent from the cached array indefinitely.
+    Keep the count and indexed reads under the same cache mask; clearing cached
+    properties alone allows reentrant cache events to restore the stale array.
+    """
+    def read_children():
+        count = _child_count(app)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return []
+        return [child for index in range(count)
+                if (child := _child_at(app, index)) is not None]
+
+    return _without_child_cache(app, read_children)
+
+
 def showing_toplevels(node) -> list:
     """Showing top-level windows of ``node``'s application, active first.
 
@@ -6317,13 +6326,9 @@ def showing_toplevels(node) -> list:
     identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
     if identity in _linux_system._PORTAL_BACKENDS:
         return [node]
-    count = _child_count(app)
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        count = 0
     frames = []
-    for index in range(int(count)):
-        child = _child_at(app, index)
-        if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
+    for child in _fresh_application_children(app):
+        if _role_name(child) not in _TOPLEVEL_ROLES:
             continue
         if not _state_has(child, "SHOWING"):
             continue

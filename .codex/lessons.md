@@ -274,6 +274,7 @@
 - 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
 
 - 2026-10-16 (PR #467 validation): A worktree can have read-only shared Git metadata and protected contributor files even when ordinary source files are writable. Preserve the remote PR head in a writable temporary checkout before merging; do not leave a partially updated original worktree after a checkout fails on a protected file.
+- 2026-10-16 (PR #715 merge repair): Preserve stale top-level application-child cache regressions alongside table-band boundary regressions when both append to the Linux synthetic suite; window discovery and complete table-cell publication are independent behaviors.
 
 
 - 2026-10-16 (PR #711 repair): Calc viewport bands use the table role to retain sheet pruning limits, while ordinary table-cell bands use groups to avoid orphaned final cells. Preserve both representations and their regressions when merging adjacent band changes; label only the Calc synthetic bands.
