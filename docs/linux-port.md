@@ -350,10 +350,12 @@ Qt line edits retain their text without requesting document viewport ranges.
 Snapshot values and text searches use `Text.get_bounded_ranges`
 inside the measured editor bounds, falling back to native point offsets and
 verified character rectangles when Qt omits bounded ranges. If that query
-fails or times out and point offsets are unavailable (as on Qt 5.15), a raw
-Text prefix capped at 4000 characters is read and each character's native
-rectangle is checked against the viewport. Unverified and off-screen characters
-remain excluded from search. Each scroll re-reads
+fails, times out, or returns malformed ranges and point offsets are unavailable
+(as on Qt 5.15), a raw Text prefix capped at 4000 characters is read. Failed
+explicit text reads retry `getText(0,-1)` only when the native character count
+fits that cap, then try 256-character chunks within the same cap. Each
+character's native rectangle is checked against the viewport. Unverified and
+off-screen characters remain excluded from search. Each scroll re-reads
 these ranges, so an off-screen match becomes searchable when it enters the
 viewport. When neither interface establishes visibility, the document value is
 omitted and its hint recommends in-document Find or line navigation. `find` and

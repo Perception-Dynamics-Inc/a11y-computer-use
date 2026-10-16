@@ -15066,3 +15066,97 @@ def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, 
         snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
                               app="scribus", pid=1, geometry=_geometry())
         assert observe.find_elements(snap, text="QTDOC_1135")
+
+
+@pytest.mark.parametrize("failure", ["marshalling", "exception", "timeout", "no_answer", "malformed", "empty_content", "invalid_content"])
+@pytest.mark.parametrize("read_path", ["bounded", "sentinel", "chunks", "unavailable"])
+def test_qt_failed_ranges_recover_native_text(monkeypatch, failure, read_path):
+    """A broken QSpiTextRangeList must still reach working Text reads."""
+    text = "QTDOC_684 hello" + "x" * 300
+    reads = []
+    checked = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def ranges(*args):
+        if failure == "marshalling":
+            raise RuntimeError("Marshalling failed: Unregistered type QSpiTextRangeList")
+        if failure == "exception":
+            raise ValueError("invalid D-Bus reply")
+        if failure == "timeout":
+            raise TimeoutError("Did not receive a reply")
+        if failure == "empty_content":
+            return [_NS(content="")]
+        if failure == "invalid_content":
+            return [_NS(content=None)]
+        return [object()] if failure == "malformed" else None
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        if read_path == "unavailable":
+            raise RuntimeError("Text unavailable")
+        if read_path == "sentinel" and end != -1:
+            raise RuntimeError("Explicit range failed")
+        if read_path == "chunks" and (end == -1 or end - start > 256):
+            raise RuntimeError("Large range failed")
+        return text[start:] if end == -1 else text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        return _NS(x=20, y=40 if offset < 15 else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(get_bounded_ranges=ranges,
+                 get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text),
+                 get_text=get_text, get_character_extents=rectangle),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    if read_path == "unavailable":
+        assert value is None
+        assert checked == []
+    else:
+        assert value == text[:15]
+        assert checked == list(range(len(text)))
+        raw = RawNode(role="AXTextArea", value=value)
+        snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                              app="scribus", pid=1, geometry=_geometry())
+        assert observe.find_elements(snap, text="QTDOC_684")
+    assert reads[0] == (0, len(text))
+    if read_path == "sentinel":
+        assert reads == [(0, len(text)), (0, -1)]
+    elif read_path in {"chunks", "unavailable"}:
+        assert reads[:3] == [(0, len(text)), (0, -1), (0, 256)]
+        assert len(reads) <= 4
+
+
+@pytest.mark.parametrize("chunk_failure", [False, True])
+def test_qt_range_recovery_never_requests_unbounded_large_document(monkeypatch, chunk_failure):
+    text = "QTDOC_684 hello" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        assert end != -1
+        assert 0 <= start <= end <= _atspi._PAGE_TEXT_CHARS
+        if end - start > 256 or (chunk_failure and start > 0):
+            raise RuntimeError("Range read failed")
+        return text[start:end]
+
+    def ranges(*args):
+        raise RuntimeError("Unregistered type QSpiTextRangeList")
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(get_bounded_ranges=ranges,
+                 get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text), get_text=get_text,
+                 get_character_extents=lambda *args: _NS(x=20, y=40, width=8, height=16)),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    if chunk_failure:
+        assert value is None
+    else:
+        assert value == text[:_atspi._PAGE_TEXT_CHARS]
+    assert len(reads) <= 1 + (_atspi._PAGE_TEXT_CHARS + 255) // 256
