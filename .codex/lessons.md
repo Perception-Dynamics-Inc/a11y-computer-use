@@ -154,3 +154,5 @@
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
+
+- 2026-10-16 (#682): Thunar toolbar path entries can echo EditableText while leaving the navigation model stale. Retype through confirmed focus even when the buffer already equals the requested path; keep Return separate and verify navigation from location/title.
