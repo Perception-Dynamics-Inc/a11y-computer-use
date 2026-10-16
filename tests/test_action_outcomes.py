@@ -1461,6 +1461,7 @@ def test_popover_cover_requires_unrelated_measured_overlap(tmp_path, case):
 def test_linux_popover_cover_reads_newly_opened_top_layer(tmp_path):
     """A cover opened after the issued snapshot still blocks the click."""
     driver = TreeDriver()
+    driver.elements.append(_element("web", "AXWebArea", "Page"))
     runtime = _runtime(tmp_path, driver)
     driver.name = "linux"
     driver.elements.append(_element(
@@ -1533,3 +1534,53 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
     for rendered in (observe.render_text(snap), observe.render_text(snap, mode="interactive"),
                      observe.render_matches(snap, matches)):
         assert ("covered by 'Extract files'" in rendered) is covered
+
+
+@pytest.mark.parametrize("operation", ["click", "crop"])
+def test_linux_native_popover_guard_does_not_snapshot(tmp_path, monkeypatch, operation):
+    """#717: the pre-input guard must not walk a native app again."""
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    driver.name = "linux"
+    original = runtime._popover_cover
+    checked = []
+
+    def guard(element, *, refresh=False):
+        if refresh:
+            with monkeypatch.context() as patch:
+                def unexpected_snapshot(*args):
+                    pytest.fail("native popover guard requested a full snapshot")
+                patch.setattr(driver, "snapshot", unexpected_snapshot)
+                result = original(element, refresh=True)
+            checked.append(element.ref)
+            return result
+        return original(element)
+
+    monkeypatch.setattr(runtime, "_popover_cover", guard)
+    getattr(runtime, operation)("e2")
+    assert checked == ["e2"]
+
+
+@pytest.mark.parametrize("source", ["browser", "web_area", "document", "popover"])
+def test_linux_plausible_popover_refresh_refuses_covered_click(tmp_path, monkeypatch, source):
+    if source == "browser":
+        monkeypatch.setattr(sys.modules[__name__], "APP", "chromium")
+    driver = TreeDriver()
+    if source == "web_area":
+        driver.elements.append(_element("web", "AXWebArea", "Page"))
+    elif source == "popover":
+        driver.elements.append(_element(
+            "aside", "AXPopover", "", bounds=Bounds(0, 400, 400, 100, 100),
+        ))
+    runtime = _runtime(tmp_path, driver)
+    driver.name = "linux"
+    if source == "document":
+        monkeypatch.setattr(driver, "element_document_url", lambda element: "https://example.test/", raising=False)
+    driver.elements.append(_element(
+        "overlay", "AXPopover", "", bounds=Bounds(0, 0, 0, 200, 100),
+    ))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.click("e2")
+    assert caught.value.code == ErrorCode.NOT_VISIBLE
+    assert caught.value.detail["reason"] == "covered"
+    assert driver.calls == []

@@ -485,7 +485,10 @@ Ref clicks and crops refuse with `not_visible` / `covered` when another
 popover's measured bounds contain the ref's center. Controls inside their own
 popover remain eligible; dismiss the covering popover before retrying a covered
 ref. This check uses the accessibility tree because Chrome's accessible
-hit test can return the underlying control.
+hit test can return the underlying control. A fresh cover snapshot is limited
+to recognized browsers, refs with a document URL, trees with `AXWebArea`,
+or trees that already contained an `AXPopover`; native trees without those
+signals avoid the extra snapshot.
 
 
 Claws Mail's GTK folder and message lists can expose only childless panels

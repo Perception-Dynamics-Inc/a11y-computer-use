@@ -4663,6 +4663,17 @@ class Runtime:
         if snap is None:
             return None
         if refresh and self.driver.name == "linux" and callable(getattr(self.driver, "snapshot", None)):
+            from a11y_computer_use.drivers.linux import _named_browser
+
+            # Native GTK/Qt clicks need no extra tree walk. Web documents
+            # and observed popovers can gain or lose covers after ref issuance.
+            plausible = (
+                any(el.role in {"AXPopover", "AXWebArea"} for el in snap.elements)
+                or _named_browser(snap.app)
+                or self.element_document_url(element) is not None
+            )
+            if not plausible:
+                return None
             # Resolve against the same fresh tree used for cover geometry;
             # opening a popover can change refs since the issued snapshot.
             from dataclasses import replace
