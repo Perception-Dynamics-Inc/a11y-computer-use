@@ -15486,6 +15486,16 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
         app = _call_first(acc, ("get_application", "getApplication"))
         name = _call_first(app, ("get_name",), default="") or ""
+        if str(name).casefold() == "eog" and re.fullmatch(
+            r"\s*\d+(?:[.,]\d+)?\s*%\s*", _full_text(acc) or ""
+        ):
+            # A matching entry buffer does not verify the image scale.
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "Eye of GNOME zoom entry text does not verify applied zoom; "
+                "use the zoom UI and verify the displayed image scale",
+                detail={"reason": "commit_unverified"},
+            )
         if str(name).casefold() == "abiword":
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,

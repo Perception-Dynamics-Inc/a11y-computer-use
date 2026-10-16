@@ -600,3 +600,11 @@ listing and paths remain unsupported for that shape; the error points to
 `desktop_snapshot`, clicking the menu button's ref, and a fresh snapshot's
 popover control refs. If already open, use the current popover refs directly.
 Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
+
+### Eye of GNOME zoom entry
+
+`set_value` refuses GTK percentage entries in Eye of GNOME (`eog`) with
+`unsupported` / `commit_unverified` before changing their text. EditableText
+read-back can match the requested percentage while the image scale stays
+unchanged. Use the zoom UI and verify the displayed image scale; the backend
+does not send an activation key or substitute a zoom-button click.

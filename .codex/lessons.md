@@ -210,4 +210,5 @@
 - 2026-10-16 (PR #696 repair): Keep VLC's bounded registration retry and VLC-specific Qt setup hint alongside the generic GTK2 bridge prerequisites when merging missing-tree diagnostics. Preserve both the VLC registration regressions and main's Qt text-recovery regressions.
 - 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
 
+- 2026-10-16 (#651): Eye of GNOME GTK zoom entries can echo EditableText percentages without changing image scale. Buffer equality cannot verify applied zoom; refuse before mutation rather than send an unrequested activation. Preserve the independent header-bar menu guidance when merging adjacent backend notes.
 - 2026-10-16 (PR #701 main merge): Retain GTK numeric label tests alongside VLC registration tests and same-app cover documentation when adjacent additions conflict; they protect independent observation behaviors.
