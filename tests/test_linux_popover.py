@@ -75,3 +75,12 @@ def test_another_popover_at_old_position_does_not_retain_ref():
     with pytest.raises(ComputerUseError) as caught:
         observe.rematch_ref(old, by_title(old, "Alpha action").ref, live)
     assert caught.value.detail["reason"] == "popover_closed"
+
+
+def test_partial_snapshot_with_omitted_parent_still_resolves():
+    from dataclasses import replace
+
+    old = snap_of(save_window())
+    target = next(element for element in old.elements if element.parent)
+    partial = replace(old, elements=(target,))
+    assert observe.rematch_ref(partial, target.ref, old) == target
