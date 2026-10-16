@@ -155,6 +155,10 @@
 
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
+- 2026-10-16 (#609): Chrome's accessible hit test can return the underlying control through a top-layer HTML popover. Use showing `ispopup` panels and measured bounds to identify covers, and keep the mapped `AXPopover` in the container no-value set to avoid numeric interface reads.
+
+- 2026-10-16 (PR #679 repair): HTML popover mapping and Claws Mail wizard tab naming have independent appended regressions. Preserve both complete test blocks when merging main, including native unknown-geometry assertions for hidden wizard tabs.
+
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
 
 - 2026-10-16 (#682): Thunar toolbar path entries can echo EditableText while leaving the navigation model stale. Retype through confirmed focus even when the buffer already equals the requested path; keep Return separate and verify navigation from location/title.
@@ -163,6 +167,11 @@
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
 - 2026-10-16 (PR #685 repair): Thunar toolbar path replacement and Chromium PDF thumbnail refusal protect independent action paths. Preserve both backend notes and regression blocks when merging main; neither requires changing the other action.
+
+- 2026-10-16 (PR #679 merge repair): Preserve Claws Mail opaque-list labels and HTML popover coverage as independent behaviors when merging adjacent documentation and synthetic regressions. Inspect the complete Linux failure summary before changing code for the tracked Calc timing flake.
+
+- 2026-10-16 (test isolation): Concurrent D-Bus test sessions need distinct writable XDG_CACHE_HOME directories; sharing the AT-SPI socket path can close a remote-runtime subprocess connection when the other session exits.
+
 - 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
 
 - 2026-10-16 (PR #685 merge): Thunar path replacement and failed-navigation verification are complementary. Preserve focused replacement with a separate Return, and check navigation errors before accepting a changed accessibility tree as success.

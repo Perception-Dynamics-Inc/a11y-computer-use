@@ -459,6 +459,15 @@ unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
 
+Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
+`manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
+Ref clicks and crops refuse with `not_visible` / `covered` when another
+popover's measured bounds contain the ref's center. Controls inside their own
+popover remain eligible; dismiss the covering popover before retrying a covered
+ref. This check uses the accessibility tree because Chrome's accessible
+hit test can return the underlying control.
+
+
 Claws Mail's GTK folder and message lists can expose only childless panels
 inside scroll panes in the main split-pane layout. These opaque regions are
 labelled `Claws Mail folder / message list` with a note that folder rows and
