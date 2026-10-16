@@ -1595,6 +1595,29 @@ def _hidden_page_tab(node) -> bool:
     return _negative_extent(size)
 
 
+def _claws_wizard_page_title(node) -> str:
+    """Read the leading page label of Claws Mail's hidden wizard notebook."""
+    if _application_name(node).casefold() not in {"claws-mail", "claws mail"}:
+        return ""
+    if "setup wizard" not in _frame_accessible_name(node).casefold():
+        return ""
+    # Only descend through leading layout children. Later labels include
+    # explanatory prose and field captions, not the page title. Never borrow
+    # a label from another page or substitute the shared wizard window title.
+    current = node
+    for _ in range(8):
+        kids = _direct_children(current)
+        if not kids:
+            return ""
+        current = kids[0]
+        role = _role_name(current)
+        if role == "label":
+            return _plain_accessible_name(_node_name(current))
+        if role not in {"panel", "filler", "section"}:
+            return ""
+    return ""
+
+
 def _direct_children(node) -> list:
     """Immediate children, without the snapshot's page-tab hoist."""
     count = _child_count(node)
@@ -3890,7 +3913,11 @@ class ATSPIAccessor:
             # menu or the page, so this control stays hidden: named, with
             # no bounds and no press action.
             label = str(name).strip()
-            if not label:
+            if not label and not str(description).strip():
+                label = _claws_wizard_page_title(node)
+                if label:
+                    role = "AXTab"
+            if not label and not str(description).strip():
                 label = _frame_accessible_name(node)
             name = label
             position, size = None, None
