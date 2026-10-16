@@ -205,4 +205,9 @@
 
 - 2026-10-16 (PR #467 Geany verification): XSync confirms X server delivery, not completion of symbol navigation. After the requested double-click, poll Geany's native status line on separate AT-SPI operations; status may be exposed through Name or Text. Keep waits on the caller, preserve both pointer clicks, and return an unconfirmed error if the reported destination never appears.
 
+- 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
+
+- 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
+
+- 2026-10-16 (PR #467 repair): A Geany navigation or show-desktop CI failure can disappear in a clean desktop session. Reproduce both failed cases alongside Scintilla search under isolated D-Bus, Xvfb, and Openbox before changing pointer behavior or verification bounds.

@@ -2846,6 +2846,7 @@ class Runtime:
         bounds: bool = False,
         previous: str | None = None,
         key_focus: bool = False,
+        key_chord: str | None = None,
         focus_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
@@ -2862,6 +2863,11 @@ class Runtime:
         changed: bool | None = None
         focus_note = None
         if readable and before is not None and after is not None:
+            if key_chord and key_chord.casefold() in _CONFIRM_KEYS:
+                failure = self._location_return_failure(before["snap"], after)
+                if failure:
+                    self._remember_baseline(after)
+                    return "suspected_noop", failure
             changed = outcome.relevant_state_changed(before["snap"], after, element)
             if bounds and not changed:
                 changed = before["bounds"] != outcome.bounds_fingerprint(after)
@@ -3005,6 +3011,37 @@ class Runtime:
                 return "suspected_noop", cover
         return judged, evidence
 
+    def _location_return_failure(self, before: Snapshot, after: Snapshot) -> str | None:
+        """Report failed Thunar toolbar navigation from the observed entry/window."""
+        if getattr(self.driver, "name", None) != "linux" or (before.app or "").casefold() != "thunar":
+            return None
+        entry = next((e for e in before.elements if e.focused and e.role == "AXTextField"), None)
+        if entry is None or entry.secure:
+            return None
+        nodes = {e.ref: e for e in before.elements}
+        parent = nodes.get(entry.parent)
+        toolbar = False
+        while parent is not None and parent.role != "AXWindow":
+            toolbar |= parent.role == "AXToolbar"
+            parent = nodes.get(parent.parent)
+        if not toolbar or parent is None:
+            return None
+        fresh = self._element_like(entry, after)
+        error = fresh is not None and any(
+            e.parent == fresh.ref and e.role == "AXImage" and e.title == "dialog-error-symbolic"
+            for e in after.elements
+        )
+        windows = [e for e in after.elements if e.role == "AXWindow" and e.path == parent.path]
+        window = windows[0] if len(windows) == 1 else None
+        unchanged = window is not None and bool(parent.title) and window.title == parent.title
+        if not error and not unchanged:
+            return None
+        reason = "the entry shows an error icon" if error else "the window title did not change"
+        return (
+            f"location not opened: {reason}; the path may not exist. "
+            "Create the missing folder from the nearest existing parent, or check the path."
+        )
+
     def _key_focus_probe(self, app: str | None) -> tuple | None:
         """Focused text, caret, selection, and sheet cell, or None off Linux.
 
@@ -3114,6 +3151,7 @@ class Runtime:
         previous: str | None = None,
         verdict: tuple[str, str] | None = None,
         key_focus: bool = False,
+        key_chord: str | None = None,
         focus_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
@@ -3126,11 +3164,13 @@ class Runtime:
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
-                key_focus=key_focus, focus_before=focus_before, selection=selection,
+                key_focus=key_focus, key_chord=key_chord, focus_before=focus_before, selection=selection,
                 cover_click=cover_click,
             )
         else:
             judged, evidence = verdict
+        if tool == "key" and evidence.startswith("location not opened:"):
+            text = evidence
         died = "exited after the action" in evidence
         browser = getattr(self.driver, "name", None) == "browser"
         return outcome.ActionResult(
@@ -5543,7 +5583,7 @@ class Runtime:
         return self._conclude(
             f"pressed {chord} in {bundle}{note}",
             tool="key", app=bundle, before=before,
-            key_focus=True, focus_before=focus_before,
+            key_focus=True, key_chord=chord, focus_before=focus_before,
         )
 
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
@@ -5780,7 +5820,7 @@ class Runtime:
             return self._conclude(
                 f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
                 tool="key", app=bundle, before=before,
-                key_focus=True, focus_before=focus_before,
+                key_focus=True, key_chord=chord, focus_before=focus_before,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -5805,7 +5845,7 @@ class Runtime:
         return self._conclude(
             f"pressed {chord}{''.join(note)}",
             tool="key", app=target, before=before,
-            key_focus=True, focus_before=focus_before,
+            key_focus=True, key_chord=chord, focus_before=focus_before,
         )
 
     @_serialized
@@ -6281,7 +6321,9 @@ class Runtime:
                 "; text read-back does not verify activation or navigation. "
                 "set_value does not guarantee keyboard focus. For GTK path entries "
                 "(Thunar/FileZilla), focus the field, select all, type the path, "
-                "then Return; verify the folder title/file list in a fresh snapshot."
+                "then Return; verify the folder title/file list in a fresh snapshot. "
+                "If the path does not exist, create the missing folder from the nearest "
+                "existing parent, or check the path."
             )
         return self._conclude(
             text,
@@ -9585,7 +9627,9 @@ def build_server(
         'full'. The text is unchanged. Structured content adds outcome, next,
         and evidence. A key is confirmed when the focused text, caret,
         selection, or focused cell changes, including when the rest of the
-        page fingerprint does not."""
+        page fingerprint does not. Thunar location-entry Return/KP_Enter reports
+        suspected_noop when an error icon appears or the window title stays unchanged;
+        check the path or create missing folders from the nearest existing parent."""
         return _publish(await run(runtime.key, chord, app, _outcome=True, _tool="key"))
 
     @server.tool(name="scroll")
@@ -9735,8 +9779,9 @@ def build_server(
         An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success.
         Text read-back does not verify activation or navigation, and an API
-        write does not guarantee keyboard focus. GTK path entries such as
-        Thunar's location bar and FileZilla's Local site field may display
+        write does not guarantee keyboard focus.
+        Missing paths must be created from the nearest existing parent or corrected.
+        GTK path entries such as Thunar's location bar and FileZilla's Local site field may display
         the new path without navigating, even after Return. For those entries,
         focus the field, select all, type the path, then Return. Verify the
         folder title/file list in a fresh desktop_snapshot; Return without

@@ -70,7 +70,7 @@ _KEYSYM_MODS = {
 _KEYSYM_KEYS: dict[str, int] = {c: ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
 _KEYSYM_KEYS.update({d: ord(d) for d in "0123456789"})
 _KEYSYM_KEYS.update({
-    "enter": 0xFF0D, "return": 0xFF0D, "tab": 0xFF09, "space": 0x0020,
+    "enter": 0xFF0D, "return": 0xFF0D, "kp_enter": 0xFF8D, "tab": 0xFF09, "space": 0x0020,
     "backspace": 0xFF08, "delete": 0xFFFF, "escape": 0xFF1B, "esc": 0xFF1B,
     "left": 0xFF51, "up": 0xFF52, "right": 0xFF53, "down": 0xFF54,
     "home": 0xFF50, "end": 0xFF57, "pageup": 0xFF55, "pagedown": 0xFF56,
