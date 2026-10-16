@@ -48,6 +48,7 @@ from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 # because the strings are stable across atspi2 versions and bindings.
 _ROLE = {
     "push button": "AXButton",
+    "push button menu": "AXButton",
     "toggle button": "AXButton",
     "spin button": "AXTextField",
     "button": "AXButton",
@@ -7472,15 +7473,29 @@ def click_gtk4_tree_expander(acc) -> bool:
     return _do_action_named(acc, frozenset({name}))
 
 
+def qt_menu_button(acc) -> bool:
+    """Qt split/menu tool button whose menu action is not a main press."""
+    return _role_name(acc) == "push button menu" and _qt_app(acc)
+
+
+_MAIN_BUTTON_ACTIONS = frozenset({"click", "press", "activate"})
+
+
+def qt_menu_button_without_press(acc) -> bool:
+    """True when Qt provides no explicit main-button activation action."""
+    return qt_menu_button(acc) and not (_MAIN_BUTTON_ACTIONS & set(_raw_action_names(acc)))
+
+
 def do_press(acc) -> bool:
     """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
     action = _action_iface(acc)
     if action is None:
         return False
     n = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    allowed = _MAIN_BUTTON_ACTIONS if qt_menu_button(acc) else _PRESS_ACTION_NAMES | _PICK_ACTION_NAMES
     for i in range(int(n)):
         raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
-        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+        if raw in allowed:
             if _call_first(action, ("do_action", "doAction"), i, default=False):
                 return True
     return False
