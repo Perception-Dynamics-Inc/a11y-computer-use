@@ -1091,3 +1091,72 @@ def test_qt_viewport_read_preserves_kate_visibility_refusal(atspi, monkeypatch, 
     assert raw.editable
     if owner_name == "Kate":
         assert "Document text visibility unavailable" in raw.description
+
+
+@pytest.mark.parametrize("case", ["success", "miss", "missing_option", "no_popup", "no_geometry", "ambiguous", "popup_stays"])
+def test_qt_quick_combo_uses_new_frame_menu_and_verifies_commit(atspi, monkeypatch, case):
+    display = _Node("text", text="Apple", states={"EDITABLE", "SHOWING"}, toolkit="Qt")
+    combo = _Node("combo box", "Fruit", children=[display], actions=["SetFocus"], toolkit="Qt")
+    cherry = _Node("menu item", "Cherry", x=40, y=80, w=100, h=24, toolkit="Qt")
+    popup = _Node("menu", children=[_Node("menu item", "Apple"), cherry], toolkit="Qt")
+    unrelated = _Node("menu", states={"SHOWING"}, children=[_Node("menu item", "Cherry")])
+    frame = _Node("frame", children=[combo, unrelated], toolkit="Qt")
+    other_popup = _Node("menu", states={"SHOWING"}, children=[_Node("menu item", "Cherry")])
+    clicks = []
+    chords = []
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+    if case == "no_geometry":
+        combo.rect.width = 0
+
+    def click(x, y, *_args, **_kwargs):
+        clicks.append((int(x), int(y)))
+        if len(clicks) == 1:
+            if case != "no_popup":
+                popup.states.add("SHOWING")
+                popup.parent = frame
+                frame.children.append(popup)
+                if case == "ambiguous":
+                    frame.children.append(other_popup)
+        else:
+            if case != "popup_stays":
+                popup.states.discard("SHOWING")
+            if case != "miss":
+                display.text = "Cherry"
+
+    def escape(chord):
+        chords.append(chord)
+        popup.states.discard("SHOWING")
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.press_chord", escape)
+    assert _atspi._combo_entry(combo) is None
+    _atspi.set_combo_value(combo, "Apple")
+    assert clicks == []
+    if case == "success":
+        with _atspi.read_cache():
+            _atspi.set_combo_value(combo, "Cherry")
+        assert display.text == "Cherry"
+        assert clicks == [(70, 22), (90, 92)]
+        assert chords == []
+    elif case == "missing_option":
+        with pytest.raises(ValueError, match="Apple, Cherry"):
+            _atspi.set_combo_value(combo, "Durian")
+        assert len(clicks) == 1
+        assert chords == ["Escape"]
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            _atspi.set_combo_value(combo, "Cherry")
+        assert exc.value.detail["reason"] == ("text_mismatch" if case in {"miss", "popup_stays"} else "popup_missing")
+        assert len(clicks) == (2 if case in {"miss", "popup_stays"} else 0 if case == "no_geometry" else 1)
+        assert display.text == ("Cherry" if case == "popup_stays" else "Apple")
+        if case == "popup_stays":
+            assert chords == ["Escape"]
+    assert combo.action_log == []
+    assert "SHOWING" in unrelated.states
+
+
+def test_qt_combo_enabled_entry_is_preserved(atspi):
+    entry = _Node("text", states={"ENABLED", "SENSITIVE", "FOCUSABLE"}, toolkit="Qt")
+    combo = _Node("combo box", children=[entry], toolkit="Qt")
+    assert _atspi._combo_entry(combo) is entry
+    assert _atspi._qt_quick_display(combo) is None
