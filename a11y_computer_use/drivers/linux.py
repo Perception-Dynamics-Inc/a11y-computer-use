@@ -2186,6 +2186,23 @@ class LinuxDriver:
                 f"{element.ref} ({element.role}) click did not change the checked state",
                 detail={"ref": element.ref, "role": element.role, "reason": "checked_unchanged"},
             )
+        # Okular's TOC Toggle selects a row without navigating. Selection
+        # cannot verify activation, so refuse before mutating the item.
+        if self._run(lambda: _atspi.okular_toc_toggle_cell(handle)):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) TOC activation cannot be verified; "
+                "no click was sent",
+                detail={
+                    "ref": element.ref,
+                    "role": element.role,
+                    "reason": "toc_activation_unverified",
+                    "outcome": "refused",
+                    "hint": "Use a coordinate click inside the visible TOC cell, "
+                    "then verify the viewer's page number changed. "
+                    "AT-SPI Toggle only changes selection, not the displayed page.",
+                },
+            )
         # A Qt grid cell's Toggle action adds the cell and leaves currentItem
         # where it was. Selection.select_child does the same on Qt 6.11. A
         # pointer click at the cell center selects only that cell and makes

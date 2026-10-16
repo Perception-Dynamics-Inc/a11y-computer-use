@@ -7408,6 +7408,17 @@ def qt_quick_checkable(acc) -> bool:
     )
 
 
+def okular_toc_toggle_cell(acc) -> bool:
+    """Identify Okular tree cells whose Toggle only changes selection."""
+    return (
+        _role_name(acc) == "table cell"
+        and _qt_app(acc)
+        and _application_name(acc).casefold() == "okular"
+        and set(_raw_action_names(acc)) - {"setfocus"} == {"toggle"}
+        and any(_role_name(parent) == "tree" for parent in _ancestor_nodes(acc))
+    )
+
+
 def qt_toggle_only_control(acc) -> bool:
     """Qt buttons and list items whose only activating action is Toggle.
 
