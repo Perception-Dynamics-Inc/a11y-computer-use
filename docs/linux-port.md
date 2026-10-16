@@ -581,3 +581,11 @@ refs, capabilities, and bounds are retained. Missing ownership or geometry
 evidence produces no cover claim. Clicks still recheck coverage at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
+
+### Eye of GNOME zoom entry
+
+`set_value` refuses GTK percentage entries in Eye of GNOME (`eog`) with
+`unsupported` / `commit_unverified` before changing their text. EditableText
+read-back can match the requested percentage while the image scale stays
+unchanged. Use the zoom UI and verify the displayed image scale; the backend
+does not send an activation key or substitute a zoom-button click.
