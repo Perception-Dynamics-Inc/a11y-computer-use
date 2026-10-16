@@ -2978,11 +2978,16 @@ def _gtk_button_row_name(acc, name: str) -> str:
     label = _labelled_by_name(acc)
     if label:
         return _strip_label_colon(label) or name
+    return _gtk_row_label_name(acc, name, ambiguous_button=True)
+
+
+def _gtk_row_label_name(acc, name: str, *, ambiguous_button: bool = False) -> str:
+    """Use a measured left-hand label in the same native parent and row."""
     parent = _parent_of(acc)
     if parent is None or _role_name(parent) not in {"panel", "filler", "grouping"}:
         return name
     siblings = [_child_at(parent, i) for i in range(_child_count(parent))]
-    if name.strip() and sum(
+    if ambiguous_button and name.strip() and sum(
         _role_name(child) == "push button" and _node_name(child) == name
         for child in siblings if child is not None
     ) < 2:
@@ -4044,6 +4049,11 @@ class ATSPIAccessor:
             name = _gtk_entry_row_name(node)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
+        if (role_str in {"slider", "spin button"} and not name.strip()
+                and "gtk" in _toolkit_name(node)):
+            label = _plain_accessible_name(_labelled_by_name(node))
+            name = (_strip_label_colon(label) if label else
+                    _gtk_row_label_name(node, str(name)))
         if role == "AXMenuItem" and not str(name).strip():
             # GTK 4 Gio.Menu labels live on LABELLED_BY targets, sometimes
             # only as Text rather than an accessible name.
@@ -15481,6 +15491,16 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
         app = _call_first(acc, ("get_application", "getApplication"))
         name = _call_first(app, ("get_name",), default="") or ""
+        if str(name).casefold() == "eog" and re.fullmatch(
+            r"\s*\d+(?:[.,]\d+)?\s*%\s*", _full_text(acc) or ""
+        ):
+            # A matching entry buffer does not verify the image scale.
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "Eye of GNOME zoom entry text does not verify applied zoom; "
+                "use the zoom UI and verify the displayed image scale",
+                detail={"reason": "commit_unverified"},
+            )
         if str(name).casefold() == "abiword":
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,

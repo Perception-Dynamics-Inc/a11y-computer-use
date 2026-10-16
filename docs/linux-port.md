@@ -571,6 +571,14 @@ accessibility registration. Screenshots and explicitly requested coordinate
 actions are separate tools; the backend does not substitute them for ref or
 menu actions, invent refs, or infer control geometry.
 
+Unnamed GTK sliders and spin buttons use their AT-SPI `labelled-by` label as
+their title, before the description fallback. Without a relation, a measured
+left-hand label in the same parent and row supplies the title when the nearest
+candidate is unambiguous. Explicit accessible names remain authoritative; numeric
+values and descriptions remain separate from the title. This naming behavior is
+covered by synthetic tests; native GTK verification is pending.
+
+
 ### Same-app window covers in discovery
 
 Multi-window AT-SPI snapshots annotate clickable and editable controls with
@@ -578,7 +586,11 @@ Multi-window AT-SPI snapshots annotate clickable and editable controls with
 finds a different sibling window at the control's measured center. The note
 appears in full snapshots, interactive snapshots, and `find` results; native
 refs, capabilities, and bounds are retained. Missing ownership or geometry
-evidence produces no cover claim. Clicks still recheck coverage at action time.
+evidence produces no cover claim. Discovery shares one lightweight X11 stacking
+read within a snapshot and resolves native identity once per owning window,
+using the observed parent refs instead of walking every control's native
+ancestors. This cache ends with the snapshot. Clicks still recheck coverage
+at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
 
@@ -596,3 +608,11 @@ listing and paths remain unsupported for that shape; the error points to
 `desktop_snapshot`, clicking the menu button's ref, and a fresh snapshot's
 popover control refs. If already open, use the current popover refs directly.
 Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
+
+### Eye of GNOME zoom entry
+
+`set_value` refuses GTK percentage entries in Eye of GNOME (`eog`) with
+`unsupported` / `commit_unverified` before changing their text. EditableText
+read-back can match the requested percentage while the image scale stays
+unchanged. Use the zoom UI and verify the displayed image scale; the backend
+does not send an activation key or substitute a zoom-button click.

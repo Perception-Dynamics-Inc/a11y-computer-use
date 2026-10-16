@@ -558,6 +558,31 @@ def window_at_point(x: float, y: float) -> dict | None:
         return None
 
 
+def window_cover_rows() -> list[dict]:
+    """Read stacking once for snapshot covers, without process identity scans.
+
+    Do not wait for PID settlement; missing ownership stays unknown.
+    """
+    rows = []
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                if _is_hidden(win, d):
+                    continue
+                geom = _geometry_on_root(win, d)
+                if geom is None:
+                    continue
+                x, y, width, height = geom
+                rows.append({
+                    "window_id": int(win.id), "title": _win_title(win, d),
+                    "pid": _pid_of(win, d), "on_screen": True,
+                    "bounds": {"x": x, "y": y, "width": width, "height": height},
+                })
+    except Exception:
+        return []
+    return rows
+
+
 def _launcher_comm(identifier: str, comm: str) -> bool:
     """Whether ``identifier`` names the same process as ``comm``.
 
@@ -817,7 +842,8 @@ def windows() -> list[dict]:
     return rows
 
 
-def window_id_for_toplevel(*, title: str, pid: int | None, extents) -> int | None:
+def window_id_for_toplevel(*, title: str, pid: int | None, extents,
+                           rows: list[dict] | None = None) -> int | None:
     """X id of the on-screen window that owns an AT-SPI top-level window.
 
     An exact title within the same pid wins. Several windows with that title,
@@ -825,8 +851,10 @@ def window_id_for_toplevel(*, title: str, pid: int | None, extents) -> int | Non
     most. ``extents`` is ``(x, y, width, height)`` in screen pixels. The X
     client box sits inside the frame, so the match is overlap, not equality.
     None when nothing on screen matches: the caller still runs the action.
+    Discovery may supply snapshot-local rows to avoid another native scan.
     """
-    rows = [row for row in windows() if row.get("on_screen") and row.get("bounds")]
+    rows = [row for row in (windows() if rows is None else rows)
+            if row.get("on_screen") and row.get("bounds")]
     if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
         owned = [row for row in rows if int(row.get("pid") or 0) == int(pid)]
         if owned:

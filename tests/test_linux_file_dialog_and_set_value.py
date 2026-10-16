@@ -378,3 +378,40 @@ def test_text_area_role_without_the_flag_is_still_editable(spies, monkeypatch) -
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
     assert LinuxDriver().set_value(element, "NEW") is True
     assert _atspi._atspi().Text.get_text(field, 0, -1) == "NEW"
+
+
+@pytest.mark.parametrize("role", ["text", "entry"])
+@pytest.mark.parametrize("value", ["200%", "150%", "75%"])
+def test_eog_zoom_entry_refuses_buffer_only_success(spies, monkeypatch, role, value):
+    events, _document = spies
+    field = _ReplacingField("100%")
+    field.get_role_name = lambda: role
+    field.get_application = lambda: field
+    field.get_toolkit_name = lambda: "gtk"
+    field.get_name = lambda: "eog"
+    field.image_zoom = "100%"
+    element = _element("e3", "AXTextField", "", editable=True, value="100%")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(element, value)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "commit_unverified"
+    assert "displayed image scale" in exc.value.message
+    assert field.text == field.image_zoom == "100%"
+    assert field.deletes == 0
+    assert events == []
+
+
+@pytest.mark.parametrize(("app", "initial"), [("other", "100%"), ("eog", "picture.png")])
+def test_eog_zoom_refusal_preserves_other_entries(spies, monkeypatch, app, initial):
+    events, _document = spies
+    field = _ReplacingField(initial)
+    field.get_role_name = lambda: "entry"
+    field.get_application = lambda: field
+    field.get_toolkit_name = lambda: "gtk"
+    field.get_name = lambda: app
+    element = _element("e3", "AXTextField", "", editable=True, value=initial)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    assert LinuxDriver().set_value(element, "replacement") is True
+    assert field.text == "replacement"
+    assert events == []
