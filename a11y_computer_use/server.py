@@ -3040,6 +3040,18 @@ class Runtime:
         windows = [e for e in after.elements if e.role == "AXWindow" and e.path == parent.path]
         window = windows[0] if len(windows) == 1 else None
         unchanged = window is not None and bool(parent.title) and window.title == parent.title
+        # An icon can appear during successful navigation too. Require the
+        # live entry and changed window title to agree with the requested
+        # folder before letting that observed navigation override the icon.
+        requested = (entry.value or "").rstrip("/")
+        folder = requested.rsplit("/", 1)[-1]
+        if (
+            window is not None and not unchanged and parent.title
+            and requested.startswith("/") and folder
+            and fresh is not None and (fresh.value or "").rstrip("/") == requested
+            and window.title == f"{folder} - Thunar"
+        ):
+            return None
         if not error and not unchanged:
             return None
         reason = "the entry shows an error icon" if error else "the window title did not change"
