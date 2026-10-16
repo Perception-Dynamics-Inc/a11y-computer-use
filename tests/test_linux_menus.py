@@ -1152,3 +1152,101 @@ def test_file_dialog_names_the_linux_limit() -> None:
     assert "Ctrl+L" in hint and "set_value" in hint
     assert "press the item by ref" not in hint
     assert exc.value.detail["reason"] == "no_file_dialog"
+
+
+def _quick_app(monkeypatch, *, opens=True, bounds=((10, 20), (80, 30))):
+    from a11y_computer_use.drivers import _atspi, _linux_input
+
+    leaf = _ENode("menu item", "New Item", states={"sensitive", "showing"})
+    popup = _ENode("menu", "", [leaf], states={"showing"})
+    entry = _ENode("menu bar", "File", states={"sensitive", "showing"})
+    entry.get_n_actions = lambda: 0
+    bar = _ENode("menu bar", "", [entry])
+    frame = _ENode("frame", "QML Probe", [bar], states={"active", "showing"})
+    app = _ENode("application", "qml", [frame])
+    clicks = []
+
+    def click(x, y):
+        clicks.append((x, y))
+        if opens:
+            if popup in frame.children:
+                frame.children.remove(popup)
+            else:
+                frame.children.append(popup)
+                popup.parent = frame
+
+    leaf.on_press = lambda _: frame.children.remove(popup)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_extents", lambda _: bounds)
+    monkeypatch.setattr(_linux_input, "click", click)
+    monkeypatch.setattr(_linux_menus, "_settle", lambda _: None)
+    return app, entry, leaf, clicks
+
+
+def test_qt_quick_menu_lists_and_activates_same_window_popup(monkeypatch):
+    app, entry, leaf, clicks = _quick_app(monkeypatch)
+    assert _linux_menus.menu_items(app, None)[0]["submenu"] is True
+    assert clicks == []
+    assert [row["title"] for row in _linux_menus.menu_items(app, "File")] == ["New Item"]
+    assert clicks == [(50, 35), (50, 35)]
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+    assert _linux_menus.menu_press(app, "File > New Item") == "New Item"
+    assert leaf.pressed == ["click"]
+    assert entry.pressed == []
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+
+
+@pytest.mark.parametrize("bounds", [(None, None), ((10, 20), (0, 30))])
+def test_qt_quick_menu_refuses_without_native_bounds(monkeypatch, bounds):
+    app, _, leaf, clicks = _quick_app(monkeypatch, bounds=bounds)
+    with pytest.raises(ComputerUseError, match="refused to press"):
+        _linux_menus.menu_press(app, "File > New Item")
+    assert clicks == []
+    assert leaf.pressed == []
+
+
+def test_qt_quick_menu_requires_popup_effect_in_own_window(monkeypatch):
+    app, _, leaf, clicks = _quick_app(monkeypatch, opens=False)
+    other_popup = _ENode("menu", "", [_item("New Item")], states={"showing"})
+    app.children.append(_ENode("frame", "Other", [other_popup], states={"showing"}))
+    with pytest.raises(ComputerUseError, match="refused to press"):
+        _linux_menus.menu_press(app, "File > New Item")
+    assert clicks == [(50, 35)]
+    assert leaf.pressed == []
+
+
+def test_qt_quick_menu_state_and_close_verify_popup(monkeypatch):
+    app, entry, _, _ = _quick_app(monkeypatch)
+    assert _linux_menus._press(entry)
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["File"]}
+    assert _linux_menus.menu_close(
+        app, dismiss=lambda: _linux_menus._press(entry),
+    ) == ["File"]
+
+
+def test_qt_quick_menu_refuses_without_x11(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    app, _, _, clicks = _quick_app(monkeypatch)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: False)
+    with pytest.raises(ComputerUseError, match="refused to press"):
+        _linux_menus.menu_press(app, "File > New Item")
+    assert clicks == []
+
+
+def test_menu_bar_container_is_not_a_quick_menu_entry():
+    bar = _ENode("menu bar", "Application")
+    _ENode("frame", "Window", [bar])
+    assert not _linux_menus._quick_menu_entry(bar)
+    assert not _linux_menus._has_submenu(bar)
+
+
+def test_qt_quick_top_menu_uses_pointer_even_with_leaf_dispatch(monkeypatch):
+    app, _, _, clicks = _quick_app(monkeypatch)
+
+    def dispatch(_):
+        pytest.fail("actionless menu entry must not use native leaf dispatch")
+
+    assert _linux_menus.menu_press(app, "File", dispatch=dispatch) == "File"
+    assert clicks == [(50, 35)]
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["File"]}
