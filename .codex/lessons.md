@@ -217,3 +217,5 @@
 - 2026-10-17 (PR #720 repair): Native popover-refresh gating and per-snapshot sibling-window cover caching address independent tree and window-scan costs. Preserve both complete regression blocks when merging their appended action-outcome tests.
 
 - 2026-10-17 (PR #720 Calc CI investigation): A live Calc failure in the initial LinuxDriver.snapshot loop occurs before Runtime creation, so Runtime popover-refresh gating cannot cause it. Check the failing phase before changing input code. The exact failed head 8eb1b60 passed test_linux_calc_range_formula_and_normalised_numbers_confirm alone in 164.23 s under private 1280x800 Xvfb, D-Bus, AT-SPI and Openbox; retain the unchanged startup assertions and limits.
+
+- 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
