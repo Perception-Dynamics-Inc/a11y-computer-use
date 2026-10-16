@@ -462,3 +462,8 @@ popover's measured bounds contain the ref's center. Controls inside their own
 popover remain eligible; dismiss the covering popover before retrying a covered
 ref. This check uses the accessibility tree because Chrome's accessible
 hit test can return the underlying control.
+
+Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
+Submit queries (`submit` or `submit form`) also match these buttons, and button
+role searches rank them first. No default is inferred from labels or geometry;
+the marker does not change click behavior or safety checks.
