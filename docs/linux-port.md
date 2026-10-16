@@ -492,8 +492,10 @@ Unnamed GTK single-line text fields can use a sibling label when its measured
 box lies to the left and fully within the field's row. This fallback requires
 one label and no other text editor on that row; missing or ambiguous geometry
 leaves the name empty. Existing names, descriptions, and explicit label
-relations take precedence. It changes naming only and retains the native entry
-handle and bounds (including Claws Mail's Setup Wizard fields).
+relations take precedence over this geometry fallback. Unnamed text and password
+fields prefer explicit `labelled-by` names over tooltip descriptions, which remain
+available as hints; native names are preserved. It changes naming only and retains
+the native entry handle and bounds (including Claws Mail's Setup Wizard fields).
 
 Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
 `manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
@@ -501,7 +503,10 @@ Ref clicks and crops refuse with `not_visible` / `covered` when another
 popover's measured bounds contain the ref's center. Controls inside their own
 popover remain eligible; dismiss the covering popover before retrying a covered
 ref. This check uses the accessibility tree because Chrome's accessible
-hit test can return the underlying control.
+hit test can return the underlying control. A fresh cover snapshot is limited
+to recognized browsers, refs with a document URL, trees with `AXWebArea`,
+or trees that already contained an `AXPopover`; native trees without those
+signals avoid the extra snapshot.
 
 
 Claws Mail's GTK folder and message lists can expose only childless panels

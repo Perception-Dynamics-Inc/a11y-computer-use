@@ -15801,3 +15801,41 @@ def test_kate_scroll_search_uses_character_viewport(monkeypatch, found):
     else:
         assert scrolls
         assert result.startswith("not found after")
+
+
+@pytest.mark.parametrize("role", ["text", "entry", "password text"])
+@pytest.mark.parametrize("description", ["", "Enter the address of the server. Use a hostname or IP."])
+@pytest.mark.parametrize("case", ["label", "native", "no_relation", "no_geometry"])
+def test_entry_relation_labels_precede_tooltips(fake_atspi, monkeypatch, role, description, case):
+    """#657: FileZilla/Thunar field labels remain findable despite tooltips."""
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    field = _place_row(_Acc(role, name="Native" if case == "native" else "",
+                            states=("ENABLED", "VISIBLE", "SHOWING", "SINGLE_LINE", "EDITABLE")),
+                       220, 100, 240, 30)
+    field.get_description = lambda: description
+    label = _Acc("label", name="Password:" if role == "password text" else "Host:")
+    relation = _NS(get_relation_type=lambda: "labelled-by", get_n_targets=lambda: 1,
+                   get_target=lambda index: label)
+    field.get_relation_set = lambda: [] if case == "no_relation" else [relation]
+    if case == "no_geometry":
+        field.component = None
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(field)
+    expected = "Native" if case == "native" else "" if case == "no_relation" else label.name[:-1]
+    assert raw.title == expected
+    assert raw.description == description
+    assert raw.role == ("AXSecureTextField" if role == "password text" else "AXTextField")
+    if case == "no_geometry":
+        assert raw.position is None and raw.size is None
+    else:
+        snap = build_snapshot(field, accessor, scope=Scope.WINDOW,
+                              app="filezilla", pid=657, geometry=_geometry())
+        if expected:
+            found = observe.find_elements(snap, text=expected)
+            assert len(found) == 1
+            assert found[0].title == expected
+            assert found[0].bounds == Bounds(0, 220, 100, 240, 30)
+            assert observe.ax_handle_for(snap.snapshot_id, found[0].ref) is field
+            if role == "password text":
+                assert found[0].secure is True
+                assert found[0].value is None
