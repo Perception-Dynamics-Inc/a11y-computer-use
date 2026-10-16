@@ -333,7 +333,13 @@ class BrowserDriver:
             }
             for f in frames
         ])
-        accessor = _cdp_ax.CDPAccessor(stitched, geometry, frozenset(secure), frozenset(empty))
+        submits = _cdp_ax.submit_forms(dom)
+        for frame in frames:
+            if frame.get("session_id") and isinstance(frame.get("dom"), dict):
+                submits.update(_cdp_ax.submit_forms(frame["dom"], frame["session_id"]))
+        accessor = _cdp_ax.CDPAccessor(
+            stitched, geometry, frozenset(secure), frozenset(empty), submits,
+        )
         return observe.build_snapshot(
             accessor.root(), accessor, scope=scope, app=self._target_id, pid=None,
             geometry=self._page_geometry(dom),
