@@ -136,3 +136,5 @@
 - 2026-10-14 (PR #648 repair): Editor scroll-anchor selection and secure-field pre-resolution refusals are independent server behaviors. Preserve both regression blocks when resolving appended test conflicts; the unreadable-editor refusal must still happen before wheel or Find input.
 
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
+
+- 2026-10-16 (PR #659 repair): Qt Quick combo selection and numeric Value-interface support are independent behaviors. Preserve both backend documentation blocks when resolving adjacent additions; verify combo regressions alongside numeric Qt tests after merging main.

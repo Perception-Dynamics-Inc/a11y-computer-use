@@ -403,6 +403,14 @@ checked-state change. Missing or off-screen bounds, native Wayland, and an
 unchanged checked state return an error; no AT-SPI Toggle follows the click.
 This path is covered by hermetic tests; a live QML run has not been performed.
 
+Qt Quick sliders and spin buttons can report a working AT-SPI Value interface
+with broken minimum/maximum getters returning 0..0. These controls expose their
+finite current value and accept numeric `set_value` with unknown bounds; success
+requires the requested value to read back. A clamped or unchanged value is an
+error. Qt spin buttons use the numeric role and writer rather than Text. Value
+writes do not guarantee Qt Quick user-interaction signals such as `moved` or
+`valueModified`. Other invalid bounds and non-numeric Qt roles remain excluded.
+
 ## Qt Quick combo selection
 
 For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable

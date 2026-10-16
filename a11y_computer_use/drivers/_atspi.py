@@ -3238,8 +3238,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     Qt publishes a Value interface on labels, checks, rows, and empty text
     fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
     Text, or the accessible name, is what those roles show. Value is read for
-    a slider, spin button, or progress bar, and only when Qt's minimum and
-    maximum are a real range. GTK's fallback for a non-range control requires
+    a slider, spin button, or progress bar. Qt requires a real range, except
+    that sliders/spins reporting 0..0 have unknown bounds. GTK's fallback
+    for a non-range control requires
     a Value interface. A dialog or a checkbox whose CurrentValue is a
     subnormal double: that reading is absent. Zero and a small normalized
     value on those roles stay. An empty entry, text field, or paragraph
@@ -3346,16 +3347,27 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     return cur
 
 
+def _qt_unknown_value_range(acc, span) -> bool:
+    """Qt Quick sliders/spins can expose Value but fail both bound getters."""
+    return (
+        span == (0.0, 0.0)
+        and _role_name(acc) in {"slider", "spin button"}
+        and _qt_app(acc)
+        and _value_interface_present(acc)
+    )
+
+
 def _range_value(acc):
     """Current Value for a slider, spin button, or progress bar.
 
-    Qt's minimum and maximum have to be a real range. A denormal or a
-    minimum that is not below the maximum is not shown. Other toolkits keep
+    Qt requires a real range, except that sliders/spins reporting 0..0
+    have unknown bounds. Denormal or other invalid bounds are not shown.
+    Other toolkits keep
     the current value whenever the interface returns a finite number.
     """
     if _qt_app(acc):
         span = _value_range(acc)
-        if span is None or not _sane_range(*span):
+        if span is None or not (_sane_range(*span) or _qt_unknown_value_range(acc, span)):
             return None
     cur = _safe(lambda: _atspi().Value.get_current_value(acc))
     if isinstance(cur, bool) or not isinstance(cur, (int, float)):
@@ -3715,8 +3727,9 @@ class ATSPIAccessor:
         # sends to AXTextField. That renders as textfield (edit) and hides
         # the number. AXSpinButton is the slider treatment: the role is the
         # control, and it is not an editable text field. A native number
-        # input and a date segment stay on the text-field mapping.
-        if _aria_spinbutton(node, role_str, attrs):
+        # input and a date segment stay on the text-field mapping. Qt spins
+        # use Value as well, including Qt Quick spins with no Text interface.
+        if _aria_spinbutton(node, role_str, attrs) or (role_str == "spin button" and _qt_app(node)):
             role = "AXSpinButton"
         # `_entry_is_multiline` already mapped a tagged <textarea>. A Gecko
         # entry that check left as a text field is still a textarea when it
@@ -11922,7 +11935,8 @@ def control_kind(acc) -> str | None:
 
     Qt publishes Value on labels and empty text as well. Those are not
     numeric targets. A Qt slider, spin button, or progress bar is a numeric
-    target only when its minimum and maximum are a real range. A non-Qt
+    target when its minimum and maximum are a real range; sliders/spins
+    reporting 0..0 instead have unknown bounds. A non-Qt
     control keeps the previous rule: a spin button, a slider, a number
     input, or any other non-text role that exposes a range.
     """
@@ -11938,7 +11952,7 @@ def control_kind(acc) -> str | None:
     if _qt_app(acc):
         if role in _RANGE_ROLE_NAMES:
             span = _value_range(acc)
-            if span is not None and _sane_range(*span):
+            if span is not None and (_sane_range(*span) or _qt_unknown_value_range(acc, span)):
                 return "value"
         return None
     # A Chrome date segment is a spin button whose Value interface is not the
@@ -13317,6 +13331,8 @@ def _apply_xournal_percent(acc, value: str, low: float, high: float) -> bool | N
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
+    Qt Quick sliders/spins reporting 0..0 have unknown bounds: write the
+    requested number without step guesses and require matching read-back.
     A non-number or a number outside minimum..maximum raises ValueError before
     the write. The message includes the minimum and maximum. The current value
     is read back and must match. False means this control has no Value
@@ -13361,7 +13377,8 @@ def set_numeric_value(acc, value: str) -> bool | str:
         return False
     low = high = None
     open_upper = False
-    if span is not None:
+    unknown_range = _qt_unknown_value_range(acc, span)
+    if span is not None and not unknown_range:
         low, high = span
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
@@ -13431,11 +13448,12 @@ def set_numeric_value(acc, value: str) -> bool | str:
         ) from None
     if span is None:
         return False
-    if _outside_range(number, low, high, open_upper=open_upper):
-        raise ValueError(_range_message(value, low, high, open_upper=open_upper))
-    number = _snap_spin(acc, number, low)
-    if _outside_range(number, low, high, open_upper=open_upper):
-        raise ValueError(_range_message(value, low, high, open_upper=open_upper))
+    if not unknown_range:
+        if _outside_range(number, low, high, open_upper=open_upper):
+            raise ValueError(_range_message(value, low, high, open_upper=open_upper))
+        number = _snap_spin(acc, number, low)
+        if _outside_range(number, low, high, open_upper=open_upper):
+            raise ValueError(_range_message(value, low, high, open_upper=open_upper))
     if _number_field_is_empty(acc):
         if _fill_empty_number(acc, value):
             return True
