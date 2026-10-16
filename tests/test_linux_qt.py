@@ -1160,3 +1160,151 @@ def test_qt_combo_enabled_entry_is_preserved(atspi):
     combo = _Node("combo box", children=[entry], toolkit="Qt")
     assert _atspi._combo_entry(combo) is entry
     assert _atspi._qt_quick_display(combo) is None
+
+
+@pytest.mark.parametrize("placement", ["frame", "nested", "direct"])
+@pytest.mark.parametrize("delay", [0.0, 1.0])
+def test_qt_quick_combo_waits_for_shown_rows(atspi, monkeypatch, placement, delay):
+    """Delayed menus and combo-owned rows must be ready before option input."""
+    display = _Node("text", text="Apple", states={"EDITABLE", "SHOWING"}, toolkit="Qt")
+    combo = _Node("combo box", "Fruit", children=[display], toolkit="Qt")
+    cherry = _Node("menu item", "Cherry", states={"SHOWING"}, toolkit="Qt")
+    popup = _Node("menu", children=[cherry], toolkit="Qt")
+    frame = _Node("frame", children=[combo], toolkit="Qt")
+    unrelated = _Node("menu", states={"SHOWING"}, toolkit="Qt")
+    frame.children.append(unrelated)
+    clock = [0.0]
+    clicks = []
+    probing = [False]
+
+    def publish():
+        if clock[0] < delay or not clicks:
+            return
+        if placement == "direct":
+            combo.states.add("EXPANDED")
+            combo.children = [display, cherry]
+            cherry.parent = combo
+        else:
+            popup.states.add("SHOWING")
+            parent = frame if placement == "frame" else combo
+            if popup not in parent.children:
+                parent.children.append(popup)
+                popup.parent = parent
+
+    def sleep(seconds):
+        assert not probing[0], "readiness wait blocked the native event thread"
+        clock[0] += seconds
+        publish()
+
+    def run(fn):
+        assert not probing[0]
+        probing[0] = True
+        try:
+            return fn()
+        finally:
+            probing[0] = False
+
+    def click(*args, **kwargs):
+        clicks.append(clock[0])
+        if len(clicks) == 1:
+            publish()
+        else:
+            assert clock[0] >= delay
+            display.text = "Cherry"
+            popup.states.discard("SHOWING")
+            combo.states.discard("EXPANDED")
+
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    with _atspi.read_cache():
+        _atspi._set_qt_quick_combo(combo, display, "Cherry", run=run)
+    assert len(clicks) == 2
+    assert delay <= clock[0] <= delay + 0.05
+    assert display.text == "Cherry"
+
+
+def test_qt_quick_combo_readiness_deadline(atspi, monkeypatch):
+    display = _Node("text", text="Apple", states={"EDITABLE", "SHOWING"}, toolkit="Qt")
+    combo = _Node("combo box", children=[display], toolkit="Qt")
+    _Node("frame", children=[combo], toolkit="Qt")
+    clock = [0.0]
+    clicks = []
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_atspi.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", lambda *a, **k: clicks.append(a))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_combo_value(combo, "Cherry")
+    assert exc.value.detail["reason"] == "popup_missing"
+    assert clock[0] == _atspi._MENU_DIALOG_WAIT_S
+    assert len(clicks) == 1
+    assert display.text == "Apple"
+
+
+def test_qt_quick_combo_waits_for_rows_after_menu_shows(atspi, monkeypatch):
+    display = _Node("text", text="Apple", states={"EDITABLE", "SHOWING"}, toolkit="Qt")
+    combo = _Node("combo box", children=[display], toolkit="Qt")
+    cherry = _Node("menu item", "Cherry", toolkit="Qt")
+    popup = _Node("menu", toolkit="Qt")
+    frame = _Node("frame", children=[combo], toolkit="Qt")
+    clock = [0.0]
+    clicks = []
+
+    def sleep(seconds):
+        clock[0] += seconds
+        if clock[0] >= 1.0:
+            popup.children = [cherry]
+            cherry.parent = popup
+
+    def click(*args, **kwargs):
+        clicks.append(clock[0])
+        if len(clicks) == 1:
+            frame.children.append(popup)
+            popup.parent = frame
+            popup.states.add("SHOWING")
+        else:
+            assert popup.children == [cherry]
+            display.text = "Cherry"
+            popup.states.discard("SHOWING")
+
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    _atspi.set_combo_value(combo, "Cherry")
+    assert len(clicks) == 2
+    assert 1.0 <= clicks[1] <= 1.05
+
+
+def test_qt_quick_driver_keeps_wait_outside_native_dispatch(atspi, monkeypatch):
+    from a11y_computer_use.drivers import _cdp_forms
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Element
+
+    display = _Node("text", text="Apple", states={"EDITABLE", "SHOWING"}, toolkit="Qt")
+    combo = _Node("combo box", children=[display], toolkit="Qt")
+    driver = LinuxDriver()
+    active = [False]
+    calls = []
+
+    def run(fn):
+        active[0] = True
+        try:
+            return fn()
+        finally:
+            active[0] = False
+
+    def select(node, child, value, *, run):
+        assert not active[0]
+        assert (node, child, value) == (combo, display, "Cherry")
+        run(lambda: calls.append(active[0]))
+
+    monkeypatch.setattr(driver, "_run", run)
+    monkeypatch.setattr(driver, "_dom_window_title", lambda handle: "")
+    monkeypatch.setattr(driver, "_dom_pids", lambda handle: set())
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda *a, **k: None)
+    monkeypatch.setattr(_atspi, "is_sheet_cell", lambda handle: False)
+    monkeypatch.setattr(_atspi, "control_kind", lambda handle: "combo")
+    monkeypatch.setattr(_atspi, "_set_qt_quick_combo", select)
+    element = Element("e1", "AXComboBox", "Fruit", "Apple", None, "snap")
+    assert driver._apply_set_value(element, "Cherry", combo) is True
+    assert calls == [True]
