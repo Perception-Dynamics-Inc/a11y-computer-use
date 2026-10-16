@@ -386,4 +386,29 @@ clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
 
+GTK 4 tree-expander buttons exposing `listitem.toggle-expand` (or the
+state-appropriate `listitem.expand` / `listitem.collapse`) use that native action
+for a ref click. The driver verifies a change in the live `EXPANDED` state;
+a successful action acknowledgement or focus moving to another row is
+insufficient. A failed expansion returns an error without a pointer fallback,
+since these controls can report bounds that do not match their painted rows.
+
 Editable web combobox inputs (ARIA autocomplete and HTML datalist) retain their combobox role and expose `edit` when their native node has `tag=input`, Text, and `EDITABLE`, without `READ_ONLY`. `set_value` uses the verified text replacement path, and `type(ref=...)` uses the focus-confirmed text path; values are not restricted to popup options. Select-style combos retain option selection. This distinction is hermetic-tested; native Chrome verification remains a CI/live check.
+
+## Qt Quick checkable clicks
+
+Qt Quick checkboxes, switches, and radio buttons can expose `Toggle`, `Press`,
+and `SetFocus`: `Toggle` changes state without user signals, while `Press` does
+nothing. Ref clicks on Qt checkable roles with that action pair use one X11
+pointer click at the visible center of the reported bounds and require a stable
+checked-state change. Missing or off-screen bounds, native Wayland, and an
+unchanged checked state return an error; no AT-SPI Toggle follows the click.
+This path is covered by hermetic tests; a live QML run has not been performed.
+
+Qt Quick sliders and spin buttons can report a working AT-SPI Value interface
+with broken minimum/maximum getters returning 0..0. These controls expose their
+finite current value and accept numeric `set_value` with unknown bounds; success
+requires the requested value to read back. A clamped or unchanged value is an
+error. Qt spin buttons use the numeric role and writer rather than Text. Value
+writes do not guarantee Qt Quick user-interaction signals such as `moved` or
+`valueModified`. Other invalid bounds and non-numeric Qt roles remain excluded.
