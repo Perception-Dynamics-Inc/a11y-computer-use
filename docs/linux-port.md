@@ -13,6 +13,13 @@ allocation remain hidden, without bounds or click actions; use the wizard's
 Next/Previous buttons to change pages. This naming fallback is hermetic-tested;
 live Claws Mail verification is pending.
 
+Large Calc sheets group visible cells into tables named `Visible cells (synthetic
+viewport band)` to retain the viewport through snapshot pruning. These groups
+are snapshot-only, not native sheets or nested AT-SPI tables. The real sheet
+retains its native name, and cells retain their native handles and measured
+bounds. Short visible cell lists remain flat. This labeling is covered by
+hermetic snapshot and find tests; live Calc verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
@@ -86,7 +93,7 @@ For Chrome/Electron processes that advertise a DevTools port, the Linux form ove
 | `resolve_ref` | fresh `snapshot` + the shared `observe._match_anchor`; structured `STALE_REF` when the anchor no longer resolves | the *same* `_match_anchor` on all three OSes |
 | `press_element` | `AtspiAction.do_action` on the first activating action (the a11y-first payoff: no pointer movement). A control whose top-level window is not ACTIVE is raised with `_NET_ACTIVE_WINDOW` first, unless that X window is already the EWMH active window. An editable field with no action falls back to `AtspiComponent.grab_focus`; secure fields are refused | `AXUIElementPerformAction(AXPress)` / `InvokePattern.Invoke` |
 | `scroll_into_view` | `AtspiComponent.scroll_to(ScrollType.ANYWHERE)` | `AXScrollToVisible` / `ScrollItemPattern.ScrollIntoView` |
-| `click` | XTEST via python-xlib: absolute XTEST `MotionNotify` + `ButtonPress/Release`; modifier-clicks bracket with keysym press/release (`held()`). An on-screen `AXButton` ref uses this path instead of `DoAction`: at-spi2-atk runs the action before `dbus_connection_dispatch` returns, and `Gtk.Dialog.run()` from that handler holds the dispatch lock, so the next key waits forever | `CGEvent` mouse / `SendInput(MOUSEINPUT)` |
+| `click` | XTEST via python-xlib: absolute XTEST `MotionNotify` + `ButtonPress/Release`; modifier-clicks bracket with keysym press/release (`held()`). Multi-clicks sync each intermediate press/release pair and pause 30 ms before the next pair inside the same call, so applications such as Engrampa receive distinct clicks. The gap is covered by a fake-clock XTEST regression; Engrampa was not live-tested on this branch. An on-screen `AXButton` ref uses this path instead of `DoAction`: at-spi2-atk runs the action before `dbus_connection_dispatch` returns, and `Gtk.Dialog.run()` from that handler holds the dispatch lock, so the next key waits forever | `CGEvent` mouse / `SendInput(MOUSEINPUT)` |
 | `hover` | XTEST absolute `MotionNotify` plus a flush, and no button. Computer-use `mouse_move` / `move` and the MCP `hover` tool, an `act` step `{"do":"hover"}`, and `run-once` call the same `Runtime.hover`: the pointer goes to an x,y point or a ref and a tooltip or a hover-opened menu can see the motion. A point owned by another app is `focus_changed` and the pointer is not moved. Click, right-click, double-click, and drag keep their own sequences. The tool registration is covered by synthetic tests; not a live tooltip run | macOS `kCGEventMouseMoved` |
 | `drag` | XTEST: absolute motion → `ButtonPress` → absolute motion → `ButtonRelease` | `CGEvent` drag / `SendInput` |
 | `scroll` | `unit=lines` on a target that is not a Chromium list: XTEST wheel buttons **4/5** (vertical) and **6/7** (horizontal), one notch per unit. A Chromium list whose own box sits fully on the screen, or a list inside a shorter overflow ancestor, does not start with that wheel. One line is one content row (`_ROWS_PER_LINE` is 1 in `drivers/_atspi.py`), and the step is not larger than the rows already on screen. The driver writes that list's vertical AT-SPI scroll bar by that distance. When the list has no such bar, it calls AT-SPI `scroll_to` (`TOP_EDGE`) on a row that many lines from the on-screen head. When the bar write or `scroll_to` does not move the painted rows, a left click lands on the vertical track (the lower track to go down, the upper track to go up). A wheel is sent only when those do not move the list. A step is a success when the pixels in the list box change and the on-screen head leaves the previous row. A head that moved by about the requested lines is that step even when the grab is at or under the uniform-row floor (0.4): the bar write stays, and no track click or wheel follows. A page-sized jump is not that step. `page_unchanged` is the case where the head stays and the grab stays at or under 1. A content-height list whose parent is the document, and a document group, keep the wheel. A document group is not a list. XTEST notches do not move a Chrome document, so a line step uses a CDP `scrollBy` of about 40 pixels per line when that window's process was started with `--remote-debugging-port`, and keeps the step only when `scrollTop` changes. A window with no port keeps the wheel. A Chromium document's tree trails that wheel, so the call waits until the on-screen names change, at most 0.9s, before the next snapshot. `scroll_to_find` on a page of plain elements anchors on the titled document rather than a larger empty Chrome panel. `snapshot` lists every on-screen row of a Chromium list; 16 is the hit-test sample count (`_MAX_ROW_SAMPLES`), not a cap on that walk. A list longer than `_MAX_CHILDREN_FETCH` (250) is not read from child 0: the on-screen walk starts at the first child whose box reaches the viewport, so a painted row past that index is still listed. Rows the accessibility tree does not expose are not added. `unit=pixels`: AT-SPI `Value.set_current_value` on the nearest scroll bar by that delta (GTK scrolled windows expose the value in pixels); the write is read back. A missing bar uses a CDP `scrollTop` write when that window's process was started with `--remote-debugging-port`, and keeps the step only when `scrollTop` changes. Otherwise it sends XTEST wheel notches at the element box (about one per 80 pixels) and keeps the step only when a grab of that box changes. A step that cannot be checked, or that does not move, is `unsupported`. Native Wayland rejects the wheel fallback; the bar path and a CDP scroll do not need XTEST. The line-scroll description is the control flow in `LinuxDriver.scroll` and `_atspi.py`. The tests use synthetic trees, not a live Chrome list. Pixel scroll is covered by synthetic tests, not a live Mousepad run | macOS `CGEventScrollWheel` line vs pixel units / Windows `MOUSEEVENTF_WHEEL` (wheel not implemented) |
@@ -573,6 +580,14 @@ accessibility registration. Screenshots and explicitly requested coordinate
 actions are separate tools; the backend does not substitute them for ref or
 menu actions, invent refs, or infer control geometry.
 
+Unnamed GTK sliders and spin buttons use their AT-SPI `labelled-by` label as
+their title, before the description fallback. Without a relation, a measured
+left-hand label in the same parent and row supplies the title when the nearest
+candidate is unambiguous. Explicit accessible names remain authoritative; numeric
+values and descriptions remain separate from the title. This naming behavior is
+covered by synthetic tests; native GTK verification is pending.
+
+
 ### Same-app window covers in discovery
 
 Multi-window AT-SPI snapshots annotate clickable and editable controls with
@@ -580,6 +595,25 @@ Multi-window AT-SPI snapshots annotate clickable and editable controls with
 finds a different sibling window at the control's measured center. The note
 appears in full snapshots, interactive snapshots, and `find` results; native
 refs, capabilities, and bounds are retained. Missing ownership or geometry
-evidence produces no cover claim. Clicks still recheck coverage at action time.
+evidence produces no cover claim. Discovery shares one lightweight X11 stacking
+read within a snapshot and resolves native identity once per owning window,
+using the observed parent refs instead of walking every control's native
+ancestors. This cache ends with the snapshot. Clicks still recheck coverage
+at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
+
+GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
+button and a popover of ordinary buttons/checkboxes without a menu bar. Menu
+listing and paths remain unsupported for that shape; the error points to
+`desktop_snapshot`, clicking the menu button's ref, and a fresh snapshot's
+popover control refs. If already open, use the current popover refs directly.
+Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
+
+### Eye of GNOME zoom entry
+
+`set_value` refuses GTK percentage entries in Eye of GNOME (`eog`) with
+`unsupported` / `commit_unverified` before changing their text. EditableText
+read-back can match the requested percentage while the image scale stays
+unchanged. Use the zoom UI and verify the displayed image scale; the backend
+does not send an activation key or substitute a zoom-button click.

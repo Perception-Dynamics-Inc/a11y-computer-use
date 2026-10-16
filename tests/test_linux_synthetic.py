@@ -2679,6 +2679,45 @@ def test_click_button_and_count(xtest_recorder) -> None:
     assert events[1:] == [(_X_BPRESS, 3, 0, 0), (_X_BRELEASE, 3, 0, 0)] * 2
 
 
+@pytest.mark.parametrize("count", [1, 2, 3])
+@pytest.mark.parametrize("button, number", [("left", 1), ("right", 3), ("middle", 2)])
+def test_click_delivers_pairs_with_an_inter_click_gap(
+    xtest_recorder, monkeypatch, count, button, number,
+) -> None:
+    """Timestamp delivered events, so sleeping before a final-only sync fails."""
+    import time
+
+    events, display = xtest_recorder
+    now = 0.0
+    delivered = []
+    sleeps = []
+    sent = 0
+
+    def sync():
+        nonlocal sent
+        delivered.extend((event, now) for event in events[sent:])
+        sent = len(events)
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(display, "sync", sync)
+    monkeypatch.setattr(time, "sleep", sleep)
+    _linux_input.click(406, 465, button=button, count=count)
+
+    assert delivered[0] == ((_X_MOTION, 0, 406, 465), 0.0)
+    assert [event for event, _ in delivered[1:]] == [
+        (_X_BPRESS, number, 0, 0), (_X_BRELEASE, number, 0, 0),
+    ] * count
+    assert [timestamp for _, timestamp in delivered[1:]] == pytest.approx([
+        index * 0.03 for index in range(count) for _ in range(2)
+    ])
+    assert sleeps == [0.03] * (count - 1)
+    assert now == pytest.approx((count - 1) * 0.03)
+
+
 def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder, monkeypatch) -> None:
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
     monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
@@ -15409,12 +15448,13 @@ def test_geany_double_click_waits_for_navigation_without_substituting_input(
     if arrives:
         driver.click(cell, count=2)
         assert len(polls) == 2
-        assert sleeps == [_atspi._FOCUS_CONFIRM_PAUSE_S]
+        assert sleeps == [0.03, _atspi._FOCUS_CONFIRM_PAUSE_S]
     else:
         with pytest.raises(ComputerUseError, match="did not confirm navigation") as error:
             driver.click(cell, count=2)
         assert error.value.detail["outcome"] == "unconfirmed"
         assert len(polls) == _atspi._FOCUS_CONFIRM_POLLS
+        assert sleeps == [0.03] + [_atspi._FOCUS_CONFIRM_PAUSE_S] * (len(polls) - 1)
     assert len([event for event in events if event[0] == _X_BPRESS]) == 2
 
 
@@ -15546,6 +15586,42 @@ def test_geany_navigation_verifies_native_caret_when_status_lags(
     monkeypatch.setattr(fake_atspi.Text, "get_text",
                         lambda node, start, end: prefix if readable else None, raising=False)
     assert _atspi.geany_symbol_arrived((301, [status])) is arrived
+
+
+@pytest.mark.parametrize("role", ["slider", "spin button"])
+@pytest.mark.parametrize("case", ["relation", "row", "named", "non_gtk", "missing", "tie", "other_row", "right"])
+def test_gtk_numeric_controls_use_stable_labels(fake_atspi, monkeypatch, role, case):
+    """Native labels survive changing values; unavailable row evidence stays unnamed."""
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    control = _place_row(_Acc(role, name="Native" if case == "named" else "", value=8,
+                              states=("ENABLED", "VISIBLE", "SHOWING")),
+                         200, 100, 140, 30)
+    control.get_description = lambda: f"{control.value:g} px" if role == "slider" else ""
+    label = _place_row(_Acc("label", name="Threshold:"),
+                       350 if case == "right" else 20,
+                       200 if case == "other_row" else 105, 160, 20)
+    _adopt(_Acc("panel"), control, label)
+    # Exercise the real relation reader; relation evidence does not need geometry.
+    relation = _NS(get_relation_type=lambda: "labelled-by", get_n_targets=lambda: 1,
+                   get_target=lambda index: label)
+    control.get_relation_set = lambda: [relation] if case in {"relation", "named", "non_gtk"} else []
+    if case in {"missing", "relation"}:
+        control.component = None
+    if case == "tie":
+        other = _place_row(_Acc("label", name="Other:"), 20, 105, 160, 20)
+        _adopt(control.parent, control, label, other)
+    accessor = _atspi.ATSPIAccessor()
+    for value in (8, 10, 6):
+        control.value = value
+        raw = accessor.read(control)
+        assert raw.title == ("Threshold" if case in {"relation", "row"} else
+                             "Native" if case == "named" else "")
+        assert raw.value == value
+        assert raw.description == (f"{value} px" if role == "slider" else "")
+        if case in {"relation", "row"}:
+            snap = build_snapshot(control, accessor, scope=Scope.WINDOW,
+                                  app="demo", pid=639, geometry=_geometry())
+            assert len(observe.find_elements(snap, text="Threshold")) == 1
 
 
 @pytest.mark.parametrize("identifier", ["vlc", "VLC media player"])
@@ -15745,3 +15821,76 @@ def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
     ))
     assert _atspi._qt_viewport_text(object()) == "VISIBLE"
     assert drained == []
+
+
+def test_calc_viewport_bands_are_explicitly_synthetic(fake_atspi, monkeypatch) -> None:
+    """The native sheet stays distinct from snapshot-only cell groups."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi)
+    try:
+        accessor = _atspi.ATSPIAccessor()
+        bands = accessor.children(table)
+        assert len(bands) > 1
+        assert all(isinstance(band, _atspi._OnScreenBand) for band in bands)
+        native_cells = _atspi._sheet_window_cells(table)
+        assert [cell for band in bands for cell in accessor.children(band)] == native_cells
+        snap = _sheet_snapshot(table)
+        tables = [el for el in snap.elements if el.role == "AXTable"]
+        assert len(tables) == len(bands) + 1
+        assert tables[0].title == "Sheet"
+        assert all(el.title == "Visible cells (synthetic viewport band)" for el in tables[1:])
+        assert 'table "Visible cells (synthetic viewport band)"' in observe.render_text(snap, mode="full")
+        assert len([el for el in snap.elements if el.role == "AXCell"]) == 29 * 16
+        found = observe.find_elements(snap, text="A29")
+        assert len(found) == 1 and found[0].bounds is not None
+    finally:
+        del fake_atspi.Table
+
+
+def test_short_calc_sheet_does_not_add_synthetic_bands(fake_atspi, monkeypatch) -> None:
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, visible_rows=3, visible_cols=4)
+    try:
+        snap = _sheet_snapshot(table)
+        assert [el.title for el in snap.elements if el.role == "AXTable"] == ["Sheet"]
+        assert len([el for el in snap.elements if el.role == "AXCell"]) == 12
+    finally:
+        del fake_atspi.Table
+
+
+@pytest.mark.parametrize("count", [24, 25, 26, 48, 49])
+@pytest.mark.parametrize("cached", [False, True])
+def test_snapshot_bands_do_not_orphan_the_last_table_cell(fake_atspi, count, cached):
+    """Xarchiver's 25 visible headers/cells must not end in a collapsed band."""
+    table = _Acc("table", name="Files", width=600, height=600)
+    cells = [
+        _Acc("table cell", name=f"cell-{index}", width=100, height=20)
+        for index in range(count)
+    ]
+    _adopt(table, *cells)
+    rows = [(cell, (10, 10 + index * 10), (100, 20))
+            for index, cell in enumerate(cells)]
+    accessor = _atspi.ATSPIAccessor()
+    accessor._visible_children[id(table)] = cells
+    accessor._visible_bounds.update({id(cell): (pos, size) for cell, pos, size in rows})
+    if not cached:
+        bands = _atspi._bands_for_snapshot(rows)
+        table.children = bands
+        accessor._visible_children.clear()
+    snap = build_snapshot(
+        table, accessor, scope=Scope.WINDOW, app="xarchiver", pid=1,
+        geometry=_geometry(),
+    )
+    published = [el for el in snap.elements if el.role == "AXCell"]
+    assert [el.title for el in published] == [cell.name for cell in cells]
+    assert [observe._HANDLES[snap.snapshot_id][el.ref] for el in published] == cells
+    table_el = next(el for el in snap.elements if el.role == "AXTable")
+    if count <= observe.MAX_CHILDREN:
+        assert all(el.parent == table_el.ref for el in published)
+    else:
+        groups = [el for el in snap.elements if el.parent == table_el.ref]
+        assert groups and all(el.role == "AXGroup" for el in groups)
+        assert all(el.parent in {group.ref for group in groups} for el in published)
+        assert all(2 <= sum(el.parent == group.ref for el in published)
+                   <= observe.MAX_CHILDREN for group in groups)
+    _assert_no_elision(snap)

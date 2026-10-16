@@ -469,6 +469,35 @@ def test_no_menu_bar_is_unsupported() -> None:
     assert "menu bar" in exc.value.message
 
 
+@pytest.mark.parametrize("opened", [False, True])
+@pytest.mark.parametrize("operation", ["list", "list_path", "press"])
+def test_header_bar_menu_refusal_explains_snapshot_route(opened, operation) -> None:
+    button = Acc("push button", "Menu", states={"checked"} if opened else set())
+    leaf = Acc("push button", "Preferences")
+    checkbox = Acc("check box", "Slideshow")
+    children = [Acc("panel", "", [button])]
+    if opened:
+        children.append(Acc("panel", "", [leaf, checkbox], states={"showing"}))
+    app = Acc("application", "eog", [Acc("frame", "image.png", children, states={"active"})])
+    dismissed = []
+    with pytest.raises(ComputerUseError) as exc:
+        if operation == "press":
+            _linux_menus.menu_press(app, "Preferences", dismiss=lambda: dismissed.append(True))
+        else:
+            _linux_menus.menu_items(app, "Menu" if operation == "list_path" else None)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    hint = exc.value.detail["hint"]
+    assert "Menu or Main Menu button" in hint
+    assert "desktop_snapshot" in hint
+    assert "click its snapshot ref" in hint
+    assert "button/checkbox refs" in hint
+    assert "already open" in hint
+    assert "menu paths do not support these popovers" in hint
+    assert "Escape can quit" in hint
+    assert button.pressed == leaf.pressed == checkbox.pressed == []
+    assert dismissed == []
+
+
 def test_active_frame_menu_bar_wins() -> None:
     idle = Acc("frame", "other", [Acc("menu bar", "", [_menu("Help")])], states=set())
     current = Acc("frame", "Mousepad", [Acc("menu bar", "", [_menu("File", _item("New"))])], states={"active"})
