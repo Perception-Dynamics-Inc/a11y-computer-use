@@ -16284,16 +16284,20 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object])
             if found is not None:
                 return found
     if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
-        return node, 0, 1
+        # Zero rows marks a document-text hit, not an indexed table hit.
+        return node, 0, 0
     return None
 
 
-def reveal_text_in_document(root, needle: str) -> bool:
+def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
 
     The walk includes nodes the pruner will drop, so a table that starts
     below the viewport is still searched. A match that is already on screen
     is left where it is. False when nothing in the seek window matches.
+    Non-table text uses one TOP_LEFT request; Chromium PDF geometry may
+    update later. ``offscreen`` retains those hits for snapshot attachment
+    if pruning still drops them, without claiming that scrolling completed.
     """
     text = needle.strip() if isinstance(needle, str) else ""
     if not text or root is None:
@@ -16314,7 +16318,15 @@ def reveal_text_in_document(root, needle: str) -> bool:
     screen = _screen_size()
     if _on_screen_item(cell, screen) is not None:
         return True
-    _bring_cell_on_screen(cell, screen, row, rows)
+    if rows > 0:
+        _bring_cell_on_screen(cell, screen, row, rows)
+    else:
+        # Chromium PDF scrolling is asynchronous. Do not stack ANYWHERE,
+        # TOP_EDGE and a scrollbar write against the same stale extents.
+        # A document-order text hit has no table row fraction either.
+        scroll_to_edge(cell, "TOP_LEFT")
+        if offscreen is not None:
+            offscreen.append((cell, _parent_of(cell)))
     _invalidate_tree_cache(root)
     return True
 

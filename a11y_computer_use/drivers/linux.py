@@ -1578,19 +1578,20 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk(node: object) -> Snapshot:
+                    document_matches: list = []
                     if seek and _atspi._chromium_app(node):
-                        _atspi.reveal_text_in_document(node, seek)
+                        _atspi.reveal_text_in_document(node, seek, offscreen=document_matches)
                     accessor.refresh_visible(node)
                     snap = observe.build_snapshot(
                         node, accessor, scope=scope, app=app, pid=watch.pid,
                         geometry=geometry,
                     )
-                    # A GTK table cell find could not scroll on screen. Attach
-                    # it with the extents AT-SPI reported, which the pruner
-                    # drops when they miss the display. No box is invented.
-                    # Drain the list so the next window does not attach the
-                    # same cells again.
-                    pending = list(accessor._offscreen_seek)
+                    # Retain GTK cells that could not scroll and Chromium
+                    # text hits whose asynchronous reveal is still pending.
+                    # The pruner may drop either; attachment supplies no
+                    # click bounds and deduplicates handles already walked.
+                    # Drain the GTK list before walking the next window.
+                    pending = list(accessor._offscreen_seek) + document_matches
                     accessor._offscreen_seek.clear()
                     if pending:
                         specs = [(cell, accessor.read(cell), table) for cell, table in pending]
