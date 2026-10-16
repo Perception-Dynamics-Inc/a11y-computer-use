@@ -436,6 +436,14 @@ checked-state change. Missing or off-screen bounds, native Wayland, and an
 unchanged checked state return an error; no AT-SPI Toggle follows the click.
 This path is covered by hermetic tests; a live QML run has not been performed.
 
+Qt `push button menu` controls (for example Okular's Text Selection tool)
+appear as buttons and match `find(role="button")`. A ref click uses an explicit
+Press/Click/Activate action when available. If Qt exposes only ShowMenu/SetFocus,
+the click is refused with `menu_button_without_press`: these actions do not
+establish a main-button press. Use a screenshot and an explicit coordinate click
+on the desired segment; the whole-button bounds do not identify the arrow and
+main segment separately.
+
 Qt Quick sliders and spin buttons can report a working AT-SPI Value interface
 with broken minimum/maximum getters returning 0..0. These controls expose their
 finite current value and accept numeric `set_value` with unknown bounds; success

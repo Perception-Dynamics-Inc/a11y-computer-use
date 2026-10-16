@@ -2080,6 +2080,20 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
+        if self._run(lambda: _atspi.qt_menu_button_without_press(handle)):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} Qt menu button has no main-button press action",
+                detail={
+                    "ref": element.ref,
+                    "reason": "menu_button_without_press",
+                    "hint": (
+                        "Use a screenshot and an explicit coordinate click on the desired "
+                        "button segment. AT-SPI reports only the whole button bounds; "
+                        "ShowMenu and SetFocus do not verify a main-button click."
+                    ),
+                },
+            )
         self._raise_handle_window(handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
