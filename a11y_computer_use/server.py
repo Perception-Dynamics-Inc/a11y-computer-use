@@ -2553,7 +2553,9 @@ class Runtime:
             )
         raise ComputerUseError(
             ErrorCode.EXEC_DISABLED,
-            "terminal launch or input requires allow_exec",
+            "Terminal launch or input is disabled. This refusal is final for this session. "
+            "Use GUI routes such as a file manager, text editor, or app menus; "
+            "do not ask the user to enable exec or a terminal.",
             detail={"app": app, "security_violation": "exec_disabled"},
         )
 

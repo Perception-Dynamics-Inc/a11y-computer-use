@@ -132,6 +132,9 @@
 
 - 2026-10-14 (PR #562 conflict repair): Qt viewport-search and app-registration regressions can conflict where both branches append tests. Retain both complete blocks; confirm the failed Linux job contains only the tracked Calc timing flake before changing unrelated code.
 - 2026-10-14 (#590): GTK 4 GtkMenuButton may expose an actionless push-button wrapper around its actionable toggle. Fold only a sole toggle with the same native name and positive, identical measured bounds; preserve the inner native handle so find refs use the existing verified click path.
+- 2026-10-14 (#588): GTK 4 text ranges can reject SCREEN coordinates and point-to-offset queries while WINDOW range extents work. Compare ranges and widget bounds in WINDOW space; keep full-buffer write verification separate from visible snapshot values.
+
+- 2026-10-14 (PR #626 repair): GTK 4 bridges can omit WINDOW GetRangeExtents while supporting GetCharacterExtents. Keep unavailable geometry unreadable, but verify every character through the native fallback rather than relying on endpoint boxes for wrapped lines.
 
 - 2026-10-14 (PR #623 CI repair): Firefox address-bar combo wrappers can expose an input tag, Text, and EDITABLE together. Those signals alone do not identify the Chromium ARIA/datalist editor from #582. Scope that exception to Chromium and preserve Gecko wrapper, select, and paragraph refusals; verify both the Firefox live regression and hermetic tests with GI imports blocked.
 - 2026-10-14 (#537): `_atspi()` was initialized once but still ran `gi.require_version` for every state/geometry probe; the newer masking probes multiplied typelib version enumeration during Calc snapshots. Cache only the successfully initialized binding, preserve `_inited` invalidation on D-Bus reconnect and missing-GI dependency isolation, and keep all native state/geometry/readback calls live. Profile the event-thread callback, not just the caller waiting in `submit`; use fresh LibreOffice and D-Bus processes for repeated loaded measurements.
@@ -150,6 +153,9 @@
 - 2026-10-14 (PR #467 repair): Set DISPLAY and a unique writable XDG_CACHE_HOME before starting dbus-run-session, not only inside its child script. D-Bus-activated AT-SPI services inherit the session daemon environment and otherwise can bind the wrong display or abort on a read-only home cache. Validate Geany symbol jumps and Scintilla search together with CI-sized Openbox geometry.
 
 - 2026-10-14 (PR #467 repair): A repository fetch refspec may omit cursor branches. Explicitly fetch the PR branch and compare its remote head before conflict repair so existing repair commits and regressions are retained.
+
+
+- 2026-10-14 (PR #626 CI repair): GTK 4.14 routes GtkAccessibleText through a bridge that implements neither range nor character extents, unlike newer GTK. Keep buffer read-back separate from verified visibility in the search index; label unverified contents and never allow them to satisfy find. Reproduce version-dependent failures with the runner’s GTK and app libraries.
 - 2026-10-14 (#618): GTK 4 tree-expander buttons expose namespaced listitem expansion actions. Prefer toggle-expand, otherwise choose expand/collapse from the live state, and verify EXPANDED changes before success. Do not fall back to pointer input after a failed native action.
 
 - 2026-10-14 (PR #630 repair): Tree-expander regressions and Chromium combobox regressions append at the same location; preserve both complete blocks during a main merge and run the combined synthetic suite.
@@ -170,14 +176,25 @@
 - 2026-10-14 (PR #648 repair): Editor scroll-anchor selection and secure-field pre-resolution refusals are independent server behaviors. Preserve both regression blocks when resolving appended test conflicts; the unreadable-editor refusal must still happen before wheel or Find input.
 
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
+- 2026-10-16 (#595): XTEST wheel taps need both per-notch sync and real time between taps; sleeping while events remain queued still delivers a coalescible burst to Qt Quick. Wheel line units describe input notches, not verified pixels or rows.
 
 - 2026-10-14 (PR #467 status repair): Keep GTK status message reads independent of a positive Text character count. When the count is empty or unavailable, request the native Text endpoint (-1) and retain only actual returned text; do not infer a caret line from symbol names or document geometry. Validate the empty-count case hermetically and both Geany navigation paths live.
 
 - 2026-10-16 (#467 CI repair): Geany 2.0's startup welcome message masks caret statistics even after its symbol tree/editor is accessible. Statistics refresh on editor input, so initialize the fixture caret with Ctrl+Home and require the real initial line status within the existing startup deadline before testing navigation. Stop setup input once ready and preserve all final caret/visibility assertions; Text probes and geometry refreshes cannot reveal statistics the application is not displaying yet.
 
+
+
+- 2026-10-14 (PR #626 merge repair): Preserve GTK buffer search exclusion and Kate owner detection together when merging adjacent snapshot rules; they protect independent toolkit visibility paths.
+
+- 2026-10-16 (PR #626 merge repair): GTK 4 verified text visibility and GTK 4 tree-expander click verification are independent behaviors; preserve both backend notes when their adjacent documentation conflicts.
 - 2026-10-16 (PR #655 repair): Require the AT-SPI Value interface before meter numeric reads even when a missing interface returns a plausible stale number. Preserve Qt Quick slider/spin unknown-bound handling independently of that interface gate, and retain both regression blocks when merging appended tests.
 - 2026-10-16 (PR #659 repair): Qt Quick combo selection and numeric Value-interface support are independent behaviors. Preserve both backend documentation blocks when resolving adjacent additions; verify combo regressions alongside numeric Qt tests after merging main.
 
 - 2026-10-16 (#596): Qt Quick MenuBarItem exposes a named nested menu-bar role with zero actions; its popup is a sibling in the same window. Recognize that shape, use only measured native bounds for pointer opening, and verify popup visibility changed before walking rows. The bar label's SHOWING state alone does not establish an open popup.
 
 - 2026-10-16 (PR #467 merge validation): An inherited DISPLAY can opt the full suite into unrelated desktop fixtures and credential prompts. Run the hermetic suite with DISPLAY unset, then validate Geany symbol navigation and Scintilla search together in a fresh Xvfb/Openbox/D-Bus session; preserve both native-status readiness and meter Value-interface regressions when merging their adjacent test additions.
+
+
+- 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
+
+- 2026-10-16 (PR #467/#626 merge repair): Scintilla match visibility and GTK 4 visible-buffer snapshot filtering are complementary. Preserve both helper blocks when their insertion points conflict, and verify Geany symbol navigation together with Scintilla search under the CI window manager before adding a workaround for an older failed run.
