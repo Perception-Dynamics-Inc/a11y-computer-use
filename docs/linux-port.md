@@ -461,3 +461,8 @@ one label and no other text editor on that row; missing or ambiguous geometry
 leaves the name empty. Existing names, descriptions, and explicit label
 relations take precedence. It changes naming only and retains the native entry
 handle and bounds (including Claws Mail's Setup Wizard fields).
+
+Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
+Submit queries (`submit` or `submit form`) also match these buttons, and button
+role searches rank them first. No default is inferred from labels or geometry;
+the marker does not change click behavior or safety checks.

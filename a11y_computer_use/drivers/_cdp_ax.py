@@ -115,7 +115,9 @@ class CDPAccessor:
     """
 
     def __init__(self, nodes: Sequence[dict], geometry: dict[int, tuple[float, float, float, float]],
-                 secure_ids: frozenset[int], empty_number_ids: frozenset[int] = frozenset()) -> None:
+                 secure_ids: frozenset[int], empty_number_ids: frozenset[int] = frozenset(),
+                 submit_forms: dict | None = None) -> None:
+        self._submit_forms = submit_forms or {}
         self._by_id = {n["nodeId"]: n for n in nodes}
         self._geometry = geometry
         self._secure_ids = secure_ids
@@ -200,6 +202,8 @@ class CDPAccessor:
             selected=props.get("selected") is True,
             expanded=_tristate(props.get("expanded")),
             stable_id=stable,
+            default=role == "AXButton" and (session, backend) in self._submit_forms,
+            form_id=self._submit_forms.get((session, backend)),
         )
 
     def children(self, node: dict) -> Sequence[dict]:
@@ -338,6 +342,46 @@ def _tristate(v: object) -> bool | None:
     if v is False or v == "false":
         return False
     return None
+
+
+def submit_forms(snapshot: dict, session: str = "") -> dict:
+    """Map explicit HTML submit controls to owning forms in each document/session.
+
+    An explicit form attribute overrides ancestry, including an unresolved id.
+    No label or geometry heuristic is used.
+    """
+    strings = snapshot.get("strings", [])
+    result = {}
+    for doc in snapshot.get("documents", []):
+        nodes = doc.get("nodes", {})
+        ids = nodes.get("backendNodeId", [])
+        names = [strings[i].upper() for i in nodes.get("nodeName", [])]
+        attrs = [dict(zip((strings[i].lower() for i in row[::2]),
+                          (strings[i] for i in row[1::2])))
+                 for row in nodes.get("attributes", [])]
+        parents = nodes.get("parentIndex", [])
+        forms = {attrs[i].get("id"): i for i in range(min(len(names), len(attrs)))
+                 if names[i] == "FORM" and attrs[i].get("id")}
+        for i in range(min(len(ids), len(names), len(attrs))):
+            fields = attrs[i]
+            kind = fields.get("type", "").lower()
+            if not ((names[i] == "BUTTON" and kind not in {"button", "reset"})
+                    or (names[i] == "INPUT" and kind in {"submit", "image"})):
+                continue
+            if "form" in fields:
+                owner = forms.get(fields["form"])
+            else:
+                owner = parents[i] if i < len(parents) else -1
+                seen = set()
+                while owner is not None and 0 <= owner < len(names) and names[owner] != "FORM":
+                    if owner in seen:
+                        owner = -1
+                        break
+                    seen.add(owner)
+                    owner = parents[owner] if owner < len(parents) else -1
+            if owner is not None and 0 <= owner < len(ids) and names[owner] == "FORM":
+                result[(session, ids[i])] = f"{session}:{ids[owner]}"
+    return result
 
 
 def parse_dom_snapshot(

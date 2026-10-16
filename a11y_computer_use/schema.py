@@ -228,6 +228,8 @@ class Element:
             ``("AXWindow", "AXToolbar", "AXButton")``. Re-resolution anchor.
         enabled: False for greyed-out/disabled controls.
         focused: True if the element currently has keyboard focus.
+        default: Explicit native default/HTML submit button; a discovery hint only.
+        form_id: Owning HTML form identity when reported by the backend.
         clickable: True if the element accepts press/click actions.
         editable: True if the element accepts text input.
         secure: True for secure/password fields. Acting on a secure element
@@ -270,6 +272,8 @@ class Element:
     path: tuple[str, ...] = ()
     enabled: bool = True
     focused: bool = False
+    default: bool = False
+    form_id: str | None = None
     clickable: bool = False
     editable: bool = False
     secure: bool = False
