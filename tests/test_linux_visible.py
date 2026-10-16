@@ -70,19 +70,53 @@ def test_latency_no_native_work_or_sleep(feedback, monkeypatch):
 def test_glide_eight_steps_budget(feedback, monkeypatch):
     from a11y_computer_use.drivers import _linux_input
     moves, sleeps = [], []
+    clock = [0.0]
     screen = SimpleNamespace(width_in_pixels=1000, height_in_pixels=1000,
                              root=SimpleNamespace(query_pointer=lambda: SimpleNamespace(root_x=0, root_y=0)))
     monkeypatch.setattr(_linux_input, "_disp", lambda: SimpleNamespace(
-        screen=lambda: screen, has_extension=lambda ext: True, flush=lambda: None))
+        screen=lambda: screen, has_extension=lambda ext: True, flush=lambda: (_ for _ in ()).throw(
+            AssertionError("glide must not flush/sync during motion"))))
     monkeypatch.setattr(_linux_input, "_move", lambda x, y: moves.append((x, y)))
-    monkeypatch.setattr(visible.time, "sleep", sleeps.append)
+    monkeypatch.setattr(visible.time, "monotonic", lambda: clock[0])
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(visible.time, "sleep", fake_sleep)
     feedback._glide(Bounds(0, 10, 20, 30, 40))
-    assert len(moves) == 8
+    # Eight eased steps plus a final jump to the target centre.
+    assert len(moves) == 9
     assert moves[-1] == (25, 40)
-    assert sum(sleeps) == 0.08
+    assert abs(sum(sleeps) - 0.08) < 1e-9
     assert sum(sleeps) < 0.150
+    assert clock[0] <= 0.08 + 1e-9
     feedback._glide(Bounds(0, 2000, 0, 30, 40))
-    assert len(moves) == 8
+    assert len(moves) == 9
+
+
+def test_glide_jumps_when_deadline_exceeded(feedback, monkeypatch):
+    """Slow intermediate work must not exceed the configured glide budget."""
+    from a11y_computer_use.drivers import _linux_input
+    moves, sleeps = [], []
+    clock = [0.0]
+    screen = SimpleNamespace(width_in_pixels=1000, height_in_pixels=1000,
+                             root=SimpleNamespace(query_pointer=lambda: SimpleNamespace(root_x=0, root_y=0)))
+    monkeypatch.setattr(_linux_input, "_disp", lambda: SimpleNamespace(
+        screen=lambda: screen, has_extension=lambda ext: True))
+    monkeypatch.setattr(_linux_input, "_move", lambda x, y: moves.append((x, y)))
+    monkeypatch.setattr(visible.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_GLIDE_MS", "80")
+
+    def slow_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += 0.05  # each step burns budget faster than planned
+
+    monkeypatch.setattr(visible.time, "sleep", slow_sleep)
+    feedback._glide(Bounds(0, 10, 20, 30, 40))
+    assert moves[-1] == (25, 40)
+    assert clock[0] <= 0.08 + 1e-9 or len(moves) < 9
+    assert sum(sleeps) <= 0.08 + 1e-9
 
 
 def test_type_into_ref_announces_type_not_typed_text(monkeypatch):
@@ -122,6 +156,48 @@ def test_type_into_ref_announces_type_not_typed_text(monkeypatch):
     assert driver.type_into(element, "secret-payload") == len("secret-payload")
     assert announces == [("Type", "Name", bounds, False)]
     assert all("secret-payload" not in str(item) for item in announces)
+
+
+def test_type_text_converts_window_relative_extents_to_screen(monkeypatch):
+    """GTK4 SCREEN (0,0) + WINDOW offset must recover the screen rect for Type."""
+    from a11y_computer_use.drivers import _atspi
+
+    driver = LinuxDriver()
+    handle = SimpleNamespace(get_name=lambda: "Editor")
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_extents", lambda h: ((0.0, 0.0), (100.0, 24.0)))
+    monkeypatch.setattr(
+        _atspi,
+        "gtk4_recovered_box",
+        lambda h, position, size, cache=None: ((361.0, 302.0), (100.0, 24.0)),
+    )
+    monkeypatch.setattr(_atspi, "published_origin_untrusted", lambda h: True)
+    assert driver._screen_bounds_for_visible(handle) == Bounds(0, 361.0, 302.0, 100.0, 24.0)
+
+
+def test_type_text_skips_overlay_when_screen_rect_unknown(monkeypatch):
+    """Unrecovered GTK4 (0,0) SCREEN must draw no overlay (never fabricate)."""
+    from a11y_computer_use.drivers import _atspi
+
+    driver = LinuxDriver()
+    handle = SimpleNamespace(get_name=lambda: "Editor")
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_extents", lambda h: ((0.0, 0.0), (700.0, 473.0)))
+    monkeypatch.setattr(_atspi, "gtk4_recovered_box", lambda *a, **k: None)
+    monkeypatch.setattr(_atspi, "published_origin_untrusted", lambda h: True)
+    assert driver._screen_bounds_for_visible(handle) is None
+
+
+def test_type_text_keeps_non_gtk4_screen_extents(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    driver = LinuxDriver()
+    handle = SimpleNamespace(get_name=lambda: "Editor")
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_extents", lambda h: ((40.0, 50.0), (120.0, 30.0)))
+    monkeypatch.setattr(_atspi, "gtk4_recovered_box", lambda *a, **k: None)
+    monkeypatch.setattr(_atspi, "published_origin_untrusted", lambda h: False)
+    assert driver._screen_bounds_for_visible(handle) == Bounds(0, 40.0, 50.0, 120.0, 30.0)
 
 
 def test_set_value_preserves_native_dispatch_even_on_overlay_failure(monkeypatch):

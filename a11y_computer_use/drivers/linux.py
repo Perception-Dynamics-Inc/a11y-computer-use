@@ -2062,6 +2062,32 @@ class LinuxDriver:
             import logging
             logging.getLogger(__name__).debug("Visible action failed", exc_info=True)
 
+    def _screen_bounds_for_visible(self, handle) -> Bounds | None:
+        """SCREEN bounds for overlay feedback, or None when untrusted.
+
+        Matches the snapshot path: ``_extents`` then ``gtk4_recovered_box``.
+        GTK 4 reports SCREEN at (0, 0) while WINDOW is client-relative; recovery
+        adds the X client origin. When that screen rect cannot be determined,
+        return None so no overlay is drawn (never fabricate (0, 0)).
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        position, size = self._run(lambda: _atspi._extents(handle))
+        if position is None or size is None:
+            return None
+        recovered = self._run(lambda: _atspi.gtk4_recovered_box(handle, position, size))
+        if recovered is not None:
+            position, size = recovered
+        elif (
+            abs(float(position[0])) <= 0.5
+            and abs(float(position[1])) <= 0.5
+            and self._run(lambda: _atspi.published_origin_untrusted(handle))
+        ):
+            return None
+        return Bounds(
+            0, float(position[0]), float(position[1]), float(size[0]), float(size[1])
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -3590,10 +3616,10 @@ class LinuxDriver:
             try:
                 from a11y_computer_use.visible import enabled, visible_actions
                 if enabled(self.visible_actions):
-                    position, size = self._run(lambda: _atspi._extents(handle))
-                    bounds = Bounds(0, *position, *size) if position and size else None
+                    bounds = self._screen_bounds_for_visible(handle)
                     label = self._run(lambda: handle.get_name())
-                    visible_actions.prepare("Type", label, bounds, self.visible_actions)
+                    if bounds is not None:
+                        visible_actions.prepare("Type", label, bounds, self.visible_actions)
             except Exception:
                 import logging
                 logging.getLogger(__name__).debug("Visible typing feedback failed", exc_info=True)

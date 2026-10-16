@@ -72,7 +72,21 @@ class VisibleActions:
             _LOG.debug("Visible actions unavailable", exc_info=True)
 
     def _glide(self, bounds):
+        """Move the pointer toward the target centre within a hard wall-time cap.
+
+        Total wall time is at most ``A11Y_VISIBLE_ACTIONS_GLIDE_MS`` (default 80,
+        max 120). A monotonic deadline ends intermediate steps early and jumps
+        to the target; no X flush/sync or AT-SPI work runs during the glide.
+        Pointer mode stays off by default.
+        """
         from a11y_computer_use.drivers import _linux_input
+        try:
+            duration = float(os.environ.get("A11Y_VISIBLE_ACTIONS_GLIDE_MS", "80"))
+        except ValueError:
+            duration = 80
+        if not math.isfinite(duration) or not 0 <= duration <= 120:
+            duration = 80
+        deadline = time.monotonic() + duration / 1000.0
         connection = _linux_input._disp()
         if not all(connection.has_extension(ext) for ext in ("SHAPE", "XTEST")):
             self.disabled = True
@@ -84,19 +98,22 @@ class VisibleActions:
                 and bounds.y + bounds.height <= screen.height_in_pixels):
             return
         start = screen.root.query_pointer()
-        try:
-            duration = float(os.environ.get("A11Y_VISIBLE_ACTIONS_GLIDE_MS", "80"))
-        except ValueError:
-            duration = 80
-        if not math.isfinite(duration) or not 0 <= duration <= 120:
-            duration = 80
+        target_x = round(bounds.x + bounds.width / 2)
+        target_y = round(bounds.y + bounds.height / 2)
         for step in range(1, 9):
+            if time.monotonic() >= deadline:
+                break
             t = step / 8
             eased = t * t * (3 - 2 * t)
-            _linux_input._move(round(start.root_x + (bounds.x + bounds.width / 2 - start.root_x) * eased),
-                               round(start.root_y + (bounds.y + bounds.height / 2 - start.root_y) * eased))
-            connection.flush()
-            time.sleep(duration / 8000)
+            _linux_input._move(
+                round(start.root_x + (target_x - start.root_x) * eased),
+                round(start.root_y + (target_y - start.root_y) * eased),
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(duration / 8000.0, remaining))
+        _linux_input._move(target_x, target_y)
 
     def _consume(self):
         backend = None
