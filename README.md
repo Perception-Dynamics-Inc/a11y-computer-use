@@ -87,6 +87,8 @@ Same planner, 13 browser tasks, one round: refs finished 13/13 with 0 misclicks 
 
 \*Windows is partial: ref re-resolution, capture, and coordinate input are not implemented yet. Exact gates per platform: [docs/ci.md](./docs/ci.md), [docs/windows-port.md](./docs/windows-port.md), [docs/linux-port.md](./docs/linux-port.md).
 
+Linux GTK2 limitation: HexChat 2.16.2 has been reported as listed and focusable without an AT-SPI tree. Snapshot, find, and menus then return `no_accessibility_bridge`. See the [GTK2 bridge prerequisites and known limitation](./docs/linux-port.md#gtk2-hexchat-bridge-limitation).
+
 ## Safety
 
 <p align="center"><img src="docs/assets/safety-gate.png" alt="Permission tier, confirmation gate, same-window recheck, execute, audit log" width="92%"></p>

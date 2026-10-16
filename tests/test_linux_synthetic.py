@@ -13222,7 +13222,7 @@ def test_qt_document_point_offsets_verify_character_visibility(monkeypatch, miss
         assert _atspi._qt_viewport_text(object()) == "TOKEN_070"
 
 
-@pytest.mark.parametrize("app", ["vlc", "krita"])
+@pytest.mark.parametrize("app", ["vlc", "krita", "hexchat"])
 @pytest.mark.parametrize("listed_by", ["apps", "windows"])
 def test_running_app_without_atspi_tree_fails_fast(
     fake_atspi, monkeypatch, app, listed_by
@@ -13275,6 +13275,14 @@ def test_running_app_without_atspi_tree_fails_fast(
             assert exc.value.detail["reason"] == "no_accessibility_bridge"
             assert "running" in exc.value.message
             assert "screenshot" in exc.value.detail["hint"]
+            if app == "hexchat":
+                hint = exc.value.detail["hint"]
+                for prerequisite in (
+                    "GTK2 atk-bridge", "libatk-adaptor", "libgail-common",
+                    "GTK_MODULES=gail:atk-bridge", "NO_AT_BRIDGE=0",
+                    "remain unavailable",
+                ):
+                    assert prerequisite in hint
             assert clock["t"] - before == pytest.approx(expected_wait)
 
 
