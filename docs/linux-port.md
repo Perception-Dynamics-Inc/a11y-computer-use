@@ -349,7 +349,11 @@ AT-SPI Text. Native multiline states or attributes select this path; ordinary
 Qt line edits retain their text without requesting document viewport ranges.
 Snapshot values and text searches use `Text.get_bounded_ranges`
 inside the measured editor bounds, falling back to native point offsets and
-verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+verified character rectangles when Qt omits bounded ranges. If that query
+fails or times out and point offsets are unavailable (as on Qt 5.15), a raw
+Text prefix capped at 4000 characters is read and each character's native
+rectangle is checked against the viewport. Unverified and off-screen characters
+remain excluded from search. Each scroll re-reads
 these ranges, so an off-screen match becomes searchable when it enters the
 viewport. When neither interface establishes visibility, the document value is
 omitted and its hint recommends in-document Find or line navigation. `find` and
@@ -483,3 +487,14 @@ acknowledge a no-op, and page navigation is not verified by this path. This
 restriction also applies to fully visible thumbnails. Use a screenshot to choose
 a coordinate inside the visible thumbnail and check the viewer's page number
 after clicking. No scrolling or alternate action is substituted for the ref click.
+
+### Thunar location-entry failures
+
+After Return or KP_Enter in a focused Thunar toolbar location textfield, the
+runtime checks the post-action snapshot. A `dialog-error-symbolic` image child
+or an unchanged window title returns `suspected_noop` with `location not opened`
+and guidance to check the path or create missing folders from the nearest
+existing parent. An unchanged title alone does not prove that an error icon
+exists, so the result names the observed evidence. Successful navigation keeps
+the usual key result. Text read-back from `set_value` does not establish that a
+folder exists.
