@@ -15246,6 +15246,42 @@ def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, 
         assert observe.find_elements(snap, text="QTDOC_1135")
 
 
+@pytest.mark.parametrize("role", ["slider", "spin button"])
+@pytest.mark.parametrize("case", ["relation", "row", "named", "non_gtk", "missing", "tie", "other_row", "right"])
+def test_gtk_numeric_controls_use_stable_labels(fake_atspi, monkeypatch, role, case):
+    """Native labels survive changing values; unavailable row evidence stays unnamed."""
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    control = _place_row(_Acc(role, name="Native" if case == "named" else "", value=8,
+                              states=("ENABLED", "VISIBLE", "SHOWING")),
+                         200, 100, 140, 30)
+    control.get_description = lambda: f"{control.value:g} px" if role == "slider" else ""
+    label = _place_row(_Acc("label", name="Threshold:"),
+                       350 if case == "right" else 20,
+                       200 if case == "other_row" else 105, 160, 20)
+    _adopt(_Acc("panel"), control, label)
+    # Exercise the real relation reader; relation evidence does not need geometry.
+    relation = _NS(get_relation_type=lambda: "labelled-by", get_n_targets=lambda: 1,
+                   get_target=lambda index: label)
+    control.get_relation_set = lambda: [relation] if case in {"relation", "named", "non_gtk"} else []
+    if case in {"missing", "relation"}:
+        control.component = None
+    if case == "tie":
+        other = _place_row(_Acc("label", name="Other:"), 20, 105, 160, 20)
+        _adopt(control.parent, control, label, other)
+    accessor = _atspi.ATSPIAccessor()
+    for value in (8, 10, 6):
+        control.value = value
+        raw = accessor.read(control)
+        assert raw.title == ("Threshold" if case in {"relation", "row"} else
+                             "Native" if case == "named" else "")
+        assert raw.value == value
+        assert raw.description == (f"{value} px" if role == "slider" else "")
+        if case in {"relation", "row"}:
+            snap = build_snapshot(control, accessor, scope=Scope.WINDOW,
+                                  app="demo", pid=639, geometry=_geometry())
+            assert len(observe.find_elements(snap, text="Threshold")) == 1
+
+
 @pytest.mark.parametrize("identifier", ["vlc", "VLC media player"])
 @pytest.mark.parametrize("registration", ["missing", "ready", "retry"])
 def test_vlc_registration_probe_is_bounded(fake_atspi, monkeypatch, identifier, registration):
@@ -15443,3 +15479,41 @@ def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
     ))
     assert _atspi._qt_viewport_text(object()) == "VISIBLE"
     assert drained == []
+
+
+@pytest.mark.parametrize("count", [24, 25, 26, 48, 49])
+@pytest.mark.parametrize("cached", [False, True])
+def test_snapshot_bands_do_not_orphan_the_last_table_cell(fake_atspi, count, cached):
+    """Xarchiver's 25 visible headers/cells must not end in a collapsed band."""
+    table = _Acc("table", name="Files", width=600, height=600)
+    cells = [
+        _Acc("table cell", name=f"cell-{index}", width=100, height=20)
+        for index in range(count)
+    ]
+    _adopt(table, *cells)
+    rows = [(cell, (10, 10 + index * 10), (100, 20))
+            for index, cell in enumerate(cells)]
+    accessor = _atspi.ATSPIAccessor()
+    accessor._visible_children[id(table)] = cells
+    accessor._visible_bounds.update({id(cell): (pos, size) for cell, pos, size in rows})
+    if not cached:
+        bands = _atspi._bands_for_snapshot(rows)
+        table.children = bands
+        accessor._visible_children.clear()
+    snap = build_snapshot(
+        table, accessor, scope=Scope.WINDOW, app="xarchiver", pid=1,
+        geometry=_geometry(),
+    )
+    published = [el for el in snap.elements if el.role == "AXCell"]
+    assert [el.title for el in published] == [cell.name for cell in cells]
+    assert [observe._HANDLES[snap.snapshot_id][el.ref] for el in published] == cells
+    table_el = next(el for el in snap.elements if el.role == "AXTable")
+    if count <= observe.MAX_CHILDREN:
+        assert all(el.parent == table_el.ref for el in published)
+    else:
+        groups = [el for el in snap.elements if el.parent == table_el.ref]
+        assert groups and all(el.role == "AXGroup" for el in groups)
+        assert all(el.parent in {group.ref for group in groups} for el in published)
+        assert all(2 <= sum(el.parent == group.ref for el in published)
+                   <= observe.MAX_CHILDREN for group in groups)
+    _assert_no_elision(snap)
