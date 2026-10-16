@@ -3027,7 +3027,13 @@ class Runtime:
         if not toolbar or parent is None:
             return None
         fresh = self._element_like(entry, after)
-        error = fresh is not None and any(
+        # Thunar can retain this icon through successful navigation. Only a
+        # newly appearing icon establishes an error independently of the title.
+        prior_error = any(
+            e.parent == entry.ref and e.role == "AXImage" and e.title == "dialog-error-symbolic"
+            for e in before.elements
+        )
+        error = fresh is not None and not prior_error and any(
             e.parent == fresh.ref and e.role == "AXImage" and e.title == "dialog-error-symbolic"
             for e in after.elements
         )
@@ -6274,8 +6280,10 @@ class Runtime:
             text += (
                 "; text read-back does not verify activation or navigation. "
                 "set_value does not guarantee keyboard focus. For GTK path entries "
-                "(Thunar/FileZilla), focus the field, select all, type the path, "
+                "such as FileZilla, focus the field, select all, type the path, "
                 "then Return; verify the folder title/file list in a fresh snapshot. "
+                "Thunar location entries use focused keyboard replacement; send Return "
+                "separately to navigate. "
                 "If the path does not exist, create the missing folder from the nearest "
                 "existing parent, or check the path."
             )
@@ -9694,9 +9702,10 @@ def build_server(
         An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success.
         Text read-back does not verify activation or navigation, and an API
-        write does not guarantee keyboard focus.
+        write does not guarantee keyboard focus. Thunar's location bar uses
+        focused keyboard replacement and leaves Return to the caller.
         Missing paths must be created from the nearest existing parent or corrected.
-        GTK path entries such as Thunar's location bar and FileZilla's Local site field may display
+        Other GTK path entries such as FileZilla's Local site field may display
         the new path without navigating, even after Return. For those entries,
         focus the field, select all, type the path, then Return. Verify the
         folder title/file list in a fresh desktop_snapshot; Return without

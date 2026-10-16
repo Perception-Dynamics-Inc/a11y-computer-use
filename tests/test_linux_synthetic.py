@@ -15140,6 +15140,58 @@ def test_claws_wizard_page_title_does_not_borrow_unrelated_labels(monkeypatch, a
     assert _atspi._claws_wizard_page_title(tab) == ""
 
 
+@pytest.mark.parametrize('readback', [True, False])
+def test_thunar_path_replace_uses_real_input_and_readback(monkeypatch, readback):
+    node = object()
+    calls = []
+    for name in ('is_secure', 'drawing_text_editable', '_blocks_text_replace',
+                 'text_visibility_unknown'):
+        monkeypatch.setattr(_atspi, name, lambda *a: False)
+    monkeypatch.setattr(_atspi, '_role_name', lambda a: '')
+    monkeypatch.setattr(_atspi, '_thunar_location_entry', lambda a: a is node)
+    monkeypatch.setattr(_atspi, '_x11_keys_available', lambda: True)
+    # Even an equal buffer must be retyped: EditableText may have left the
+    # path model stale while its visible text already matches.
+    monkeypatch.setattr(_atspi, '_full_text', lambda a: '/tmp/destination')
+    monkeypatch.setattr(_atspi, '_x11_select_all_and_delete', lambda a: calls.append('clear'))
+    monkeypatch.setattr(_atspi, '_wait_until_gone', lambda a: True)
+    monkeypatch.setattr(_atspi, '_type_into_target', lambda a, text: calls.append(text))
+    monkeypatch.setattr(_atspi, '_confirm_text', lambda a, text: readback)
+    assert _atspi._set_text_body(node, '/tmp/destination') is readback
+    assert calls == ['clear', '/tmp/destination']  # no Return/activation
+
+
+@pytest.mark.parametrize('app,ancestor,expected', [
+    ('thunar', 'tool bar', True), ('Thunar', 'tool bar', True),
+    ('thunar', 'dialog', False), ('other', 'tool bar', False),
+])
+def test_thunar_path_entry_scope(monkeypatch, app, ancestor, expected):
+    node, parent, owner = object(), object(), object()
+    monkeypatch.setattr(_atspi, '_role_name', lambda a: 'entry' if a is node else ancestor)
+    monkeypatch.setattr(_atspi, '_toolkit_name', lambda a: 'gtk')
+    monkeypatch.setattr(_atspi, '_parent_of', lambda a: parent if a is node else None)
+    monkeypatch.setattr(_atspi, '_call_first', lambda a, *args, **kw: owner if a is node else app)
+    assert _atspi._thunar_location_entry(node) is expected
+
+
+def test_thunar_path_focus_failure_sends_no_text(monkeypatch):
+    node = object()
+    for name in ('is_secure', 'drawing_text_editable', '_blocks_text_replace',
+                 'text_visibility_unknown'):
+        monkeypatch.setattr(_atspi, name, lambda *a: False)
+    monkeypatch.setattr(_atspi, '_role_name', lambda a: '')
+    monkeypatch.setattr(_atspi, '_thunar_location_entry', lambda a: True)
+    monkeypatch.setattr(_atspi, '_x11_keys_available', lambda: True)
+    monkeypatch.setattr(_atspi, '_full_text', lambda a: '/tmp/')
+    monkeypatch.setattr(_atspi, 'grab_focus', lambda a: None)
+    monkeypatch.setattr(_atspi, '_confirm_focus_on_target', lambda a: False)
+    monkeypatch.setattr(_atspi, '_type_string', lambda text: pytest.fail('typed without focus'))
+    monkeypatch.setattr(_linux_input, 'press_chord', lambda text: pytest.fail('key without focus'))
+    with pytest.raises(ComputerUseError) as err:
+        _atspi._set_text_body(node, '/usr/share')
+    assert err.value.code is ErrorCode.FOCUS_LOST
+
+
 @pytest.mark.parametrize("failure", ["timeout", "no_answer"])
 @pytest.mark.parametrize("geometry", ["visible", "offscreen", "missing", "split"])
 def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, failure, geometry):
