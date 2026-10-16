@@ -2679,6 +2679,45 @@ def test_click_button_and_count(xtest_recorder) -> None:
     assert events[1:] == [(_X_BPRESS, 3, 0, 0), (_X_BRELEASE, 3, 0, 0)] * 2
 
 
+@pytest.mark.parametrize("count", [1, 2, 3])
+@pytest.mark.parametrize("button, number", [("left", 1), ("right", 3), ("middle", 2)])
+def test_click_delivers_pairs_with_an_inter_click_gap(
+    xtest_recorder, monkeypatch, count, button, number,
+) -> None:
+    """Timestamp delivered events, so sleeping before a final-only sync fails."""
+    import time
+
+    events, display = xtest_recorder
+    now = 0.0
+    delivered = []
+    sleeps = []
+    sent = 0
+
+    def sync():
+        nonlocal sent
+        delivered.extend((event, now) for event in events[sent:])
+        sent = len(events)
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(display, "sync", sync)
+    monkeypatch.setattr(time, "sleep", sleep)
+    _linux_input.click(406, 465, button=button, count=count)
+
+    assert delivered[0] == ((_X_MOTION, 0, 406, 465), 0.0)
+    assert [event for event, _ in delivered[1:]] == [
+        (_X_BPRESS, number, 0, 0), (_X_BRELEASE, number, 0, 0),
+    ] * count
+    assert [timestamp for _, timestamp in delivered[1:]] == pytest.approx([
+        index * 0.03 for index in range(count) for _ in range(2)
+    ])
+    assert sleeps == [0.03] * (count - 1)
+    assert now == pytest.approx((count - 1) * 0.03)
+
+
 def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder, monkeypatch) -> None:
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
     monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
