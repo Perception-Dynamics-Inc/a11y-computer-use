@@ -48,7 +48,12 @@ def _no_accessibility_tree(app: str) -> ComputerUseError:
             "app": app,
             "reason": "no_accessibility_bridge",
             "hint": "Use a screenshot and explicit coordinates, or enable the app's "
-                    "accessibility bridge. If the app is still starting, retry.",
+                    "accessibility bridge. For GTK2 apps such as HexChat, install "
+                    "libgail-common and libatk-adaptor (Debian/Ubuntu), then fully "
+                    "restart with GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0. "
+                    "The GTK2 atk-bridge module must be installed; GTK_MODULES alone "
+                    "is insufficient. If no tree registers, accessibility tools "
+                    "remain unavailable. If the app is still starting, retry.",
         },
     )
 
