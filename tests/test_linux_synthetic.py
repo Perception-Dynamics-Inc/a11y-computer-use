@@ -14892,3 +14892,59 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
             expected.append(("sleep", 0.12))
         expected.append(("sync", 1 + 2 * (index + 1)))
     assert timeline == (expected or [("sync", 1)])
+
+
+@pytest.mark.parametrize("selected_index", [0, 1])
+def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index):
+    titles = ["Welcome to Claws Mail", "About You", "Receiving mail"]
+    tabs = []
+    for title in titles:
+        page = _PageNode("panel", children=[
+            _PageNode("label", f"<b>{title}</b>"),
+            _PageNode("label", "Explanatory text, not the title"),
+        ])
+        tabs.append(_PageNode(
+            "page tab", box=((-1.0, -1.0), (-1.0, -1.0)), children=[page],
+        ))
+    notebook = _PageNode("page tab list", children=tabs)
+    frame = _PageNode("frame", "Claws Mail Setup Wizard", children=[notebook])
+    monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box or ((0., 0.), (500., 500.)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
+        True, False, None, node is tabs[selected_index], None, False, False,
+    ))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *a, **kw: None)
+    accessor = _atspi.ATSPIAccessor()
+    for index, tab in enumerate(tabs):
+        raw = accessor.read(tab)
+        assert raw.role == "AXTab"
+        assert raw.title == titles[index]
+        assert raw.selected == (index == selected_index)
+        assert raw.unallocated
+        assert raw.position is None and raw.size is None
+        assert raw.actions == ()
+        assert accessor.children(tab) == []
+    snap = build_snapshot(
+        frame, accessor, scope=Scope.WINDOW, app="claws-mail", pid=1, geometry=_geometry(),
+    )
+    pages = [el for el in snap.elements if el.role == "AXTab"]
+    assert [el.title for el in pages] == titles
+    assert all(el.bounds is None and not el.clickable and not el.actionable for el in pages)
+    rendered = observe.render_text(snap)
+    assert "Welcome to Claws Mail" in rendered and "About You" in rendered
+    assert len([el for el in snap.elements if el.title == "Explanatory text, not the title"]) == 3
+
+
+@pytest.mark.parametrize("app,window,first_role", [
+    ("Other App", "Setup Wizard", "label"),
+    ("Claws Mail", "Inbox", "label"),
+    ("Claws Mail", "Setup Wizard", "entry"),
+])
+def test_claws_wizard_page_title_does_not_borrow_unrelated_labels(monkeypatch, app, window, first_role):
+    page = _PageNode("panel", children=[
+        _PageNode(first_role, "First field"), _PageNode("label", "Later caption"),
+    ])
+    tab = _PageNode("page tab", children=[page])
+    _PageNode("frame", window, children=[_PageNode("page tab list", children=[tab])])
+    monkeypatch.setattr(_atspi, "_application_name", lambda node: app)
+    assert _atspi._claws_wizard_page_title(tab) == ""

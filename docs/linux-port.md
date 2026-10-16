@@ -6,6 +6,13 @@
 
 Xournal++ zoom sliders owned by `xournalpp` or `Xournal++` accept `150%`, `150 %`, and out-of-range bare numbers as percents when the current label and Value match the application's offset natural-log scale. Conversion uses `log(percent / 100 - 0.20753)` without step snapping. In-range bare numbers remain raw values. Percent writes require both the raw Value and the displayed percent to confirm; builds that change only the adjustment return `text_mismatch` without substituting clicks or keys. This path is covered by hermetic tests; live Xournal++ verification is pending.
 
+Claws Mail's Setup Wizard notebook pages with empty names can use their leading
+native page-title label as a tab name. The fallback is limited to that application's
+Setup Wizard window and does not use later field captions. Tabs without a native
+allocation remain hidden, without bounds or click actions; use the wizard's
+Next/Previous buttons to change pages. This naming fallback is hermetic-tested;
+live Claws Mail verification is pending.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.

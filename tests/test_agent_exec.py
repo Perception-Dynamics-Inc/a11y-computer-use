@@ -310,3 +310,23 @@ def test_agent_propagates_exec_permission_to_runtime(tmp_path):
         )
         assert result.status == "success"
         assert runtime.allow_exec is allowed
+
+
+def test_exec_off_planner_uses_gui_routes_only(tmp_path):
+    """Only exec-off runs receive final-refusal and GUI-route guidance."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    for allowed in (False, True):
+        model = ScriptedModel([turn(done(
+            "ready", [{"element": {"role": "AXButton", "name": "Save"}}],
+        ))])
+        result, _events, _runtime, _agent = run(
+            model, elements, trace_dir=tmp_path / str(allowed), allow_exec=allowed,
+        )
+        assert result.status == "success"
+        prompt = model.seen[0][0].content
+        assert ("never request that the user enable exec or a terminal" in prompt) is (not allowed)
+        if not allowed:
+            assert "terminal refusals are final" in prompt
+            assert "file manager, text editor, app menus" in prompt
+        else:
+            assert "shell and python are available" in prompt
