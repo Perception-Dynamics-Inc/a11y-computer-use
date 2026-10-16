@@ -1480,3 +1480,46 @@ def test_portal_without_managed_parent_keeps_own_identity(monkeypatch):
     monkeypatch.setattr(_linux_system, "_cmdline_basename", lambda pid: "xdg-desktop-portal-gtk")
     monkeypatch.setattr(_linux_system, "_exe_basename", lambda pid: "xdg-desktop-portal-gtk")
     assert _linux_system.frontmost_app_id() == "xdg-desktop-portal-gtk"
+
+
+def test_cover_rows_read_stacking_once_without_process_identity(fake_ewmh, monkeypatch):
+    """#718: snapshot cover evidence needs geometry/PID, not full app discovery."""
+    original = _linux_system._managed_windows
+    calls = []
+
+    def managed(display):
+        calls.append(display)
+        return original(display)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("cover scans must not resolve apps or wait for PID settlement")
+
+    monkeypatch.setattr(_linux_system, "_managed_windows", managed)
+    monkeypatch.setattr(_linux_system, "_app_id", unexpected)
+    monkeypatch.setattr(_linux_system, "_settled_pid", unexpected)
+    rows = _linux_system.window_cover_rows()
+    assert calls == [fake_ewmh]
+    assert [row["window_id"] for row in rows] == [0x10, 0x20]
+    assert rows[1]["pid"] == 200
+    assert rows[1]["bounds"] == {"x": 158, "y": 50, "width": 400, "height": 200}
+    assert _linux_system.window_id_for_toplevel(
+        title="", pid=200, extents=(158, 50, 400, 200), rows=rows,
+    ) == 0x20
+    assert calls == [fake_ewmh]
+
+
+@pytest.mark.parametrize("missing", ["hidden", "geometry", "display"])
+def test_cover_rows_omit_unavailable_window_evidence(fake_ewmh, monkeypatch, missing):
+    if missing == "hidden":
+        monkeypatch.setattr(_linux_system, "_is_hidden", lambda win, d: win.id == 0x20)
+    elif missing == "geometry":
+        original = _linux_system._geometry_on_root
+        monkeypatch.setattr(_linux_system, "_geometry_on_root", lambda win, d: (
+            None if win.id == 0x20 else original(win, d)
+        ))
+    else:
+        def unavailable():
+            raise RuntimeError("no X11")
+        monkeypatch.setattr(_linux_system, "_display", unavailable)
+    rows = _linux_system.window_cover_rows()
+    assert [row["window_id"] for row in rows] == ([] if missing == "display" else [0x10])

@@ -15246,6 +15246,42 @@ def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, 
         assert observe.find_elements(snap, text="QTDOC_1135")
 
 
+@pytest.mark.parametrize("role", ["slider", "spin button"])
+@pytest.mark.parametrize("case", ["relation", "row", "named", "non_gtk", "missing", "tie", "other_row", "right"])
+def test_gtk_numeric_controls_use_stable_labels(fake_atspi, monkeypatch, role, case):
+    """Native labels survive changing values; unavailable row evidence stays unnamed."""
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    control = _place_row(_Acc(role, name="Native" if case == "named" else "", value=8,
+                              states=("ENABLED", "VISIBLE", "SHOWING")),
+                         200, 100, 140, 30)
+    control.get_description = lambda: f"{control.value:g} px" if role == "slider" else ""
+    label = _place_row(_Acc("label", name="Threshold:"),
+                       350 if case == "right" else 20,
+                       200 if case == "other_row" else 105, 160, 20)
+    _adopt(_Acc("panel"), control, label)
+    # Exercise the real relation reader; relation evidence does not need geometry.
+    relation = _NS(get_relation_type=lambda: "labelled-by", get_n_targets=lambda: 1,
+                   get_target=lambda index: label)
+    control.get_relation_set = lambda: [relation] if case in {"relation", "named", "non_gtk"} else []
+    if case in {"missing", "relation"}:
+        control.component = None
+    if case == "tie":
+        other = _place_row(_Acc("label", name="Other:"), 20, 105, 160, 20)
+        _adopt(control.parent, control, label, other)
+    accessor = _atspi.ATSPIAccessor()
+    for value in (8, 10, 6):
+        control.value = value
+        raw = accessor.read(control)
+        assert raw.title == ("Threshold" if case in {"relation", "row"} else
+                             "Native" if case == "named" else "")
+        assert raw.value == value
+        assert raw.description == (f"{value} px" if role == "slider" else "")
+        if case in {"relation", "row"}:
+            snap = build_snapshot(control, accessor, scope=Scope.WINDOW,
+                                  app="demo", pid=639, geometry=_geometry())
+            assert len(observe.find_elements(snap, text="Threshold")) == 1
+
+
 @pytest.mark.parametrize("identifier", ["vlc", "VLC media player"])
 @pytest.mark.parametrize("registration", ["missing", "ready", "retry"])
 def test_vlc_registration_probe_is_bounded(fake_atspi, monkeypatch, identifier, registration):
