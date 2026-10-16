@@ -15418,6 +15418,58 @@ def test_geany_double_click_waits_for_navigation_without_substituting_input(
     assert len([event for event in events if event[0] == _X_BPRESS]) == 2
 
 
+@pytest.mark.parametrize('readback', [True, False])
+def test_thunar_path_replace_uses_real_input_and_readback(monkeypatch, readback):
+    node = object()
+    calls = []
+    for name in ('is_secure', 'drawing_text_editable', '_blocks_text_replace',
+                 'text_visibility_unknown'):
+        monkeypatch.setattr(_atspi, name, lambda *a: False)
+    monkeypatch.setattr(_atspi, '_role_name', lambda a: '')
+    monkeypatch.setattr(_atspi, '_thunar_location_entry', lambda a: a is node)
+    monkeypatch.setattr(_atspi, '_x11_keys_available', lambda: True)
+    # Even an equal buffer must be retyped: EditableText may have left the
+    # path model stale while its visible text already matches.
+    monkeypatch.setattr(_atspi, '_full_text', lambda a: '/tmp/destination')
+    monkeypatch.setattr(_atspi, '_x11_select_all_and_delete', lambda a: calls.append('clear'))
+    monkeypatch.setattr(_atspi, '_wait_until_gone', lambda a: True)
+    monkeypatch.setattr(_atspi, '_type_into_target', lambda a, text: calls.append(text))
+    monkeypatch.setattr(_atspi, '_confirm_text', lambda a, text: readback)
+    assert _atspi._set_text_body(node, '/tmp/destination') is readback
+    assert calls == ['clear', '/tmp/destination']  # no Return/activation
+
+
+@pytest.mark.parametrize('app,ancestor,expected', [
+    ('thunar', 'tool bar', True), ('Thunar', 'tool bar', True),
+    ('thunar', 'dialog', False), ('other', 'tool bar', False),
+])
+def test_thunar_path_entry_scope(monkeypatch, app, ancestor, expected):
+    node, parent, owner = object(), object(), object()
+    monkeypatch.setattr(_atspi, '_role_name', lambda a: 'entry' if a is node else ancestor)
+    monkeypatch.setattr(_atspi, '_toolkit_name', lambda a: 'gtk')
+    monkeypatch.setattr(_atspi, '_parent_of', lambda a: parent if a is node else None)
+    monkeypatch.setattr(_atspi, '_call_first', lambda a, *args, **kw: owner if a is node else app)
+    assert _atspi._thunar_location_entry(node) is expected
+
+
+def test_thunar_path_focus_failure_sends_no_text(monkeypatch):
+    node = object()
+    for name in ('is_secure', 'drawing_text_editable', '_blocks_text_replace',
+                 'text_visibility_unknown'):
+        monkeypatch.setattr(_atspi, name, lambda *a: False)
+    monkeypatch.setattr(_atspi, '_role_name', lambda a: '')
+    monkeypatch.setattr(_atspi, '_thunar_location_entry', lambda a: True)
+    monkeypatch.setattr(_atspi, '_x11_keys_available', lambda: True)
+    monkeypatch.setattr(_atspi, '_full_text', lambda a: '/tmp/')
+    monkeypatch.setattr(_atspi, 'grab_focus', lambda a: None)
+    monkeypatch.setattr(_atspi, '_confirm_focus_on_target', lambda a: False)
+    monkeypatch.setattr(_atspi, '_type_string', lambda text: pytest.fail('typed without focus'))
+    monkeypatch.setattr(_linux_input, 'press_chord', lambda text: pytest.fail('key without focus'))
+    with pytest.raises(ComputerUseError) as err:
+        _atspi._set_text_body(node, '/usr/share')
+    assert err.value.code is ErrorCode.FOCUS_LOST
+
+
 @pytest.mark.parametrize("failure", ["timeout", "no_answer"])
 @pytest.mark.parametrize("geometry", ["visible", "offscreen", "missing", "split"])
 def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, failure, geometry):
@@ -15494,6 +15546,52 @@ def test_geany_navigation_verifies_native_caret_when_status_lags(
     monkeypatch.setattr(fake_atspi.Text, "get_text",
                         lambda node, start, end: prefix if readable else None, raising=False)
     assert _atspi.geany_symbol_arrived((301, [status])) is arrived
+
+
+@pytest.mark.parametrize("identifier", ["vlc", "VLC media player"])
+@pytest.mark.parametrize("registration", ["missing", "ready", "retry"])
+def test_vlc_registration_probe_is_bounded(fake_atspi, monkeypatch, identifier, registration):
+    """Young VLC must fail quickly, but a real root always remains usable."""
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    probes = []
+    window = _Acc("frame", name="VLC", width=640, height=480)
+
+    def find_root(name, scope):
+        probes.append(name)
+        if registration == "ready" or (registration == "retry" and clock["t"] > 0):
+            return window
+        return None
+
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda app: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda app: True)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda app: "vlc")
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 1.0 + clock["t"])
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep",
+                        lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    driver = LinuxDriver()
+    for _ in range(2):
+        before = clock["t"]
+        probes.clear()
+        if registration == "missing":
+            with pytest.raises(ComputerUseError) as exc:
+                driver.snapshot(Scope.WINDOW, identifier)
+            assert exc.value.code is ErrorCode.UNSUPPORTED
+            assert exc.value.detail["reason"] == "no_accessibility_bridge"
+            assert "QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1" in exc.value.detail["hint"]
+            assert "restart VLC" in exc.value.detail["hint"]
+        else:
+            snap = driver.snapshot(Scope.WINDOW, identifier)
+            assert snap.elements[0].role == "AXWindow"
+            assert snap.elements[0].title == "VLC"
+        assert clock["t"] - before < 0.5
+        assert len(probes) <= 4
 
 
 @pytest.mark.parametrize("failure", ["marshalling", "exception", "timeout", "no_answer", "malformed", "empty_content", "invalid_content"])

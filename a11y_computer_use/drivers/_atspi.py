@@ -15716,6 +15716,26 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
 
 
+def _thunar_location_entry(acc) -> bool:
+    """Identify Thunar's toolbar entry without including rename/search dialogs."""
+    if _role_name(acc) not in {"text", "entry"} or "gtk" not in _toolkit_name(acc):
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if str(_call_first(app, ("get_name",), default="")).casefold() != "thunar":
+        return False
+    node = _parent_of(acc)
+    for _ in range(8):
+        if node is None:
+            break
+        role = _role_name(node)
+        if role == "tool bar":
+            return True
+        if role in {"dialog", "frame", "application"}:
+            break
+        node = _parent_of(node)
+    return False
+
+
 def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -15798,6 +15818,17 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
                 "use focused typing and verify the value after closing and reopening the dialog",
                 detail={"reason": "commit_unverified"},
             )
+    if _thunar_location_entry(acc):
+        # EditableText changes the displayed buffer but not Thunar's path
+        # completion model. Real input updates both, leaving Return to the
+        # caller. Even equal buffer text must be retyped to repair that model.
+        if not _x11_keys_available() or _full_text(acc) is None:
+            return False
+        _x11_select_all_and_delete(acc)
+        if not _wait_until_gone(acc):
+            return False
+        _type_into_target(acc, text)
+        return _confirm_text(acc, text)
     if is_writer_document(acc):
         return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):
