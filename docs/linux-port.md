@@ -461,3 +461,8 @@ still outside the snapshot, it is returned as off-screen with no click
 bounds rather than reported missing. No table-row scrollbar position is
 inferred for a document-text match. This fallback has synthetic regression
 coverage; native PDF scrolling still requires live verification.
+
+Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
+Submit queries (`submit` or `submit form`) also match these buttons, and button
+role searches rank them first. No default is inferred from labels or geometry;
+the marker does not change click behavior or safety checks.

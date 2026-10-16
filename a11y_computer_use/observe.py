@@ -234,6 +234,8 @@ class RawNode:
     description: str = ""
     enabled: bool = True
     focused: bool = False
+    default: bool = False
+    form_id: str | None = None
     position: tuple[float, float] | None = None
     size: tuple[float, float] | None = None
     actions: tuple[str, ...] = ()
@@ -1347,10 +1349,12 @@ def find_elements(
         editable / clickable: keep only elements whose flag equals the given
             boolean.
 
-    Returns the matches in the snapshot's pre-order, so refs read top-to-bottom.
+    Submit queries also match explicit default buttons. Submit queries and
+    role="button" rank them first; other matches retain pre-order.
     """
     needle = text.lower() if text else None
     role_needle = role.lower().removeprefix("ax") if role else None
+    submit_query = needle is not None and needle.strip() in {"submit", "submit form"}
     full_values = _FULL_VALUES.get(snap.snapshot_id, {})
     out: list[Element] = []
     for el in snap.elements:
@@ -1361,7 +1365,7 @@ def find_elements(
             # NBSP is a space. The container value already has each U+FFFC
             # replaced by the embedded child's text, so the sentence matches.
             haystack = f"{el.title} {value} {el.hint} {el.shortcut}".replace("\u00a0", " ").lower()
-            if needle.replace("\u00a0", " ") not in haystack:
+            if needle.replace("\u00a0", " ") not in haystack and not (submit_query and el.default):
                 continue
         if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
             continue
@@ -1370,6 +1374,8 @@ def find_elements(
         if clickable is not None and el.clickable is not clickable:
             continue
         out.append(el)
+    if submit_query or role_needle == "button":
+        out.sort(key=lambda el: not el.default)
     return tuple(out)
 
 
@@ -1408,6 +1414,8 @@ def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[
         role = el.role.lower().removeprefix("ax")
         return role in _EXACT_NAME_ROLES
 
+    if needle in {"submit", "submit form"} and any(el.default for el in matches):
+        return tuple(matches)
     exact = tuple(el for el in matches if exact_control(el))
     if exact:
         return exact
@@ -2769,6 +2777,8 @@ def _flatten(
             path=path,
             enabled=node.raw.enabled,
             focused=node.raw.focused,
+            default=node.raw.default,
+            form_id=node.raw.form_id,
             clickable=clickable,
             editable=editable,
             secure=secure,
@@ -2952,6 +2962,7 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         name
         for name, on in (
             ("click", show_click),
+            ("default", el.default),
             ("edit", el.editable),
             ("secure", el.secure),
             ("checked", el.checked is True),

@@ -122,3 +122,10 @@ per-action latency p50/p95 + tokens). `a11y-computer-use bench desktop` runs the
 per-view measurement on the current platform driver (or `A11Y_COMPUTER_USE_DRIVER=browser`
 for the bound tab); method and numbers in docs/observation-cost.md. `a11y-computer-use
 bench h2h` is the task-level head-to-head on this backend (docs/benchmark.md).
+
+HTML submit buttons with a known owning form carry a `default` snapshot flag.
+This includes implicit submit `<button>` elements and `<input type=submit|image>`,
+and respects explicit `form` attributes. Each frame/session keeps its own form
+identity. `find(text="submit")` and `find(text="submit form")` also match marked
+buttons; these queries and `find(role="button")` rank marked buttons first.
+The flag is a discovery hint and does not perform or replace any action.
