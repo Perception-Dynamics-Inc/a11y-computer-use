@@ -150,3 +150,5 @@
 
 - 2026-10-16 (#596): Qt Quick MenuBarItem exposes a named nested menu-bar role with zero actions; its popup is a sibling in the same window. Recognize that shape, use only measured native bounds for pointer opening, and verify popup visibility changed before walking rows. The bar label's SHOWING state alone does not establish an open popup.
 - 2026-10-16 (#603): Claws Mail folder and message lists share an empty panel-under-scroll-pane shape. Use a combined surface label and retain the missing-row limitation; pane dimensions or focusability do not establish list identity. Scope recognition to Claws split-pane windows and preserve native labels.
+
+- 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
