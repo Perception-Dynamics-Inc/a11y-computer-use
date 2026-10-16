@@ -160,6 +160,9 @@
 
 - 2026-10-16 (PR #667 repair): Preserve Chromium PDF asynchronous-reveal notes and native DEFAULT submit-discovery notes together when adjacent backend documentation conflicts; they describe independent behaviors. Inspect the direct Actions job log when the failed-log command returns no output.
 
+- 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
 - 2026-10-16 (PR #667 main merge): Keep asynchronous PDF find reveal tests alongside PDF thumbnail click refusals; finding a native text handle and verifying page navigation are independent guarantees.
+
+- 2026-10-16 (PR #667 default-state merge): Preserve the native IS_DEFAULT StateSet regression alongside asynchronous PDF reveal behavior; synthetic state-name fallbacks must not hide native enum mistakes.

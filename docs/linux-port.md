@@ -470,7 +470,7 @@ provides no list-type identifier, so the label does not distinguish the two
 panes by size or position. Native names and bounds are preserved; this does
 not expose row refs or enable selecting a folder or message by name.
 
-Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
+Buttons exposing native AT-SPI IS_DEFAULT state (nick `is-default`) carry a `default` snapshot flag.
 Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;
 the marker does not change click behavior or safety checks.
