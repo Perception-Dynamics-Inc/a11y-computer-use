@@ -3214,6 +3214,50 @@ def _page_text(acc) -> str | None:
     return text or None
 
 
+def _gtk4_visible_buffer(acc, text: str) -> str | None:
+    """Read complete lines verified inside the widget in WINDOW coordinates.
+
+    GTK 4 can reject SCREEN ranges and point-to-offset queries. Missing
+    geometry must not make the whole buffer searchable as visible text.
+    """
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "WINDOW", None)
+    box = _raw_rect(acc, "WINDOW")
+    if coord is None or box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    x, y, width, height = box
+    visible = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if content:
+            rect = _safe(lambda: Atspi.Text.get_range_extents(
+                acc, offset, offset + len(content), coord,
+            ))
+            rectangles = [rect]
+            if rect is None:
+                # Older GTK 4 bridges omit GetRangeExtents but implement
+                # GetCharacterExtents. Verify every character independently;
+                # endpoint boxes cannot establish visibility of wrapped text.
+                rectangles = [
+                    _safe(lambda index=index: Atspi.Text.get_character_extents(
+                        acc, index, coord,
+                    ))
+                    for index in range(offset, offset + len(content))
+                ]
+                if any(item is None for item in rectangles):
+                    return None
+            if all(item.width > 0 and item.height > 0
+                   and x <= item.x and y <= item.y
+                   and item.x + item.width <= x + width
+                   and item.y + item.height <= y + height
+                   for item in rectangles):
+                visible.append(content)
+        offset += len(line)
+    # Preserve separation even when intervening lines are off screen.
+    return "\n".join(visible)
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -3267,6 +3311,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         got = _read_full_text(acc, count=count)
         if isinstance(got, str) and got:
+            if (_gtk4_app(acc) and role_name in {"text", "editable text", "entry"}
+                    and (_reports_multiline(acc, _get_attributes(acc)) or "\n" in got)):
+                return _gtk4_visible_buffer(acc, got)
             if _OBJECT_REPLACEMENT in got:
                 if _is_choice_role(role, role_name or ""):
                     cleaned = _strip_objects(got)
@@ -3887,6 +3934,18 @@ class ATSPIAccessor:
             sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
+        search_value = None
+        if (value is None and role == "AXTextArea"
+                and role_str in {"text", "editable text", "entry"}
+                and _gtk4_app(node) and not is_secure(node)):
+            # GTK 4.14 implements neither text extent API for AccessibleText.
+            # Preserve native buffer read-back, without indexing it as visible.
+            buffer = _read_full_text(node)
+            if isinstance(buffer, str) and buffer and (
+                _reports_multiline(node, attrs) or "\n" in buffer
+            ):
+                value = buffer
+                search_value = ""
         owner_name = ""
         if role == "AXTextArea":
             owner = _application_of(node)
@@ -3922,7 +3981,10 @@ class ATSPIAccessor:
                 "Visible document text unavailable; use in-document Find or line navigation"
             )
         surface_name = ""
-        content_note = ""
+        content_note = (
+            "Buffer contents; text visibility unavailable, excluded from text search."
+            if search_value is not None else ""
+        )
         panel_note = ""
         if (
             role_str == "drawing area"
@@ -4048,6 +4110,7 @@ class ATSPIAccessor:
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
+            search_value=search_value,
             surface_name=surface_name,
             content_note=content_note,
             hint=hint,

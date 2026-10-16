@@ -386,6 +386,16 @@ clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
 
+GTK 4 multiline text values include only complete lines whose AT-SPI text range
+fits inside the widget's WINDOW-coordinate rectangle. This avoids whole-buffer
+matches in `find` and `scroll_to_find` when SCREEN text coordinates and
+point-to-offset queries are unsupported. When range extents are unavailable,
+each character must have measured WINDOW extents inside the widget. Missing
+geometry leaves text unsearchable. GTK versions without either extent API
+retain labeled buffer contents for read-back, excluded from the search index.
+Partially clipped or horizontally overflowing lines are conservatively excluded.
+This does not change full-buffer write verification.
+
 GTK 4 tree-expander buttons exposing `listitem.toggle-expand` (or the
 state-appropriate `listitem.expand` / `listitem.collapse`) use that native action
 for a ref click. The driver verifies a change in the live `EXPANDED` state;
