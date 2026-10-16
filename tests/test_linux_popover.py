@@ -19,16 +19,17 @@ class Panel:
         return ""
 
 
+@pytest.mark.parametrize("showing", [True, False])
 @pytest.mark.parametrize("kind", ["auto", "manual", "hint", None, "false"])
-def test_popover_metadata(monkeypatch, kind):
+def test_popover_metadata(monkeypatch, kind, showing):
     monkeypatch.setattr(_atspi, "_get_attributes", lambda node: {"ispopup": kind})
     monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
-    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state == "SHOWING")
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: showing and state == "SHOWING")
     monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: ((100, 100), (300, 200)))
     monkeypatch.setattr(_atspi, "_relation_targets", lambda node, relation: ["opener"] if relation == "details_for" else [])
     monkeypatch.setattr(_atspi, "_node_name", lambda node: "Open Menu")
     raw = _atspi.ATSPIAccessor().read(Panel())
-    if kind in {"auto", "manual", "hint"}:
+    if showing and kind in {"auto", "manual", "hint"}:
         assert raw.role == "AXPopover"
         assert raw.note == "open; opened by 'Open Menu'"
         assert raw.value is None

@@ -155,11 +155,20 @@
 
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
+- 2026-10-16 (#609): Chrome's accessible hit test can return the underlying control through a top-layer HTML popover. Use showing `ispopup` panels and measured bounds to identify covers, and keep the mapped `AXPopover` in the container no-value set to avoid numeric interface reads.
+
+- 2026-10-16 (PR #679 repair): HTML popover mapping and Claws Mail wizard tab naming have independent appended regressions. Preserve both complete test blocks when merging main, including native unknown-geometry assertions for hidden wizard tabs.
+
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
 
 - 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
+- 2026-10-16 (PR #679 merge repair): Preserve Claws Mail opaque-list labels and HTML popover coverage as independent behaviors when merging adjacent documentation and synthetic regressions. Inspect the complete Linux failure summary before changing code for the tracked Calc timing flake.
+
+- 2026-10-16 (test isolation): Concurrent D-Bus test sessions need distinct writable XDG_CACHE_HOME directories; sharing the AT-SPI socket path can close a remote-runtime subprocess connection when the other session exits.
 - 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
 
 - 2026-10-16 (#610): Chromium HTML popovers expose panel + ispopup and DETAILS_FOR opener relations. Preserve their container boundary before descendant ref matching; dismissed descendants can otherwise receive reorder hints naming unrelated browser chrome. Snapshot absence alone does not prove how a popover was dismissed.
+
+- 2026-10-16 (PR #692 repair): Preserve SHOWING-gated HTML popover mapping when adding opener metadata and stale descendant guidance; hidden panels must retain ordinary group behavior so containment checks cannot treat a dismissed popup as open.

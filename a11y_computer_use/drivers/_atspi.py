@@ -2108,9 +2108,9 @@ def _action_names(acc) -> tuple[str, ...]:
 # groups/buttons/windows are the bulk of a tree. Their label lives in the Name
 # (title), not the value, so skipping the value read is a pure speedup.
 _NO_VALUE_ROLES = frozenset({
-    "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXPopover", "AXWindow", "AXToolbar", "AXMenuBar",
+    "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
-    "AXStatusBar",
+    "AXStatusBar", "AXPopover",
 })
 
 
@@ -3852,7 +3852,9 @@ class ATSPIAccessor:
             role = "AXTextArea"
         role = _refine_web_role(role, attrs)
         role = _opaque_surface_role(role, role_str, attrs)
-        if role_str == "panel" and attrs.get("ispopup") in {"auto", "manual", "hint"}:
+        # Chromium reports HTML top-layer popovers as ordinary panels.
+        if (role_str == "panel" and attrs.get("ispopup") in {"auto", "manual", "hint"}
+                and _state_has(node, "SHOWING")):
             role = "AXPopover"
         # A custom role=spinbutton is an AT-SPI spin button, which this map
         # sends to AXTextField. That renders as textfield (edit) and hides
