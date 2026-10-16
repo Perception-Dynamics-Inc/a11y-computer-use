@@ -15037,3 +15037,57 @@ def test_thunar_path_focus_failure_sends_no_text(monkeypatch):
     with pytest.raises(ComputerUseError) as err:
         _atspi._set_text_body(node, '/usr/share')
     assert err.value.code is ErrorCode.FOCUS_LOST
+
+
+@pytest.mark.parametrize("failure", ["timeout", "no_answer"])
+@pytest.mark.parametrize("geometry", ["visible", "offscreen", "missing", "split"])
+def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, failure, geometry):
+    """Qt 5's broken bounded reply must not hide verifiably visible text."""
+    text = "QTDOC_1135 hello" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    checked = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def bounded(*args):
+        if failure == "timeout":
+            raise TimeoutError("Did not receive a reply")
+        return None
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        return text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        if geometry == "missing":
+            return None
+        visible = geometry != "offscreen" and offset < 16
+        if geometry == "split" and offset == 5:
+            visible = False
+        return _NS(x=20, y=40 if visible else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=lambda *args: -1,
+            get_character_count=lambda acc: len(text),
+            get_text=get_text,
+            get_character_extents=rectangle,
+        ),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    assert reads == [(0, _atspi._PAGE_TEXT_CHARS)]
+    assert len(checked) <= _atspi._PAGE_TEXT_CHARS
+    if geometry == "missing":
+        assert value is None
+    elif geometry == "offscreen":
+        assert value == ""
+    elif geometry == "split":
+        assert value == "QTDOC\n1135 hello"
+    else:
+        assert value == "QTDOC_1135 hello"
+        raw = RawNode(role="AXTextArea", value=value)
+        snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                              app="scribus", pid=1, geometry=_geometry())
+        assert observe.find_elements(snap, text="QTDOC_1135")
