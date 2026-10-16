@@ -190,6 +190,7 @@ call done only if the goal already holds. If a condition fails, that run is
 not done. Do not derive a click target from the goal text. Do not substitute
 an action with a different effect. A click that already has x and y stays
 that click. A key stays that key. When the goal
+creates a folder, include dir_exists for its path. When the goal
 saves or creates a file, one condition must be file_exists for that path,
 and it must include contains for the text the file should hold. The file
 must have a modification time newer than task start; a browser form Save
@@ -3140,12 +3141,18 @@ def _goal_forbids_bom(goal: str | None) -> bool:
     return _BOM_FORBIDDEN.search(goal) is not None
 
 
+_DIRECTORY_CREATE = re.compile(
+    r"\bcreat(?:e|es|ed|ing)\s+(?:(?:a|the|new)\s+)*(?:folder|directory)\b",
+    re.IGNORECASE,
+)
+
+
 def goal_writes_a_file(goal: str) -> bool:
     """True when the goal is to save, create, download, or export a file.
 
     The check is the wording of the goal. It does not name a benchmark task.
     """
-    text = goal or ""
+    text = _DIRECTORY_CREATE.sub("", goal or "")
     if _SAVE_AS.search(text):
         return True
     if not _FILE_VERBS.search(text):
@@ -3289,6 +3296,10 @@ def file_evidence_error(goal: str, conditions: list) -> str | None:
     has to carry ``contains`` for that text. Text the goal says to replace or
     remove is not demanded here; the file check rejects it if it is still there.
     """
+    if _DIRECTORY_CREATE.search(goal) and not any(
+        isinstance(item, dict) and "dir_exists" in item for item in conditions
+    ):
+        return "a goal that creates a folder needs a dir_exists condition for that path"
     if not goal_writes_a_file(goal):
         return None
     files = [
@@ -3350,6 +3361,12 @@ def _one_condition(
     if len(condition) != 1:
         return False, "a condition must be one object with one key"
     key = next(iter(condition))
+    if key == "dir_exists":
+        try:
+            matched = conditions.Checker().probe(condition, {})
+        except (ValueError, OSError) as exc:
+            return False, str(exc)
+        return bool(matched), matched or f"directory {condition[key]!r} was not found"
     if key == "element":
         spec = condition["element"]
         if not isinstance(spec, dict) or not spec.get("role") or not spec.get("name"):

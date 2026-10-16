@@ -4764,3 +4764,40 @@ def test_budget_header_does_not_change_max_steps_or_max_time(tmp_path, monkeypat
     assert timed.reason == "max_time"
     assert exit_code(timed) == 1
     assert timed.reason != "done"
+
+
+@pytest.mark.parametrize("suffix", ["", ", move three files into it and rename notes-old.txt to notes-2025.txt"])
+def test_directory_creation_done_gate(tmp_path, monkeypatch, suffix):
+    from a11y_computer_use.agent.core import file_evidence_error, goal_writes_a_file
+
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "2026"
+    goal = f"Create folder {path}{suffix}"
+    condition = {"dir_exists": str(path)}
+    assert not goal_writes_a_file(goal)
+    assert "dir_exists" in file_evidence_error(goal, [{"window_title_contains": "2026"}])
+    assert file_evidence_error(goal, [condition]) is None
+    assert not check_conditions([condition], None)[0]["ok"]
+    path.mkdir()
+    assert check_conditions([condition], None)[0]["ok"]
+    assert not check_conditions([{"file_exists": str(path)}], None)[0]["ok"]
+    model = ScriptedModel([turn(done("created", [condition]))])
+    result = Agent(model, runtime=FakeRuntime(window()), trace_dir=tmp_path / "trace").run(goal)
+    assert result.status == "success", result
+    assert goal_writes_a_file(goal + " and save a report.txt")
+    assert "file_exists" in file_evidence_error(goal + " and save a report.txt", [condition])
+
+
+def test_directory_condition_rejects_files_options_and_outside_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "regular"
+    path.write_text("data")
+    checked = check_conditions([{"dir_exists": str(path)}], None)[0]
+    assert not checked["ok"]
+    assert "not a directory" in checked["detail"]
+    assert not check_conditions([{"dir_exists": str(tmp_path), "contains": "data"}], None)[0]["ok"]
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH")
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    checked = check_conditions([{"dir_exists": str(tmp_path)}], None)[0]
+    assert not checked["ok"]
+    assert "outside the home" in checked["detail"]
