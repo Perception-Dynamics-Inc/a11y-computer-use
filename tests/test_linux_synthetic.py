@@ -15058,3 +15058,49 @@ def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, 
         snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
                               app="scribus", pid=1, geometry=_geometry())
         assert observe.find_elements(snap, text="QTDOC_1135")
+
+
+@pytest.mark.parametrize("identifier", ["vlc", "VLC media player"])
+@pytest.mark.parametrize("registration", ["missing", "ready", "retry"])
+def test_vlc_registration_probe_is_bounded(fake_atspi, monkeypatch, identifier, registration):
+    """Young VLC must fail quickly, but a real root always remains usable."""
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    probes = []
+    window = _Acc("frame", name="VLC", width=640, height=480)
+
+    def find_root(name, scope):
+        probes.append(name)
+        if registration == "ready" or (registration == "retry" and clock["t"] > 0):
+            return window
+        return None
+
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda app: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda app: True)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda app: "vlc")
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 1.0 + clock["t"])
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep",
+                        lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    driver = LinuxDriver()
+    for _ in range(2):
+        before = clock["t"]
+        probes.clear()
+        if registration == "missing":
+            with pytest.raises(ComputerUseError) as exc:
+                driver.snapshot(Scope.WINDOW, identifier)
+            assert exc.value.code is ErrorCode.UNSUPPORTED
+            assert exc.value.detail["reason"] == "no_accessibility_bridge"
+            assert "QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1" in exc.value.detail["hint"]
+            assert "restart VLC" in exc.value.detail["hint"]
+        else:
+            snap = driver.snapshot(Scope.WINDOW, identifier)
+            assert snap.elements[0].role == "AXWindow"
+            assert snap.elements[0].title == "VLC"
+        assert clock["t"] - before < 0.5
+        assert len(probes) <= 4
