@@ -14983,6 +14983,52 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
     assert timeline == (expected or [("sync", 1)])
 
 
+def test_gtk_unnamed_entries_find_sibling_row_labels(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    labels = ["Your name", "Your email address", "Your organization"]
+    entries = [_place_row(_Acc("text", states=("SINGLE_LINE", "EDITABLE")),
+                          220, 100 + i * 40, 240, 30) for i in range(3)]
+    texts = [_place_row(_Acc("label", name=name + ":"), 20, 105 + i * 40, 180, 20)
+             for i, name in enumerate(labels)]
+    panel = _adopt(_place_row(_Acc("panel"), 0, 80, 500, 200),
+                   *reversed(entries), *reversed(texts))
+    root = _adopt(_place_row(_Acc("frame", name="Setup Wizard"), 0, 0, 600, 400), panel)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="claws-mail", pid=605, geometry=_geometry())
+    for i, label in enumerate(labels):
+        found = observe.find_elements(snap, text=label, role="textfield")
+        assert len(found) == 1
+        assert found[0].title == label
+        assert found[0].bounds == Bounds(0, 220, 100 + i * 40, 240, 30)
+        assert observe.ax_handle_for(snap.snapshot_id, found[0].ref) is entries[i]
+
+
+@pytest.mark.parametrize("case", ["named", "description", "relation", "non_gtk", "missing",
+                                  "other_row", "right", "two_labels", "two_entries", "multiline"])
+def test_gtk_entry_row_names_require_unambiguous_native_evidence(fake_atspi, monkeypatch, case):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: "Explicit:" if case == "relation" else "")
+    entry = _place_row(_Acc("text", name="Native" if case == "named" else "",
+                            states=("MULTI_LINE",) if case == "multiline" else ("SINGLE_LINE",)),
+                       220, 100, 240, 30)
+    if case == "description":
+        entry.get_description = lambda: "Description"
+    label = _place_row(_Acc("label", name="Your name:"),
+                       500 if case == "right" else 20, 200 if case == "other_row" else 105, 180, 20)
+    children = [entry, label]
+    if case == "missing":
+        entry.component = None
+    if case == "two_labels":
+        children.append(_place_row(_Acc("label", name="Other:"), 30, 105, 160, 20))
+    if case == "two_entries":
+        children.append(_place_row(_Acc("entry"), 500, 100, 100, 30))
+    _adopt(_Acc("panel"), *children)
+    raw = _atspi.ATSPIAccessor().read(entry)
+    assert raw.title == {"named": "Native", "relation": "Explicit"}.get(case, "")
+    if case == "description":
+        assert raw.description == "Description"
+
+
 @pytest.mark.parametrize("mode", ["auto", "manual", "hint", "false", "", "true"])
 def test_html_popover_panel_keeps_top_layer_role(monkeypatch, mode):
     """#609: ispopup describes the panel, not the opener's haspopup flag."""

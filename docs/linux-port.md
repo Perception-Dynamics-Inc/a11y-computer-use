@@ -466,6 +466,13 @@ bounds rather than reported missing. No table-row scrollbar position is
 inferred for a document-text match. This fallback has synthetic regression
 coverage; native PDF scrolling still requires live verification.
 
+Unnamed GTK single-line text fields can use a sibling label when its measured
+box lies to the left and fully within the field's row. This fallback requires
+one label and no other text editor on that row; missing or ambiguous geometry
+leaves the name empty. Existing names, descriptions, and explicit label
+relations take precedence. It changes naming only and retains the native entry
+handle and bounds (including Claws Mail's Setup Wizard fields).
+
 Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
 `manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
 Ref clicks and crops refuse with `not_visible` / `covered` when another
