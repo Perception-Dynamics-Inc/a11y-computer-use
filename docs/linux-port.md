@@ -625,3 +625,5 @@ Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
 read-back can match the requested percentage while the image scale stays
 unchanged. Use the zoom UI and verify the displayed image scale; the backend
 does not send an activation key or substitute a zoom-button click.
+
+Menu leaf presses also check for keyboard focus left on the menubar or its entries after the popup closes (for example, Qt menus in Okular). Cleanup sends Escape and verifies that both popup state and menubar focus clear; a refusal reports retained focus. A showing dialog is left alone, and explicitly pressing a submenu still leaves it open. This cleanup is covered by synthetic menu regressions; it has not been live-verified in Okular.

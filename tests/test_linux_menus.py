@@ -1279,3 +1279,67 @@ def test_qt_quick_top_menu_uses_pointer_even_with_leaf_dispatch(monkeypatch):
     assert _linux_menus.menu_press(app, "File", dispatch=dispatch) == "File"
     assert clicks == [(50, 35)]
     assert _linux_menus.menu_state(app) == {"open": True, "path": ["File"]}
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("focus_on_bar", [False, True])
+@pytest.mark.parametrize("releases_focus", [False, True])
+def test_menu_press_clears_keyboard_tracking_without_popup(
+    disabled, focus_on_bar, releases_focus,
+):
+    leaf = _item("Fit Width", states=() if disabled else ("enabled", "sensitive"))
+    view = _menu("View", leaf)
+    bar = Acc("menu bar", children=[view], states=set())
+    app = Acc("application", children=[Acc("frame", children=[bar])])
+    focused = bar if focus_on_bar else view
+
+    class Open(_Action):
+        def do_action(self, index):
+            focused.states.add("focused")
+            return super().do_action(index)
+
+    view.get_action_iface = lambda: Open(view)
+    sent = []
+
+    def dismiss():
+        sent.append("escape")
+        if releases_focus:
+            focused.states.discard("focused")
+
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+    if disabled or not releases_focus:
+        with pytest.raises(ComputerUseError) as exc:
+            _linux_menus.menu_press(
+                app, "View > Fit Width", settle=lambda _: None, dismiss=dismiss,
+            )
+        assert exc.value.detail["reason"] == (
+            "disabled" if releases_focus else "menu_still_open"
+        )
+        if not releases_focus:
+            assert "menubar still has focus" in exc.value.message
+    else:
+        assert _linux_menus.menu_press(
+            app, "View > Fit Width", settle=lambda _: None, dismiss=dismiss,
+        ) == "Fit Width"
+    assert sent == ["escape"]
+    assert leaf.pressed == ([] if disabled else ["click"])
+    assert ("focused" in focused.states) is not releases_focus
+
+
+def test_menu_press_keeps_dialog_when_menubar_retains_focus():
+    leaf = _item("Open")
+    file_menu = _menu("File", leaf, states={"focused", "enabled"})
+    bar = Acc("menu bar", children=[file_menu])
+    frame = Acc("frame", children=[bar])
+    app = Acc("application", children=[frame])
+
+    def dispatch(node):
+        frame.children.append(Acc("dialog", "Open Document", states={"showing"}))
+        return "ok"
+
+    sent = []
+    assert _linux_menus.menu_press(
+        app, "File > Open", dispatch=dispatch, settle=lambda _: None,
+        dismiss=lambda: sent.append("escape"),
+    ) == "Open"
+    assert sent == []

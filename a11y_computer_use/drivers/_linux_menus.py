@@ -950,36 +950,44 @@ def _open_branch(app: object, path: str, settle) -> object:
     return top
 
 
+def _menubar_has_focus(app: object) -> bool:
+    """Detect keyboard tracking even when the popup has already closed."""
+    bar = _require_bar(app)
+    return _has_state(bar, "FOCUSED") or any(
+        _has_state(item, "FOCUSED") for item in entries_of(bar)
+    )
+
+
 def _close_leftover_popup(app: object, path: str, settle, dismiss) -> None:
-    """Close a popup that is still showing after the leaf ran.
+    """Close a leftover popup or menubar keyboard tracking after the leaf ran.
 
     A dialog the leaf opened is left alone: Escape would cancel it. A Java
     bar entry that only keeps SELECTED, with no showing item, is already
     closed and is not dismissed. When the popup is still showing after
-    Escape, the press does not report a clean success.
+    Escape, or menubar focus remains, the press reports a cleanup error.
     """
     if _tree_has_showing_dialog(app):
         return
-    if not menu_state(app).get("open"):
+    if not menu_state(app).get("open") and not _menubar_has_focus(app):
         return
     dismiss()
     after = menu_state(app)
     for _attempt in range(3):
-        if not after.get("open"):
+        if not after.get("open") and not _menubar_has_focus(app):
             return
         settle(menus.MENU_OPEN_SETTLE_S)
         after = menu_state(app)
-    if not after.get("open"):
+    if not after.get("open") and not _menubar_has_focus(app):
         return
     still = [str(part) for part in (after.get("path") or [])]
     raise ComputerUseError(
         ErrorCode.UNSUPPORTED,
-        "the menu is still open after the item was pressed",
+        "the menu is still open or the menubar still has focus after the item was pressed",
         detail={
             "path": path,
             "reason": "menu_still_open",
             "open": still,
-            "hint": "Escape was sent after the item ran, and the popup is still showing.",
+            "hint": "Escape was sent after the item ran; the popup or menubar keyboard focus remains.",
         },
     )
 
@@ -1009,12 +1017,14 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
     def abandon() -> None:
         if not opened:
             return
+        if _tree_has_showing_dialog(app):
+            return
         dismiss()
         after = menu_state(app)
-        if after.get("open"):
+        if after.get("open") or _menubar_has_focus(app):
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
-                "the menu stayed open after Escape; the previous state was not restored",
+                "the menu stayed open or the menubar still has focus after Escape; the previous state was not restored",
                 detail={
                     "path": path,
                     "reason": "menu_still_open",
