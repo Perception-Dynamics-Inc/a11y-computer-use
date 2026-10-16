@@ -13556,7 +13556,9 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
         assert "line: 301" not in status, status
         runtime._current = after_single
         cell = next(el for el in after_single.elements if "target_fn_row150" in (el.title or ""))
+        started = time.monotonic()
         double = runtime.click(cell.ref, count=2)
+        assert time.monotonic() - started < 5.0, "Geany symbol double-click exceeded five seconds"
         assert "clicked" in double
         assert "(activates on double-click)" not in str(double)
         assert double.outcome != "partial"

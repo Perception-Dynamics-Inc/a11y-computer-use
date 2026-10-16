@@ -639,6 +639,60 @@ def test_press_element_still_toggles_a_qt_tree_item(atspi, monkeypatch) -> None:
     assert clicks == []
 
 
+@pytest.mark.parametrize("states", [
+    {"SELECTABLE", "FOCUSABLE"},
+    {"SELECTABLE", "FOCUSABLE", "SELECTED"},
+    {"SELECTABLE", "FOCUSABLE", "EXPANDABLE"},
+])
+@pytest.mark.parametrize("bounds_available", [False, True])
+@pytest.mark.parametrize("actions", [["Toggle"], ["Toggle", "SetFocus"]])
+def test_okular_toc_toggle_refuses_without_selecting_or_clicking(
+    atspi, monkeypatch, states, bounds_available, actions,
+) -> None:
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Bounds, Element
+
+    cell = _Node("table cell", "Chapter 5 Heading", actions=actions,
+                 toolkit="Qt", states=states)
+    tree = _Node("tree", "Contents", children=[cell], toolkit="Qt")
+    app = _Node("application", "okular", children=[tree], toolkit="Qt")
+    cell.get_application = lambda: app
+    element = Element(
+        "e24", "AXCell", cell.name, None,
+        Bounds(0, 10, 40, 80, 20) if bounds_available else None,
+        "snap", clickable=True,
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: cell)
+    monkeypatch.setattr(driver, "click", lambda *_args: pytest.fail("unexpected pointer click"))
+    monkeypatch.setattr(tree, "select_child", lambda *_args: pytest.fail("unexpected selection"))
+
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "toc_activation_unverified"
+    assert "coordinate click" in exc.value.detail["hint"]
+    assert "page number" in exc.value.detail["hint"]
+    assert cell.action_log == []
+    assert cell.states == states
+
+
+@pytest.mark.parametrize("app_name,toolkit,parent_role,actions", [
+    ("other", "Qt", "tree", ["Toggle"]),
+    ("okular", "gtk", "tree", ["Toggle"]),
+    ("okular", "Qt", "table", ["Toggle"]),
+    ("okular", "Qt", "tree", ["Press", "Toggle"]),
+])
+def test_okular_toc_refusal_is_scoped(atspi, app_name, toolkit, parent_role, actions):
+    cell = _Node("table cell", "Chapter", toolkit=toolkit, actions=actions)
+    parent = _Node(parent_role, children=[cell], toolkit=toolkit)
+    app = _Node("application", app_name, children=[parent], toolkit=toolkit)
+    cell.get_application = lambda: app
+    assert _atspi.okular_toc_toggle_cell(cell) is False
+
+
 def test_gtk_combo_still_uses_its_own_selection(atspi, monkeypatch) -> None:
     red = _Node("menu item", "Red", states={"SELECTED"}, toolkit="gtk")
     green = _Node("menu item", "Green", toolkit="gtk")

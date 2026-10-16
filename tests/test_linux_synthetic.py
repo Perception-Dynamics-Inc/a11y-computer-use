@@ -3432,6 +3432,63 @@ def _toggle_click_target(monkeypatch, *, toolkit="Qt", role="check box",
     return driver, control, element, action_log, events
 
 
+def test_push_button_menu_is_discoverable_as_button():
+    tree = _node("AXWindow", "Okular", children=[
+        _node(_atspi._ROLE["push button menu"], "Text Selection",
+              actions=_atspi_actions("ShowMenu", "ShowMenu", "SetFocus"),
+              pos=(40.0, 60.0), size=(100.0, 20.0)),
+    ])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="okular", pid=653, geometry=_geometry())
+    matches = observe.find_elements(snap, role="button", text="Text Selection")
+    assert len(matches) == 1
+    assert matches[0].clickable
+    assert matches[0].bounds == Bounds(0, 40, 60, 100, 20)
+
+
+@pytest.mark.parametrize("actions", [
+    ("ShowMenu", "ShowMenu", "SetFocus"), ("SetFocus",), (),
+])
+@pytest.mark.parametrize("bounds", [None, Bounds(0, 40, 60, 100, 20)])
+def test_qt_menu_button_without_main_press_refuses_without_input(
+    fake_atspi, monkeypatch, actions, bounds,
+):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role="push button menu", actions=actions, bounds=bounds,
+    )
+    with pytest.raises(ComputerUseError, match="no main-button press action") as exc:
+        driver.press_element(element)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert action_log == []
+    assert events == []
+
+
+@pytest.mark.parametrize("action", ["Press", "Click", "Activate"])
+def test_qt_menu_button_prefers_main_press_over_showmenu(fake_atspi, monkeypatch, action):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role="push button menu", actions=("ShowMenu", action, "SetFocus"),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == [action]
+    assert events == [("raise", control)]
+
+
+def test_non_qt_menu_button_keeps_native_menu_action(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="push button menu", actions=("ShowMenu",),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["ShowMenu"]
+
+
+def test_qt_menu_button_do_press_never_substitutes_showmenu(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role="push button menu", actions=("ShowMenu", "SetFocus"),
+    )
+    assert _atspi.do_press(control) is False
+    assert action_log == []
+
+
 @pytest.mark.parametrize("role", ["check box", "toggle button", "radio button", "list item"])
 @pytest.mark.parametrize("actions", [("Toggle",), ("SetFocus", "Toggle")])
 def test_qt_toggle_only_ref_click_runs_the_pointer_handler(fake_atspi, monkeypatch, role, actions):
