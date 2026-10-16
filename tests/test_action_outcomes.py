@@ -1509,6 +1509,14 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
         {"window_id": 2 if x > 300 else front_id, "title": "Extract files"}
         if front_id else None
     ))
+    # Discovery now shares one native stacking read across all controls.
+    monkeypatch.setattr(_linux_system, "window_cover_rows", lambda: ([
+        {"window_id": 1, "title": "Archive", "pid": 4242, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 800, "height": 600}},
+        {"window_id": 2, "title": "Extract files", "pid": owner_pid, "on_screen": True,
+         "bounds": {"x": 0 if front_id == 2 else 300, "y": 0,
+                    "width": 500, "height": 600}},
+    ] if front_id else []))
     # _run is also used by the cover check, so dispatch just that native call.
     def run(fn):
         if fn.__name__ == "_do":
@@ -1517,7 +1525,7 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
 
     monkeypatch.setattr(driver, "_run", run)
     monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
-        False, "Archive" if handle == "toolbar" else "Extract files",
+        False, "Archive" if handle in {"toolbar", "main"} else "Extract files",
         4242, (0, 0, 800, 600),
     ))
     snap = driver._snapshot_root("xarchiver", object(), Scope.WINDOW)
@@ -1533,3 +1541,97 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
     for rendered in (observe.render_text(snap), observe.render_text(snap, mode="interactive"),
                      observe.render_matches(snap, matches)):
         assert ("covered by 'Extract files'" in rendered) is covered
+
+
+def test_linux_discovery_cover_work_scales_with_windows_and_refreshes(monkeypatch):
+    """#718: many controls share one stacking read and one lookup per window."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    elements = (
+        _element("main", "AXWindow", "Archive"),
+        _element("dialog", "AXDialog", "Extract files"),
+        *(_element(f"button{i}", "AXButton", "Extract", parent="main", clickable=True)
+          for i in range(100)),
+        _element("confirm", "AXButton", "Extract", parent="dialog", clickable=True),
+    )
+    source = Snapshot("snap", Scope.WINDOW, "xarchiver", 4242, 0, (), elements)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: source if fn.__name__ == "_do" else fn())
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda el, handle: False)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snap, ref: ref)
+    native_reads = []
+
+    def toplevel(handle):
+        native_reads.append(handle)
+        assert handle in {"main", "dialog"}
+        return False, "Archive" if handle == "main" else "Extract files", 4242, (0, 0, 800, 600)
+
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", toplevel)
+    reads = []
+    rows = [
+        {"window_id": wid, "title": title, "pid": 4242, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 800, "height": 600}}
+        for wid, title in [(1, "Archive"), (2, "Extract files")]
+    ]
+
+    def stacking():
+        reads.append(True)
+        return list(rows)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("discovery must not repeat a full window/process scan or point probe")
+
+    monkeypatch.setattr(_linux_system, "window_cover_rows", stacking)
+    monkeypatch.setattr(_linux_system, "windows", unexpected)
+    monkeypatch.setattr(_linux_system, "pid_at_point", unexpected)
+    monkeypatch.setattr(_linux_system, "window_at_point", unexpected)
+    snap = driver._snapshot_root("xarchiver", object(), Scope.WINDOW)
+    assert all("covered by 'Extract files'" in snap.element(f"button{i}").note for i in range(100))
+    assert snap.element("confirm").note is None
+    assert reads == [True]
+    assert native_reads == ["main", "dialog"]
+
+    # Reordering windows must invalidate all discovery evidence on the next snapshot.
+    rows.reverse()
+    snap = driver._snapshot_root("xarchiver", object(), Scope.WINDOW)
+    assert all(snap.element(f"button{i}").note is None for i in range(100))
+    assert snap.element("confirm").note == "covered by 'Archive'"
+    assert len(reads) == 2
+    assert native_reads == ["main", "dialog", "main", "dialog"]
+
+    # An action still probes current native ownership, independently of discovery.
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 4242)
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 1)
+    monkeypatch.setattr(_linux_system, "window_at_point", lambda x, y: {
+        "window_id": 2, "title": "Extract files",
+    })
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
+        False, "Archive", 4242, (0, 0, 800, 600),
+    ))
+    assert driver.same_app_window_cover(snap.element("button0"), "xarchiver") == "Extract files"
+
+
+def test_linux_discovery_caches_failed_native_window_lookup(monkeypatch):
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    owner = _element("main", "AXWindow", "Archive")
+    target = _element("button", "AXButton", "Extract", parent="main", clickable=True)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda el, handle: False)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snap, ref: ref)
+    calls = []
+
+    def unavailable(handle):
+        calls.append(handle)
+        raise RuntimeError("window disappeared")
+
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", unavailable)
+    evidence = (owner, [{"window_id": 1}], {})
+    for _ in range(100):
+        assert driver.same_app_window_cover(target, "xarchiver", _discovery=evidence) is None
+    assert calls == ["main"]

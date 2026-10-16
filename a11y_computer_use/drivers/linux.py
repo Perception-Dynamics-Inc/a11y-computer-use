@@ -1668,9 +1668,35 @@ class LinuxDriver:
         windows = sum(el.role in {"AXWindow", "AXDialog", "AXSheet"} for el in snap.elements)
         if windows < 2:
             return snap
+        from a11y_computer_use.drivers import _linux_system
+
+        rows = _linux_system.window_cover_rows()
+        if not rows:
+            return snap
+        by_ref = {el.ref: el for el in snap.elements}
+        owners = {}
+        targets = {}
         elements = []
         for el in snap.elements:
-            cover = self.same_app_window_cover(el, app) if el.clickable or el.editable else None
+            # Reuse observed ancestry and resolve native identity per window.
+            path = []
+            owner = el
+            while owner.ref not in owners:
+                path.append(owner.ref)
+                if owner.role in {"AXWindow", "AXDialog", "AXSheet"}:
+                    break
+                parent = by_ref.get(owner.parent)
+                if parent is None or parent.ref in path:
+                    owner = None
+                    break
+                owner = parent
+            if owner is not None:
+                owner = owners.get(owner.ref, owner)
+            for ref in path:
+                owners[ref] = owner
+            cover = self.same_app_window_cover(
+                el, app, _discovery=(owner, rows, targets),
+            ) if el.clickable or el.editable else None
             if cover:
                 note = f"covered by {cover!r}"
                 el = replace(el, note=f"{el.note}; {note}" if el.note else note)
@@ -4635,11 +4661,14 @@ class LinuxDriver:
 
         return _linux_system.app_at_point_id(point.x, point.y)
 
-    def same_app_window_cover(self, element: Element, app: str | None) -> str | None:
+    def same_app_window_cover(self, element: Element, app: str | None,
+                              *, _discovery=None) -> str | None:
         """Return a covering same-app sibling toplevel for a ref click.
 
         Resolve the target's owning toplevel so controls in the front dialog
         remain clickable. Missing X11/AT-SPI evidence preserves normal clicks.
+        Internal discovery evidence is scoped to a single snapshot; actions
+        always use fresh native point probes.
         """
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi, _linux_system
@@ -4651,12 +4680,39 @@ class LinuxDriver:
             handle = observe.ax_handle_for(element.snapshot_id, element.ref)
             if handle is None or self._gtk4_point_untrusted(element, handle):
                 return None
-            toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            if _discovery is None:
+                toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            else:
+                owner, rows, targets = _discovery
+                if owner is None or not rows:
+                    return None
+                if owner.ref not in targets:
+                    # Failed native reads are unknown for this snapshot too.
+                    targets[owner.ref] = (None, None)
+                    native = observe.ax_handle_for(owner.snapshot_id, owner.ref)
+                    top = (
+                        self._run(lambda: _atspi.toplevel_raise_target(native))
+                        if native is not None else None
+                    )
+                    target_id = None
+                    if top is not None:
+                        _, title, pid, extents = top
+                        target_id = _linux_system.window_id_for_toplevel(
+                            title=title, pid=pid, extents=extents, rows=rows,
+                        )
+                    targets[owner.ref] = (top, target_id)
+                toplevel, target_id = targets[owner.ref]
             if toplevel is None:
                 return None
             _active, title, pid, extents = toplevel
             cx = float(bounds.x) + float(bounds.width) / 2.0
             cy = float(bounds.y) + float(bounds.height) / 2.0
+            if _discovery is not None:
+                front = next((row for row in reversed(rows) if _window_covers(row, cx, cy)), None)
+                if (pid and front and front.get("pid") and int(front["pid"]) == int(pid)
+                        and target_id is not None and front["window_id"] != target_id):
+                    return front["title"] or "another window"
+                return None
             owner_pid = _linux_system.pid_at_point(cx, cy)
             if not pid or not owner_pid or int(owner_pid) != int(pid):
                 return None
