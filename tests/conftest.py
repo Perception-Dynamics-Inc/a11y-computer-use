@@ -24,6 +24,8 @@ import os
 import sys
 from pathlib import Path
 
+os.environ["A11Y_VISIBLE_ACTIONS"] = "0"
+
 import pytest
 
 from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot

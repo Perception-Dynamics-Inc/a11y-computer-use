@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  A11Y_VISIBLE_ACTIONS: "0"
+
 jobs:
   build:
     name: Build sdist + wheel

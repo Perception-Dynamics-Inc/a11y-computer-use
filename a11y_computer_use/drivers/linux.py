@@ -1242,7 +1242,8 @@ class LinuxDriver:
     #: What `app quit` sends: the desktop convention (cmd+q means Super+q on X, a nop).
     quit_chord = "ctrl+q"
 
-    def __init__(self) -> None:
+    def __init__(self, *, visible_actions: bool | None = None) -> None:
+        self.visible_actions = visible_actions
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
@@ -2050,6 +2051,17 @@ class LinuxDriver:
             },
         )
 
+    def _visible_action(self, target, action: str) -> None:
+        """Schedule cosmetic feedback without influencing dispatch or outcome."""
+        try:
+            from a11y_computer_use.visible import visible_actions
+            visible_actions.prepare(action, getattr(target, 'title', ''),
+                                     getattr(target, 'bounds', None), self.visible_actions,
+                                     secure=getattr(target, 'secure', False))
+        except Exception:
+            import logging
+            logging.getLogger(__name__).debug("Visible action failed", exc_info=True)
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -2080,6 +2092,7 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
+        self._visible_action(element, "Click")
         self._raise_handle_window(handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
@@ -2431,6 +2444,7 @@ class LinuxDriver:
             except Exception:
                 peers = {}
         try:
+            self._visible_action(element, "Set value")
             return self._apply_set_value(element, value, handle)
         except ComputerUseError as exc:
             self._refuse_changed_peers(handle, peers, element, exc)
@@ -2636,6 +2650,7 @@ class LinuxDriver:
                         "reason": "not_actionable", "outcome": "refused",
                     },
                 )
+        self._visible_action(target, "Click")
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
@@ -3055,6 +3070,7 @@ class LinuxDriver:
         """
         if dry_run:
             return None
+        self._visible_action(target, "Scroll")
         resolved = ScrollUnit(unit)
         if resolved is ScrollUnit.PIXELS:
             self._focused_editable = None
@@ -3567,6 +3583,17 @@ class LinuxDriver:
                     raise _secure_focus_error(
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
+        if handle is not None:
+            try:
+                from a11y_computer_use.visible import enabled, visible_actions
+                if enabled(self.visible_actions):
+                    position, size = self._run(lambda: _atspi._extents(handle))
+                    bounds = Bounds(0, *position, *size) if position and size else None
+                    label = self._run(lambda: handle.get_name())
+                    visible_actions.prepare("Type", label, bounds, self.visible_actions)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).debug("Visible typing feedback failed", exc_info=True)
         if app_id:
             # The find field latches this process even when the open bar is
             # not in a snapshot. scroll_to_find types and closes it first.
@@ -5314,6 +5341,12 @@ def _region_mean_change(before, after) -> float | None:
 
 
 def _grab_png() -> bytes:
+    from a11y_computer_use.visible import visible_actions
+    with visible_actions.capture():
+        return _grab_png_uncovered()
+
+
+def _grab_png_uncovered() -> bytes:
     """A full-screen PNG. On Wayland uses grim; on X11/XWayland uses PIL's grab.
     Raises a structured screen-permission error when no capture path works."""
     import io

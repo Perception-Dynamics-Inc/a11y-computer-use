@@ -1,0 +1,214 @@
+"""Hermetic visible-action scheduling and native-dispatch regressions."""
+import queue
+from types import SimpleNamespace
+
+import pytest
+
+from a11y_computer_use import visible
+from a11y_computer_use.drivers.linux import LinuxDriver
+from a11y_computer_use.schema import Bounds
+
+
+@pytest.fixture
+def feedback(monkeypatch):
+    for name in ("A11Y_VISIBLE_ACTIONS", "A11Y_VISIBLE_ACTIONS_POINTER", "A11Y_VISIBLE_ACTIONS_HIGHLIGHT",
+                 "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "A11Y_VISIBLE_ACTIONS_GLIDE_MS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DISPLAY", ":fake")
+    result = visible.VisibleActions()
+    result.thread = SimpleNamespace(is_alive=lambda: True)
+    return result
+
+
+def test_defaults_and_overrides(feedback, monkeypatch):
+    assert visible.enabled()
+    assert not visible.enabled(False)
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS", "1")
+    assert visible.enabled(False)
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS", "0")
+    assert not visible.enabled(True)
+    monkeypatch.delenv("DISPLAY")
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS", "1")
+    assert not visible.enabled()
+
+
+@pytest.mark.parametrize("bounds", [None, Bounds(0, 1, 2, 0, 10), Bounds(0, 1, 2, 10, -1)])
+def test_missing_geometry_does_nothing(feedback, bounds, monkeypatch):
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_POINTER", "1")
+    monkeypatch.setattr(feedback, "_glide", lambda *args: pytest.fail("no geometry"))
+    feedback.prepare("Click", "Save", bounds)
+    assert feedback.pending.empty()
+
+
+def test_latest_label_and_pointer_opt_in(feedback, monkeypatch):
+    moves = []
+    monkeypatch.setattr(feedback, "_glide", lambda bounds: moves.append(bounds))
+    bounds = Bounds(0, 10, 20, 30, 40)
+    feedback.prepare("Click", "Save", bounds)
+    assert not moves
+    feedback.announce("Type", "Field name", bounds)
+    assert feedback.pending.get_nowait() == (bounds, "Type: Field name")
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_POINTER", "1")
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_HIGHLIGHT", "0")
+    feedback.prepare("Click", "Save", bounds)
+    assert moves == [bounds]
+    assert feedback.pending.empty()
+    feedback.prepare("Set value", "Password", bounds, secure=True)
+    assert moves == [bounds]
+
+
+def test_latency_no_native_work_or_sleep(feedback, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(visible.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(visible.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0]+seconds))
+    start = visible.time.monotonic()
+    feedback.announce("Click", "Save", Bounds(0, 10, 20, 30, 40))
+    assert visible.time.monotonic() - start < 0.150
+    assert not feedback.pending.empty()
+
+
+def test_glide_eight_steps_budget(feedback, monkeypatch):
+    from a11y_computer_use.drivers import _linux_input
+    moves, sleeps = [], []
+    screen = SimpleNamespace(width_in_pixels=1000, height_in_pixels=1000,
+                             root=SimpleNamespace(query_pointer=lambda: SimpleNamespace(root_x=0, root_y=0)))
+    monkeypatch.setattr(_linux_input, "_disp", lambda: SimpleNamespace(
+        screen=lambda: screen, has_extension=lambda ext: True, flush=lambda: None))
+    monkeypatch.setattr(_linux_input, "_move", lambda x, y: moves.append((x, y)))
+    monkeypatch.setattr(visible.time, "sleep", sleeps.append)
+    feedback._glide(Bounds(0, 10, 20, 30, 40))
+    assert len(moves) == 8
+    assert moves[-1] == (25, 40)
+    assert sum(sleeps) == 0.08
+    assert sum(sleeps) < 0.150
+    feedback._glide(Bounds(0, 2000, 0, 30, 40))
+    assert len(moves) == 8
+
+
+def test_set_value_preserves_native_dispatch_even_on_overlay_failure(monkeypatch):
+    from a11y_computer_use import observe
+    driver = LinuxDriver()
+    element = SimpleNamespace(secure=False, snapshot_id="s", ref="e", bounds=None, title="Name")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    calls = []
+    monkeypatch.setattr(driver, "_apply_set_value", lambda *args: calls.append(args) or True)
+    monkeypatch.setattr(visible.visible_actions, "prepare", lambda *args, **kw: (_ for _ in ()).throw(RuntimeError("X unavailable")))
+    assert driver.set_value(element, "value") is True
+    assert calls == [(element, "value", None)]
+
+
+def test_worker_failure_disables_and_capture_does_not_hang(feedback, monkeypatch):
+    from a11y_computer_use import _x11_overlay
+    monkeypatch.setattr(_x11_overlay, "X11Overlay", lambda: (_ for _ in ()).throw(OSError("display died")))
+    feedback._consume()
+    assert feedback.disabled
+    with feedback.capture():
+        assert feedback.capturing == 1
+    assert feedback.capturing == 0
+
+
+def test_wayland_noop(feedback, monkeypatch):
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    feedback.announce("Click", "Save", Bounds(0, 10, 20, 30, 40))
+    assert feedback.pending.empty()
+
+
+def test_capture_suppresses_queued_feedback(feedback):
+    with feedback.capture():
+        feedback.announce("Click", "Save", Bounds(0, 10, 20, 30, 40))
+        assert feedback.pending.empty()
+
+
+def test_cli_config():
+    from a11y_computer_use.cli import _build_parser
+    assert _build_parser().parse_args(["mcp", "--no-visible-actions"]).visible_actions is False
+
+
+def test_x11_window_reuse_and_input_shape(monkeypatch, tmp_path):
+    """Run explicitly under Xvfb; headless/platform runs retain an honest skip."""
+    import shutil
+    import subprocess
+    import time
+    if not shutil.which("Xvfb"):
+        pytest.skip("requires Xvfb for isolated X11 integration")
+    pytest.importorskip("Xlib")
+    number_path = tmp_path / "display"
+    with number_path.open("w") as output:
+        process = subprocess.Popen(["Xvfb", "-displayfd", str(output.fileno()),
+                                    "-screen", "0", "800x600x24"], pass_fds=(output.fileno(),))
+    def cleanup():
+        process.terminate()
+        process.wait()
+    # Fixture finalizer also runs if initialization or an assertion fails.
+    import atexit
+    atexit.register(cleanup)
+    for _ in range(100):
+        number = number_path.read_text().strip()
+        if number:
+            break
+        time.sleep(0.01)
+    assert number
+    monkeypatch.setenv("DISPLAY", f":{number}")
+    from Xlib import X, display
+    from Xlib.ext import shape
+    from a11y_computer_use._x11_overlay import X11Overlay
+    connection = display.Display()
+    root = connection.screen().root
+    app = root.create_window(20, 20, 300, 200, 0, connection.screen().root_depth,
+                             X.InputOutput, X.CopyFromParent, background_pixel=0)
+    app.map()
+    app.set_input_focus(X.RevertToParent, X.CurrentTime)
+    root.warp_pointer(50, 50)
+    connection.sync()
+    backend = X11Overlay()
+    try:
+        before = connection.get_input_focus().focus.id
+        window_id = backend.window.id
+        start = time.perf_counter()
+        assert backend.show(Bounds(0, 20, 20, 300, 200), "Click: Save")
+        elapsed = time.perf_counter() - start
+        assert backend.window.shape_get_rectangles(shape.SK.Input).rectangles == []
+        assert connection.get_input_focus().focus.id == before
+        assert root.query_pointer().child.id == app.id
+        backend.hide()
+        backend.show(Bounds(0, 30, 30, 200, 100), "Type: Name")
+        assert backend.window.id == window_id
+        print(f"reused overlay show: {elapsed * 1000:.3f} ms")
+        assert elapsed < 0.150
+    finally:
+        backend.close()
+        app.destroy()
+        connection.close()
+        cleanup()
+        atexit.unregister(cleanup)
+
+
+def test_capture_waits_for_worker_unmap(feedback, monkeypatch):
+    import threading
+    from a11y_computer_use import _x11_overlay
+    mapped, hidden = threading.Event(), threading.Event()
+    class Backend:
+        def show(self, bounds, label):
+            mapped.set()
+            return True
+        def hide(self):
+            hidden.set()
+        def close(self):
+            pass
+    monkeypatch.setattr(_x11_overlay, "X11Overlay", Backend)
+    feedback.thread = None
+    feedback.announce("Click", "Save", Bounds(0, 10, 20, 30, 40))
+    assert mapped.wait(1)
+    with feedback.capture():
+        assert hidden.is_set()
+        assert not feedback.mapped
+
+
+def test_runtime_config(monkeypatch, tmp_path):
+    from a11y_computer_use.server import Runtime
+    from a11y_computer_use import safety
+    driver = LinuxDriver()
+    Runtime(driver=driver, visible_actions=False,
+            store=safety.PermissionStore(tmp_path / "permissions.json"),
+            audit=safety.AuditLog(tmp_path / "audit.jsonl"))
+    assert driver.visible_actions is False

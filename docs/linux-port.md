@@ -601,6 +601,44 @@ at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
 
+### Visible actions (X11 prototype)
+
+With `DISPLAY` set, Linux actions schedule cosmetic feedback in a daemon worker:
+click, type, set_value and scroll keep their existing dispatch and verification.
+An override-redirect XShape window shows a border and short action/target label
+for approximately 300 ms. The interior is transparent even without a compositor;
+the input shape is empty, so the window cannot intercept clicks or take focus.
+Labels use at most 24 characters of the accessible name.
+No typed text or values appear in the label. There is no fade animation.
+
+- `A11Y_VISIBLE_ACTIONS=0` disables all feedback; `1` enables it on X11.
+- `LinuxDriver(visible_actions=False)` is the equivalent embedding config option.
+  An explicit environment setting takes precedence.
+- `A11Y_VISIBLE_ACTIONS_HIGHLIGHT=0/1` controls the highlight (default `1`).
+- `A11Y_VISIBLE_ACTIONS_POINTER=1` enables optional XTest motion before the action
+  to the measured target centre (default off).
+- `A11Y_VISIBLE_ACTIONS_GLIDE_MS` sets that motion's duration (default 80 ms;
+  finite values from 0–120 ms accepted, others revert to 80).
+
+No usable bounds means no overlay or motion. Wayland without X11, missing
+XShape/XTest, connection failures and other feedback errors produce no action
+failure; diagnostic messages use debug logging. X11 overlay work and expiry never run
+on the caller. The queue holds at most one waiting request and keeps the latest pending
+feedback. Scheduling adds no intentional wait; the fake-clock unit budget is
+below 150 ms, not a real-machine latency measurement. Pointer motion uses eight
+eased steps before existing action prechecks.
+Screenshots wait for the overlay to unmap. Secure targets skip pointer motion.
+Wayland sessions disable feedback and doctor reports the limitation.
+CLI: `mcp --visible-actions/--no-visible-actions`. SDK/MCP: pass
+`visible_actions=False` to `Runtime` or `build_server`.
+
+Manual verification: outside pytest, enable feedback on an X11 desktop, click a
+Save button by ref, type in an editable field, set a value and scroll. Check that
+the border/label disappears, the native effects still verify, and clicking through
+the border reaches the underlying app. Repeat with no bounds, disabled feedback,
+and pointer opt-in. Tests and all CI workflows disable feedback, including Calc's
+unchanged five-second timing test. See the R&D spec in `/workspace/research`;
+it may tune these prototype knobs.
 GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
 button and a popover of ordinary buttons/checkboxes without a menu bar. Menu
 listing and paths remain unsupported for that shape; the error points to
