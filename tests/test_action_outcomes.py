@@ -1686,3 +1686,75 @@ def test_linux_discovery_caches_failed_native_window_lookup(monkeypatch):
     for _ in range(100):
         assert driver.same_app_window_cover(target, "xarchiver", _discovery=evidence) is None
     assert calls == ["main"]
+
+
+@pytest.mark.parametrize("rows", [0, 2000])
+@pytest.mark.parametrize("cover", ["none", "new", "dismissed", "ancestor", "aside"])
+@pytest.mark.parametrize("operation", ["click", "crop"])
+def test_linux_web_cover_reuses_ref_resolution_tree(
+    tmp_path, monkeypatch, rows, cover, operation,
+):
+    """#737: the guard consumes fresh evidence without a second page read."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    class ResolvedTreeDriver(TreeDriver):
+        resolve_ref = LinuxDriver.resolve_ref
+        _remember_popover_cover = LinuxDriver._remember_popover_cover
+        take_resolved_popover_cover = LinuxDriver.take_resolved_popover_cover
+
+    driver = ResolvedTreeDriver()
+    driver.elements.append(_element("web", "AXWebArea", "Page"))
+    driver.elements.extend(_element(f"row{i}", "AXStaticText", str(i)) for i in range(rows))
+    overlay = _element("overlay", "AXPopover", "Menu", bounds=Bounds(0, 0, 0, 200, 100))
+    if cover == "dismissed":
+        driver.elements.append(overlay)
+    runtime = _runtime(tmp_path, driver)
+    driver.name = "linux"
+    if cover in {"new", "ancestor", "aside"}:
+        if cover == "aside":
+            overlay = dataclasses.replace(overlay, bounds=Bounds(0, 400, 400, 100, 100))
+        driver.elements.append(overlay)
+    if cover == "ancestor":
+        # Preserve target ancestry in both the issued and resolved tree.
+        driver._replace("e2", parent="overlay")
+        runtime._current = driver.snapshot(runtime._current.scope, APP)
+    if cover == "dismissed":
+        driver.elements.remove(overlay)
+    original = runtime._popover_cover
+    checked = []
+
+    def guard(element, *, refresh=False):
+        if not refresh:
+            return original(element)
+        with monkeypatch.context() as patch:
+            def unexpected_snapshot(*args):
+                pytest.fail("web cover guard requested another full page snapshot")
+            patch.setattr(driver, "snapshot", unexpected_snapshot)
+            result = original(element, refresh=True)
+        checked.append(result)
+        return result
+
+    monkeypatch.setattr(runtime, "_popover_cover", guard)
+    if cover == "new":
+        with pytest.raises(ComputerUseError) as caught:
+            getattr(runtime, operation)("e2")
+        assert caught.value.code == ErrorCode.NOT_VISIBLE
+        assert caught.value.detail["reason"] == "covered"
+        assert driver.calls == []
+        assert checked == ["popover 'Menu'"]
+    else:
+        getattr(runtime, operation)("e2")
+        assert checked == [None]
+
+
+def test_linux_resolved_cover_evidence_is_target_bound_and_single_use():
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    target = _tree()[1]
+    driver._resolved_popover_cover = (target, "popover")
+    assert driver.take_resolved_popover_cover(dataclasses.replace(target)) == (False, None)
+    assert driver.take_resolved_popover_cover(target) == (False, None)
+    driver._resolved_popover_cover = (target, None)
+    assert driver.take_resolved_popover_cover(target) == (True, None)
+    assert driver.take_resolved_popover_cover(target) == (False, None)
