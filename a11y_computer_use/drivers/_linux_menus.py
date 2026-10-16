@@ -3,7 +3,9 @@
 GTK publishes a menu-bar entry as role ``menu``. Its rows are either direct
 children or the children of one popup (untitled, or the entry's only child).
 Chromium and Electron publish the bar entry as a push button with no children.
-Pressing it opens a menu in another window. Item names include the accelerator
+Pressing it opens a menu in another window. Qt Quick uses actionless nested
+menu-bar entries that open a sibling popup through a measured pointer click.
+Item names include the accelerator
 (``New Note Ctrl+N``). An exact title wins; otherwise the name with that
 suffix removed matches.
 
@@ -210,8 +212,8 @@ def _has_submenu(node: object) -> bool:
     """True when activating ``node`` opens another menu.
 
     GTK bar entries are role ``menu``, or they already have rows. A Chromium
-    menu-bar entry is a push button whose parent is the menu bar and whose
-    popup does not exist until the button is pressed. ``HAS_POPUP`` or
+    menu-bar entry is a push button (a nested menu bar in Qt Quick) whose
+    parent is the menu bar and whose popup does not exist until pressed. ``HAS_POPUP`` or
     ``EXPANDABLE`` is that same fact on a menu item.
     """
     if _role(node) in _MENU_ROLES:
@@ -220,7 +222,7 @@ def _has_submenu(node: object) -> bool:
         return True
     if _has_state(node, "HAS_POPUP", "EXPANDABLE"):
         return True
-    if _role(node) in {"push button", "toggle button"}:
+    if _role(node) in {"push button", "toggle button", "menu bar"}:
         parent = _call(node, ("get_parent", "getParent"))
         if _role(parent) == "menu bar":
             return True
@@ -453,8 +455,54 @@ def _invoke_press(node: object) -> bool:
     return False
 
 
+def _quick_menu_entry(node: object) -> bool:
+    """A named nested menu bar, the Qt Quick MenuBarItem shape."""
+    return (
+        _role(node) == "menu bar" and bool(_name(node).strip())
+        and _role(_call(node, ("get_parent", "getParent"))) == "menu bar"
+    )
+
+
+def _quick_popup(node: object) -> object | None:
+    """A showing popup in this entry's own window, outside the menu bar."""
+    frame = _call(node, ("get_parent", "getParent"))
+    for _ in range(12):
+        if frame is None:
+            return None
+        if _role(frame) in {"frame", "window", "dialog"}:
+            return next(
+                (menu for menu in _popup_menus(frame)
+                 if _has_state(menu, "SHOWING") and not _contains(menu, node)),
+                None,
+            )
+        frame = _call(frame, ("get_parent", "getParent"))
+    return None
+
+
+def _press_quick_entry(node: object) -> bool:
+    """Click measured native bounds and verify popup visibility changed."""
+    from a11y_computer_use.drivers import _atspi, _linux_input
+
+    if not _enabled(node) or not _atspi._x11_keys_available():
+        return False
+    pos, size = _atspi._extents(node)
+    if pos is None or size is None or size[0] <= 0 or size[1] <= 0:
+        return False
+    was_open = _quick_popup(node) is not None
+    _linux_input.click(int(pos[0] + size[0] / 2), int(pos[1] + size[1] / 2))
+    for _ in range(3):
+        _settle(menus.MENU_OPEN_SETTLE_S)
+        if (_quick_popup(node) is not None) != was_open:
+            return True
+    return False
+
+
 def _press(node: object) -> bool:
     try:
+        if _quick_menu_entry(node):
+            action = _call(node, ("get_action_iface", "get_action"))
+            if not _call(action, ("get_n_actions", "get_nActions"), default=0):
+                return _press_quick_entry(node)
         return _invoke_press(node)
     except Exception:
         return False
@@ -666,6 +714,8 @@ def _opened_menu(app: object, node: object) -> object:
     """
     if entries_of(node):
         return node
+    if _quick_menu_entry(node):
+        return _quick_popup(node) or node
     found = [menu for menu in _popup_menus(app) if not _contains(menu, node)]
     if not found:
         return node
@@ -763,6 +813,8 @@ def _is_open(node: object) -> bool:
     leftover bit is not an open menu: the entry counts only when a popup or
     an item is SHOWING.
     """
+    if _quick_menu_entry(node):
+        return _quick_popup(node) is not None
     if _java_toolkit(node):
         return _popup_or_item_showing(node)
     if _has_state(node, "SELECTED"):
@@ -985,7 +1037,7 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
                 f"{title!r} has no submenu",
                 detail={"component": wanted},
             )
-        if last and dispatch is not None:
+        if last and dispatch is not None and not _quick_menu_entry(node):
             outcome = dispatch(node)
             if outcome == "refused":
                 abandon()

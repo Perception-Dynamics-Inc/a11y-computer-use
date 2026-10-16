@@ -144,4 +144,7 @@
 - 2026-10-14 (PR #626 merge repair): Preserve GTK buffer search exclusion and Kate owner detection together when merging adjacent snapshot rules; they protect independent toolkit visibility paths.
 
 - 2026-10-16 (PR #626 merge repair): GTK 4 verified text visibility and GTK 4 tree-expander click verification are independent behaviors; preserve both backend notes when their adjacent documentation conflicts.
+- 2026-10-16 (PR #655 repair): Require the AT-SPI Value interface before meter numeric reads even when a missing interface returns a plausible stale number. Preserve Qt Quick slider/spin unknown-bound handling independently of that interface gate, and retain both regression blocks when merging appended tests.
 - 2026-10-16 (PR #659 repair): Qt Quick combo selection and numeric Value-interface support are independent behaviors. Preserve both backend documentation blocks when resolving adjacent additions; verify combo regressions alongside numeric Qt tests after merging main.
+
+- 2026-10-16 (#596): Qt Quick MenuBarItem exposes a named nested menu-bar role with zero actions; its popup is a sibling in the same window. Recognize that shape, use only measured native bounds for pointer opening, and verify popup visibility changed before walking rows. The bar label's SHOWING state alone does not establish an open popup.
