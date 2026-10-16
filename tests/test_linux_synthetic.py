@@ -12780,9 +12780,10 @@ def test_ref_with_large_extents_and_addressable_center_keeps_its_click():
 
 @pytest.mark.parametrize("effect", ["exclusive", "unchanged", "additive", "no_bounds"])
 @pytest.mark.parametrize("named", [True, False])
-def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named):
+@pytest.mark.parametrize("native_role", ["image", "icon"])
+def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named, native_role):
     driver, icon, element, actions, events = _toggle_click_target(
-        monkeypatch, toolkit="gtk", role="image", actions=("activate",),
+        monkeypatch, toolkit="gtk", role=native_role, actions=("activate",),
     )
     icon.name = "Cherry" if named else ""
     previous = _Acc("image", states=("SELECTED",))
@@ -14972,6 +14973,24 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
             expected.append(("sleep", 0.12))
         expected.append(("sync", 1 + 2 * (index + 1)))
     assert timeline == (expected or [("sync", 1)])
+
+
+@pytest.mark.parametrize("mode", ["auto", "manual", "hint", "false", "", "true"])
+def test_html_popover_panel_keeps_top_layer_role(monkeypatch, mode):
+    """#609: ispopup describes the panel, not the opener's haspopup flag."""
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: acc.role)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {"ispopup": mode})
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8., 9.), (120., 80.)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_call_first", lambda acc, names, *args, default=None: "")
+    accessor = _atspi.ATSPIAccessor()
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state == "SHOWING")
+    expected = "AXPopover" if mode in {"auto", "manual", "hint"} else "AXGroup"
+    assert accessor.read(_NS(role="panel")).role == expected
+    assert accessor.read(_NS(role="push button")).role == "AXButton"
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: False)
+    assert accessor.read(_NS(role="panel")).role == "AXGroup"
 
 
 @pytest.mark.parametrize("case", [

@@ -466,6 +466,15 @@ bounds rather than reported missing. No table-row scrollbar position is
 inferred for a document-text match. This fallback has synthetic regression
 coverage; native PDF scrolling still requires live verification.
 
+Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
+`manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
+Ref clicks and crops refuse with `not_visible` / `covered` when another
+popover's measured bounds contain the ref's center. Controls inside their own
+popover remain eligible; dismiss the covering popover before retrying a covered
+ref. This check uses the accessibility tree because Chrome's accessible
+hit test can return the underlying control.
+
+
 Claws Mail's GTK folder and message lists can expose only childless panels
 inside scroll panes in the main split-pane layout. These opaque regions are
 labelled `Claws Mail folder / message list` with a note that folder rows and
@@ -498,3 +507,11 @@ existing parent. An unchanged title alone does not prove that an error icon
 exists, so the result names the observed evidence. Successful navigation keeps
 the usual key result. Text read-back from `set_value` does not establish that a
 folder exists.
+
+### GTK icon-view ref clicks
+
+GTK icon-view children can report native AT-SPI `icon` or `image` roles; both
+appear as `AXImage` in snapshots. Their `activate` action opens the item rather
+than selecting it. Ref clicks use one pointer click at the item's measured
+bounds and require that it becomes the only selected child. An unavailable
+pointer path or unverified selection returns an error without invoking activate.
