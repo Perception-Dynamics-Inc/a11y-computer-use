@@ -15502,3 +15502,41 @@ def test_top_level_enumeration_bypasses_stale_application_children(
     assert masks
     assert masks == [0, 1] * (len(masks) // 2)
     assert state["mask"] == 1
+
+
+@pytest.mark.parametrize("count", [24, 25, 26, 48, 49])
+@pytest.mark.parametrize("cached", [False, True])
+def test_snapshot_bands_do_not_orphan_the_last_table_cell(fake_atspi, count, cached):
+    """Xarchiver's 25 visible headers/cells must not end in a collapsed band."""
+    table = _Acc("table", name="Files", width=600, height=600)
+    cells = [
+        _Acc("table cell", name=f"cell-{index}", width=100, height=20)
+        for index in range(count)
+    ]
+    _adopt(table, *cells)
+    rows = [(cell, (10, 10 + index * 10), (100, 20))
+            for index, cell in enumerate(cells)]
+    accessor = _atspi.ATSPIAccessor()
+    accessor._visible_children[id(table)] = cells
+    accessor._visible_bounds.update({id(cell): (pos, size) for cell, pos, size in rows})
+    if not cached:
+        bands = _atspi._bands_for_snapshot(rows)
+        table.children = bands
+        accessor._visible_children.clear()
+    snap = build_snapshot(
+        table, accessor, scope=Scope.WINDOW, app="xarchiver", pid=1,
+        geometry=_geometry(),
+    )
+    published = [el for el in snap.elements if el.role == "AXCell"]
+    assert [el.title for el in published] == [cell.name for cell in cells]
+    assert [observe._HANDLES[snap.snapshot_id][el.ref] for el in published] == cells
+    table_el = next(el for el in snap.elements if el.role == "AXTable")
+    if count <= observe.MAX_CHILDREN:
+        assert all(el.parent == table_el.ref for el in published)
+    else:
+        groups = [el for el in snap.elements if el.parent == table_el.ref]
+        assert groups and all(el.role == "AXGroup" for el in groups)
+        assert all(el.parent in {group.ref for group in groups} for el in published)
+        assert all(2 <= sum(el.parent == group.ref for el in published)
+                   <= observe.MAX_CHILDREN for group in groups)
+    _assert_no_elision(snap)

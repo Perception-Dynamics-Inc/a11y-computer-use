@@ -206,3 +206,5 @@
 
 - 2026-10-16 (PR #696 repair): Keep VLC's bounded registration retry and VLC-specific Qt setup hint alongside the generic GTK2 bridge prerequisites when merging missing-tree diagnostics. Preserve both the VLC registration regressions and main's Qt text-recovery regressions.
 - 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
+
+- 2026-10-16 (PR #715 merge repair): Preserve stale top-level application-child cache regressions alongside table-band boundary regressions when both append to the Linux synthetic suite; window discovery and complete table-cell publication are independent behaviors.

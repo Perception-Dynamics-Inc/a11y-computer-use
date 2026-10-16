@@ -589,3 +589,10 @@ stale cached application child list. The existing cache-mask helper keeps the
 count and indexed reads on the event thread and restores the default mask after
 the read. Regression coverage is synthetic; this change has not been live-verified
 against Scribus.
+
+GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
+button and a popover of ordinary buttons/checkboxes without a menu bar. Menu
+listing and paths remain unsupported for that shape; the error points to
+`desktop_snapshot`, clicking the menu button's ref, and a fresh snapshot's
+popover control refs. If already open, use the current popover refs directly.
+Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
