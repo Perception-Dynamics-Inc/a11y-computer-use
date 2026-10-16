@@ -138,3 +138,5 @@
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
 
 - 2026-10-16 (PR #659 repair): Qt Quick combo selection and numeric Value-interface support are independent behaviors. Preserve both backend documentation blocks when resolving adjacent additions; verify combo regressions alongside numeric Qt tests after merging main.
+
+- 2026-10-16 (#596): Qt Quick MenuBarItem exposes a named nested menu-bar role with zero actions; its popup is a sibling in the same window. Recognize that shape, use only measured native bounds for pointer opening, and verify popup visibility changed before walking rows. The bar label's SHOWING state alone does not establish an open popup.

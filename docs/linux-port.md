@@ -420,3 +420,11 @@ that native frame. Success requires the display Text to match and the popup
 to close. Missing geometry, ambiguous popups, and uncommitted selections return
 errors. Editable Qt entries retain their text-write path. This behavior is
 hermetic-tested; native Qt Quick verification remains a CI/live check.
+
+Qt Quick Controls 2 menu-bar entries can expose a named `menu bar` directly
+under the real menu bar with no native actions. The menu walker recognizes
+these as submenus and clicks their measured native bounds on X11. It requires
+a showing popup in the same window before continuing; missing bounds or an
+unchanged popup returns a refusal. Listing an unopened submenu opens it and
+closes it again. This path is covered by synthetic menu tests; native Qt Quick
+verification remains dependent on Linux CI.
