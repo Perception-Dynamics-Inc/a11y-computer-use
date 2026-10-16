@@ -4226,6 +4226,13 @@ class ATSPIAccessor:
             # the child's native handle and geometry as the click target.
             role, name, description = "AXGroup", "", ""
             focusable, value = False, None
+        if role == "AXPopover":
+            panel_note = "open" if _state_has(node, "SHOWING") else "not showing"
+            openers = _relation_targets(node, "details_for")
+            labels = [_plain_accessible_name(_node_name(opener)) for opener in openers]
+            labels = [label for label in labels if label]
+            if labels:
+                panel_note += "; opened by " + ", ".join(repr(label) for label in labels)
         return RawNode(
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
