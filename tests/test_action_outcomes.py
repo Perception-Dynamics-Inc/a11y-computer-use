@@ -1469,3 +1469,67 @@ def test_linux_popover_cover_reads_newly_opened_top_layer(tmp_path):
     assert runtime._popover_cover(runtime._current.element("e2"), refresh=True) == "popover"
     driver.elements = [el for el in driver.elements if el.ref != "overlay"]
     assert runtime._popover_cover(runtime._current.element("e2"), refresh=True) is None
+
+
+@pytest.mark.parametrize("owner_pid,front_id,covered", [
+    (4242, 2, True),
+    (4242, 1, False),
+    (9000, 2, False),
+    (None, 2, False),
+    (4242, None, False),
+])
+def test_linux_snapshot_and_find_mark_same_app_window_cover(
+    monkeypatch, owner_pid, front_id, covered,
+):
+    """Synthetic X11 ownership: only the covered toolbar gets a warning."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    elements = (
+        _element("main", "AXWindow", "Archive"),
+        _element("toolbar", "AXButton", "Extract", parent="main", clickable=True,
+                 note="existing hint"),
+        _element("unknown", "AXButton", "Extract", parent="main", clickable=True,
+                 bounds=None),
+        _element("dialog", "AXDialog", "Extract files"),
+        _element("confirm", "AXButton", "Extract", parent="dialog", clickable=True,
+                 bounds=Bounds(0, 350, 280, 100, 40)),
+    )
+    source = Snapshot("snap", Scope.WINDOW, "xarchiver", 4242, 0, (), elements)
+    driver = LinuxDriver()
+    # Bypass the native walk, retaining the actual post-walk annotation and
+    # same-app click gate. Native calls below are scripted ownership evidence.
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda el, handle: False)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snap, ref: ref)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: owner_pid)
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel",
+                        lambda **kw: 1 if kw["title"] == "Archive" else 2)
+    monkeypatch.setattr(_linux_system, "window_at_point", lambda x, y: (
+        {"window_id": 2 if x > 300 else front_id, "title": "Extract files"}
+        if front_id else None
+    ))
+    # _run is also used by the cover check, so dispatch just that native call.
+    def run(fn):
+        if fn.__name__ == "_do":
+            return source
+        return fn()
+
+    monkeypatch.setattr(driver, "_run", run)
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
+        False, "Archive" if handle == "toolbar" else "Extract files",
+        4242, (0, 0, 800, 600),
+    ))
+    snap = driver._snapshot_root("xarchiver", object(), Scope.WINDOW)
+    matches = observe.find_elements(snap, text="Extract", role="AXButton")
+    toolbar = snap.element("toolbar")
+    assert ("covered by 'Extract files'" in (toolbar.note or "")) is covered
+    assert "existing hint" in toolbar.note
+    assert snap.element("confirm").note is None
+    assert snap.element("unknown").note is None
+    assert toolbar.bounds == elements[1].bounds
+    assert toolbar.clickable
+    assert [el.ref for el in matches] == ["toolbar", "unknown", "confirm"]
+    for rendered in (observe.render_text(snap), observe.render_text(snap, mode="interactive"),
+                     observe.render_matches(snap, matches)):
+        assert ("covered by 'Extract files'" in rendered) is covered

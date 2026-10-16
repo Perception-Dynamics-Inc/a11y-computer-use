@@ -20,6 +20,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 from a11y_computer_use.schema import (
     Bounds,
@@ -1651,7 +1652,22 @@ class LinuxDriver:
                     observe.discard_epoch(snap.snapshot_id)
                 return merged
 
-        return self._run(_do)
+        snap = self._run(_do)
+        # The click gate already checks native window ownership at the
+        # control's measured center. Carry that evidence into discovery too,
+        # so a covered toolbar button is distinguishable from its dialog twin.
+        # Single-window trees need no sibling-window hit tests.
+        windows = sum(el.role in {"AXWindow", "AXDialog", "AXSheet"} for el in snap.elements)
+        if windows < 2:
+            return snap
+        elements = []
+        for el in snap.elements:
+            cover = self.same_app_window_cover(el, app) if el.clickable or el.editable else None
+            if cover:
+                note = f"covered by {cover!r}"
+                el = replace(el, note=f"{el.note}; {note}" if el.note else note)
+            elements.append(el)
+        return replace(snap, elements=tuple(elements))
 
     def document_url(self, app: str | None = None) -> str | None:
         """AT-SPI DocURL for ``app``'s document, or None when the tree has none."""

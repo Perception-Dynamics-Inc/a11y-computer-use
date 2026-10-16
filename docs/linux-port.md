@@ -563,3 +563,14 @@ absent, the backend continues to return `unsupported` with
 accessibility registration. Screenshots and explicitly requested coordinate
 actions are separate tools; the backend does not substitute them for ref or
 menu actions, invent refs, or infer control geometry.
+
+### Same-app window covers in discovery
+
+Multi-window AT-SPI snapshots annotate clickable and editable controls with
+`covered by 'window title'` when the existing X11 same-app ownership check
+finds a different sibling window at the control's measured center. The note
+appears in full snapshots, interactive snapshots, and `find` results; native
+refs, capabilities, and bounds are retained. Missing ownership or geometry
+evidence produces no cover claim. Clicks still recheck coverage at action time.
+This behavior has synthetic regression coverage; Xarchiver was not live-tested
+for this change.
