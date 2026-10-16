@@ -198,6 +198,7 @@
 - 2026-10-16 (PR #467 merge validation): An inherited DISPLAY can opt the full suite into unrelated desktop fixtures and credential prompts. Run the hermetic suite with DISPLAY unset, then validate Geany symbol navigation and Scintilla search together in a fresh Xvfb/Openbox/D-Bus session; preserve both native-status readiness and meter Value-interface regressions when merging their adjacent test additions.
 
 
+- 2026-10-16 (#598 merge repair): Preserve asynchronous Chromium PDF reveal regressions alongside XTEST wheel-pacing regressions when both append to the Linux synthetic suite. A document-text hit has no table row index; retain its actual handle without click bounds while native extents settle.
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
 
@@ -215,11 +216,17 @@
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
 
 - 2026-10-16 (PR #467 Geany verification): XSync confirms X server delivery, not completion of symbol navigation. After the requested double-click, poll Geany's native status line on separate AT-SPI operations; status may be exposed through Name or Text. Keep waits on the caller, preserve both pointer clicks, and return an unconfirmed error if the reported destination never appears.
+- 2026-10-16 (PR #667 repair): Preserve Chromium PDF asynchronous-reveal notes and native DEFAULT submit-discovery notes together when adjacent backend documentation conflicts; they describe independent behaviors. Inspect the direct Actions job log when the failed-log command returns no output.
+
 - 2026-10-16 (PR #677 conflict repair): GTK sibling-row entry naming and native DEFAULT submit discovery are independent observation hints. Preserve both documentation blocks and test their combined synthetic behavior after merging main.
 
 
 - 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
+
+- 2026-10-16 (PR #667 main merge): Keep asynchronous PDF find reveal tests alongside PDF thumbnail click refusals; finding a native text handle and verifying page navigation are independent guarantees.
+
+- 2026-10-16 (PR #667 default-state merge): Preserve the native IS_DEFAULT StateSet regression alongside asynchronous PDF reveal behavior; synthetic state-name fallbacks must not hide native enum mistakes.
 
 - 2026-10-16 (PR #677 merge): Claws Mail opaque list labels and wizard entry row labels are independent fallbacks. Preserve both complete regression blocks when merging their adjacent additions.
 
@@ -232,6 +239,7 @@
 - 2026-10-16 (PR #467 repair): A Geany navigation or show-desktop CI failure can disappear in a clean desktop session. Reproduce both failed cases alongside Scintilla search under isolated D-Bus, Xvfb, and Openbox before changing pointer behavior or verification bounds.
 
 - 2026-10-16 (PR #467 conflict repair): Independently appended Geany navigation, GTK icon selection, and Qt viewport regressions must all survive conflict resolution. Reproduce older failed checks at the current merged head: Geany navigation and Scintilla visibility, and terminal-grant cleanup followed by the short-budget agent test, pass in fresh isolated desktop sessions.
+- 2026-10-16 (PR #667 validation): Run the full suite through `python -m pytest`: invoking pytest from stdin breaks multiprocessing spawn because `<stdin>` is not an importable file. Limit forced missing-GI checks to hermetic backend tests; Linux CLI, menu, and live checks can require the installed native binding even without a display.
 
 - 2026-10-16 (PR #677 CI review): Check failed-run job summaries against the current head before changing platform code; the older run failed only the tracked Calc timing test while Windows, macOS, Browser, and Package passed.
 
@@ -246,3 +254,7 @@
 
 
 - 2026-10-16 (#684): Qt text recovery must handle malformed QSpiTextRangeList replies and failures in the fallback Text read itself. Retry getText(0,-1) only for a native character count within the existing cap, then capped chunks; retain native character visibility checks and refuse incomplete reads.
+
+- 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
+
+- 2026-10-16 (PR #467 validation): A worktree can have read-only shared Git metadata and protected contributor files even when ordinary source files are writable. Preserve the remote PR head in a writable temporary checkout before merging; do not leave a partially updated original worktree after a checkout fails on a protected file.

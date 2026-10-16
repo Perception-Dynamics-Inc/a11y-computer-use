@@ -3209,6 +3209,26 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _drain_atspi_replies(budget_s: float = 0.25) -> None:
+    """Dispatch pending D-Bus replies (such as libatspi's hang-check ping).
+
+    Bounded: at most ``budget_s`` seconds, non-blocking iterations only.
+    """
+    try:
+        from gi.repository import GLib
+    except ImportError:
+        return
+    ctx = GLib.MainContext.default()
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if ctx.pending():
+            ctx.iteration(False)
+        else:
+            time.sleep(0.01)
+            if not ctx.pending():
+                break
+
+
 def _qt_viewport_text(acc) -> str | None:
     """Only native text ranges inside a Qt editor's measured viewport.
 
@@ -3226,6 +3246,18 @@ def _qt_viewport_text(acc) -> str | None:
         ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
             acc, *map(int, box), coord, clip, clip,
         ))
+    if clip is not None and _reply_local.last_failed:
+        # Qt 5 cannot marshal QSpiTextRangeList, so GetBoundedRanges never
+        # answers. libatspi then marks the whole application hung until its
+        # follow-up Peer.Ping reply is dispatched, which fails every later
+        # read of this editor (and of the rest of the walk) at once.
+        try:
+            from a11y_computer_use.drivers import _atspi_events
+
+            # Iterate the context on the thread that owns libatspi.
+            _atspi_events.run(_drain_atspi_replies)
+        except Exception:
+            pass
     if ranges:
         # A malformed/marshalling-failed reply is as unusable as no reply.
         try:
@@ -16904,16 +16936,20 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object])
             if found is not None:
                 return found
     if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
-        return node, 0, 1
+        # Zero rows marks a document-text hit, not an indexed table hit.
+        return node, 0, 0
     return None
 
 
-def reveal_text_in_document(root, needle: str) -> bool:
+def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
 
     The walk includes nodes the pruner will drop, so a table that starts
     below the viewport is still searched. A match that is already on screen
     is left where it is. False when nothing in the seek window matches.
+    Non-table text uses one TOP_LEFT request; Chromium PDF geometry may
+    update later. ``offscreen`` retains those hits for snapshot attachment
+    if pruning still drops them, without claiming that scrolling completed.
     """
     text = needle.strip() if isinstance(needle, str) else ""
     if not text or root is None:
@@ -16934,7 +16970,15 @@ def reveal_text_in_document(root, needle: str) -> bool:
     screen = _screen_size()
     if _on_screen_item(cell, screen) is not None:
         return True
-    _bring_cell_on_screen(cell, screen, row, rows)
+    if rows > 0:
+        _bring_cell_on_screen(cell, screen, row, rows)
+    else:
+        # Chromium PDF scrolling is asynchronous. Do not stack ANYWHERE,
+        # TOP_EDGE and a scrollbar write against the same stale extents.
+        # A document-order text hit has no table row fraction either.
+        scroll_to_edge(cell, "TOP_LEFT")
+        if offscreen is not None:
+            offscreen.append((cell, _parent_of(cell)))
     _invalidate_tree_cache(root)
     return True
 
