@@ -12937,39 +12937,71 @@ def _qt_quick_display(acc):
     return None
 
 
-def _set_qt_quick_combo(acc, display, value: str) -> None:
-    """Select through a newly shown menu in this combo's native frame."""
-    if _full_text(display) == value:
+def _set_qt_quick_combo(acc, display, value: str, *, run=lambda fn: fn()) -> None:
+    """Wait for native popup readiness, then select and verify the value.
+
+    Driver callers marshal each probe separately so the event loop remains
+    free to process popup creation between probes.
+    """
+    if run(lambda: _full_text(display)) == value:
         return
-    frame = _frame_ancestor(acc)
+    frame = run(lambda: _frame_ancestor(acc))
 
     def menus():
-        if frame is None:
-            return []
-        # Pointer input bypasses _call_first mutators: invalidate native and
-        # operation-scoped child reads before looking for the new sibling.
-        _call_first(frame, ("clear_cache", "clearCache"))
-        return [child for index in range(_child_count(frame))
-                if (child := _child_at(frame, index)) is not None
-                and _role_name(child) in {"menu", "popup menu"}
-                and _state_has(child, "SHOWING")]
+        found = {}
 
-    before = {_ancestor_key(menu) for menu in menus()}
-    _click_center(acc)
+        def walk(node, depth):
+            if depth > 5:
+                return
+            _call_first(node, ("clear_cache", "clearCache"))
+            for index in range(_child_count(node)):
+                child = _child_at(node, index)
+                if child is None:
+                    continue
+                role = _role_name(child)
+                if role in {"menu", "popup menu", "list", "list box"}:
+                    if _state_has(child, "SHOWING"):
+                        found[_ancestor_key(child)] = child
+                elif node is acc or (node is not frame and role not in _TEXT_ROLE_NAMES):
+                    walk(child, depth + 1)
+
+        walk(acc, 0)
+        combo_has_menu = bool(found)
+        if frame is not None:
+            walk(frame, 0)
+        # Some bridges put the visible rows directly beneath the combo.
+        if not combo_has_menu and _state_has(acc, "EXPANDED") and any(
+            _state_has(node, "SHOWING") for _, node, *_ in _collect_options(acc)
+        ):
+            found[_ancestor_key(acc)] = acc
+        return found
+
+    before = set(run(menus))
+    run(lambda: _click_center(acc))
     popup = None
-    for attempt in range(8):
-        opened = [menu for menu in menus() if _ancestor_key(menu) not in before]
-        if len(opened) == 1:
-            popup = opened[0]
-            break
+    # Readiness has its own bounded deadline, rather than a fixed delay after
+    # input. Stop immediately once a newly shown popup has published its rows.
+    deadline = time.monotonic() + _MENU_DIALOG_WAIT_S
+    while True:
+        def probe():
+            opened = [menu for key, menu in menus().items() if key not in before]
+            if len(opened) != 1:
+                return opened, []
+            return opened, _collect_options(opened[0])
+
+        opened, options = run(probe)
         if len(opened) > 1:
             break
-        if attempt < 7:
-            time.sleep(0.05)
+        if len(opened) == 1 and options:
+            popup = opened[0]
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
     if popup is None:
         raise _text_mismatch("popup_missing", "no unambiguous Qt combo popup appeared", expected=value)
     try:
-        options = _collect_options(popup)
         matches = [node for label, node, *_rest in options if label == value]
         if not matches:
             labels = [label for label, *_rest in options]
@@ -12979,18 +13011,26 @@ def _set_qt_quick_combo(acc, display, value: str) -> None:
             raise ValueError(f"value {value!r} is not one of: {listed}")
         if len(matches) != 1:
             raise _text_mismatch("ambiguous_option", "multiple Qt combo options match", expected=value)
-        _click_center(matches[0])
-        for attempt in range(8):
+        run(lambda: _click_center(matches[0]))
+
+        def committed():
             _refresh_event_cache(display)
             _refresh_event_cache(popup)
-            if _full_text(display) == value and not _state_has(popup, "SHOWING"):
+            closed = not _state_has(popup, "EXPANDED" if popup is acc else "SHOWING")
+            return _full_text(display) == value and closed
+
+        for attempt in range(8):
+            if run(committed):
                 return
             if attempt < 7:
                 time.sleep(0.05)
         raise _text_mismatch("text_mismatch", f"the combo selection did not commit {value!r}", expected=value)
     finally:
-        _refresh_event_cache(popup)
-        if _state_has(popup, "SHOWING") and _x11_keys_available():
+        def still_open():
+            _refresh_event_cache(popup)
+            return _state_has(popup, "EXPANDED" if popup is acc else "SHOWING")
+
+        if run(still_open) and _x11_keys_available():
             from a11y_computer_use.drivers import _linux_input
 
             _linux_input.press_chord("Escape")
