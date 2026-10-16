@@ -4305,12 +4305,16 @@ class ATSPIAccessor:
         ):
             position, size = (-1.0, -1.0), (-1.0, -1.0)
         if (
-            role == "AXTextField"
-            and role_str in {"entry", "text"}
+            role in {"AXTextField", "AXSecureTextField"}
+            and role_str in {"entry", "text", "password text"}
             and not name.strip()
-            and not description.strip()
         ):
-            name = _gtk_entry_row_name(node)
+            # Explicit labels precede tooltips, including password labels.
+            # Relation evidence does not require geometry.
+            label = _plain_accessible_name(_labelled_by_name(node))
+            name = _strip_label_colon(label)
+            if not name and not description.strip() and role == "AXTextField":
+                name = _gtk_entry_row_name(node)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if (role_str in {"slider", "spin button"} and not name.strip()

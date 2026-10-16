@@ -283,8 +283,14 @@
 
 - 2026-10-17 (PR #467 repair): When a Geany symbol double-click is unconfirmed, preserve main’s XTEST inter-click flush and pacing fix (#721) before adding caret/status workarounds. Validate symbol navigation and Scintilla viewport search together under a fresh Xvfb/Openbox/D-Bus session; XSync delivery alone does not verify navigation.
 - 2026-10-17 (PR #467 merge regression): Patching linux.time.sleep also patches the shared time module used by XTEST. Geany navigation tests must require both main’s 30 ms inter-click gap and the existing navigation polling pauses, including the refusal path.
+- 2026-10-17 (PR #720 repair): Native popover-refresh gating and per-snapshot sibling-window cover caching address independent tree and window-scan costs. Preserve both complete regression blocks when merging their appended action-outcome tests.
+
+- 2026-10-17 (PR #720 Calc CI investigation): A live Calc failure in the initial LinuxDriver.snapshot loop occurs before Runtime creation, so Runtime popover-refresh gating cannot cause it. Check the failing phase before changing input code. The exact failed head 8eb1b60 passed test_linux_calc_range_formula_and_normalised_numbers_confirm alone in 164.23 s under private 1280x800 Xvfb, D-Bus, AT-SPI and Openbox; retain the unchanged startup assertions and limits.
 
 - 2026-10-17 (#652): Okular TOC QTreeView cells expose selection-only Toggle without CHECKABLE. Highlighting a row does not verify page navigation; refuse ref activation before mutation until navigation can be verified, and keep grid-cell and other tree-item handling separate.
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
 
 - 2026-10-17 (PR #467 diagnosis): A passing isolated Geany run does not explain a repeated CI navigation refusal. Measure the whole Runtime double-click under CI’s Xvfb/Openbox session, assert the five-second bound in the live regression, and retain the native navigation assertions. Keep each parallel D-Bus session’s XDG_CACHE_HOME unique; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS.
+- 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
+
+- 2026-10-17 (PR #467 main merge): Retain Scintilla visibility checks alongside main's native-click popover-refresh gate. The previously failing Geany symbol double-click and both document-visibility live regressions pass together after the merge under private Xvfb/Openbox/D-Bus; this local pass does not establish the cause of the earlier CI refusal.
