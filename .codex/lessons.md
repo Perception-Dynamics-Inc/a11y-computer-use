@@ -157,6 +157,11 @@
 
 - 2026-10-16 (PR #677 repair): Claws Mail wizard page titles and unnamed entry row labels are independent naming fallbacks. Preserve both regression blocks when merging their appended tests; entry labels must retain native handles and measured bounds.
 
+
+- 2026-10-16 (#609): Chrome's accessible hit test can return the underlying control through a top-layer HTML popover. Use showing `ispopup` panels and measured bounds to identify covers, and keep the mapped `AXPopover` in the container no-value set to avoid numeric interface reads.
+
+- 2026-10-16 (PR #679 repair): HTML popover mapping and Claws Mail wizard tab naming have independent appended regressions. Preserve both complete test blocks when merging main, including native unknown-geometry assertions for hidden wizard tabs.
+
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
 
 - 2026-10-16 (PR #677 conflict repair): GTK sibling-row entry naming and native DEFAULT submit discovery are independent observation hints. Preserve both documentation blocks and test their combined synthetic behavior after merging main.
@@ -166,6 +171,13 @@
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
 - 2026-10-16 (PR #677 merge): Claws Mail opaque list labels and wizard entry row labels are independent fallbacks. Preserve both complete regression blocks when merging their adjacent additions.
+
+
+- 2026-10-16 (PR #679 merge repair): Preserve Claws Mail opaque-list labels and HTML popover coverage as independent behaviors when merging adjacent documentation and synthetic regressions. Inspect the complete Linux failure summary before changing code for the tracked Calc timing flake.
+
+- 2026-10-16 (test isolation): Concurrent D-Bus test sessions need distinct writable XDG_CACHE_HOME directories; sharing the AT-SPI socket path can close a remote-runtime subprocess connection when the other session exits.
 - 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
 
 - 2026-10-16 (PR #677 CI review): Check failed-run job summaries against the current head before changing platform code; the older run failed only the tracked Calc timing test while Windows, macOS, Browser, and Package passed.
+
+- 2026-10-16 (PR #677 main merge): Preserve HTML popover coverage alongside GTK sibling-row entry naming when resolving appended tests and backend notes; these observation hints are independent.
