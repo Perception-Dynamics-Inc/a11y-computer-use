@@ -413,6 +413,13 @@ error. Qt spin buttons use the numeric role and writer rather than Text. Value
 writes do not guarantee Qt Quick user-interaction signals such as `moved` or
 `valueModified`. Other invalid bounds and non-numeric Qt roles remain excluded.
 
+
+X11 wheel line input syncs each notch and waits 120 ms between successive
+notches (including across axes), so Qt Quick does not receive one queued burst.
+Line units describe wheel input, not a guaranteed pixel or row distance.
+This pacing is covered by synthetic event-order tests; Qt Quick movement has
+not been live-verified for this change.
+
 ## Qt Quick combo selection
 
 For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable
