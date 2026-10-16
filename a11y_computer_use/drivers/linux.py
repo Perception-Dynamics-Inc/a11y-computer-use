@@ -41,19 +41,25 @@ from a11y_computer_use.schema import (
 
 
 def _no_accessibility_tree(app: str) -> ComputerUseError:
+    hint = ("Use a screenshot and explicit coordinates, or enable the app's "
+            "accessibility bridge. For GTK2 apps such as HexChat, install "
+            "libgail-common and libatk-adaptor (Debian/Ubuntu), then fully "
+            "restart with GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0. "
+            "The GTK2 atk-bridge module must be installed; GTK_MODULES alone "
+            "is insufficient. If no tree registers, accessibility tools "
+            "remain unavailable. If the app is still starting, retry.")
+    if app.strip().casefold() == "vlc":
+        hint = ("VLC Qt accessibility registration can be intermittent. Enable Qt "
+                "accessibility with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 and restart VLC. "
+                "If it still exposes no tree, use a screenshot and explicit coordinates "
+                "instead of repeatedly retrying accessibility queries.")
     return ComputerUseError(
         ErrorCode.UNSUPPORTED,
         f"{app!r} is running but exposes no AT-SPI accessibility tree",
         detail={
             "app": app,
             "reason": "no_accessibility_bridge",
-            "hint": "Use a screenshot and explicit coordinates, or enable the app's "
-                    "accessibility bridge. For GTK2 apps such as HexChat, install "
-                    "libgail-common and libatk-adaptor (Debian/Ubuntu), then fully "
-                    "restart with GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0. "
-                    "The GTK2 atk-bridge module must be installed; GTK_MODULES alone "
-                    "is insufficient. If no tree registers, accessibility tools "
-                    "remain unavailable. If the app is still starting, retry.",
+            "hint": hint,
         },
     )
 
@@ -1472,7 +1478,9 @@ class LinuxDriver:
             office = _atspi.libreoffice_app(app) or _atspi.libreoffice_app(resolved)
             wait = (_atspi.ATSPI_REGISTER_WAIT_S if office
                     else _atspi.ATSPI_REGISTER_POLL_S)
-            if not office:
+            # VLC may never register its Qt bridge on this launch. Process
+            # youth is not evidence that a long blind wait will help (#680).
+            if not office and resolved.strip().casefold() != "vlc":
                 wait = max(wait, min(
                     _atspi.ATSPI_REGISTER_WAIT_S,
                     max(_atspi.registration_startup_remaining(app),
