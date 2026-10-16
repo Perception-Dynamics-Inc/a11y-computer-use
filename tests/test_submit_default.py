@@ -93,3 +93,14 @@ def test_browser_driver_publishes_dom_submit_marker():
     assert save.default and save.form_id == ":100"
     assert observe.find_elements(snap, text="submit") == (save,)
     assert not any(method.startswith("Input.") for method, _ in transport.sent)
+
+
+@pytest.mark.parametrize("names, expected", [(None, False), (set(), False), ({"default"}, True)])
+def test_atspi_default_state_without_optional_binding(monkeypatch, names, expected):
+    def unavailable():
+        raise ImportError("PyGObject is not installed")
+
+    monkeypatch.setattr(_atspi, "_atspi", unavailable)
+    node = SimpleNamespace(get_state_set=lambda: SimpleNamespace(names=names))
+    assert _atspi._has_default_state(node) is expected
+    assert not _atspi._has_default_state(SimpleNamespace())
