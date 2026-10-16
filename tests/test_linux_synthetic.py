@@ -15520,6 +15520,65 @@ def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
     assert drained == []
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_top_level_enumeration_bypasses_stale_application_children(
+    fake_atspi, monkeypatch, fail,
+) -> None:
+    """A new Story Editor is discovered despite a persistent native child cache."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    main = _WindowNode("frame", "Scribus", states={"SHOWING"})
+    editor = _WindowNode("frame", "Story Editor - Text1", states={"SHOWING", "ACTIVE"})
+    app = _WindowNode("application", "scribus", children=[main, editor])
+    desktop = _WindowNode("desktop", children=[app])
+    fake_atspi.desktop = desktop
+    for node in (app, main, editor):
+        node.get_application = lambda: app
+    masks = []
+    state = {"mask": 1}
+
+    def set_mask(mask):
+        masks.append(mask)
+        state["mask"] = mask
+
+    def count():
+        if state["mask"] == 0:
+            return 2
+        return 1
+
+    def child(index):
+        if state["mask"] == 0 and index == 1:
+            if fail:
+                raise RuntimeError("native read failed")
+            return editor
+        return main
+
+    app.set_cache_mask = set_mask
+    app.get_child_count = count
+    app.get_child_at_index = child
+    monkeypatch.setattr(_atspi, "_cache_masks", lambda: (0, 1))
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    monkeypatch.setattr(_atspi, "_combo_owning_popup", lambda node: None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, name: name in node.states)
+    # The native StateSet path used by find_root, rather than names fallback.
+    active = object()
+    monkeypatch.setattr(fake_atspi.StateType, "ACTIVE", active, raising=False)
+    for node in (main, editor):
+        node.get_state_set = lambda node=node: _NS(
+            contains=lambda flag: flag == active and "ACTIVE" in node.states,
+        )
+    with _atspi.read_cache():
+        assert _atspi._child_count(app) == 1
+        picked = _atspi.find_root("scribus", Scope.WINDOW)
+        assert picked is (main if fail else editor)
+        assert _atspi.snapshot_window_list(main) == ([main] if fail else [editor, main])
+    assert masks
+    assert masks == [0, 1] * (len(masks) // 2)
+    assert state["mask"] == 1
+
+
 def test_calc_viewport_bands_are_explicitly_synthetic(fake_atspi, monkeypatch) -> None:
     """The native sheet stays distinct from snapshot-only cell groups."""
     monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))

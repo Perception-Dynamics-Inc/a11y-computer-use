@@ -603,6 +603,14 @@ at action time.
 This behavior has synthetic regression coverage; Xarchiver was not live-tested
 for this change.
 
+Top-level application children are enumerated with the native child cache disabled
+for both window-root selection and showing-window discovery. This prevents a
+new Qt window, such as Scribus's Story Editor, from remaining absent behind a
+stale cached application child list. The existing cache-mask helper keeps the
+count and indexed reads on the event thread and restores the default mask after
+the read. Regression coverage is synthetic; this change has not been live-verified
+against Scribus.
+
 GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
 button and a popover of ordinary buttons/checkboxes without a menu bar. Menu
 listing and paths remain unsupported for that shape; the error points to
