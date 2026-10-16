@@ -211,5 +211,8 @@
 - 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
 
 - 2026-10-16 (PR #715 merge repair): Preserve stale top-level application-child cache regressions alongside table-band boundary regressions when both append to the Linux synthetic suite; window discovery and complete table-cell publication are independent behaviors.
+
+
+- 2026-10-16 (PR #711 repair): Calc viewport bands use the table role to retain sheet pruning limits, while ordinary table-cell bands use groups to avoid orphaned final cells. Preserve both representations and their regressions when merging adjacent band changes; label only the Calc synthetic bands.
 - 2026-10-16 (#651): Eye of GNOME GTK zoom entries can echo EditableText percentages without changing image scale. Buffer equality cannot verify applied zoom; refuse before mutation rather than send an unrequested activation. Preserve the independent header-bar menu guidance when merging adjacent backend notes.
 - 2026-10-16 (PR #701 main merge): Retain GTK numeric label tests alongside VLC registration tests and same-app cover documentation when adjacent additions conflict; they protect independent observation behaviors.
