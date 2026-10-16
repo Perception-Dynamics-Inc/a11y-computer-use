@@ -592,7 +592,14 @@ def _require_bar(app: object) -> object:
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             "the application exposes no menu bar through accessibility",
-            detail={"hint": "focus the app first; background-only apps have no menu bar"},
+            detail={"hint": (
+                "Focus the app and use desktop_snapshot. Header-bar apps may expose a "
+                "Menu or Main Menu button instead of a menu bar: click its snapshot ref, "
+                "then take another snapshot and click the exposed button/checkbox refs. "
+                "If the popover is already open, use its current snapshot refs directly; "
+                "menu paths do not support these popovers. Do not use Escape to dismiss "
+                "Eye of GNOME's menu: Escape can quit the app."
+            )},
         )
     return bar
 
