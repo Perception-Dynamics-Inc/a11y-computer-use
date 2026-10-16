@@ -4656,3 +4656,35 @@ async def test_secure_ref_refused_before_rebuilt_child_resolution(
     assert rows[0]["params"] == {"ref": "e4", "role": "AXTextField"}
     assert "Secret643" not in "".join(p.read_text() for p in audit_dir.glob("*.jsonl"))
     assert mocked_driver["type"] == []
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_terminal_refusal_is_final_and_points_to_gui_routes(tmp_path, allowed):
+    """Guidance preserves the explicit exec gate and refusal audit."""
+    from types import SimpleNamespace
+    from a11y_computer_use.schema import AppOp, AppVerb
+
+    audit_dir = tmp_path / "audit"
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(audit_dir),
+        driver=SimpleNamespace(terminal_target=lambda *args, **kwargs: True),
+        allow_exec=allowed,
+    )
+    action = AppOp(verb=AppVerb.LAUNCH, app="terminal")
+    if allowed:
+        runtime._reject_terminal(action, "terminal")
+        assert not list(audit_dir.glob("*.jsonl"))
+    else:
+        with pytest.raises(ComputerUseError) as caught:
+            runtime._reject_terminal(action, "terminal")
+        assert caught.value.code is ErrorCode.EXEC_DISABLED
+        message = str(caught.value)
+        assert "final for this session" in message
+        assert "file manager, text editor, or app menus" in message
+        assert "do not ask the user to enable exec or a terminal" in message
+        rows = [json.loads(line) for path in audit_dir.glob("*.jsonl")
+                for line in path.read_text().splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["result"] == "exec_disabled"
+        assert rows[0]["metrics"]["security_violation"] == "exec_disabled"
