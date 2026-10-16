@@ -831,3 +831,5 @@ Not in this change:
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.
+
+When exec is off, the planner is instructed to use GUI routes such as a file manager, text editor, or app menus and never ask the user to enable exec or a terminal. Terminal refusals are final for the session; the execution gate and refusal audit remain in force.
