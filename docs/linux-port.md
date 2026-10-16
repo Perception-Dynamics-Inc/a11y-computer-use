@@ -50,6 +50,8 @@ Coordinates need no projection either: `AtspiComponent.get_extents(SCREEN)` retu
 
 AT-SPI `heading` maps to `AXHeading`, so `find(role="heading")` includes headings from Firefox and WebKitGTK. Snapshots preserve a positive integer `level` object attribute as `heading_level` and print `(level N)` beside the heading. Missing or invalid levels stay unknown; ordinary static text remains `AXStaticText`. Chromium’s heading wrapper around a single same-named button retains its existing static-text label ref and verified click behavior. This mapping and text matching are covered by synthetic tests; Firefox and Yelp live runs were not performed for this change.
 
+AT-SPI `level bar` maps to `AXProgressIndicator` and shows its current Value with the reported minimum and maximum when the range is valid. Numeric range reads require a Value interface: a progress-role widget without one keeps its accessible child labels and has no numeric value. This behavior is covered by synthetic tests; GTK4/Baobab live runs were not performed for this change.
+
 ## Chromium pages
 
 A Chrome document can hide a whole form under one zero-height section. On the Figma login page the raw AT-SPI tree is `document web` "Login | Figma" (1279 by 812) → `section` with height 0 (1279 by 0) → `section` (1279 by 812) → `section` → `form` → entry "EMAIL", password text "PASSWORD", push buttons "Continue with Google" and "Log in", and links. The snapshot used to print only `group "Login | Figma"` with no children. The pruner dropped any node whose bounds were zero-size, and the zero-height section took the painted form with it. Chrome does expose those children.
@@ -420,3 +422,11 @@ that native frame. Success requires the display Text to match and the popup
 to close. Missing geometry, ambiguous popups, and uncommitted selections return
 errors. Editable Qt entries retain their text-write path. This behavior is
 hermetic-tested; native Qt Quick verification remains a CI/live check.
+
+Qt Quick Controls 2 menu-bar entries can expose a named `menu bar` directly
+under the real menu bar with no native actions. The menu walker recognizes
+these as submenus and clicks their measured native bounds on X11. It requires
+a showing popup in the same window before continuing; missing bounds or an
+unchanged popup returns a refusal. Listing an unopened submenu opens it and
+closes it again. This path is covered by synthetic menu tests; native Qt Quick
+verification remains dependent on Linux CI.

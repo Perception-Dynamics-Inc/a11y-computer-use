@@ -118,6 +118,7 @@ _ROLE = {
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "progress bar": "AXProgressIndicator",
+    "level bar": "AXProgressIndicator",
     # Ristretto's image metadata bar is ATSPI_ROLE_STATUS_BAR. The name is
     # the status text. AXGroup, the unmapped fallback, hid it among layout.
     "status bar": "AXStatusBar",
@@ -2091,7 +2092,7 @@ _TEXT_ROLE_NAMES = frozenset({
 # Roles whose Value interface is a real range. Qt exposes Value on labels,
 # checks, rows, and empty text fields too; those numbers are 0.0 or an
 # uninitialized double, not a value the widget holds.
-_RANGE_ROLE_NAMES = frozenset({"slider", "spin button", "progress bar"})
+_RANGE_ROLE_NAMES = frozenset({"slider", "spin button", "progress bar", "level bar"})
 
 
 def _strip_objects(text: str) -> str:
@@ -3002,6 +3003,8 @@ def _aria_spin_value(acc) -> str | None:
     raw = _get_attributes(acc).get("valuetext")
     shown = raw.strip() if isinstance(raw, str) else ""
     if not shown:
+        if not _value_interface_present(acc):
+            return None
         cur = _safe(lambda: _atspi().Value.get_current_value(acc))
         if isinstance(cur, bool) or not isinstance(cur, (int, float)):
             return None
@@ -3571,7 +3574,13 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         if _SHEET_ADDRESS.match(_node_name(acc)):
             return None
     if role_name in _RANGE_ROLE_NAMES:
-        return _range_value(acc)
+        cur = _range_value(acc)
+        if role_name == "level bar" and cur is not None:
+            span = _value_range(acc)
+            if span is not None and _sane_range(*span):
+                low, high = span
+                return f"{cur:.17g} (min {low:.17g}, max {high:.17g})"
+        return cur
     if role_name == "document text":
         # The document node's own text is empty. Paragraphs hold the lines.
         # The Value interface on that node is an uninitialized double
@@ -3615,13 +3624,15 @@ def _qt_unknown_value_range(acc, span) -> bool:
 
 
 def _range_value(acc):
-    """Current Value for a slider, spin button, or progress bar.
+    """Current Value for a slider, spin button, progress bar, or level bar.
 
     Qt requires a real range, except that sliders/spins reporting 0..0
     have unknown bounds. Denormal or other invalid bounds are not shown.
     Other toolkits keep
     the current value whenever the interface returns a finite number.
     """
+    if not _value_interface_present(acc):
+        return None
     if _qt_app(acc):
         span = _value_range(acc)
         if span is None or not (_sane_range(*span) or _qt_unknown_value_range(acc, span)):
