@@ -3163,14 +3163,22 @@ def _qt_viewport_text(acc) -> str | None:
             for y in (top, top + height - 1)
         ]
         if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
-            return None
-        start, end = min(offsets), max(offsets) + 1
+            # Qt 5.15 cannot marshal bounded ranges and may reject corner
+            # offsets too. Read a capped raw prefix, then verify visibility
+            # through native character rectangles before making it searchable.
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                return None
+            start, end = 0, min(count, _PAGE_TEXT_CHARS)
+        else:
+            start = min(offsets)
+            end = min(max(offsets) + 1, start + _PAGE_TEXT_CHARS)
         text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
         if not isinstance(text, str):
             return None
         visible = []
         clipped = False
-        for index, char in enumerate(text):
+        for index, char in enumerate(text[:end - start]):
             rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
                 acc, start + index, coord,
             ))
