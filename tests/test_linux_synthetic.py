@@ -15391,3 +15391,38 @@ def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
     ))
     assert _atspi._qt_viewport_text(object()) == "VISIBLE"
     assert drained == []
+
+
+def test_calc_viewport_bands_are_explicitly_synthetic(fake_atspi, monkeypatch) -> None:
+    """The native sheet stays distinct from snapshot-only cell groups."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi)
+    try:
+        accessor = _atspi.ATSPIAccessor()
+        bands = accessor.children(table)
+        assert len(bands) > 1
+        assert all(isinstance(band, _atspi._OnScreenBand) for band in bands)
+        native_cells = _atspi._sheet_window_cells(table)
+        assert [cell for band in bands for cell in accessor.children(band)] == native_cells
+        snap = _sheet_snapshot(table)
+        tables = [el for el in snap.elements if el.role == "AXTable"]
+        assert len(tables) == len(bands) + 1
+        assert tables[0].title == "Sheet"
+        assert all(el.title == "Visible cells (synthetic viewport band)" for el in tables[1:])
+        assert 'table "Visible cells (synthetic viewport band)"' in observe.render_text(snap, mode="full")
+        assert len([el for el in snap.elements if el.role == "AXCell"]) == 29 * 16
+        found = observe.find_elements(snap, text="A29")
+        assert len(found) == 1 and found[0].bounds is not None
+    finally:
+        del fake_atspi.Table
+
+
+def test_short_calc_sheet_does_not_add_synthetic_bands(fake_atspi, monkeypatch) -> None:
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, visible_rows=3, visible_cols=4)
+    try:
+        snap = _sheet_snapshot(table)
+        assert [el.title for el in snap.elements if el.role == "AXTable"] == ["Sheet"]
+        assert len([el for el in snap.elements if el.role == "AXCell"]) == 12
+    finally:
+        del fake_atspi.Table

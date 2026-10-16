@@ -3784,9 +3784,10 @@ class _OnScreenBand:
     table role so the sheet cap, not the dense cap, applies to its cells.
     """
 
-    def __init__(self, rows: list[tuple], *, role: str = "panel") -> None:
+    def __init__(self, rows: list[tuple], *, role: str = "panel", name: str = "") -> None:
         self._rows = rows
         self._role = role
+        self._name = name
         left = min(float(pos[0]) for _acc, pos, _size in rows)
         top = min(float(pos[1]) for _acc, pos, _size in rows)
         right = max(float(pos[0]) + float(size[0]) for _acc, pos, size in rows)
@@ -3797,7 +3798,7 @@ class _OnScreenBand:
         return self._role
 
     def get_name(self) -> str:
-        return ""
+        return self._name
 
     def get_description(self) -> str:
         return ""
@@ -11248,7 +11249,8 @@ def _publish_sheet_cells(cells: list) -> list:
     A flat list is cut at 96 and at 200 walked children, so a 29-row window
     would still end at row 6. Each band is a table of at most
     ``SHEET_MAX_CHILDREN`` address cells. A window of 64×32 is 22 bands,
-    which is under the dense cap, so the lower rows stay.
+    which is under the dense cap, so the lower rows stay. The explicit
+    synthetic label distinguishes these snapshot groups from native tables.
     """
     if len(cells) <= SHEET_MAX_CHILDREN:
         return cells
@@ -11261,7 +11263,10 @@ def _publish_sheet_cells(cells: list) -> list:
     if len(items) <= SHEET_MAX_CHILDREN:
         return [cell for cell, _pos, _size in items] or cells[:SHEET_MAX_CHILDREN]
     return [
-        _OnScreenBand(items[start:start + SHEET_MAX_CHILDREN], role="table")
+        _OnScreenBand(
+            items[start:start + SHEET_MAX_CHILDREN], role="table",
+            name="Visible cells (synthetic viewport band)",
+        )
         for start in range(0, len(items), SHEET_MAX_CHILDREN)
     ]
 
