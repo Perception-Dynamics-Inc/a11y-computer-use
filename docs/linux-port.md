@@ -351,10 +351,12 @@ Qt line edits retain their text without requesting document viewport ranges.
 Snapshot values and text searches use `Text.get_bounded_ranges`
 inside the measured editor bounds, falling back to native point offsets and
 verified character rectangles when Qt omits bounded ranges. If that query
-fails or times out and point offsets are unavailable (as on Qt 5.15), a raw
-Text prefix capped at 4000 characters is read and each character's native
-rectangle is checked against the viewport. Unverified and off-screen characters
-remain excluded from search. Each scroll re-reads
+fails, times out, or returns malformed ranges and point offsets are unavailable
+(as on Qt 5.15), a raw Text prefix capped at 4000 characters is read. Failed
+explicit text reads retry `getText(0,-1)` only when the native character count
+fits that cap, then try 256-character chunks within the same cap. Each
+character's native rectangle is checked against the viewport. Unverified and
+off-screen characters remain excluded from search. Each scroll re-reads
 these ranges, so an off-screen match becomes searchable when it enters the
 viewport. When neither interface establishes visibility, the document value is
 omitted and its hint recommends in-document Find or line navigation. `find` and
@@ -460,6 +462,13 @@ unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
 
+Unnamed GTK single-line text fields can use a sibling label when its measured
+box lies to the left and fully within the field's row. This fallback requires
+one label and no other text editor on that row; missing or ambiguous geometry
+leaves the name empty. Existing names, descriptions, and explicit label
+relations take precedence. It changes naming only and retains the native entry
+handle and bounds (including Claws Mail's Setup Wizard fields).
+
 Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
 `manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
 Ref clicks and crops refuse with `not_visible` / `covered` when another
@@ -502,6 +511,14 @@ exists, so the result names the observed evidence. Successful navigation keeps
 the usual key result. Text read-back from `set_value` does not establish that a
 folder exists.
 
+Showing HTML popover panels reporting AT-SPI `ispopup=auto|manual|hint`
+appear as `popover` containers. Their notes report native SHOWING state and opener
+labels from DETAILS_FOR relations when available. If a saved ref's containing
+popover disappears from the fresh snapshot, resolution refuses with
+`stale_ref` (`reason=popover_closed`) and asks to reopen and re-observe it,
+without suggesting unrelated controls at the old tree position. Absence from
+the snapshot does not prove the dismissal mechanism.
+
 ### GTK icon-view ref clicks
 
 GTK icon-view children can report native AT-SPI `icon` or `image` roles; both
@@ -509,3 +526,31 @@ appear as `AXImage` in snapshots. Their `activate` action opens the item rather
 than selecting it. Ref clicks use one pointer click at the item's measured
 bounds and require that it becomes the only selected child. An unavailable
 pointer path or unverified selection returns an error without invoking activate.
+
+### GTK2 HexChat bridge limitation
+
+[Issue #678](https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues/678)
+reports HexChat 2.16.2 windows listed and focusable on X11 but absent from
+the AT-SPI desktop, even with `GTK_MODULES=gail:atk-bridge`.
+This remains a known limitation: without a registered tree, snapshot,
+find, and accessibility menus cannot operate.
+
+GTK2 needs both GAIL and the GTK2 ATK-to-AT-SPI bridge module.
+[Debian's accessibility guide](https://wiki.debian.org/accessibility-devel)
+names `libgail-common` and `libatk-adaptor`. Setting `GTK_MODULES` alone
+does not install these modules. On Debian/Ubuntu, check these prerequisites:
+
+```bash
+sudo apt install libgail-common libatk-adaptor
+# Fully quit the existing HexChat process first; use the same desktop session.
+GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 hexchat
+```
+
+These are troubleshooting steps, not a verified recovery for the reported
+HexChat environment. Verify that HexChat appears on the AT-SPI desktop and
+a snapshot returns its tree before treating it as accessible. If it remains
+absent, the backend continues to return `unsupported` with
+`reason: no_accessibility_bridge`. A listed/focusable window does not prove
+accessibility registration. Screenshots and explicitly requested coordinate
+actions are separate tools; the backend does not substitute them for ref or
+menu actions, invent refs, or infer control geometry.

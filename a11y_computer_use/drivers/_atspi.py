@@ -3014,6 +3014,56 @@ def _gtk_button_row_name(acc, name: str) -> str:
     return _strip_label_colon(candidates[0][1]) or name
 
 
+def _gtk_entry_row_name(acc) -> str:
+    """Recover an unnamed single-line GTK entry's unambiguous row label."""
+    if "gtk" not in _toolkit_name(acc):
+        return ""
+    label = _labelled_by_name(acc)
+    if label:
+        return _strip_label_colon(_plain_accessible_name(label))
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) not in {"panel", "filler", "grouping"}:
+        return ""
+
+    def box(node):
+        pos, size = _extents(node)
+        if pos is None or size is None:
+            return None
+        if not all(math.isfinite(v) for v in (*pos, *size)) or min(size) <= 0:
+            return None
+        return (*pos, *size)
+
+    target = box(acc)
+    if target is None:
+        return ""
+    x, y, _, height = target
+    siblings = [_child_at(parent, i) for i in range(_child_count(parent))]
+    candidates = []
+    for child in siblings:
+        if child is None or _role_name(child) not in {"label", "static", "static text"}:
+            continue
+        text = _plain_accessible_name(_node_name(child)).strip()
+        rect = box(child)
+        if not text or rect is None:
+            continue
+        left, top, w, h = rect
+        if left + w <= x and y <= top and top + h <= y + height:
+            candidates.append(text)
+    if len(candidates) != 1:
+        return ""
+    # Multiple editors on one row do not establish which owns the label.
+    for child in siblings:
+        if child is None or child == acc or _role_name(child) not in {"entry", "text", "password text"}:
+            continue
+        rect = box(child)
+        if rect is None:
+            return ""
+        _, top, _, h = rect
+        if top < y + height and top + h > y:
+            return ""
+    return _strip_label_colon(candidates[0])
+
+
 def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
     """True for a Chromium custom ``role=spinbutton``, not a native number input.
 
@@ -3171,61 +3221,82 @@ def _qt_viewport_text(acc) -> str | None:
     Atspi = _atspi()
     coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
-    if clip is None:
+    ranges = None
+    if clip is not None:
+        ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
+            acc, *map(int, box), coord, clip, clip,
+        ))
+    if ranges:
+        # A malformed/marshalling-failed reply is as unusable as no reply.
+        try:
+            contents = [span.content for span in ranges]
+            if any(contents) and all(isinstance(content, str) for content in contents):
+                return "\n".join(contents)
+        except Exception:
+            pass
+    # Qt commonly leaves GetBoundedRanges unimplemented. Use native
+    # point offsets and character rectangles instead, never the buffer
+    # alone. These reads are repeated after every scroll.
+    left, top, width, height = map(int, box)
+    offsets = [
+        _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
+        for x in (left, left + width - 1)
+        for y in (top, top + height - 1)
+    ]
+    if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
+        # Qt 5.15 cannot marshal bounded ranges and may reject corner
+        # offsets too. Read a capped raw prefix, then verify visibility
+        # through native character rectangles before making it searchable.
+        count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        start, end = 0, min(count, _PAGE_TEXT_CHARS)
+    else:
+        start = min(offsets)
+        end = min(max(offsets) + 1, start + _PAGE_TEXT_CHARS)
+    text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
+    if not isinstance(text, str) or (not text and end > start):
+        # Some Qt Text implementations reject explicit end offsets while
+        # accepting the end-of-buffer sentinel. Only request the whole
+        # buffer when its native count fits the existing read budget.
+        count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        valid_count = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        if valid_count and count <= _PAGE_TEXT_CHARS:
+            text = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+            start, end = 0, count
+        if not isinstance(text, str) or (not text and end > start):
+            # A failed large read may still support small explicit reads.
+            # Never publish a partial result when a chunk is unavailable.
+            chunks = []
+            for offset in range(start, end, 256):
+                stop = min(offset + 256, end)
+                chunk = _safe(lambda offset=offset, stop=stop:
+                              Atspi.Text.get_text(acc, offset, stop))
+                if not isinstance(chunk, str) or len(chunk) != stop - offset:
+                    return None
+                chunks.append(chunk)
+            text = "".join(chunks)
+    if not isinstance(text, str):
         return None
-    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
-        acc, *map(int, box), coord, clip, clip,
-    ))
-    if not ranges:
-        # Qt commonly leaves GetBoundedRanges unimplemented. Use native
-        # point offsets and character rectangles instead, never the buffer
-        # alone. These reads are repeated after every scroll.
-        left, top, width, height = map(int, box)
-        offsets = [
-            _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
-            for x in (left, left + width - 1)
-            for y in (top, top + height - 1)
-        ]
-        if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
-            # Qt 5.15 cannot marshal bounded ranges and may reject corner
-            # offsets too. Read a capped raw prefix, then verify visibility
-            # through native character rectangles before making it searchable.
-            count = _safe(lambda: Atspi.Text.get_character_count(acc))
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                return None
-            start, end = 0, min(count, _PAGE_TEXT_CHARS)
+    visible = []
+    clipped = False
+    for index, char in enumerate(text[:end - start]):
+        rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
+            acc, start + index, coord,
+        ))
+        hits = _rect_hits_box(rect, box)
+        if hits is None:
+            return None
+        # Keep a separator at clipped characters so two disconnected
+        # visible fragments cannot manufacture a substring match.
+        if hits:
+            if clipped and visible:
+                visible.append("\n")
+            visible.append(char)
+            clipped = False
         else:
-            start = min(offsets)
-            end = min(max(offsets) + 1, start + _PAGE_TEXT_CHARS)
-        text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
-        if not isinstance(text, str):
-            return None
-        visible = []
-        clipped = False
-        for index, char in enumerate(text[:end - start]):
-            rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
-                acc, start + index, coord,
-            ))
-            hits = _rect_hits_box(rect, box)
-            if hits is None:
-                return None
-            # Keep a separator at clipped characters so two disconnected
-            # visible fragments cannot manufacture a substring match.
-            if hits:
-                if clipped and visible:
-                    visible.append("\n")
-                visible.append(char)
-                clipped = False
-            else:
-                clipped = True
-        return "".join(visible)
-    try:
-        contents = [span.content for span in ranges]
-        if not all(isinstance(content, str) for content in contents):
-            return None
-        return "\n".join(contents)
-    except (AttributeError, TypeError):
-        return None
+            clipped = True
+    return "".join(visible)
 
 
 def _evince_page(node) -> bool:
@@ -3926,6 +3997,13 @@ class ATSPIAccessor:
             and _child_count(node) == 0
         ):
             position, size = (-1.0, -1.0), (-1.0, -1.0)
+        if (
+            role == "AXTextField"
+            and role_str in {"entry", "text"}
+            and not name.strip()
+            and not description.strip()
+        ):
+            name = _gtk_entry_row_name(node)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if role == "AXMenuItem" and not str(name).strip():
@@ -4169,6 +4247,13 @@ class ATSPIAccessor:
             # the child's native handle and geometry as the click target.
             role, name, description = "AXGroup", "", ""
             focusable, value = False, None
+        if role == "AXPopover":
+            panel_note = "open" if _state_has(node, "SHOWING") else "not showing"
+            openers = _relation_targets(node, "details_for")
+            labels = [_plain_accessible_name(_node_name(opener)) for opener in openers]
+            labels = [label for label in labels if label]
+            if labels:
+                panel_note += "; opened by " + ", ".join(repr(label) for label in labels)
         return RawNode(
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
