@@ -3150,6 +3150,8 @@ def goal_writes_a_file(goal: str) -> bool:
         return True
     if not _FILE_VERBS.search(text):
         return False
+    # URL paths and names describe web resources, not local file output.
+    text = re.sub(r"[a-z][a-z0-9+.-]*://\S+", " ", text, flags=re.IGNORECASE)
     return bool(_FILE_NOUNS.search(text) or _FILE_PATH.search(text))
 
 

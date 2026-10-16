@@ -1968,6 +1968,33 @@ class LinuxDriver:
             },
         )
 
+    def _refuse_unverified_pdf_thumbnail(self, element: Element, handle) -> None:
+        """Refuse Chromium PDF thumbnail clicks whose navigation is not verified."""
+        if (
+            handle is None
+            or element.role != "AXButton"
+            or not element.title.startswith("Thumbnail for page ")
+            or not element.title.removeprefix("Thumbnail for page ").isdigit()
+        ):
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        if not self._run(lambda: _atspi._chromium_app(handle)):
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} PDF thumbnail navigation cannot be verified; no click was sent",
+            detail={
+                "ref": element.ref, "role": element.role,
+                "reason": "pdf_thumbnail_unverified", "outcome": "refused",
+                "hint": (
+                    "Chromium's thumbnail action can acknowledge a no-op. Use a screenshot "
+                    "to choose a coordinate inside the visible thumbnail, then check the "
+                    "viewer's page number after clicking."
+                ),
+            },
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -1983,6 +2010,7 @@ class LinuxDriver:
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         self._refuse_gnumeric_go_jump(element, handle)
+        self._refuse_unverified_pdf_thumbnail(element, handle)
         pressed = _cdp_forms.press_checkable(
             element,
             window_title=self._dom_window_title(handle),
@@ -2536,6 +2564,7 @@ class LinuxDriver:
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_gnumeric_go_jump(target, handle)
+            self._refuse_unverified_pdf_thumbnail(target, handle)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
             if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
