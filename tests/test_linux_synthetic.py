@@ -12780,9 +12780,10 @@ def test_ref_with_large_extents_and_addressable_center_keeps_its_click():
 
 @pytest.mark.parametrize("effect", ["exclusive", "unchanged", "additive", "no_bounds"])
 @pytest.mark.parametrize("named", [True, False])
-def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named):
+@pytest.mark.parametrize("native_role", ["image", "icon"])
+def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named, native_role):
     driver, icon, element, actions, events = _toggle_click_target(
-        monkeypatch, toolkit="gtk", role="image", actions=("activate",),
+        monkeypatch, toolkit="gtk", role=native_role, actions=("activate",),
     )
     icon.name = "Cherry" if named else ""
     previous = _Acc("image", states=("SELECTED",))
