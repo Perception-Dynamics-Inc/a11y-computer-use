@@ -14841,6 +14841,86 @@ def test_qt_unknown_range_exception_stays_scoped(fake_atspi, role, span, present
     assert _atspi._value_text(node, _atspi._ROLE[role], role) is None
 
 
+@pytest.mark.parametrize("initial_y", [2355, -2995, 199])
+@pytest.mark.parametrize("settles_immediately", [False, True])
+def test_chromium_pdf_find_does_not_stack_asynchronous_scrolls(
+    fake_atspi, monkeypatch, initial_y, settles_immediately,
+):
+    """Delayed PDF extents retain an honest match, without another scroll."""
+    from a11y_computer_use import server
+
+    heading = _Acc("heading", name="Chapter 3: PDFMARK-03", width=300, height=24)
+    _place_row(heading, 100, initial_y, 300, 24)
+    document = _adopt(_Acc("document frame", width=1200, height=700), heading)
+    window = _adopt(_Acc("frame", name="PDF", width=1280, height=800), document)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "chromium_snapshot_root", lambda node: node)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    calls = []
+
+    def scroll_to_edge(node, edge):
+        assert node is heading
+        calls.append(edge)
+        if settles_immediately:
+            _place_row(heading, 100, 143, 300, 24)
+        return True
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("document text must not stack scrolls or use a table row fraction")
+
+    monkeypatch.setattr(_atspi, "scroll_to_edge", scroll_to_edge)
+    monkeypatch.setattr(_atspi, "scroll_to", forbidden)
+    monkeypatch.setattr(_atspi, "_scroll_vertical_bar_to_row", forbidden)
+    runtime = _bare_runtime(driver)
+    found = runtime.find("chrome", text="PDFMARK-03")
+    assert "no elements match" not in found
+    assert "PDFMARK-03" in found
+    match = next(el for el in runtime._current.elements if "PDFMARK-03" in el.title)
+    assert observe.ax_handle_for(match.snapshot_id, match.ref) is heading
+    if initial_y == 199:
+        assert calls == []
+        assert match.bounds.y == 199
+    else:
+        assert calls == ["TOP_LEFT"]
+        if settles_immediately:
+            assert match.bounds.y == 143
+            assert "off-screen" not in found
+        else:
+            assert match.bounds is None
+            assert "off-screen" in found
+            # Once the renderer publishes the new extents, the next find
+            # uses that live box and issues no additional reveal request.
+            _place_row(heading, 100, 143, 300, 24)
+            settled = runtime.find("chrome", text="PDFMARK-03")
+            assert "off-screen" not in settled
+            fresh = next(el for el in runtime._current.elements if "PDFMARK-03" in el.title)
+            assert fresh.bounds.y == 143
+            assert calls == ["TOP_LEFT"]
+
+
+def test_chromium_document_reveal_preserves_table_child_scroll(fake_atspi, monkeypatch):
+    """A text child of a one-row table still uses the table reveal path."""
+    label = _Acc("static", name="TABLEMARK", width=100, height=20)
+    _place_row(label, 100, 2355, 100, 20)
+    cell = _adopt(_Acc("table cell"), label)
+    table = _adopt(_Acc("table"), cell)
+    table.get_n_rows = lambda: 1
+    table.get_n_columns = lambda: 1
+    table.get_accessible_at = lambda row, col: cell
+    document = _adopt(_Acc("document web"), table)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    calls = []
+    monkeypatch.setattr(
+        _atspi, "_bring_cell_on_screen",
+        lambda target, screen, row, rows: calls.append((target, row, rows)),
+    )
+    offscreen = []
+    assert _atspi.reveal_text_in_document(document, "TABLEMARK", offscreen=offscreen)
+    assert calls == [(label, 0, 1)]
+    assert offscreen == []
+
+
 @pytest.mark.parametrize("method", ["press_element", "click"])
 @pytest.mark.parametrize("y", [606, 710])
 def test_pdf_thumbnail_refuses_unverified_navigation(fake_atspi, monkeypatch, method, y):
@@ -15252,3 +15332,62 @@ def test_qt_range_recovery_never_requests_unbounded_large_document(monkeypatch, 
     else:
         assert value == text[:_atspi._PAGE_TEXT_CHARS]
     assert len(reads) <= 1 + (_atspi._PAGE_TEXT_CHARS + 255) // 256
+
+
+def test_qt_unanswered_bounded_ranges_clears_libatspi_hang_before_reading(monkeypatch):
+    """#684: Scribus never answers GetBoundedRanges (QSpiTextRangeList is not
+    registered). libatspi then reports the app as hung until its pending
+    replies are dispatched; the editor text must still be read afterwards."""
+    text = "Hello Scribus 12345"
+    hung = {"on": False}
+    drained = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (150, 150, 460, 237))
+
+    def guarded(fn):
+        def call(*args):
+            if hung["on"]:
+                raise RuntimeError("atspi_error: The process appears to be hung. (1)")
+            return fn(*args)
+        return call
+
+    def bounded(*args):
+        hung["on"] = True
+        raise RuntimeError("atspi_error: Did not receive a reply.")
+
+    def drain(*args, **kwargs):
+        drained.append(True)
+        hung["on"] = False
+
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", drain)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=guarded(lambda *args: -1),
+            get_character_count=guarded(lambda acc: len(text)),
+            # Qt returns "" for an end offset past the character count.
+            get_text=guarded(lambda acc, start, end: (
+                text if end == -1 else ("" if end > len(text) else text[start:end]))),
+            get_character_extents=guarded(
+                lambda acc, offset, coord: _NS(x=155 + 8 * offset, y=155, width=8, height=17)),
+        ),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    assert drained == [True]
+    assert value == text
+    raw = RawNode(role="AXTextArea", value=value)
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="scribus", pid=1, geometry=_geometry())
+    assert observe.find_elements(snap, text="Scribus 123")
+
+
+def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
+    drained = []
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda *a, **k: drained.append(True))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(get_bounded_ranges=lambda *args: [_NS(content="VISIBLE")]),
+    ))
+    assert _atspi._qt_viewport_text(object()) == "VISIBLE"
+    assert drained == []

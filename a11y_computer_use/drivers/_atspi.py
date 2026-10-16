@@ -3209,6 +3209,26 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _drain_atspi_replies(budget_s: float = 0.25) -> None:
+    """Dispatch pending D-Bus replies (such as libatspi's hang-check ping).
+
+    Bounded: at most ``budget_s`` seconds, non-blocking iterations only.
+    """
+    try:
+        from gi.repository import GLib
+    except ImportError:
+        return
+    ctx = GLib.MainContext.default()
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if ctx.pending():
+            ctx.iteration(False)
+        else:
+            time.sleep(0.01)
+            if not ctx.pending():
+                break
+
+
 def _qt_viewport_text(acc) -> str | None:
     """Only native text ranges inside a Qt editor's measured viewport.
 
@@ -3226,6 +3246,18 @@ def _qt_viewport_text(acc) -> str | None:
         ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
             acc, *map(int, box), coord, clip, clip,
         ))
+    if clip is not None and _reply_local.last_failed:
+        # Qt 5 cannot marshal QSpiTextRangeList, so GetBoundedRanges never
+        # answers. libatspi then marks the whole application hung until its
+        # follow-up Peer.Ping reply is dispatched, which fails every later
+        # read of this editor (and of the rest of the walk) at once.
+        try:
+            from a11y_computer_use.drivers import _atspi_events
+
+            # Iterate the context on the thread that owns libatspi.
+            _atspi_events.run(_drain_atspi_replies)
+        except Exception:
+            pass
     if ranges:
         # A malformed/marshalling-failed reply is as unusable as no reply.
         try:
@@ -12937,39 +12969,71 @@ def _qt_quick_display(acc):
     return None
 
 
-def _set_qt_quick_combo(acc, display, value: str) -> None:
-    """Select through a newly shown menu in this combo's native frame."""
-    if _full_text(display) == value:
+def _set_qt_quick_combo(acc, display, value: str, *, run=lambda fn: fn()) -> None:
+    """Wait for native popup readiness, then select and verify the value.
+
+    Driver callers marshal each probe separately so the event loop remains
+    free to process popup creation between probes.
+    """
+    if run(lambda: _full_text(display)) == value:
         return
-    frame = _frame_ancestor(acc)
+    frame = run(lambda: _frame_ancestor(acc))
 
     def menus():
-        if frame is None:
-            return []
-        # Pointer input bypasses _call_first mutators: invalidate native and
-        # operation-scoped child reads before looking for the new sibling.
-        _call_first(frame, ("clear_cache", "clearCache"))
-        return [child for index in range(_child_count(frame))
-                if (child := _child_at(frame, index)) is not None
-                and _role_name(child) in {"menu", "popup menu"}
-                and _state_has(child, "SHOWING")]
+        found = {}
 
-    before = {_ancestor_key(menu) for menu in menus()}
-    _click_center(acc)
+        def walk(node, depth):
+            if depth > 5:
+                return
+            _call_first(node, ("clear_cache", "clearCache"))
+            for index in range(_child_count(node)):
+                child = _child_at(node, index)
+                if child is None:
+                    continue
+                role = _role_name(child)
+                if role in {"menu", "popup menu", "list", "list box"}:
+                    if _state_has(child, "SHOWING"):
+                        found[_ancestor_key(child)] = child
+                elif node is acc or (node is not frame and role not in _TEXT_ROLE_NAMES):
+                    walk(child, depth + 1)
+
+        walk(acc, 0)
+        combo_has_menu = bool(found)
+        if frame is not None:
+            walk(frame, 0)
+        # Some bridges put the visible rows directly beneath the combo.
+        if not combo_has_menu and _state_has(acc, "EXPANDED") and any(
+            _state_has(node, "SHOWING") for _, node, *_ in _collect_options(acc)
+        ):
+            found[_ancestor_key(acc)] = acc
+        return found
+
+    before = set(run(menus))
+    run(lambda: _click_center(acc))
     popup = None
-    for attempt in range(8):
-        opened = [menu for menu in menus() if _ancestor_key(menu) not in before]
-        if len(opened) == 1:
-            popup = opened[0]
-            break
+    # Readiness has its own bounded deadline, rather than a fixed delay after
+    # input. Stop immediately once a newly shown popup has published its rows.
+    deadline = time.monotonic() + _MENU_DIALOG_WAIT_S
+    while True:
+        def probe():
+            opened = [menu for key, menu in menus().items() if key not in before]
+            if len(opened) != 1:
+                return opened, []
+            return opened, _collect_options(opened[0])
+
+        opened, options = run(probe)
         if len(opened) > 1:
             break
-        if attempt < 7:
-            time.sleep(0.05)
+        if len(opened) == 1 and options:
+            popup = opened[0]
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
     if popup is None:
         raise _text_mismatch("popup_missing", "no unambiguous Qt combo popup appeared", expected=value)
     try:
-        options = _collect_options(popup)
         matches = [node for label, node, *_rest in options if label == value]
         if not matches:
             labels = [label for label, *_rest in options]
@@ -12979,18 +13043,26 @@ def _set_qt_quick_combo(acc, display, value: str) -> None:
             raise ValueError(f"value {value!r} is not one of: {listed}")
         if len(matches) != 1:
             raise _text_mismatch("ambiguous_option", "multiple Qt combo options match", expected=value)
-        _click_center(matches[0])
-        for attempt in range(8):
+        run(lambda: _click_center(matches[0]))
+
+        def committed():
             _refresh_event_cache(display)
             _refresh_event_cache(popup)
-            if _full_text(display) == value and not _state_has(popup, "SHOWING"):
+            closed = not _state_has(popup, "EXPANDED" if popup is acc else "SHOWING")
+            return _full_text(display) == value and closed
+
+        for attempt in range(8):
+            if run(committed):
                 return
             if attempt < 7:
                 time.sleep(0.05)
         raise _text_mismatch("text_mismatch", f"the combo selection did not commit {value!r}", expected=value)
     finally:
-        _refresh_event_cache(popup)
-        if _state_has(popup, "SHOWING") and _x11_keys_available():
+        def still_open():
+            _refresh_event_cache(popup)
+            return _state_has(popup, "EXPANDED" if popup is acc else "SHOWING")
+
+        if run(still_open) and _x11_keys_available():
             from a11y_computer_use.drivers import _linux_input
 
             _linux_input.press_chord("Escape")
@@ -16523,16 +16595,20 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object])
             if found is not None:
                 return found
     if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
-        return node, 0, 1
+        # Zero rows marks a document-text hit, not an indexed table hit.
+        return node, 0, 0
     return None
 
 
-def reveal_text_in_document(root, needle: str) -> bool:
+def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
 
     The walk includes nodes the pruner will drop, so a table that starts
     below the viewport is still searched. A match that is already on screen
     is left where it is. False when nothing in the seek window matches.
+    Non-table text uses one TOP_LEFT request; Chromium PDF geometry may
+    update later. ``offscreen`` retains those hits for snapshot attachment
+    if pruning still drops them, without claiming that scrolling completed.
     """
     text = needle.strip() if isinstance(needle, str) else ""
     if not text or root is None:
@@ -16553,7 +16629,15 @@ def reveal_text_in_document(root, needle: str) -> bool:
     screen = _screen_size()
     if _on_screen_item(cell, screen) is not None:
         return True
-    _bring_cell_on_screen(cell, screen, row, rows)
+    if rows > 0:
+        _bring_cell_on_screen(cell, screen, row, rows)
+    else:
+        # Chromium PDF scrolling is asynchronous. Do not stack ANYWHERE,
+        # TOP_EDGE and a scrollbar write against the same stale extents.
+        # A document-order text hit has no table row fraction either.
+        scroll_to_edge(cell, "TOP_LEFT")
+        if offscreen is not None:
+            offscreen.append((cell, _parent_of(cell)))
     _invalidate_tree_cache(root)
     return True
 

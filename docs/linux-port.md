@@ -448,8 +448,11 @@ not been live-verified for this change.
 
 For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable
 Text display children as write targets. It opens the combo with one click at
-its measured center and selects the exact option from a newly shown menu in
-that native frame. Success requires the display Text to match and the popup
+its measured center, then polls native popup readiness within the existing
+menu deadline. Each probe runs on the AT-SPI thread while waits leave that
+thread free to process events. Options may belong to a newly shown menu in
+that native frame or to the combobox descendants. It selects the exact option
+only after rows appear. Success requires the display Text to match and the popup
 to close. Missing geometry, ambiguous popups, and uncommitted selections return
 errors. Editable Qt entries retain their text-write path. This behavior is
 hermetic-tested; native Qt Quick verification remains a CI/live check.
@@ -461,6 +464,13 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+Chromium document-text `find` reveals use one native AT-SPI `TOP_LEFT`
+request. PDF viewers can update extents asynchronously; if the match is
+still outside the snapshot, it is returned as off-screen with no click
+bounds rather than reported missing. No table-row scrollbar position is
+inferred for a document-text match. This fallback has synthetic regression
+coverage; native PDF scrolling still requires live verification.
 
 Unnamed GTK single-line text fields can use a sibling label when its measured
 box lies to the left and fully within the field's row. This fallback requires
