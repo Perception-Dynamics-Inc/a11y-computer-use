@@ -1421,3 +1421,51 @@ def test_covered_ref_click_is_not_clicked_and_the_point_stays(tmp_path) -> None:
     point = runtime.click(x=100, y=94)
     assert str(point).startswith("clicked (100, 94)")
     assert sent[-1] == Point(display_id=0, x=100, y=94)
+
+
+@pytest.mark.parametrize("operation", ["click", "crop"])
+@pytest.mark.parametrize("title", ["", "Overlay panel"])
+def test_popover_cover_refuses_before_input_or_capture(tmp_path, operation, title):
+    """#609: a top-layer cover must not receive a covered ref's click/crop."""
+    driver = TreeDriver()
+    driver.elements.append(_element(
+        "overlay", "AXPopover", title, parent="e1", bounds=Bounds(0, 0, 0, 200, 100),
+    ))
+    runtime = _runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as caught:
+        getattr(runtime, operation)("e2")
+    assert caught.value.code == ErrorCode.NOT_VISIBLE
+    assert caught.value.detail["reason"] == "covered"
+    assert "covered by popover" in caught.value.message
+    assert driver.calls == []
+
+
+@pytest.mark.parametrize("case", ["ancestor", "self", "aside", "missing_bounds"])
+def test_popover_cover_requires_unrelated_measured_overlap(tmp_path, case):
+    driver = TreeDriver()
+    cover = _element("overlay", "AXPopover", "", bounds=Bounds(0, 0, 0, 200, 100))
+    target = driver.elements[1]
+    if case == "ancestor":
+        target = dataclasses.replace(target, parent=cover.ref)
+    elif case == "self":
+        target = cover
+    elif case == "aside":
+        cover = dataclasses.replace(cover, bounds=Bounds(0, 200, 200, 100, 100))
+    else:
+        cover = dataclasses.replace(cover, bounds=None)
+    driver.elements = [driver.elements[0], cover, target] if case != "self" else [cover]
+    runtime = _runtime(tmp_path, driver)
+    assert runtime._popover_cover(target) is None
+
+
+def test_linux_popover_cover_reads_newly_opened_top_layer(tmp_path):
+    """A cover opened after the issued snapshot still blocks the click."""
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    driver.name = "linux"
+    driver.elements.append(_element(
+        "overlay", "AXPopover", "", bounds=Bounds(0, 0, 0, 200, 100),
+    ))
+    assert runtime._popover_cover(runtime._current.element("e2"), refresh=True) == "popover"
+    driver.elements = [el for el in driver.elements if el.ref != "overlay"]
+    assert runtime._popover_cover(runtime._current.element("e2"), refresh=True) is None

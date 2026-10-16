@@ -447,3 +447,11 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
+`manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
+Ref clicks and crops refuse with `not_visible` / `covered` when another
+popover's measured bounds contain the ref's center. Controls inside their own
+popover remain eligible; dismiss the covering popover before retrying a covered
+ref. This check uses the accessibility tree because Chrome's accessible
+hit test can return the underlying control.
