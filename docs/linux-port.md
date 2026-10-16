@@ -430,3 +430,12 @@ a showing popup in the same window before continuing; missing bounds or an
 unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
+
+### Chromium PDF thumbnails
+
+Ref clicks on Chromium buttons named `Thumbnail for page N` are refused with
+`unsupported` / `pdf_thumbnail_unverified`. The native accessibility action can
+acknowledge a no-op, and page navigation is not verified by this path. This
+restriction also applies to fully visible thumbnails. Use a screenshot to choose
+a coordinate inside the visible thumbnail and check the viewer's page number
+after clicking. No scrolling or alternate action is substituted for the ref click.
