@@ -243,3 +243,6 @@
 - 2026-10-16 (#610 repair): Runtime click verification can pass a target-only snapshot to rematch_ref. Ancestor inspection must tolerate omitted parents while retaining containment checks for ancestors present in a full snapshot.
 
 - 2026-10-16 (PR #467 caret verification): Geany's status label is asynchronous. Verify symbol navigation through either the reported status line or the focused editor's native caret offset and exact text prefix; never use symbol selection, an unfocused buffer, or an incomplete text read as proof. Keep the pointer sequence and existing polling bounds unchanged.
+
+
+- 2026-10-16 (#684): Qt text recovery must handle malformed QSpiTextRangeList replies and failures in the fallback Text read itself. Retry getText(0,-1) only for a native character count within the existing cap, then capped chunks; retain native character visibility checks and refuse incomplete reads.
