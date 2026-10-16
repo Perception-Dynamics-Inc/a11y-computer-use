@@ -507,6 +507,14 @@ exists, so the result names the observed evidence. Successful navigation keeps
 the usual key result. Text read-back from `set_value` does not establish that a
 folder exists.
 
+Showing HTML popover panels reporting AT-SPI `ispopup=auto|manual|hint`
+appear as `popover` containers. Their notes report native SHOWING state and opener
+labels from DETAILS_FOR relations when available. If a saved ref's containing
+popover disappears from the fresh snapshot, resolution refuses with
+`stale_ref` (`reason=popover_closed`) and asks to reopen and re-observe it,
+without suggesting unrelated controls at the old tree position. Absence from
+the snapshot does not prove the dismissal mechanism.
+
 ### GTK icon-view ref clicks
 
 GTK icon-view children can report native AT-SPI `icon` or `image` roles; both

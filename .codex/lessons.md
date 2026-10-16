@@ -176,3 +176,10 @@
 
 - 2026-10-16 (PR #685 merge): Thunar path replacement and failed-navigation verification are complementary. Preserve focused replacement with a separate Return, and check navigation errors before accepting a changed accessibility tree as success.
 - 2026-10-16 (PR #685 live verification): Thunar can expose dialog-error-symbolic before and after successful navigation. A persistent icon alone is not a new failure; retain unchanged-window refusal and newly appearing error detection, and verify successful navigation with the live location and title.
+- 2026-10-16 (#610): Chromium HTML popovers expose panel + ispopup and DETAILS_FOR opener relations. Preserve their container boundary before descendant ref matching; dismissed descendants can otherwise receive reorder hints naming unrelated browser chrome. Snapshot absence alone does not prove how a popover was dismissed.
+
+- 2026-10-16 (PR #692 repair): Preserve SHOWING-gated HTML popover mapping when adding opener metadata and stale descendant guidance; hidden panels must retain ordinary group behavior so containment checks cannot treat a dismissed popup as open.
+
+- 2026-10-16 (#610 repair): Runtime click verification can pass a target-only snapshot to rematch_ref. Ancestor inspection must tolerate omitted parents while retaining containment checks for ancestors present in a full snapshot.
+
+- 2026-10-16 (PR #685 CI repair): A failed short-budget agent test can stop in show-desktop setup before the agent runs. Reproduce both the test alone and after the preceding terminal-launch test under a real window manager before attributing that focus failure to unrelated text replacement code.
