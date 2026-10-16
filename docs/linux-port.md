@@ -459,6 +459,13 @@ unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
 
+Unnamed GTK single-line text fields can use a sibling label when its measured
+box lies to the left and fully within the field's row. This fallback requires
+one label and no other text editor on that row; missing or ambiguous geometry
+leaves the name empty. Existing names, descriptions, and explicit label
+relations take precedence. It changes naming only and retains the native entry
+handle and bounds (including Claws Mail's Setup Wizard fields).
+
 Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
 `manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
 Ref clicks and crops refuse with `not_visible` / `covered` when another
@@ -481,7 +488,7 @@ Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;
 the marker does not change click behavior or safety checks.
 
-Geany Symbols rows marked `activates on double-click` retain single-click selection. An explicit double-click sends two pointer clicks at the measured row bounds and waits for Geany's native status line to report the symbol's line. Unverified navigation returns an error without a replacement action.
+Geany Symbols rows marked `activates on double-click` retain single-click selection. An explicit double-click sends two pointer clicks at the measured row bounds and verifies the symbol's line through Geany's native status line or the focused editor's native caret offset and text. The caret read handles a status label that has not refreshed yet; an unfocused editor or unreadable caret is not confirmation. Unverified navigation returns an error without a replacement action.
 
 ### Chromium PDF thumbnails
 

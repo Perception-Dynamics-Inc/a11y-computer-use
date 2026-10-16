@@ -15104,6 +15104,52 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
     assert timeline == (expected or [("sync", 1)])
 
 
+def test_gtk_unnamed_entries_find_sibling_row_labels(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    labels = ["Your name", "Your email address", "Your organization"]
+    entries = [_place_row(_Acc("text", states=("SINGLE_LINE", "EDITABLE")),
+                          220, 100 + i * 40, 240, 30) for i in range(3)]
+    texts = [_place_row(_Acc("label", name=name + ":"), 20, 105 + i * 40, 180, 20)
+             for i, name in enumerate(labels)]
+    panel = _adopt(_place_row(_Acc("panel"), 0, 80, 500, 200),
+                   *reversed(entries), *reversed(texts))
+    root = _adopt(_place_row(_Acc("frame", name="Setup Wizard"), 0, 0, 600, 400), panel)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="claws-mail", pid=605, geometry=_geometry())
+    for i, label in enumerate(labels):
+        found = observe.find_elements(snap, text=label, role="textfield")
+        assert len(found) == 1
+        assert found[0].title == label
+        assert found[0].bounds == Bounds(0, 220, 100 + i * 40, 240, 30)
+        assert observe.ax_handle_for(snap.snapshot_id, found[0].ref) is entries[i]
+
+
+@pytest.mark.parametrize("case", ["named", "description", "relation", "non_gtk", "missing",
+                                  "other_row", "right", "two_labels", "two_entries", "multiline"])
+def test_gtk_entry_row_names_require_unambiguous_native_evidence(fake_atspi, monkeypatch, case):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: "Explicit:" if case == "relation" else "")
+    entry = _place_row(_Acc("text", name="Native" if case == "named" else "",
+                            states=("MULTI_LINE",) if case == "multiline" else ("SINGLE_LINE",)),
+                       220, 100, 240, 30)
+    if case == "description":
+        entry.get_description = lambda: "Description"
+    label = _place_row(_Acc("label", name="Your name:"),
+                       500 if case == "right" else 20, 200 if case == "other_row" else 105, 180, 20)
+    children = [entry, label]
+    if case == "missing":
+        entry.component = None
+    if case == "two_labels":
+        children.append(_place_row(_Acc("label", name="Other:"), 30, 105, 160, 20))
+    if case == "two_entries":
+        children.append(_place_row(_Acc("entry"), 500, 100, 100, 30))
+    _adopt(_Acc("panel"), *children)
+    raw = _atspi.ATSPIAccessor().read(entry)
+    assert raw.title == {"named": "Native", "relation": "Explicit"}.get(case, "")
+    if case == "description":
+        assert raw.description == "Description"
+
+
 @pytest.mark.parametrize("mode", ["auto", "manual", "hint", "false", "", "true"])
 def test_html_popover_panel_keeps_top_layer_role(monkeypatch, mode):
     """#609: ispopup describes the panel, not the opener's haspopup flag."""
@@ -15344,3 +15390,27 @@ def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, 
         snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
                               app="scribus", pid=1, geometry=_geometry())
         assert observe.find_elements(snap, text="QTDOC_1135")
+
+
+@pytest.mark.parametrize("focused,caret_line,readable,arrived", [
+    (True, 301, True, True),
+    (True, 1, True, False),
+    (False, 301, True, False),
+    (True, 301, False, False),
+])
+def test_geany_navigation_verifies_native_caret_when_status_lags(
+    fake_atspi, monkeypatch, focused, caret_line, readable, arrived,
+):
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="line: 1 / 303")
+    editor = _Acc("text", states=("MULTI_LINE", "FOCUSED") if focused else ("MULTI_LINE",))
+    _adopt(window, window.children[0], status, editor)
+    monkeypatch.setattr(_atspi, "_gtk_multiline_document", lambda node: node is editor)
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: "")
+    prefix = "# pad\n" * (caret_line - 1)
+    monkeypatch.setattr(fake_atspi.Text, "get_caret_offset", lambda node: len(prefix), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "get_text",
+                        lambda node, start, end: prefix if readable else None, raising=False)
+    assert _atspi.geany_symbol_arrived((301, [status])) is arrived
