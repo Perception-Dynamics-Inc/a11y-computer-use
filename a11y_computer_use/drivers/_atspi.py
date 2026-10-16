@@ -2108,7 +2108,7 @@ def _action_names(acc) -> tuple[str, ...]:
 # groups/buttons/windows are the bulk of a tree. Their label lives in the Name
 # (title), not the value, so skipping the value read is a pure speedup.
 _NO_VALUE_ROLES = frozenset({
-    "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
+    "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXPopover", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
     "AXStatusBar",
 })
@@ -3852,6 +3852,8 @@ class ATSPIAccessor:
             role = "AXTextArea"
         role = _refine_web_role(role, attrs)
         role = _opaque_surface_role(role, role_str, attrs)
+        if role_str == "panel" and attrs.get("ispopup") in {"auto", "manual", "hint"}:
+            role = "AXPopover"
         # A custom role=spinbutton is an AT-SPI spin button, which this map
         # sends to AXTextField. That renders as textfield (edit) and hides
         # the number. AXSpinButton is the slider treatment: the role is the
@@ -4165,6 +4167,13 @@ class ATSPIAccessor:
             # the child's native handle and geometry as the click target.
             role, name, description = "AXGroup", "", ""
             focusable, value = False, None
+        if role == "AXPopover":
+            panel_note = "open" if _state_has(node, "SHOWING") else "not showing"
+            openers = _relation_targets(node, "details_for")
+            labels = [_plain_accessible_name(_node_name(opener)) for opener in openers]
+            labels = [label for label in labels if label]
+            if labels:
+                panel_note += "; opened by " + ", ".join(repr(label) for label in labels)
         return RawNode(
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
