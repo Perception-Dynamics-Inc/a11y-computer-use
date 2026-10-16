@@ -153,6 +153,7 @@
 
 - 2026-10-16 (#672): HTML submit ownership must honor explicit `form` attributes before ancestry and keep backend ids isolated by CDP session/document. Native DEFAULT and DOM submit markers are discovery hints only; preserve lexical exact-target behavior for unrelated queries and never turn markers into action substitution.
 
+- 2026-10-16 (#598 merge repair): Preserve asynchronous Chromium PDF reveal regressions alongside XTEST wheel-pacing regressions when both append to the Linux synthetic suite. A document-text hit has no table row index; retain its actual handle without click bounds while native extents settle.
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
 - 2026-10-16 (PR #677 repair): Claws Mail wizard page titles and unnamed entry row labels are independent naming fallbacks. Preserve both regression blocks when merging their appended tests; entry labels must retain native handles and measured bounds.
@@ -165,6 +166,8 @@
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
 
 - 2026-10-16 (#682): Thunar toolbar path entries can echo EditableText while leaving the navigation model stale. Retype through confirmed focus even when the buffer already equals the requested path; keep Return separate and verify navigation from location/title.
+- 2026-10-16 (PR #667 repair): Preserve Chromium PDF asynchronous-reveal notes and native DEFAULT submit-discovery notes together when adjacent backend documentation conflicts; they describe independent behaviors. Inspect the direct Actions job log when the failed-log command returns no output.
+
 - 2026-10-16 (PR #677 conflict repair): GTK sibling-row entry naming and native DEFAULT submit discovery are independent observation hints. Preserve both documentation blocks and test their combined synthetic behavior after merging main.
 
 
@@ -172,6 +175,10 @@
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
 
 - 2026-10-16 (PR #685 repair): Thunar toolbar path replacement and Chromium PDF thumbnail refusal protect independent action paths. Preserve both backend notes and regression blocks when merging main; neither requires changing the other action.
+- 2026-10-16 (PR #667 main merge): Keep asynchronous PDF find reveal tests alongside PDF thumbnail click refusals; finding a native text handle and verifying page navigation are independent guarantees.
+
+- 2026-10-16 (PR #667 default-state merge): Preserve the native IS_DEFAULT StateSet regression alongside asynchronous PDF reveal behavior; synthetic state-name fallbacks must not hide native enum mistakes.
+
 - 2026-10-16 (PR #677 merge): Claws Mail opaque list labels and wizard entry row labels are independent fallbacks. Preserve both complete regression blocks when merging their adjacent additions.
 
 
@@ -183,6 +190,8 @@
 
 - 2026-10-16 (PR #685 merge): Thunar path replacement and failed-navigation verification are complementary. Preserve focused replacement with a separate Return, and check navigation errors before accepting a changed accessibility tree as success.
 - 2026-10-16 (PR #685 live verification): Thunar can expose dialog-error-symbolic before and after successful navigation. A persistent icon alone is not a new failure; retain unchanged-window refusal and newly appearing error detection, and verify successful navigation with the live location and title.
+- 2026-10-16 (PR #667 validation): Run the full suite through `python -m pytest`: invoking pytest from stdin breaks multiprocessing spawn because `<stdin>` is not an importable file. Limit forced missing-GI checks to hermetic backend tests; Linux CLI, menu, and live checks can require the installed native binding even without a display.
+
 - 2026-10-16 (PR #677 CI review): Check failed-run job summaries against the current head before changing platform code; the older run failed only the tracked Calc timing test while Windows, macOS, Browser, and Package passed.
 
 - 2026-10-16 (PR #677 main merge): Preserve HTML popover coverage alongside GTK sibling-row entry naming when resolving appended tests and backend notes; these observation hints are independent.
@@ -194,3 +203,5 @@
 
 - 2026-10-16 (PR #685 CI repair): A failed short-budget agent test can stop in show-desktop setup before the agent runs. Reproduce both the test alone and after the preceding terminal-launch test under a real window manager before attributing that focus failure to unrelated text replacement code.
 - 2026-10-16 (#684): Qt text recovery must handle malformed QSpiTextRangeList replies and failures in the fallback Text read itself. Retry getText(0,-1) only for a native character count within the existing cap, then capped chunks; retain native character visibility checks and refuse incomplete reads.
+
+- 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
