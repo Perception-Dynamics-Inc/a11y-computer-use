@@ -2455,7 +2455,11 @@ class LinuxDriver:
                 # Selection or this combo's own entry. A miss raises before
                 # any keystroke, so the Runtime cannot type into a different
                 # focused field or leave the popup open.
-                self._run(lambda: _atspi.set_combo_value(handle, value))
+                display = self._run(lambda: _atspi._qt_quick_display(handle))
+                if display is not None and self._run(lambda: _atspi._combo_entry(handle)) is None:
+                    _atspi._set_qt_quick_combo(handle, display, value, run=self._run)
+                else:
+                    self._run(lambda: _atspi.set_combo_value(handle, value))
                 return True
             if kind == "value":
                 wrote = self._run(lambda: _atspi.set_numeric_value(handle, value))
