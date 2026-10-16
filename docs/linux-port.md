@@ -464,6 +464,13 @@ unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
 
+Chromium document-text `find` reveals use one native AT-SPI `TOP_LEFT`
+request. PDF viewers can update extents asynchronously; if the match is
+still outside the snapshot, it is returned as off-screen with no click
+bounds rather than reported missing. No table-row scrollbar position is
+inferred for a document-text match. This fallback has synthetic regression
+coverage; native PDF scrolling still requires live verification.
+
 Unnamed GTK single-line text fields can use a sibling label when its measured
 box lies to the left and fully within the field's row. This fallback requires
 one label and no other text editor on that row; missing or ambiguous geometry

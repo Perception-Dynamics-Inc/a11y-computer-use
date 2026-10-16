@@ -2934,7 +2934,7 @@ _IMPLICIT_CLICK_ROLES = frozenset(
 def _compact_value(text: str) -> str:
     """Escape line breaks so one snapshot field stays on one line.
 
-    ``Element.value`` keeps the real breaks. Compact output writes ``\\n``
+    Element titles and values keep the real breaks. Compact output writes ``\\n``
     and ``\\r`` so a multi-line document is not a space-separated line.
     A value with no break is returned unchanged, including a backslash.
     """
@@ -2961,7 +2961,7 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     role = el.role[2:].lower() if el.role.startswith("AX") else el.role.lower()
     parts = [el.ref, role]
     if el.title:
-        parts.append(f'"{el.title}"')
+        parts.append(f'"{_compact_value(el.title)}"')
     if el.role == "AXHeading" and el.heading_level is not None:
         parts.append(f"(level {el.heading_level})")
     if el.hint:
