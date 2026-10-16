@@ -724,7 +724,9 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "Finish the goal. conditions is 1 to 3 checks the loop re-runs against a fresh "
         "snapshot or the filesystem before it accepts success. Each condition is one of "
         '{"element": {"role", "name"}}, {"value": {"ref" or "name", "equals"}}, '
-        '{"window_title_contains": text}, {"file_exists": path, "contains"?: text}. '
+        '{"window_title_contains": text}, {"dir_exists": path}, '
+        '{"file_exists": path, "contains"?: text}. '
+        "For folder creation include dir_exists for the folder path. "
         "When the goal saves or creates a file, include file_exists, and contains "
         "for the text the file should hold. When the goal says to replace or "
         "remove text, contains is the new text, not the text being replaced or "

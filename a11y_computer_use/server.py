@@ -10201,7 +10201,8 @@ def build_server(
     async def wait_until(condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
         """Wait for something outside the accessibility tree, polling every
         poll_s seconds up to timeout_s (max 1800). condition is an object with
-        exactly one of: {"file_exists": path, "min_bytes": n} (a regular file;
+        exactly one of: {"dir_exists": path} (a directory, including an empty one),
+        {"file_exists": path, "min_bytes": n} (a regular file;
         path may use ~ and globs; newest match wins; default min_bytes is 1),
         {"file_stable": path, "seconds": n} (a regular file whose size is
         unchanged for n seconds: a finished download or render),

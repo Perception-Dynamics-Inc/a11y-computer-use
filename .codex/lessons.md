@@ -282,3 +282,5 @@
 
 - 2026-10-17 (PR #467 repair): When a Geany symbol double-click is unconfirmed, preserve main’s XTEST inter-click flush and pacing fix (#721) before adding caret/status workarounds. Validate symbol navigation and Scintilla viewport search together under a fresh Xvfb/Openbox/D-Bus session; XSync delivery alone does not verify navigation.
 - 2026-10-17 (PR #467 merge regression): Patching linux.time.sleep also patches the shared time module used by XTEST. Geany navigation tests must require both main’s 30 ms inter-click gap and the existing navigation polling pauses, including the refusal path.
+
+- 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
