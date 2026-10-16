@@ -467,3 +467,12 @@ Buttons exposing native AT-SPI IS_DEFAULT state (nick `is-default`) carry a `def
 Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;
 the marker does not change click behavior or safety checks.
+
+### Chromium PDF thumbnails
+
+Ref clicks on Chromium buttons named `Thumbnail for page N` are refused with
+`unsupported` / `pdf_thumbnail_unverified`. The native accessibility action can
+acknowledge a no-op, and page navigation is not verified by this path. This
+restriction also applies to fully visible thumbnails. Use a screenshot to choose
+a coordinate inside the visible thumbnail and check the viewer's page number
+after clicking. No scrolling or alternate action is substituted for the ref click.
