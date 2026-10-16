@@ -159,3 +159,5 @@
 
 - 2026-10-16 (#672 reopened): AT-SPI exposes StateType.IS_DEFAULT (nick is-default), not DEFAULT. Native StateSet has contains() but no names attribute; test that shape so synthetic fallback names cannot hide an incorrect enum lookup.
 - 2026-10-16 (#599): Chromium PDF thumbnail accessibility actions can return True without navigating. Ref clicks require a page-navigation verifier before success; until available, refuse with a coordinate-click hint rather than trust do_press, guess a visible point, or substitute another action.
+
+- 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
