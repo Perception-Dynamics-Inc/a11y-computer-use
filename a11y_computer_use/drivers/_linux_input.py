@@ -18,6 +18,7 @@ the focused-element typing path.
 from __future__ import annotations
 
 import math
+from time import sleep as _wheel_sleep
 from collections.abc import Sequence
 
 from contextlib import contextmanager
@@ -585,19 +586,28 @@ def _hops(x1: int, y1: int, x2: int, y2: int) -> list[tuple[int, int]]:
     return [(round(x1 + (x2 - x1) * i / n), round(y1 + (y2 - y1) * i / n)) for i in range(1, n + 1)]
 
 
-def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
-    """Wheel-notch scroll at (x, y): X buttons 4/5 vertical, 6/7 horizontal.
+WHEEL_NOTCH_INTERVAL_S = 0.12
 
-    One button tap per integer unit. This is the ``unit=lines`` path.
-    ``LinuxDriver`` must not call it for ``unit=pixels``: a notch is not a
-    pixel. Positive dy scrolls content up (wheel down)."""
+
+def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
+    """Wheel-notch input: X buttons 4/5 vertical, 6/7 horizontal.
+
+    One tap per integer line unit, not a verified pixel or row distance.
+    Sync each tap before pacing the next so Qt Quick does not coalesce
+    a queued burst. Positive dy scrolls content up (wheel down).
+    """
     from Xlib import X
 
     _move(x, y)
-    for _ in range(abs(int(dy))):
-        _fake(X.ButtonPress, 5 if dy > 0 else 4)
-        _fake(X.ButtonRelease, 5 if dy > 0 else 4)
-    for _ in range(abs(int(dx))):
-        _fake(X.ButtonPress, 7 if dx > 0 else 6)
-        _fake(X.ButtonRelease, 7 if dx > 0 else 6)
-    _flush()
+    first = True
+    for delta, positive, negative in ((dy, 5, 4), (dx, 7, 6)):
+        for _ in range(abs(int(delta))):
+            if not first:
+                _wheel_sleep(WHEEL_NOTCH_INTERVAL_S)
+            button = positive if delta > 0 else negative
+            _fake(X.ButtonPress, button)
+            _fake(X.ButtonRelease, button)
+            _flush()
+            first = False
+    if first:
+        _flush()  # deliver the pointer move even for a zero-notch request

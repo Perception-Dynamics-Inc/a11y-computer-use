@@ -287,6 +287,9 @@ class RawNode:
     #: when the driver could not separate the screen from the buffer. The
     #: snapshot shows this text; ``find`` still searches ``value``.
     screen_text: str | None = None
+    #: Explicit search value when displayed buffer contents have unverified visibility.
+    #: None keeps normal value indexing; an empty string excludes the buffer.
+    search_value: str | None = None
     #: A control the toolkit did not allocate, such as a notebook page tab
     #: while the tab bar is hidden. The snapshot keeps the name and does not
     #: invent a box. Also used for visible Evince page text whose native
@@ -2752,6 +2755,8 @@ def _flatten(
             value = _clip(raw_value, _MAX_VALUE_CHARS)
             if raw_value != value:
                 full_values[ref] = raw_value
+    if not secure and node.raw.search_value is not None:
+        full_values[ref] = node.raw.search_value
     out.append(
         Element(
             ref=ref,

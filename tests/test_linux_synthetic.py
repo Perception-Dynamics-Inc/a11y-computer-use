@@ -14869,3 +14869,26 @@ def test_pdf_thumbnail_guard_preserves_other_controls(fake_atspi, monkeypatch, a
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     element = Element("e599", role, title, None, None, "snap599", clickable=True)
     driver._refuse_unverified_pdf_thumbnail(element, button)
+
+
+@pytest.mark.parametrize("dx,dy", [(0, 1), (0, 3), (0, 10), (0, 20), (-2, -3), (2, 3), (0, 0)])
+def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, dx, dy) -> None:
+    """Queued taps must reach X before the pause, including between axes."""
+
+    events, _display = xtest_recorder
+    timeline = []
+    monkeypatch.setattr(_linux_input, "_flush", lambda: timeline.append(("sync", len(events))))
+    monkeypatch.setattr(_linux_input, "_wheel_sleep", lambda seconds: timeline.append(("sleep", seconds)))
+    _linux_input.scroll(100, 200, dx=dx, dy=dy)
+
+    buttons = [5 if dy > 0 else 4] * abs(dy) + [7 if dx > 0 else 6] * abs(dx)
+    assert events == [(_X_MOTION, 0, 100, 200)] + [
+        event for button in buttons
+        for event in [(_X_BPRESS, button, 0, 0), (_X_BRELEASE, button, 0, 0)]
+    ]
+    expected = []
+    for index in range(len(buttons)):
+        if index:
+            expected.append(("sleep", 0.12))
+        expected.append(("sync", 1 + 2 * (index + 1)))
+    assert timeline == (expected or [("sync", 1)])

@@ -386,6 +386,16 @@ clicks. It does not substitute keyboard input or claim cell-address navigation
 succeeded. Coordinate-only clicks do not identify an accessible control and are
 not covered by this guard.
 
+GTK 4 multiline text values include only complete lines whose AT-SPI text range
+fits inside the widget's WINDOW-coordinate rectangle. This avoids whole-buffer
+matches in `find` and `scroll_to_find` when SCREEN text coordinates and
+point-to-offset queries are unsupported. When range extents are unavailable,
+each character must have measured WINDOW extents inside the widget. Missing
+geometry leaves text unsearchable. GTK versions without either extent API
+retain labeled buffer contents for read-back, excluded from the search index.
+Partially clipped or horizontally overflowing lines are conservatively excluded.
+This does not change full-buffer write verification.
+
 GTK 4 tree-expander buttons exposing `listitem.toggle-expand` (or the
 state-appropriate `listitem.expand` / `listitem.collapse`) use that native action
 for a ref click. The driver verifies a change in the live `EXPANDED` state;
@@ -412,6 +422,13 @@ requires the requested value to read back. A clamped or unchanged value is an
 error. Qt spin buttons use the numeric role and writer rather than Text. Value
 writes do not guarantee Qt Quick user-interaction signals such as `moved` or
 `valueModified`. Other invalid bounds and non-numeric Qt roles remain excluded.
+
+
+X11 wheel line input syncs each notch and waits 120 ms between successive
+notches (including across axes), so Qt Quick does not receive one queued burst.
+Line units describe wheel input, not a guaranteed pixel or row distance.
+This pacing is covered by synthetic event-order tests; Qt Quick movement has
+not been live-verified for this change.
 
 ## Qt Quick combo selection
 
