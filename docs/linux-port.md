@@ -500,3 +500,11 @@ existing parent. An unchanged title alone does not prove that an error icon
 exists, so the result names the observed evidence. Successful navigation keeps
 the usual key result. Text read-back from `set_value` does not establish that a
 folder exists.
+
+### GTK icon-view ref clicks
+
+GTK icon-view children can report native AT-SPI `icon` or `image` roles; both
+appear as `AXImage` in snapshots. Their `activate` action opens the item rather
+than selecting it. Ref clicks use one pointer click at the item's measured
+bounds and require that it becomes the only selected child. An unavailable
+pointer path or unverified selection returns an error without invoking activate.

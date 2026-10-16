@@ -14265,7 +14265,7 @@ def gtk_icon_view_item(acc) -> bool:
     parent = _parent_of(acc)
     return (
         "gtk" in _toolkit_name(acc)
-        and _role_name(acc) == "image"
+        and _role_name(acc) in {"image", "icon"}
         and parent is not None
         and _role_name(parent) == "layered pane"
     )
