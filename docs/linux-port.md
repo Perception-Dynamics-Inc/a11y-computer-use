@@ -455,6 +455,14 @@ unchanged popup returns a refusal. Listing an unopened submenu opens it and
 closes it again. This path is covered by synthetic menu tests; native Qt Quick
 verification remains dependent on Linux CI.
 
+Claws Mail's GTK folder and message lists can expose only childless panels
+inside scroll panes in the main split-pane layout. These opaque regions are
+labelled `Claws Mail folder / message list` with a note that folder rows and
+message subjects are unavailable to `find` and `scroll_to_find`. The bridge
+provides no list-type identifier, so the label does not distinguish the two
+panes by size or position. Native names and bounds are preserved; this does
+not expose row refs or enable selecting a folder or message by name.
+
 Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
 Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;

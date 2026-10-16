@@ -14855,6 +14855,43 @@ def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, 
     assert timeline == (expected or [("sync", 1)])
 
 
+@pytest.mark.parametrize("case", [
+    "folder", "message", "other_app", "dialog", "no_split", "not_scroll",
+    "children", "named", "described", "text",
+])
+def test_claws_empty_list_surface_is_labelled_without_inventing_rows(monkeypatch, case):
+    """Both Claws lists stay opaque; unrelated panels retain their native labels."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_has_text_interface", lambda node: case == "text")
+    app = _Acc("application", name="other" if case == "other_app" else "claws-mail")
+    frame = _Acc("dialog" if case == "dialog" else "frame", name="Inbox - Claws Mail")
+    split = _Acc("panel" if case == "no_split" else "split pane")
+    scroll = _Acc("panel" if case == "not_scroll" else "scroll pane")
+    panel = _Acc("panel", width=525 if case == "message" else 255,
+                 height=155 if case == "message" else 468,
+                 name="Native list" if case == "named" else "")
+    panel.get_description = lambda: "Native description" if case == "described" else ""
+    if case == "children":
+        _adopt(panel, _Acc("table row", name="Inbox"))
+    _adopt(app, _adopt(frame, _adopt(split, _adopt(scroll, panel))))
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.title == panel.name
+    assert raw.position == (0.0, 0.0)
+    assert raw.size == ((525, 155) if case == "message" else (255, 468))
+    if case in {"folder", "message"}:
+        assert raw.surface_name == "Claws Mail folder / message list"
+        assert "not exposed by AT-SPI" in raw.note
+        assert "whole pane" in raw.note
+        opaque = observe._as_opaque_region(raw, [], 0)
+        assert opaque.role == "opaque_region"
+        assert opaque.title == raw.surface_name
+        assert opaque.value is None
+        assert _atspi.ATSPIAccessor().children(panel) == []
+    else:
+        assert raw.surface_name == ""
+
+
 @pytest.mark.parametrize("selected_index", [0, 1])
 def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index):
     titles = ["Welcome to Claws Mail", "About You", "Receiving mail"]
