@@ -508,3 +508,11 @@ popover disappears from the fresh snapshot, resolution refuses with
 `stale_ref` (`reason=popover_closed`) and asks to reopen and re-observe it,
 without suggesting unrelated controls at the old tree position. Absence from
 the snapshot does not prove the dismissal mechanism.
+
+### GTK icon-view ref clicks
+
+GTK icon-view children can report native AT-SPI `icon` or `image` roles; both
+appear as `AXImage` in snapshots. Their `activate` action opens the item rather
+than selecting it. Ref clicks use one pointer click at the item's measured
+bounds and require that it becomes the only selected child. An unavailable
+pointer path or unverified selection returns an error without invoking activate.

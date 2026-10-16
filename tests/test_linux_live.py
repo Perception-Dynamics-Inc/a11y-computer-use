@@ -13770,3 +13770,79 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
         assert "row=ROW-" not in shown
     finally:
         _stop(proc)
+
+
+def test_linux_gtk_icon_view_ref_click_selects_without_activation(tmp_path) -> None:
+    """Real GtkIconView signals distinguish single selection from opening (#533)."""
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use import observe
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuaiconprobe.py"
+    events = tmp_path / "events.txt"
+    script.write_text(textwrap.dedent('''
+        import gi
+        import sys
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib, GdkPixbuf
+        GLib.set_prgname("cuaiconprobe")
+        store = Gtk.ListStore(GdkPixbuf.Pixbuf, str)
+        for name in ("Apple", "Banana", "Cherry", "Damson"):
+            image = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 64, 64)
+            image.fill(0x336699ff)
+            store.append([image, name])
+        icons = Gtk.IconView(model=store)
+        icons.set_pixbuf_column(0)
+        icons.set_text_column(1)
+        icons.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
+        def log(message):
+            with open(sys.argv[1], "a") as stream:
+                stream.write(message + "\\n")
+        icons.connect("item-activated", lambda view, path: log("ACTIVATED " + store[path][1]))
+        icons.connect("selection-changed", lambda view: log(
+            "SELECTED " + ",".join(sorted(store[path][1] for path in view.get_selected_items()))))
+        win = Gtk.Window(title="cuaiconprobe")
+        win.set_default_size(500, 240)
+        win.add(icons)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        icons.select_path(Gtk.TreePath.new_from_string("0"))
+        win.present()
+        Gtk.main()
+    '''))
+    proc = subprocess.Popen([sys.executable, str(script), str(events)])
+    try:
+        deadline = time.monotonic() + 15
+        shot = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuaiconprobe")
+                if any(el.title == "Cherry" for el in shot.elements):
+                    break
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            time.sleep(0.1)
+        assert shot is not None
+        cherry = _by_title(shot, "Cherry", "AXImage")
+        handle = observe.ax_handle_for(cherry.snapshot_id, cherry.ref)
+        # This is the native role the old image-only predicate missed.
+        assert driver._run(lambda: _atspi._role_name(handle)) == "icon"
+        store = safety.PermissionStore(tmp_path / "permissions.json")
+        store.set_tier("cuaiconprobe", safety.Tier.FULL)
+        runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+        runtime._current = shot
+        assert "clicked" in runtime.click(cherry.ref)
+        after = driver.snapshot(Scope.WINDOW, "cuaiconprobe")
+        assert _by_title(after, "Cherry").selected is True
+        assert _by_title(after, "Apple").selected is not True
+        lines = events.read_text().splitlines()
+        assert "SELECTED Apple" in lines
+        assert lines[-1] == "SELECTED Cherry", lines
+        assert not any(line.startswith("ACTIVATED") for line in lines), lines
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
