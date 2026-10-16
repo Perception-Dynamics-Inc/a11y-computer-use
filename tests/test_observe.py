@@ -665,6 +665,33 @@ def test_render_keeps_line_breaks_in_the_value_and_escapes_them_on_one_line() ->
     assert "AAA BBB" not in change
 
 
+@pytest.mark.parametrize("separator", ["\n", "\r\n", "\r"])
+def test_render_names_escape_line_breaks_without_changing_matches(separator: str) -> None:
+    """Multiline native names occupy one line in tree and find output."""
+    title = "Adwaita\\dark" + separator + "Gtk3, Gtk2"
+    shown = "Adwaita\\\\dark" + separator.replace("\r", "\\r").replace("\n", "\\n") + "Gtk3, Gtk2"
+    snap = snap_of(ax(
+        "AXWindow", title="Themes", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[ax(
+            "AXCell", title=title, value=title, actions=("AXPress",),
+            at=(10.0, 40.0), size=(350.0, 42.0),
+        )],
+    ))
+    cell = by_title(snap, title)
+    assert cell.title == title
+    matches = observe.find_elements(snap, text=title)
+    assert list(matches) == [cell]
+    for rendered in (
+        render_text(snap),
+        render_text(snap, mode="interactive"),
+        observe.render_matches(snap, matches),
+    ):
+        lines = rendered.splitlines()
+        assert len(lines) == (2 if "match(es)" in rendered else 3)
+        line = next(line for line in lines if line.strip().startswith(cell.ref + " "))
+        assert f'cell "{shown}" ="{shown}"' in line
+
+
 def test_estimate_tokens_works_on_foreign_snapshots(synthetic_snapshot: Snapshot) -> None:
     # conftest's snapshot was not built by observe: no epoch metadata, no
     # markers — rendering and the estimate must still work.
