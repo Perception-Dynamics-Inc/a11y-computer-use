@@ -3448,16 +3448,29 @@ def test_qt_toggle_click_uses_the_visible_part_of_the_bounds(fake_atspi, monkeyp
 
 @pytest.mark.parametrize("action", ["Press", "Click", "activate", "select"])
 @pytest.mark.parametrize("toggle_first", [False, True])
-def test_qt_control_with_another_activating_action_keeps_atspi(
+def test_qt_control_with_another_action_uses_pointer_only_for_press_pair(
     fake_atspi, monkeypatch, action, toggle_first,
 ):
     actions = ("Toggle", "SetFocus", action) if toggle_first else (action, "Toggle", "SetFocus")
     driver, control, element, action_log, events = _toggle_click_target(
         monkeypatch, actions=actions,
     )
-    assert driver.press_element(element) is True
-    assert action_log == [actions[0]]
-    assert events == [("raise", control)]
+    if action == "Press":
+        def pointer_click(x, y, *, button="left", count=1):
+            events.append(("click", x, y, button, count))
+            control.states.symmetric_difference_update({"CHECKED"})
+            control.handler_ran = True
+
+        monkeypatch.setattr(_linux_input, "click", pointer_click)
+        assert driver.press_element(element) is True
+        assert action_log == []
+        assert control.handler_ran is True
+        assert "CHECKED" in control.states
+        assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+    else:
+        assert driver.press_element(element) is True
+        assert action_log == [actions[0]]
+        assert events == [("raise", control)]
 
 
 def test_qt_toggle_on_wayland_keeps_atspi(fake_atspi, monkeypatch):
@@ -14271,6 +14284,77 @@ def test_html_section_text_keeps_empty_wrappers_and_secrets_private(fake_atspi, 
     assert _atspi.ATSPIAccessor().read(section).value is None
 
 
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("actions", [
+    ("listitem.collapse", "listitem.expand", "listitem.toggle-expand"),
+    ("listitem.collapse", "listitem.expand"),
+])
+@pytest.mark.parametrize("effect", ["changed", "noop", "failed", "focus_other_row"])
+def test_gtk4_tree_expander_click_verifies_expansion(monkeypatch, fake_atspi, expanded, actions, effect):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    node = _Acc("button", name="96.04% ScanMe", states={"EXPANDABLE", "SHOWING"})
+    if expanded:
+        node.states.add("EXPANDED")
+    calls = []
+    other = _Acc("table row", name="home")
+
+    def do_action(index):
+        calls.append(actions[index])
+        if effect == "changed":
+            node.states.symmetric_difference_update({"EXPANDED"})
+        elif effect == "focus_other_row":
+            other.states.add("FOCUSED")
+        return effect != "failed"
+
+    node.get_action_iface = lambda: _NS(
+        get_n_actions=lambda: len(actions),
+        get_action_name=lambda index: actions[index],
+        do_action=do_action,
+    )
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda acc: acc is node)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    assert _atspi._action_names(node) == ("AXPress",)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (
+        True, False, None, False, "EXPANDED" in acc.states, False, False,
+    ))
+    raw = _atspi.ATSPIAccessor().read(node)
+    assert raw.actions == ("AXPress",)
+    assert raw.expanded is expanded
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *_args: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: node)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer sent"))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda *_args: None)
+    element = Element("e618", "AXButton", node.name, None, None, "snap618", clickable=True)
+    if effect == "changed":
+        assert driver.press_element(element) is True
+        assert _atspi._state_has(node, "EXPANDED") is not expanded
+        assert _atspi.ATSPIAccessor().read(node).expanded is not expanded
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "expanded_unchanged"
+    expected = "listitem.toggle-expand" if "listitem.toggle-expand" in actions else (
+        "listitem.collapse" if expanded else "listitem.expand"
+    )
+    assert calls == [expected]
+
+
+@pytest.mark.parametrize("gtk4,role,expandable", [(False, "button", True), (True, "table cell", True), (True, "button", False)])
+def test_gtk4_tree_expander_action_mapping_is_scoped(monkeypatch, gtk4, role, expandable):
+    node = _Acc(role, states={"EXPANDABLE"} if expandable else set())
+    node.get_action_iface = lambda: _NS(get_n_actions=lambda: 1,
+        get_action_name=lambda _index: "listitem.toggle-expand")
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda _acc: gtk4)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: state in acc.states)
+    assert _atspi._action_names(node) == ()
+    assert not _atspi.gtk4_tree_expander(node)
+
+
 @pytest.mark.parametrize("chromium, child_role, child_name, expected", [
     (True, "button", "Billing section", "AXStaticText"),
     (True, "push button", "Billing section", "AXStaticText"),
@@ -14557,3 +14641,128 @@ def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, 
     api = type("API", (), {"Text": Text, "TextGranularity": type("Granularity", (), {"LINE": 0})})
     monkeypatch.setattr(_atspi, "_atspi", lambda: api)
     assert _atspi.is_secure(acc) is (side != "ordinary")
+
+
+@pytest.mark.parametrize("role", ["check box", "toggle button", "radio button"])
+@pytest.mark.parametrize("checked", [False, True])
+@pytest.mark.parametrize("changes", [False, True])
+def test_qt_quick_checkable_click_verifies_handler_effect(
+    fake_atspi, monkeypatch, role, checked, changes,
+):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role=role, actions=("Toggle", "Press", "SetFocus"),
+    )
+    if checked:
+        control.states.add("CHECKED")
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+
+    def pointer_click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        if changes:
+            control.states.symmetric_difference_update({"CHECKED"})
+            control.handler_ran = True
+
+    monkeypatch.setattr(_linux_input, "click", pointer_click)
+    if changes:
+        assert driver.press_element(element) is True
+        assert control.handler_ran is True
+        assert ("CHECKED" in control.states) is not checked
+    else:
+        with pytest.raises(ComputerUseError, match="did not change the checked state") as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "checked_unchanged"
+    assert action_log == []
+    assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("bounds,wayland", [
+    (None, False), (Bounds(0, 40, 60, 0, 20), False),
+    (Bounds(0, -200, 60, 100, 20), False),
+    (Bounds(0, 40, 60, 100, 20), True),
+])
+def test_qt_quick_checkable_refuses_without_pointer_input(fake_atspi, monkeypatch, bounds, wayland):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=("Toggle", "Press", "SetFocus"), bounds=bounds,
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: wayland)
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("role", ["push button", "list item"])
+@pytest.mark.parametrize("toolkit", ["Qt", "gtk"])
+def test_qt_quick_action_pair_does_not_redirect_other_controls(fake_atspi, monkeypatch, role, toolkit):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit=toolkit, role=role, actions=("Press", "Toggle", "SetFocus"),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["Press"]
+    assert events == [("raise", control)]
+
+
+def test_qt_quick_pointer_failure_never_falls_back(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=("Toggle", "Press", "SetFocus"),
+    )
+
+    def failed_click(*args, **kwargs):
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "pointer input failed")
+
+    monkeypatch.setattr(_linux_input, "click", failed_click)
+    with pytest.raises(ComputerUseError, match="pointer input failed"):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("role,initial,wanted", [("slider", 25, "70"), ("spin button", 5, "12")])
+def test_qt_quick_unknown_range_value_write(fake_atspi, monkeypatch, role, initial, wanted):
+    """Qt Quick's broken bounds must not hide or divert its working Value."""
+    node = _Acc(role, name="Control", value=initial, minimum=0, maximum=0)
+    app = _Acc("application", name="qml")
+    app.get_toolkit_name = lambda: "Qt"
+    node.get_application = lambda: app
+    node.get_value_iface = lambda: node
+    node.get_text_iface = lambda: None
+    node.on_value = lambda acc, number: setattr(acc, "value", number) or True
+    raw = _atspi.ATSPIAccessor().read(node)
+    assert raw.role == ("AXSlider" if role == "slider" else "AXSpinButton")
+    assert float(raw.value) == initial
+    assert _atspi.control_kind(node) == "value"
+    element = Element("e1", raw.role, "Control", raw.value,
+                      Bounds(0, 0, 0, 100, 20), "qt-unknown-range")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: node)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(_atspi, "set_text", lambda *_args, **_kwargs: pytest.fail("numeric control used Text"))
+    assert driver.set_value(element, wanted) is True
+    assert node.value == float(wanted)
+    assert float(_atspi.ATSPIAccessor().read(node).value) == float(wanted)
+    # Unknown means neither bound is trusted, including the reported minimum.
+    assert driver.set_value(element, "-5") is True
+    assert node.value == -5
+    node.on_value = lambda acc, number: setattr(acc, "value", 0) or True
+    monkeypatch.setattr(_atspi.time, "sleep", lambda *_args: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(element, wanted)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    with pytest.raises(ValueError, match="not a number"):
+        driver.set_value(element, "nan")
+
+
+@pytest.mark.parametrize("role,span,present", [
+    ("label", (0, 0), True), ("text", (0, 0), True),
+    ("progress bar", (0, 0), True), ("slider", (0, 0), False),
+    ("slider", (1, 1), True), ("slider", (6.9e-310, 6.9e-310), True),
+])
+def test_qt_unknown_range_exception_stays_scoped(fake_atspi, role, span, present):
+    node = _Acc(role, value=25, minimum=span[0], maximum=span[1])
+    app = _Acc("application", name="qml")
+    app.get_toolkit_name = lambda: "Qt"
+    node.get_application = lambda: app
+    node.get_value_iface = lambda: node if present else None
+    assert _atspi.control_kind(node) is None
+    assert _atspi._value_text(node, _atspi._ROLE[role], role) is None
