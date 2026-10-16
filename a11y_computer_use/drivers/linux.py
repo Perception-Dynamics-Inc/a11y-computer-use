@@ -2116,6 +2116,29 @@ class LinuxDriver:
                 "and make it current",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # Qt Quick advertises both Toggle (no user signals) and Press
+        # (a no-op). Only a real click invokes the application's handlers.
+        if self._run(lambda: _atspi.qt_quick_checkable(handle)):
+            bounds = element.bounds
+            if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "Qt Quick checkable has no usable screen bounds")
+            if _on_wayland():
+                raise _wayland_input_error("click")
+            width, height = _screen_span()
+            left, top = max(0, bounds.x), max(0, bounds.y)
+            right = min(width, bounds.x + bounds.width)
+            bottom = min(height, bounds.y + bounds.height)
+            if right <= left or bottom <= top:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, "Qt Quick checkable has no on-screen bounds")
+            before = self._run(lambda: _atspi.checked_state(handle))
+            self.click(Point(bounds.display_id, (left + right) // 2, (top + bottom) // 2))
+            if self._run(lambda: _atspi.checked_state_flipped(handle, before)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the checked state",
+                detail={"ref": element.ref, "role": element.role, "reason": "checked_unchanged"},
+            )
         # Qt's Toggle flips a button/item's state without clicked/triggered/
         # itemClicked, so the application's handlers never run. Send one
         # real click at the visible center, after raising the owning window
