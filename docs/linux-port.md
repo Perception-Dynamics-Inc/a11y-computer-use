@@ -508,6 +508,12 @@ Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;
 the marker does not change click behavior or safety checks.
 
+Thunar toolbar location entries use confirmed focus, select-all and real typed
+input for `set_value`, with text read-back. This updates the path model that
+AT-SPI EditableText alone leaves stale. `set_value` does not navigate: send
+`key("Return", app="thunar")` separately and verify the changed location and
+window title. Without X11 keyboard input, this replacement is refused.
+
 ### Chromium PDF thumbnails
 
 Ref clicks on Chromium buttons named `Thumbnail for page N` are refused with

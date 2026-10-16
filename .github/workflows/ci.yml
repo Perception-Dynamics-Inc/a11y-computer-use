@@ -386,7 +386,7 @@ jobs:
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
-            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py tests/test_evince_page_text.py tests/test_linux_swing_live.py tests/test_inkscape_canvas.py tests/test_inkscape_zoom.py tests/test_inkscape_toolbar.py -v -rs --tb=line -p no:cacheprovider
+            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_thunar_path.py tests/test_evince_thumbnails.py tests/test_evince_page_text.py tests/test_linux_swing_live.py tests/test_inkscape_canvas.py tests/test_inkscape_zoom.py tests/test_inkscape_toolbar.py -v -rs --tb=line -p no:cacheprovider
           '
 
   package:

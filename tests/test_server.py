@@ -4756,3 +4756,22 @@ def test_linux_keypad_enter_keeps_native_keysym():
     from a11y_computer_use.drivers import _linux_input
 
     assert _linux_input._parse_chord("KP_Enter") == ([], 0xFF8D)
+
+
+def test_thunar_location_return_ignores_unchanged_error_icon_after_navigation():
+    """Thunar can expose its entry icon even before successful navigation."""
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = type("Driver", (), {"name": "linux"})()
+
+    def snapshot(title):
+        return Snapshot("s", Scope.WINDOW, "thunar", None, 0, (), (
+            Element("w", "AXWindow", title, None, None, "s", path=("AXWindow",)),
+            Element("b", "AXToolbar", "", None, None, "s", parent="w"),
+            Element("e", "AXTextField", "", "/destination", None, "s",
+                    parent="b", focused=True, editable=True),
+            Element("i", "AXImage", "dialog-error-symbolic", None, None, "s", parent="e"),
+        ))
+
+    before = snapshot("home - Thunar")
+    assert rt._location_return_failure(before, snapshot("destination - Thunar")) is None
+    assert "window title did not change" in rt._location_return_failure(before, before)
