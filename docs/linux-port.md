@@ -417,3 +417,13 @@ notches (including across axes), so Qt Quick does not receive one queued burst.
 Line units describe wheel input, not a guaranteed pixel or row distance.
 This pacing is covered by synthetic event-order tests; Qt Quick movement has
 not been live-verified for this change.
+
+## Qt Quick combo selection
+
+For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable
+Text display children as write targets. It opens the combo with one click at
+its measured center and selects the exact option from a newly shown menu in
+that native frame. Success requires the display Text to match and the popup
+to close. Missing geometry, ambiguous popups, and uncommitted selections return
+errors. Editable Qt entries retain their text-write path. This behavior is
+hermetic-tested; native Qt Quick verification remains a CI/live check.

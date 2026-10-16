@@ -137,3 +137,5 @@
 
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
 - 2026-10-16 (#595): XTEST wheel taps need both per-notch sync and real time between taps; sleeping while events remain queued still delivers a coalescible burst to Qt Quick. Wheel line units describe input notches, not verified pixels or rows.
+
+- 2026-10-16 (PR #659 repair): Qt Quick combo selection and numeric Value-interface support are independent behaviors. Preserve both backend documentation blocks when resolving adjacent additions; verify combo regressions alongside numeric Qt tests after merging main.
