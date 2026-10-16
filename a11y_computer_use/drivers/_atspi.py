@@ -3819,10 +3819,16 @@ def _bands_for_snapshot(rows: list[tuple]) -> list:
     """Row accessibles, grouped when they would exceed the snapshot child cap."""
     if len(rows) <= MAX_CHILDREN:
         return [acc for acc, _pos, _size in rows]
-    return [
-        _OnScreenBand(rows[start:start + MAX_CHILDREN])
+    chunks = [
+        rows[start:start + MAX_CHILDREN]
         for start in range(0, len(rows), MAX_CHILDREN)
     ]
+    # A singleton wrapper collapses in the shared pruner, leaving its cell
+    # beside the other bands. Keep the tail band structural without changing
+    # cell order, native handles, geometry, or the child cap.
+    if len(chunks[-1]) == 1:
+        chunks[-1].insert(0, chunks[-2].pop())
+    return [_OnScreenBand(chunk) for chunk in chunks]
 
 
 def _cached_rows_for_snapshot(bounds: dict, accs: list) -> list:
