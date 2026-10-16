@@ -510,11 +510,17 @@ def hover(x: int, y: int) -> None:
 def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
     """Synthesize a mouse click at screen (x, y). Only used when the a11y press
     path is unavailable (coordinate/vision fallback)."""
+    import time
     from Xlib import X
 
     _move(x, y)  # queued; X processes the motion before the buttons
     num = _BUTTON_NUM.get(button, 1)
-    for _ in range(max(1, count)):
+    for index in range(max(1, count)):
+        if index:
+            # Deliver the previous click before waiting: Engrampa ignores
+            # zero-gap synthetic click pairs (#710).
+            _flush()
+            time.sleep(0.03)
         _fake(X.ButtonPress, num)
         _fake(X.ButtonRelease, num)
     _flush()
