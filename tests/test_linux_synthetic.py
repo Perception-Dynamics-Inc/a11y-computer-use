@@ -14832,6 +14832,45 @@ def test_qt_unknown_range_exception_stays_scoped(fake_atspi, role, span, present
     assert _atspi._value_text(node, _atspi._ROLE[role], role) is None
 
 
+@pytest.mark.parametrize("method", ["press_element", "click"])
+@pytest.mark.parametrize("y", [606, 710])
+def test_pdf_thumbnail_refuses_unverified_navigation(fake_atspi, monkeypatch, method, y):
+    app = _Acc("application", name="Google Chrome")
+    button = _Acc("push button", name="Thumbnail for page 4")
+    button.get_application = lambda: app
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: button)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "do_press", lambda *_args: pytest.fail("unverified action sent"))
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer sent"))
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: pytest.fail("window raised"))
+    element = Element("e599", "AXButton", "Thumbnail for page 4", None,
+                      Bounds(0, 4, y, 285, 189), "snap599", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        getattr(driver, method)(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "pdf_thumbnail_unverified"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "coordinate" in exc.value.detail["hint"]
+
+
+@pytest.mark.parametrize("app_name,role,title", [
+    ("Firefox", "AXButton", "Thumbnail for page 4"),
+    ("Google Chrome", "AXButton", "Next page"),
+    ("Google Chrome", "AXImage", "Thumbnail for page 4"),
+    ("Google Chrome", "AXButton", "Thumbnail for page notes"),
+])
+def test_pdf_thumbnail_guard_preserves_other_controls(fake_atspi, monkeypatch, app_name, role, title):
+    app = _Acc("application", name=app_name)
+    button = _Acc("push button", name=title)
+    button.get_application = lambda: app
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e599", role, title, None, None, "snap599", clickable=True)
+    driver._refuse_unverified_pdf_thumbnail(element, button)
+
+
 @pytest.mark.parametrize("dx,dy", [(0, 1), (0, 3), (0, 10), (0, 20), (-2, -3), (2, 3), (0, 0)])
 def test_wheel_notches_are_delivered_before_pacing(xtest_recorder, monkeypatch, dx, dy) -> None:
     """Queued taps must reach X before the pause, including between axes."""
@@ -14871,6 +14910,43 @@ def test_html_popover_panel_keeps_top_layer_role(monkeypatch, mode):
     assert accessor.read(_NS(role="push button")).role == "AXButton"
     monkeypatch.setattr(_atspi, "_state_has", lambda acc, state: False)
     assert accessor.read(_NS(role="panel")).role == "AXGroup"
+
+
+@pytest.mark.parametrize("case", [
+    "folder", "message", "other_app", "dialog", "no_split", "not_scroll",
+    "children", "named", "described", "text",
+])
+def test_claws_empty_list_surface_is_labelled_without_inventing_rows(monkeypatch, case):
+    """Both Claws lists stay opaque; unrelated panels retain their native labels."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_has_text_interface", lambda node: case == "text")
+    app = _Acc("application", name="other" if case == "other_app" else "claws-mail")
+    frame = _Acc("dialog" if case == "dialog" else "frame", name="Inbox - Claws Mail")
+    split = _Acc("panel" if case == "no_split" else "split pane")
+    scroll = _Acc("panel" if case == "not_scroll" else "scroll pane")
+    panel = _Acc("panel", width=525 if case == "message" else 255,
+                 height=155 if case == "message" else 468,
+                 name="Native list" if case == "named" else "")
+    panel.get_description = lambda: "Native description" if case == "described" else ""
+    if case == "children":
+        _adopt(panel, _Acc("table row", name="Inbox"))
+    _adopt(app, _adopt(frame, _adopt(split, _adopt(scroll, panel))))
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.title == panel.name
+    assert raw.position == (0.0, 0.0)
+    assert raw.size == ((525, 155) if case == "message" else (255, 468))
+    if case in {"folder", "message"}:
+        assert raw.surface_name == "Claws Mail folder / message list"
+        assert "not exposed by AT-SPI" in raw.note
+        assert "whole pane" in raw.note
+        opaque = observe._as_opaque_region(raw, [], 0)
+        assert opaque.role == "opaque_region"
+        assert opaque.title == raw.surface_name
+        assert opaque.value is None
+        assert _atspi.ATSPIAccessor().children(panel) == []
+    else:
+        assert raw.surface_name == ""
 
 
 @pytest.mark.parametrize("selected_index", [0, 1])

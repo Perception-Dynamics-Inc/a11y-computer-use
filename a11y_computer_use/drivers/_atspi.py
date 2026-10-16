@@ -1381,6 +1381,30 @@ def _okular_thumbnail_surface(node) -> tuple[str, str]:
     return "", ""
 
 
+def _claws_list_surface(node) -> bool:
+    """Recognize Claws' empty list panels without guessing which list it is."""
+    if _child_count(node) != 0 or _has_text_interface(node):
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() not in {"claws-mail", "claws mail"}:
+        return False
+    parent = _parent_of(node)
+    if parent is None or _role_name(parent) != "scroll pane":
+        return False
+    split = False
+    for _ in range(20):
+        parent = _parent_of(parent)
+        if parent is None:
+            return False
+        role = _role_name(parent)
+        if role in {"dialog", "tool bar", "page tab", "page tab list", "application"}:
+            return False
+        if role in {"frame", "window"}:
+            return split
+        split = split or role == "split pane"
+    return False
+
+
 def _okular_page_surface(node) -> bool:
     """Recognize Okular's opaque document viewport from its tree context."""
     if _child_count(node) != 0 or not _parent_of(node):
@@ -4033,6 +4057,17 @@ class ATSPIAccessor:
             if search_value is not None else ""
         )
         panel_note = ""
+        if (
+            role_str == "panel" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
+            and value is None and _claws_list_surface(node)
+        ):
+            surface_name = "Claws Mail folder / message list"
+            panel_note = (
+                "Folder rows and message subjects are not exposed by AT-SPI; "
+                "find and scroll_to_find cannot read or target those rows. "
+                "This ref identifies the whole pane; its list type is unavailable."
+            )
         if (
             role_str == "drawing area"
             and not str(name).strip() and not str(description).strip()

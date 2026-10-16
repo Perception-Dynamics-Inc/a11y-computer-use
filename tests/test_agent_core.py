@@ -1183,6 +1183,21 @@ def test_txt_goal_prompt_names_a_plain_text_editor(tmp_path, monkeypatch):
     assert hint not in other.seen[0][0].content
 
 
+@pytest.mark.parametrize(("goal", "expected"), [
+    ("On http://127.0.0.1:18800/inj/settings switch the theme to Dark and save the settings.", False),
+    ("On https://example.com/files/report.pdf save the settings.", False),
+    ("On CUSTOM+v1.2://example.com/documents save the settings.", False),
+    ("save it to ~/notes.txt", True),
+    ("download https://x/y.pdf to ~/Downloads", True),
+    ("Save as report.pdf", True),
+    ("On https://example.com/settings save the document", True),
+])
+def test_file_goal_ignores_urls(goal, expected):
+    from a11y_computer_use.agent.core import goal_writes_a_file
+
+    assert goal_writes_a_file(goal) is expected
+
+
 def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkeypatch):
     """A saved-file goal is not proven by the window title. Not a named task."""
     from a11y_computer_use.agent.core import file_evidence_error, goal_writes_a_file, known_file_text

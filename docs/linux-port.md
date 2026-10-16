@@ -463,7 +463,25 @@ popover remain eligible; dismiss the covering popover before retrying a covered
 ref. This check uses the accessibility tree because Chrome's accessible
 hit test can return the underlying control.
 
+
+Claws Mail's GTK folder and message lists can expose only childless panels
+inside scroll panes in the main split-pane layout. These opaque regions are
+labelled `Claws Mail folder / message list` with a note that folder rows and
+message subjects are unavailable to `find` and `scroll_to_find`. The bridge
+provides no list-type identifier, so the label does not distinguish the two
+panes by size or position. Native names and bounds are preserved; this does
+not expose row refs or enable selecting a folder or message by name.
+
 Buttons exposing native AT-SPI DEFAULT state carry a `default` snapshot flag.
 Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;
 the marker does not change click behavior or safety checks.
+
+### Chromium PDF thumbnails
+
+Ref clicks on Chromium buttons named `Thumbnail for page N` are refused with
+`unsupported` / `pdf_thumbnail_unverified`. The native accessibility action can
+acknowledge a no-op, and page navigation is not verified by this path. This
+restriction also applies to fully visible thumbnails. Use a screenshot to choose
+a coordinate inside the visible thumbnail and check the viewer's page number
+after clicking. No scrolling or alternate action is substituted for the ref click.
