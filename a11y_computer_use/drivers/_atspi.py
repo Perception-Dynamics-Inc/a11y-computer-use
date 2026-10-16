@@ -3221,61 +3221,82 @@ def _qt_viewport_text(acc) -> str | None:
     Atspi = _atspi()
     coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
-    if clip is None:
+    ranges = None
+    if clip is not None:
+        ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
+            acc, *map(int, box), coord, clip, clip,
+        ))
+    if ranges:
+        # A malformed/marshalling-failed reply is as unusable as no reply.
+        try:
+            contents = [span.content for span in ranges]
+            if any(contents) and all(isinstance(content, str) for content in contents):
+                return "\n".join(contents)
+        except Exception:
+            pass
+    # Qt commonly leaves GetBoundedRanges unimplemented. Use native
+    # point offsets and character rectangles instead, never the buffer
+    # alone. These reads are repeated after every scroll.
+    left, top, width, height = map(int, box)
+    offsets = [
+        _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
+        for x in (left, left + width - 1)
+        for y in (top, top + height - 1)
+    ]
+    if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
+        # Qt 5.15 cannot marshal bounded ranges and may reject corner
+        # offsets too. Read a capped raw prefix, then verify visibility
+        # through native character rectangles before making it searchable.
+        count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        start, end = 0, min(count, _PAGE_TEXT_CHARS)
+    else:
+        start = min(offsets)
+        end = min(max(offsets) + 1, start + _PAGE_TEXT_CHARS)
+    text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
+    if not isinstance(text, str) or (not text and end > start):
+        # Some Qt Text implementations reject explicit end offsets while
+        # accepting the end-of-buffer sentinel. Only request the whole
+        # buffer when its native count fits the existing read budget.
+        count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        valid_count = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        if valid_count and count <= _PAGE_TEXT_CHARS:
+            text = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+            start, end = 0, count
+        if not isinstance(text, str) or (not text and end > start):
+            # A failed large read may still support small explicit reads.
+            # Never publish a partial result when a chunk is unavailable.
+            chunks = []
+            for offset in range(start, end, 256):
+                stop = min(offset + 256, end)
+                chunk = _safe(lambda offset=offset, stop=stop:
+                              Atspi.Text.get_text(acc, offset, stop))
+                if not isinstance(chunk, str) or len(chunk) != stop - offset:
+                    return None
+                chunks.append(chunk)
+            text = "".join(chunks)
+    if not isinstance(text, str):
         return None
-    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
-        acc, *map(int, box), coord, clip, clip,
-    ))
-    if not ranges:
-        # Qt commonly leaves GetBoundedRanges unimplemented. Use native
-        # point offsets and character rectangles instead, never the buffer
-        # alone. These reads are repeated after every scroll.
-        left, top, width, height = map(int, box)
-        offsets = [
-            _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
-            for x in (left, left + width - 1)
-            for y in (top, top + height - 1)
-        ]
-        if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
-            # Qt 5.15 cannot marshal bounded ranges and may reject corner
-            # offsets too. Read a capped raw prefix, then verify visibility
-            # through native character rectangles before making it searchable.
-            count = _safe(lambda: Atspi.Text.get_character_count(acc))
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                return None
-            start, end = 0, min(count, _PAGE_TEXT_CHARS)
+    visible = []
+    clipped = False
+    for index, char in enumerate(text[:end - start]):
+        rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
+            acc, start + index, coord,
+        ))
+        hits = _rect_hits_box(rect, box)
+        if hits is None:
+            return None
+        # Keep a separator at clipped characters so two disconnected
+        # visible fragments cannot manufacture a substring match.
+        if hits:
+            if clipped and visible:
+                visible.append("\n")
+            visible.append(char)
+            clipped = False
         else:
-            start = min(offsets)
-            end = min(max(offsets) + 1, start + _PAGE_TEXT_CHARS)
-        text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
-        if not isinstance(text, str):
-            return None
-        visible = []
-        clipped = False
-        for index, char in enumerate(text[:end - start]):
-            rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
-                acc, start + index, coord,
-            ))
-            hits = _rect_hits_box(rect, box)
-            if hits is None:
-                return None
-            # Keep a separator at clipped characters so two disconnected
-            # visible fragments cannot manufacture a substring match.
-            if hits:
-                if clipped and visible:
-                    visible.append("\n")
-                visible.append(char)
-                clipped = False
-            else:
-                clipped = True
-        return "".join(visible)
-    try:
-        contents = [span.content for span in ranges]
-        if not all(isinstance(content, str) for content in contents):
-            return None
-        return "\n".join(contents)
-    except (AttributeError, TypeError):
-        return None
+            clipped = True
+    return "".join(visible)
 
 
 def _evince_page(node) -> bool:
