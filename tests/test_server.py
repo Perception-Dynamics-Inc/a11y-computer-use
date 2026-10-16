@@ -4775,3 +4775,38 @@ def test_thunar_location_return_ignores_unchanged_error_icon_after_navigation():
     before = snapshot("home - Thunar")
     assert rt._location_return_failure(before, snapshot("destination - Thunar")) is None
     assert "window title did not change" in rt._location_return_failure(before, before)
+
+
+@pytest.mark.parametrize("path", ["/home/user/home/", "/home/user/Downloads/", "/home/user/Projects/2026/"])
+@pytest.mark.parametrize("prior_icon", [False, True])
+@pytest.mark.parametrize("matching_entry", [False, True])
+def test_thunar_location_return_checks_destination_before_error_icon(path, prior_icon, matching_entry):
+    """A newly visible icon cannot contradict observed destination navigation."""
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = type("Driver", (), {"name": "linux"})()
+
+    def snapshot(epoch, title, value, icon):
+        elements = [
+            Element("w", "AXWindow", title, None, None, epoch, path=("AXWindow",)),
+            Element("b", "AXToolbar", "", None, None, epoch, parent="w"),
+            Element("e", "AXTextField", "", value, None, epoch,
+                    parent="b", focused=True, editable=True),
+        ]
+        if icon:
+            elements.append(Element("i", "AXImage", "dialog-error-symbolic", None, None,
+                                    epoch, parent="e"))
+        return Snapshot(epoch, Scope.WINDOW, "thunar", None, 0, (), tuple(elements))
+
+    before = snapshot("before", "parent - Thunar", path, prior_icon)
+    after = snapshot("after", f"{path.rstrip('/').rsplit('/', 1)[-1]} - Thunar",
+                     path.rstrip("/") if matching_entry else "/different", True)
+    failure = rt._location_return_failure(before, after)
+    if matching_entry or prior_icon:
+        assert failure is None
+    else:
+        assert "entry shows an error icon" in failure
+    # A matching typed path without a title change still proves no navigation.
+    unchanged = dataclasses.replace(after, elements=(
+        dataclasses.replace(after.elements[0], title="parent - Thunar"), *after.elements[1:],
+    ))
+    assert rt._location_return_failure(before, unchanged).startswith("location not opened:")

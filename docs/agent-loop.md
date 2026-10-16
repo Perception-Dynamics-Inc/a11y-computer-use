@@ -179,3 +179,8 @@ Rules, in order:
 
 After a `title_changed` result, call `find(text=...)` or `scroll_to_find` and
 act on the ref it returns.
+
+Folder-creation goals require a `done` condition `{"dir_exists": "~/Projects/2026"}`.
+This checks the actual directory, including an empty folder, under the same home-path
+restriction as file conditions. `file_exists` still requires a regular file;
+a goal that also saves a file needs file evidence as well.
