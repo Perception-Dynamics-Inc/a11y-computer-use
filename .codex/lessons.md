@@ -144,3 +144,4 @@
 - 2026-10-14 (PR #626 merge repair): Preserve GTK buffer search exclusion and Kate owner detection together when merging adjacent snapshot rules; they protect independent toolkit visibility paths.
 
 - 2026-10-16 (PR #626 merge repair): GTK 4 verified text visibility and GTK 4 tree-expander click verification are independent behaviors; preserve both backend notes when their adjacent documentation conflicts.
+- 2026-10-16 (PR #659 repair): Qt Quick combo selection and numeric Value-interface support are independent behaviors. Preserve both backend documentation blocks when resolving adjacent additions; verify combo regressions alongside numeric Qt tests after merging main.
