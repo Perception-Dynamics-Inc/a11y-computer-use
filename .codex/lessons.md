@@ -309,4 +309,9 @@
 
 - 2026-10-17 (PR #746 repair): Preserve Scribus embedded Properties-cell hints alongside PCManFM opaque-folder labels and Qt viewport regressions when merging appended tests; each describes a separate native accessibility limitation. Keep both the Scribus guidance and Qt menu-cleanup documentation.
 
+- 2026-10-17 (#697 reopened): Same-filesystem moves/renames preserve mtime. POSIX ctime can establish metadata freshness only for relocation-only goals; Windows ctime is creation time. Keep save/content checks on mtime and exclude the write-clock slack from relocation checks so a recently pre-existing untouched file cannot pass.
+
+- 2026-10-17 (#686 reopened): libatspi Text.get_character_count returns 0 even on Scribus cells advertising no Text interface; use the advertised interfaces for opaque-widget detection. Test real leading column headers and item-widget overhangs. Discovery cover probes need the owning-window intersection, while action probes retain the actual input point. Failed find results must retain all distinct content notes so a document note cannot hide a palette limitation.
 - 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.
+
+- 2026-10-17 (PR #768 repair): Relocation freshness and multi-call screen-change guards are independent agent guarantees. Preserve both documentation blocks when merging them, and run the file-evidence and fingerprint regressions together.

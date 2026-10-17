@@ -1420,7 +1420,14 @@ def _scribus_embedded_properties(node) -> bool:
     if (frame is None or _role_name(frame) not in {"frame", "window"}
             or _node_name(frame).casefold() != "properties"):
         return False
-    if _has_text_interface(node):
+    # libatspi's Text.get_character_count can return 0 for a node without
+    # Text. Prefer the native interface list over that ambiguous sentinel.
+    interfaces = _call_first(node, ("get_interfaces",))
+    if interfaces is not None:
+        if any(str(interface).rsplit(".", 1)[-1] in {"Text", "EditableText"}
+               for interface in interfaces):
+            return False
+    elif _has_text_interface(node):
         return False
     # The content item immediately follows its expanded section header.
     previous = None
@@ -4535,12 +4542,13 @@ class ATSPIAccessor:
             hint = (hint + "; " if hint else "") + (
                 "Visible document text unavailable; use in-document Find or line navigation"
             )
-        if (
+        embedded_properties = (
             role_str == "table cell" and not str(name).strip()
             and not str(description).strip() and value is None
             and size is not None and size[0] > 0 and size[1] > 0
             and _scribus_embedded_properties(node)
-        ):
+        )
+        if embedded_properties:
             hint = (hint + "; " if hint else "") + (
                 "Embedded widgets are not exposed to accessibility; "
                 "inspect a screenshot and use coordinate clicks or keyboard input. "
@@ -4551,6 +4559,8 @@ class ATSPIAccessor:
             "Buffer contents; text visibility unavailable, excluded from text search."
             if search_value is not None else ""
         )
+        if embedded_properties:
+            content_note = hint
         panel_note = ""
         if (
             role_str == "panel" and role == "AXGroup"
