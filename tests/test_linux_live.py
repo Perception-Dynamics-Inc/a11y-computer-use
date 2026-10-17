@@ -13513,7 +13513,12 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
     if not binary:
         pytest.skip("geany is not installed")
     lines = ["# pad"] * 300
-    lines.extend(["def target_fn_row150():", "    return 1", ""])
+    # An adjacent symbol makes a one-row pointer offset observable; clicking
+    # empty tree space can otherwise navigate using the previous selection.
+    lines.extend([
+        "def target_fn_row150():", "    return 1", "",
+        "def z_other_symbol():", "    return 2", "",
+    ])
     document = tmp_path / "geany-sym.py"
     document.write_text("\n".join(lines))
     home = tmp_path / "geany-home"

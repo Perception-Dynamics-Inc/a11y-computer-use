@@ -2903,12 +2903,19 @@ class LinuxDriver:
         destination = None
         if handle is not None and button is MouseButton.LEFT and count == 2 and not modifiers:
             destination = self._run(lambda: _atspi.geany_symbol_destination(handle))
+        # Native refs identify the application whose geometry we measured.
+        # A background LibreOffice frame can overlap those pixels; its
+        # title-bar correction must not move a click aimed at another app.
+        office_pointer = handle is None or self._run(
+            lambda: _atspi.libreoffice_app(_atspi._application_name(handle))
+        )
+        px, py = self._pointer(x, y) if office_pointer else (x, y)
         if isinstance(target, Element):
             self._verify_chromium_pointer_target(target, handle, x, y)
-        px, py = self._pointer(x, y)
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
-        self._note_pointer(x, y)
+        if office_pointer:
+            self._note_pointer(x, y)
         if destination is not None:
             # XSync acknowledges delivery to X, not Geany's navigation. Wait
             # on the caller so the AT-SPI event thread can process the change.

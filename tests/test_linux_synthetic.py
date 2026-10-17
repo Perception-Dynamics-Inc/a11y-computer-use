@@ -16867,3 +16867,38 @@ def test_geany_navigation_failure_evidence_contains_only_line_numbers(
     evidence = {"old": "must be cleared"}
     assert _atspi.geany_symbol_arrived((301, [status]), evidence=evidence) is False
     assert evidence == {"expected_line": 301, "status_lines": expected, "caret_lines": []}
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("app,shifted", [("geany", False), ("mousepad", False), ("soffice", True)])
+def test_native_ref_click_does_not_borrow_background_office_geometry(
+    fake_atspi, monkeypatch, app, shifted, count,
+):
+    from a11y_computer_use.drivers import _linux_input
+
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = app
+    status = _Acc("status bar", name="line: 301 / 303")
+    _adopt(window, window.children[0], status)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    shot = driver.snapshot(Scope.WINDOW, app)
+    cell = next(el for el in shot.elements if "target_fn" in el.title)
+    assert cell.bounds is not None
+    x = int(cell.bounds.x + cell.bounds.width / 2)
+    y = int(cell.bounds.y + cell.bounds.height / 2)
+    corrections = []
+    notes = []
+    clicks = []
+
+    def background_office_shift(px, py):
+        corrections.append((px, py))
+        return 0, 21
+
+    monkeypatch.setattr(_atspi, "libreoffice_pointer_shift", background_office_shift)
+    monkeypatch.setattr(_atspi, "note_libreoffice_pointer", lambda px, py: notes.append((px, py)))
+    monkeypatch.setattr(_linux_input, "click", lambda px, py, **kw: clicks.append((px, py, kw)))
+    driver.click(cell, count=count)
+    assert clicks == [(x, y + (21 if shifted else 0), {"button": "left", "count": count})]
+    assert corrections == ([(x, y)] if shifted else [])
+    assert notes == ([(x, y)] if shifted else [])
