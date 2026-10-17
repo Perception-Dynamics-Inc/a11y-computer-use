@@ -2896,7 +2896,7 @@ def test_text_binds_complete_keymap_before_first_keystroke(xtest_recorder, monke
     assert {kc: syms for kc, syms in display.keymap.items() if any(syms)} == original_mapping
 
 
-def test_text_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, monkeypatch) -> None:
+def test_bind_all_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, monkeypatch) -> None:
     """Exhausted keycodes must not silently truncate a partly typed string."""
     import time
 
@@ -2907,7 +2907,7 @@ def test_text_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, mo
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     with pytest.raises(ValueError, match="2 unmapped characters.*1 spare keycodes"):
-        _linux_input.type_string("q@ü")
+        _linux_input._TempKeymap().bind_all([ord("@"), ord("ü")])
 
     assert events == []
     assert display.remapped == []
@@ -16147,3 +16147,77 @@ def test_claws_wizard_icon_does_not_allow_borrowing_a_field_caption(monkeypatch)
     _PageNode("dialog", "Claws Mail Setup Wizard", children=[tab])
     monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
     assert _atspi._claws_wizard_page_title(tab) == ""
+
+
+@pytest.mark.parametrize("text,capacity", [
+    ("q@üq@", 1),
+    ("qабвгдежзийклмнопрстуфхцчшщъыьэюяq", 19),
+    ("مرحبا بكم في موقعنا الجديد، نتمنى لكم تجربة ممتعة وسهلة", 19),
+])
+def test_text_runs_settle_before_reusing_keycodes(xtest_recorder, monkeypatch, text, capacity):
+    import time
+
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: list(range(256 - capacity, 256)))
+    pending = []
+    translated = []
+    flushed = False
+
+    def tap(kc, shift):
+        pending.append((kc, shift))
+
+    def flush():
+        nonlocal flushed
+        flushed = True
+
+    def sleep(seconds):
+        nonlocal flushed
+        if seconds == 0.05:
+            assert flushed
+            translated.extend(display.keycode_to_keysym(kc, int(shift)) for kc, shift in pending)
+            pending.clear()
+            flushed = False
+
+    change = display.change_keyboard_mapping
+
+    def checked_change(first, mapping):
+        assert not pending, "mapping changed before the client translated queued input"
+        change(first, mapping)
+
+    monkeypatch.setattr(display, "change_keyboard_mapping", checked_change)
+    monkeypatch.setattr(_linux_input, "_tap_keycode", tap)
+    monkeypatch.setattr(_linux_input, "_flush", flush)
+    monkeypatch.setattr(time, "sleep", sleep)
+    _linux_input.type_string(text)
+    assert translated == [_linux_input._char_keysym(ch) for ch in text]
+    assert not pending
+    assert all(not any(display.keymap[kc]) for kc in range(256 - capacity, 256))
+
+
+def test_text_no_spares_refuses_before_ascii_prefix(xtest_recorder, monkeypatch):
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: [])
+    with pytest.raises(ValueError, match="1 unmapped characters.*0 spare keycodes"):
+        _linux_input.type_string("qü")
+    assert events == []
+    assert display.remapped == []
+
+
+def test_text_run_restores_keymap_on_input_failure(xtest_recorder, monkeypatch):
+    import time
+
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: [255])
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    def fail(*args):
+        raise RuntimeError("input failed")
+
+    monkeypatch.setattr(_linux_input, "_tap_keycode", fail)
+    with pytest.raises(RuntimeError, match="input failed"):
+        _linux_input.type_string("ü@")
+    assert display.remapped == [(255, ord("ü")), (255, 0)]
