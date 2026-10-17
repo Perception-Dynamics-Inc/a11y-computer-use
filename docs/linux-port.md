@@ -28,6 +28,14 @@ hermetic snapshot and find tests; live Calc verification is pending.
 
 ## Files in opaque file-manager views
 
+PCManFM's default Icon View can publish a childless panel under `View of
+folder contents`, even while the status bar counts files. The driver labels
+this opaque region `PCManFM folder contents` and reports that file icons are
+unavailable to `find`, ref-based file clicks, and `scroll_to_find`. The pane ref
+identifies the whole surface, never an individual file. Explicitly choose
+View > Folder View Mode > Detailed List View to expose named table cells;
+the driver does not switch views automatically or synthesize icon targets.
+
 Thunar 4.20 exposes named cells in List View, but its Icon and Compact views
 can expose only an unnamed `opaque_region`. The Linux `files` helper supports
 named file tasks without clicking that surface. Configure the MCP server's

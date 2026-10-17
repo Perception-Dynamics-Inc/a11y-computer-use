@@ -15839,3 +15839,49 @@ def test_entry_relation_labels_precede_tooltips(fake_atspi, monkeypatch, role, d
             if role == "password text":
                 assert found[0].secure is True
                 assert found[0].value is None
+
+
+@pytest.mark.parametrize("case", ["opaque", "other_app", "other_scroll", "children", "named", "text", "detailed"])
+def test_pcmanfm_empty_icon_view_reports_missing_file_accessibility(monkeypatch, case):
+    """#670: label the limitation without fabricating named file targets."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_has_text_interface", lambda node: case == "text")
+    panel = _Acc("table" if case == "detailed" else "panel",
+                 name="Native" if case == "named" else "", width=525, height=468)
+    cell = _Acc("table cell", name="FILE-001.txt")
+    if case in {"children", "detailed"}:
+        _adopt(panel, cell)
+    scroll = _Acc("scroll pane", name="Other" if case == "other_scroll" else "View of folder contents")
+    app = _Acc("application", name="other" if case == "other_app" else "pcmanfm")
+    panel.get_application = lambda: app
+    _adopt(app, _adopt(_Acc("frame", name="Files"), _adopt(scroll, panel)))
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(panel)
+    assert raw.title == panel.name
+    assert raw.position == (0.0, 0.0)
+    assert raw.size == (525, 468)
+    if case == "opaque":
+        assert raw.surface_name == "PCManFM folder contents"
+        opaque = observe._as_opaque_region(raw, [], 0)
+        assert opaque.role == "opaque_region"
+        assert opaque.title == "PCManFM folder contents"
+        assert "not exposed by AT-SPI" in opaque.note
+        assert "Detailed List View" in opaque.note
+        assert opaque.value is None
+        assert accessor.children(panel) == []
+        # The panel commonly fills its parent; shared pruning must still
+        # publish the warning rather than discard a duplicate empty group.
+        tree = (RawNode(role="AXScrollArea", title=scroll.name,
+                        position=raw.position, size=raw.size), [(raw, [])])
+        snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                              app="pcmanfm", pid=670, geometry=_geometry())
+        regions = observe.find_elements(snap, role="opaque_region")
+        assert len(regions) == 1
+        assert regions[0].title == "PCManFM folder contents"
+        assert "Detailed List View" in regions[0].note
+        assert not observe.find_elements(snap, text="FILE-001")
+    else:
+        assert raw.surface_name == ""
+    if case == "detailed":
+        assert accessor.read(cell).title == "FILE-001.txt"
