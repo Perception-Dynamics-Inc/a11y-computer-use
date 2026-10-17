@@ -225,3 +225,5 @@
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
 
 - 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
+
+- 2026-10-17 (PR #735 repair): Preserve Kate character-viewport scroll-search regressions and GTK entry relation-label regressions together when merging appended tests; editor visibility and field naming are independent behaviors.
