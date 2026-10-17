@@ -293,6 +293,8 @@
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
 
 - 2026-10-17 (PR #467 diagnosis): A passing isolated Geany run does not explain a repeated CI navigation refusal. Measure the whole Runtime double-click under CI’s Xvfb/Openbox session, assert the five-second bound in the live regression, and retain the native navigation assertions. Keep each parallel D-Bus session’s XDG_CACHE_HOME unique; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS.
+- 2026-10-17 (#665): Calc type read-back prefers the transient cell editor over focused text. Probe that editor first to avoid a discarded focus-tree traversal; preserve the focused-text fallback for empty/missing editors and keep every read live across input. Standalone native call counts are instrumentation evidence, not proof of the loaded five-second CI bound.
+
 - 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
 
 - 2026-10-17 (PR #467 main merge): Retain Scintilla visibility checks alongside main's native-click popover-refresh gate. The previously failing Geany symbol double-click and both document-visibility live regressions pass together after the merge under private Xvfb/Openbox/D-Bus; this local pass does not establish the cause of the earlier CI refusal.
@@ -302,4 +304,9 @@
 - 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.
 
 - 2026-10-17 (PR #467 merge validation): Keep Scintilla buffer visibility filtering alongside Kate's native-character viewport search and target-bound popover evidence when merging main. The Geany symbol-click, Scintilla reveal, and GTK TextView reveal regressions passed together in five consecutive private Xvfb/Openbox/D-Bus runs; those passes do not establish the cause of the earlier CI navigation refusal.
+- 2026-10-17 (PR #738 repair): Preserve Calc editor-first read-back regressions alongside PCManFM opaque-view and Qt viewport regressions when appended tests conflict. The failed Linux job contained only the tracked Calc five-second timing flake; retain all action verification and timing bounds.
+
+
 - 2026-10-17 (PR #746 repair): Preserve Scribus embedded Properties-cell hints alongside PCManFM opaque-folder labels and Qt viewport regressions when merging appended tests; each describes a separate native accessibility limitation. Keep both the Scribus guidance and Qt menu-cleanup documentation.
+
+- 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.

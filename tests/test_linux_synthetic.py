@@ -16144,6 +16144,40 @@ def test_entry_relation_labels_precede_tooltips(fake_atspi, monkeypatch, role, d
                 assert found[0].value is None
 
 
+@pytest.mark.parametrize("editor", ["42", "", None])
+def test_calc_type_readback_avoids_discarded_focus_walk(monkeypatch, editor) -> None:
+    """Read the live editor first; empty/missing editors retain focus fallback."""
+    calls = []
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+
+    def editor_text(app):
+        calls.append(("editor", app))
+        return editor
+
+    def focused_text(app):
+        calls.append(("focus", app))
+        return "selected cell"
+
+    monkeypatch.setattr(_atspi, "sheet_editor_text", editor_text)
+    monkeypatch.setattr(_atspi, "focused_text", focused_text)
+    assert driver._typed_readback("soffice.bin") == (editor or "selected cell")
+    assert calls == [("editor", "soffice.bin")] + (
+        [] if editor else [("focus", "soffice.bin")]
+    )
+    # The next read must observe disappearance of the transient editor.
+    calls.clear()
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda app: None)
+    assert driver._typed_readback("soffice.bin") == "selected cell"
+    assert calls == [("focus", "soffice.bin")]
+    calls.clear()
+    assert driver._typed_readback("gedit") == "selected cell"
+    assert calls == [("focus", "gedit")]
+    calls.clear()
+    assert driver._typed_readback(None) is None
+    assert calls == []
+
+
 @pytest.mark.parametrize("case", [
     "embedded", "other_app", "other_window", "dialog", "not_tree", "collapsed",
     "named", "described", "children", "text", "missing_bounds", "first_cell",
