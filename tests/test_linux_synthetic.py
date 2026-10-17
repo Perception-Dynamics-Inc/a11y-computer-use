@@ -15885,3 +15885,58 @@ def test_pcmanfm_empty_icon_view_reports_missing_file_accessibility(monkeypatch,
         assert raw.surface_name == ""
     if case == "detailed":
         assert accessor.read(cell).title == "FILE-001.txt"
+
+
+@pytest.mark.parametrize("toolkit", ["Qt", "qt", "Qt 5.15.15", "Qt 6.8.2"])
+@pytest.mark.parametrize("offsets_available", [True, False])
+def test_qt_viewport_skips_bounded_ranges_and_rechecks_visibility(
+    monkeypatch, toolkit, offsets_available,
+):
+    """#687: repeated Qt reads never invoke the nonanswering range method."""
+    app = _NS(get_toolkit_name=lambda: toolkit)
+    editor = _NS(get_application=lambda: app)
+    text = "VISIBLE\nHIDDEN" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    checked = []
+    viewport = {"line": 0}
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def bounded(*args):
+        pytest.fail("Qt must never wait for GetBoundedRanges")
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        return text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        line = 0 if offset < 7 else 1 if 8 <= offset < 14 else 2
+        return _NS(x=20, y=40 if line == viewport["line"] else 900,
+                   width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=lambda acc, x, y, coord: (
+                (0 if y == 30 else 13) if offsets_available else -1
+            ),
+            get_character_count=lambda acc: len(text),
+            get_text=get_text,
+            get_character_extents=rectangle,
+        ),
+    ))
+    for line, expected in [(0, "VISIBLE"), (1, "HIDDEN"), (0, "VISIBLE")]:
+        viewport["line"] = line
+        assert _atspi._qt_viewport_text(editor) == expected
+    end = 14 if offsets_available else _atspi._PAGE_TEXT_CHARS
+    assert reads == [(0, end)] * 3
+    assert checked == list(range(end)) * 3
+    # A readable buffer without native geometry remains unverifiable.
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0),
+        Text=_NS(get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text), get_text=get_text,
+                 get_character_extents=lambda *args: None),
+    ))
+    assert _atspi._qt_viewport_text(editor) is None
