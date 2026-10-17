@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from a11y_computer_use.agent.actions import Action
@@ -11,6 +12,11 @@ from a11y_computer_use.schema import Element, Snapshot
 
 _COMPONENTS = frozenset({"app", "window", "url", "focus", "tree"})
 _LOCAL = frozenset({"focus", "tree"})
+# Editors mark unsaved documents in the window title (Mousepad/gedit "*doc",
+# VS Code "● doc", "doc (modified)"). An edit's own dirty marker is not a
+# screen change; any other title change still is (#787).
+_DIRTY_EDGE = "*●•"
+_DIRTY_SUFFIX = re.compile(r"\s*(?:[-–—]\s*modified|\(modified\)|\[modified\])$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -41,8 +47,27 @@ class ScreenFingerprint:
         }
 
 
+def normalize_title(title: str | None) -> str | None:
+    """Drop leading/trailing unsaved-document markers from a window title."""
+    if not title:
+        return title
+    text = title.strip()
+    while True:
+        stripped = _DIRTY_SUFFIX.sub("", text).strip(_DIRTY_EDGE).strip()
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def _window_identity(windows: tuple) -> tuple:
+    return tuple((ref, role, normalize_title(title)) for ref, role, title in windows)
+
+
 def diff(before: ScreenFingerprint, after: ScreenFingerprint) -> set[str]:
-    return {key for key in _COMPONENTS if getattr(before, key) != getattr(after, key)}
+    changed = {key for key in _COMPONENTS if getattr(before, key) != getattr(after, key)}
+    if "window" in changed and _window_identity(before.window) == _window_identity(after.window):
+        changed.discard("window")
+    return changed
 
 
 def expected_changes(action: Action, target: Element | None = None) -> frozenset[str]:

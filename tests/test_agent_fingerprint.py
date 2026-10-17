@@ -182,3 +182,71 @@ def test_implicit_type_stops_when_focus_leaves_the_original_field(tmp_path):
     assert result.step_log[0].verified
     assert result.step_log[0].turn_stop == "screen_change"
     assert len(rt.calls) == 1 and rt.observations == 2
+
+
+@pytest.mark.parametrize("before,after", [
+    ("notes.txt - Mousepad", "*notes.txt - Mousepad"),
+    ("notes.txt (~/docs) - gedit", "*notes.txt (~/docs) - gedit"),
+    ("notes.txt - Visual Studio Code", "● notes.txt - Visual Studio Code"),
+    ("notes.txt", "• notes.txt"),
+    ("notes.txt", "notes.txt *"),
+    ("notes.txt", "notes.txt (modified)"),
+    ("notes.txt", "notes.txt - Modified"),
+    ("notes.txt", "notes.txt [modified]"),
+    ("*notes.txt - Mousepad", "notes.txt - Mousepad"),  # save clears the marker
+])
+def test_dirty_marker_title_flip_is_not_a_window_change(before, after):
+    rt = CountingRuntime()
+    replace_ref(rt, "e1", title=before)
+    rt.desktop_snapshot("demo")
+    first = rt._current
+    replace_ref(rt, "e1", title=after)
+    rt.desktop_snapshot("demo")
+    second = rt._current
+    assert diff(
+        ScreenFingerprint.from_snapshot(first, snapshot_digest(first, "")),
+        ScreenFingerprint.from_snapshot(second, snapshot_digest(second, "")),
+    ) <= {"tree"}
+
+
+@pytest.mark.parametrize("before,after", [
+    ("notes.txt - Mousepad", "*other.txt - Mousepad"),
+    ("notes.txt - Mousepad", "Save As"),
+    ("Inbox (3) - Mail", "Inbox (4) - Mail"),
+    ("notes.txt", "notes.txt.bak"),
+])
+def test_real_title_change_still_counts_as_window_change(before, after):
+    rt = CountingRuntime()
+    replace_ref(rt, "e1", title=before)
+    rt.desktop_snapshot("demo")
+    first = rt._current
+    replace_ref(rt, "e1", title=after)
+    rt.desktop_snapshot("demo")
+    second = rt._current
+    assert "window" in diff(
+        ScreenFingerprint.from_snapshot(first, snapshot_digest(first, "")),
+        ScreenFingerprint.from_snapshot(second, snapshot_digest(second, "")),
+    )
+
+
+def test_first_edit_dirty_title_does_not_stop_the_turn(tmp_path):
+    """#787: Mousepad adds '*' to the title on the first edit; the queued calls must still run."""
+    rt = CountingRuntime()
+    replace_ref(rt, "e1", title="notes.txt - Mousepad")
+
+    def mutate(name, params, runtime):
+        if name == "type":
+            current = next(item.value for item in runtime.elements if item.ref == "e2")
+            replace_ref(runtime, "e2", value=(current or "") + params["text"])
+        replace_ref(runtime, "e1", title="*notes.txt - Mousepad")
+
+    rt.on_call = mutate
+    result, _, rt, _ = run(ScriptedModel([turn(
+        ToolCall("type", {"ref": "e2", "text": "hello"}),
+        ToolCall("type", {"ref": "e2", "text": " world"}),
+        ToolCall("key", {"chord": "ctrl+a"}),
+    )]), [], runtime=rt, trace_dir=tmp_path, max_steps=3)
+    assert [name for name, _ in rt.calls] == ["type", "type", "key"]
+    assert not result.skipped_steps
+    assert all(s.turn_stop != "screen_change" and not s.skipped for s in result.step_log)
+    assert [s.verified for s in result.step_log[:2]] == [True, True]
