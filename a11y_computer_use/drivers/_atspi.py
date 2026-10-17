@@ -12378,6 +12378,55 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
+def sheet_key_state(app: str, previous: tuple | None = None) -> tuple | None:
+    """Read a bounded Calc selection, then reread those exact native cells.
+
+    No truncated selection is used as evidence. Missing Text, changed windows,
+    editors and dialogs retain the ordinary outcome fallback.
+    """
+    if not libreoffice_app(app):
+        return None
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    table = _find_spreadsheet(root, [80])
+    if table is None:
+        return None
+    focused, truncated = _focused_node(app)
+    if truncated or focused is None or _role_name(focused) not in {"table", "table cell"}:
+        return None
+    if previous is not None:
+        old_table, records = previous
+        if table != old_table:
+            return None
+        cells = [record[0] for record in records]
+    else:
+        iface = _call_first(table, ("get_selection_iface", "get_selection"))
+        count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+        if not isinstance(count, int) or count < 0 or count > 256:
+            return None
+        cells = [
+            _call_first(iface, ("get_selected_child", "getSelectedChild"), index)
+            for index in range(count)
+        ]
+        if not cells:
+            cells = [cell for cell in _sheet_window_cells(table) if _state_flags(cell)[1]]
+            if len(cells) != 1:
+                return None
+    result = []
+    for index, cell in enumerate(cells):
+        if cell is None or _role_name(cell) != "table cell" or is_secure(cell):
+            return None
+        address = sheet_address(_node_name(cell))
+        text = _full_text(cell)
+        if address is None or text is None:
+            return None
+        if previous is not None and address != records[index][1]:
+            return None
+        result.append((cell, address, text))
+    return (table, tuple(result))
+
+
 def focused_key_evidence(app: str) -> tuple:
     """``(text, caret, selection start, selection end, cell address)``.
 
