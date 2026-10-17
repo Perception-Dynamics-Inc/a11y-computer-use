@@ -725,8 +725,11 @@ is checked afresh on every fallback read.
 
 Calc action outcomes first use the driver's app-bound, one-use verified typed
 text, or a live change in the selected cell address for a key. Those cases avoid
-an additional full-window outcome snapshot. Missing or mismatched typed evidence,
-unchanged or missing cell addresses, and clicks retain the full-window fallback.
+an additional full-window outcome snapshot. When Calc's Selection interface is
+empty, key evidence uses the focused visible cell's native address, as click
+verification already does. A published Selection address takes precedence.
+Missing or mismatched typed evidence, unchanged or missing cell addresses, and
+clicks retain the full-window fallback.
 After a targeted check, actions requiring a tree comparison refresh their
 baseline before input; the old tree is not treated as current. Process-exit
 checks remain active. This path has hermetic regression coverage; no live Calc
