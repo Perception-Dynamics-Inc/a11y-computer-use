@@ -2089,6 +2089,10 @@ class Runtime:
     _screen_text: "ocr.ScreenText | None" = None
     _ocr_engine: "ocr.OcrEngine | None" = None
     _ocr_seq: int = 0
+    #: The snapshot whose refs the agent was last given, and the other app's
+    #: snapshot before it while the current app is not re-observed (#836).
+    _last_issued: "Snapshot | None" = None
+    _foreign_issued: "Snapshot | None" = None
     # Defaults support lightweight __new__ test doubles. Every initialized
     # Runtime has its own lock and lifecycle state below.
     _operation_lock = RLock()
@@ -3334,6 +3338,68 @@ class Runtime:
 
     # -- target resolution ----------------------------------------------------
 
+    def _note_issued(self, snap: Snapshot) -> None:
+        """Remember which app issued the refs the agent was just given.
+
+        Refs restart at ``e1`` in every snapshot, so after a snapshot of app
+        B a ref the agent copied from app A's snapshot names some unrelated
+        element of B (#836). The previous app's snapshot is kept while the
+        agent has not re-observed the current app: a ref that both issued
+        is ambiguous, and the paths that would act on the wrong app with it
+        (a two-ref drag, a ref click that raises its app over another
+        window) refuse it. A second snapshot of the same app clears it.
+        """
+        app = getattr(snap, "app", None)
+        last = getattr(self, "_last_issued", None)
+        self._last_issued = snap
+        if last is None or not app or not getattr(last, "app", None):
+            self._foreign_issued = None
+        elif last.app != app:
+            self._foreign_issued = last
+        else:
+            self._foreign_issued = None
+
+    def _other_app_snapshot(self, ref: str | None) -> Snapshot | None:
+        """The other app's snapshot that also issued ``ref``, or None."""
+        if not isinstance(ref, str) or ocr.is_ocr_ref(ref):
+            return None
+        foreign = getattr(self, "_foreign_issued", None)
+        issued = getattr(self, "_last_issued", None)
+        current = getattr(self, "_current", None)
+        if foreign is None or issued is None or current is None:
+            return None
+        # Refs resolve in the current snapshot. It must still be the app the
+        # agent last observed, and the other snapshot another app's.
+        if current.app != issued.app or foreign.app == current.app:
+            return None
+        try:
+            foreign.element(ref)
+        except KeyError:
+            return None
+        return foreign
+
+    def _other_snapshot_error(self, ref: str, foreign: Snapshot, verb: str) -> ComputerUseError:
+        """``stale_ref`` for a ref that an earlier snapshot of another app issued."""
+        current = self._current
+        here = current.app if current is not None else None
+        return ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{ref} is ambiguous: it was issued by the {foreign.app} snapshot "
+            f"{foreign.snapshot_id} and by the current {here} snapshot "
+            f"{current.snapshot_id if current is not None else None}; refs restart "
+            f"in every snapshot, so {verb} was not sent. Re-snapshot the app you mean, "
+            "or give the other app's end as x,y from its snapshot's bounds",
+            detail={
+                "ref": ref,
+                "reason": "other_snapshot",
+                "issued_by_app": foreign.app,
+                "issued_by_snapshot": foreign.snapshot_id,
+                "current_app": here,
+                "current_snapshot": current.snapshot_id if current is not None else None,
+                "outcome": "refused",
+            },
+        )
+
     def _require_snapshot(self, ref: str) -> Snapshot:
         if self._current is None:
             raise ComputerUseError(
@@ -4420,6 +4486,7 @@ class Runtime:
             prev = self._current if mode == "diff" else None
             snap = self.driver.snapshot(Scope(scope), bundle)
             self._current = snap
+            self._note_issued(snap)
             if mode != "diff":
                 self._view = mode  # diffs and Effect Receipts follow the view last asked for
             # diff only against a prior snapshot of the SAME app (else the agent
@@ -4501,6 +4568,7 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
+            self._note_issued(snap)
             matches = observe.prefer_exact_targets(
                 observe.find_elements(
                     snap, text=text, role=role, editable=editable, clickable=clickable,
@@ -5044,6 +5112,7 @@ class Runtime:
         before = self._capture()
 
         menu_note: list[str] = []
+        button_mechanism: list[str] = []
         # A non-clickable text ref that stands for a button or link. The
         # click lands on that control. Empty when the ref is the control.
         activated: list[Element] = []
@@ -5139,6 +5208,14 @@ class Runtime:
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_CHANGED or not isinstance(act, Element):
                     raise
+                foreign = self._other_app_snapshot(act.ref)
+                if foreign is not None:
+                    # The ref may be the other app's (#836): raising this
+                    # app would click whatever shares its number here.
+                    err = self._other_snapshot_error(act.ref, foreign, "the click")
+                    err.detail["app_at_point"] = exc.detail.get("app_at_point")
+                    self._audit_stale("click", act.ref, err)
+                    raise err from exc
                 # Another app's window is over the ref. Re-observing does not
                 # move it, so "retry" could never land (#815). Raise the
                 # gated app, re-resolve the ref, and click once if it is clear.
@@ -5153,6 +5230,19 @@ class Runtime:
                 if probed is not None:
                     before = self._freeze(probed)
             self._guard_user(app)
+            # Chromium page button bounds AND native hit tests can remain
+            # stale after timer-driven transforms. A node-bound click/press
+            # avoids the old point; the normal outcome judge still verifies
+            # effect, and the receipt below names the actual mechanism.
+            button_action = getattr(self.driver, "click_button_action", None)
+            if isinstance(act, Element) and button_action is not None:
+                mechanism = button_action(
+                    act, button=parsed_button, count=count, modifiers=mods,
+                    allow_action=PREFER_AX_ACTIONS,
+                )
+                if mechanism is not None:
+                    button_mechanism.append(mechanism)
+                    return
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
@@ -5180,7 +5270,8 @@ class Runtime:
         if activated:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
-        msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
+        mechanism_note = f" via {button_mechanism[0]}" if button_mechanism else ""
+        msg = f"clicked {self._label(ref, target)}{mechanism_note}{control_note}{''.join(menu_note)}"
         outline_note = (
             isinstance(target, Element)
             and not activated
@@ -6117,6 +6208,16 @@ class Runtime:
         self._reject_drag_points(
             start_ref, start_x, start_y, end_ref, end_x, end_y, display_id, path,
         )
+        if start_ref is not None and end_ref is not None:
+            # Both ends by ref: the latest snapshot resolves both, so an end
+            # ref copied from another app's snapshot would silently land in
+            # the source app (#836). Refuse before any input.
+            for ref in (start_ref, end_ref):
+                foreign = self._other_app_snapshot(ref)
+                if foreign is not None:
+                    err = self._other_snapshot_error(ref, foreign, "the drag")
+                    self._audit_stale("drag", ref, err)
+                    raise err
         start, start_app = self._target(start_ref, start_x, start_y, display_id, kind="drag")
         end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
         waypoints = self._drag_path(path, start, display_id)
@@ -9635,6 +9736,10 @@ def build_server(
         invalid_arguments and sends no input. An unknown display_id is
         invalid_arguments and names the valid ids. button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
+        Linux Chromium page push buttons use a node-bound AT-SPI click/press for
+        plain left clicks and name that mechanism in the result. Unsupported
+        variants or unavailable actions are refused rather than using stale
+        accessibility geometry; explicit coordinate clicks remain pointer input.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
         app moved over the target — re-observe. A ref the snapshot marks
@@ -9852,7 +9957,11 @@ def build_server(
         release, so a short drag can drop. The result is confirmed when the
         dragged item changes order or moves relative to the target, or when
         the file is in the target folder afterwards. Otherwise the text says
-        the drop was not confirmed. A selection change is not a drop. Gated
+        the drop was not confirmed. A selection change is not a drop. Refs
+        restart in every snapshot: two refs right after a snapshot of another
+        app that also issued either one are stale_ref (reason other_snapshot)
+        and send no input. For a drop in another app, give start_ref and the
+        target's x/y from its snapshot's bounds. Gated
         at tier 'click' against the app under the start target. Structured
         content adds outcome, next, and evidence."""
         return _publish(await run(
