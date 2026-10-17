@@ -14,7 +14,7 @@ through `Input.insertText` / `Input.dispatchKeyEvent`. None of that moves a
 pointer or needs a focused window. Coordinate `click`, `drag`, and `scroll` also
 exist as the vision fallback (`Input.dispatchMouseEvent`, viewport-mapped; see
 the Pixel fallback row below); they are implemented but have no test coverage
-(README feature table), and a coordinate `click` is not refused on a secure
+([platforms.md](./platforms.md) feature table), and a coordinate `click` is not refused on a secure
 field. Snapshot text is diffable (`desktop_snapshot(mode="diff")`) and every gated action is
 written to the JSONL audit log. Not yet: replay tooling does not exist (the audit
 format is kept replay-compatible, nothing more), and one driver instance binds
