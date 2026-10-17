@@ -15382,7 +15382,8 @@ def test_claws_empty_list_surface_is_labelled_without_inventing_rows(monkeypatch
 
 
 @pytest.mark.parametrize("selected_index", [0, 1])
-def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index):
+@pytest.mark.parametrize("icon_header", [None, "direct", "nested"])
+def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index, icon_header):
     titles = ["Welcome to Claws Mail", "About You", "Receiving mail"]
     tabs = []
     for title in titles:
@@ -15390,11 +15391,18 @@ def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selecte
             _PageNode("label", f"<b>{title}</b>"),
             _PageNode("label", "Explanatory text, not the title"),
         ])
+        if icon_header:
+            page = _PageNode("filler", children=[
+                _PageNode("filler", children=[
+                    _PageNode("icon", "Claws logo"),
+                    *(page.children if icon_header == "direct" else [page]),
+                ]),
+            ])
         tabs.append(_PageNode(
             "page tab", box=((-1.0, -1.0), (-1.0, -1.0)), children=[page],
         ))
     notebook = _PageNode("page tab list", children=tabs)
-    frame = _PageNode("frame", "Claws Mail Setup Wizard", children=[notebook])
+    frame = _PageNode("dialog" if icon_header else "frame", "Claws Mail Setup Wizard", children=[notebook])
     monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
     monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box or ((0., 0.), (500., 500.)))
     monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
@@ -16469,3 +16477,43 @@ def test_geany_navigation_prefers_live_status_text_over_old_name(
     status = _Acc("status bar", name=f"line: {label_line} / 303")
     monkeypatch.setattr(_atspi, "_direct_text", lambda node: f"line: {text_line} / 303")
     assert _atspi.geany_symbol_arrived((301, [status])) is arrived
+
+
+def test_claws_wizard_icon_does_not_allow_borrowing_a_field_caption(monkeypatch):
+    page = _PageNode("filler", children=[
+        _PageNode("icon", "Claws logo"),
+        _PageNode("entry", ""),
+        _PageNode("label", "Later field caption"),
+    ])
+    tab = _PageNode("page tab", children=[page])
+    _PageNode("dialog", "Claws Mail Setup Wizard", children=[tab])
+    monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
+    assert _atspi._claws_wizard_page_title(tab) == ""
+
+
+@pytest.mark.parametrize("evidence", ["status", "caret"])
+def test_geany_navigation_ignores_menus_before_nested_evidence(
+    fake_atspi, monkeypatch, evidence,
+):
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="line: 301 / 303" if evidence == "status" else "Status")
+    editor = _Acc("text", states=("MULTI_LINE", "FOCUSED"))
+    menu = _adopt(_Acc("menu bar"), *[
+        _adopt(_Acc("menu"), *[_Acc("menu item") for _ in range(30)])
+        for _ in range(30)
+    ])
+    nested = _adopt(_Acc("panel"), status, editor)
+    for _ in range(6):
+        nested = _adopt(_Acc("panel"), nested)
+    _adopt(window, window.children[0], menu, nested)
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: "")
+    monkeypatch.setattr(_atspi, "_gtk_multiline_document", lambda node: node is editor)
+    prefix = "# pad\n" * 300
+    monkeypatch.setattr(fake_atspi.Text, "get_caret_offset", lambda node: len(prefix), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "get_text", lambda node, start, end: prefix, raising=False)
+    assert _atspi.geany_symbol_arrived((301, [status])) is True
+    destination = _atspi.geany_symbol_destination(symbol)
+    assert destination == (301, [status])
+    assert _atspi.geany_symbol_arrived(destination) is True

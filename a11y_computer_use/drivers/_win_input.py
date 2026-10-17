@@ -75,7 +75,7 @@ _VK_MODS = {"ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12,
 _VK_KEYS: dict[str, int] = {c: 0x41 + i for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")}
 _VK_KEYS.update({str(d): 0x30 + d for d in range(10)})
 _VK_KEYS.update({
-    "enter": 0x0D, "return": 0x0D, "tab": 0x09, "space": 0x20, "backspace": 0x08,
+    "enter": 0x0D, "return": 0x0D, "kp_enter": 0x0D, "tab": 0x09, "space": 0x20, "backspace": 0x08,
     "delete": 0x2E, "escape": 0x1B, "esc": 0x1B, "left": 0x25, "up": 0x26,
     "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23, "pageup": 0x21,
     "pagedown": 0x22,
