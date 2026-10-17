@@ -775,3 +775,10 @@ missing, or unavailable hit returns `stale_ref` with `hit_test_unverified`
 before pointer input. Browser toolbar refs and explicit coordinate clicks are
 outside this check. This guard has synthetic regression coverage; it is not
 live verification of Chromium's hit-test freshness or general overlap safety.
+
+Chromium field writes containing TAB (`type` and `set_value`) are refused before
+inserting text or clearing the existing value, with `unsupported` and
+`reason: tab_moves_focus`. The AT-SPI key fallback sends Tab as focus navigation,
+which could otherwise leave a partial prefix or type into another field. Paste
+through the clipboard or use the CDP browser backend and verify the full field
+value. This preflight does not change native GTK text insertion or Calc grid input.
