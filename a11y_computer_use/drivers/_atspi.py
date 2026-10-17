@@ -13442,7 +13442,11 @@ def _set_qt_quick_combo(acc, display, value: str, *, run=lambda fn: fn()) -> Non
                 if child is None:
                     continue
                 role = _role_name(child)
-                if role in {"menu", "popup menu", "list", "list box"}:
+                if role in {"menu", "popup menu", "list", "list box", "dialog"}:
+                    # Qt Quick can expose its popup as a sibling dialog.
+                    # Refresh that container too: clearing only its parent
+                    # leaves cached SHOWING/children from before opening.
+                    _call_first(child, ("clear_cache", "clearCache"))
                     if _state_has(child, "SHOWING"):
                         found[_ancestor_key(child)] = child
                 elif node is acc or (node is not frame and role not in _TEXT_ROLE_NAMES):

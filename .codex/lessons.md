@@ -314,6 +314,7 @@
 - 2026-10-17 (#686 reopened): libatspi Text.get_character_count returns 0 even on Scribus cells advertising no Text interface; use the advertised interfaces for opaque-widget detection. Test real leading column headers and item-widget overhangs. Discovery cover probes need the owning-window intersection, while action probes retain the actual input point. Failed find results must retain all distinct content notes so a document note cannot hide a palette limitation.
 - 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.
 
+- 2026-10-17 (PR #776 repair): Page-relative Chromium depth tests and Scribus palette visibility tests are independent appended regressions; preserve both when merging main. Chromium chrome must not spend the document budget or an iframe restart, and buried-control fixtures must remain at the page-relative cap.
 - 2026-10-17 (#755): Agent step_log ordering and length control execution budgets and replay. Keep per-skipped-call records separate, and never use _commit for them: it captures screenshots and advances progress counters.
 - 2026-10-17 (PR #768 repair): Relocation freshness and multi-call screen-change guards are independent agent guarantees. Preserve both documentation blocks when merging them, and run the file-evidence and fingerprint regressions together.
 
@@ -322,3 +323,7 @@
 - 2026-10-17 (PR #771 repair): Screen-change fingerprints and per-call statuses must reach the same executed record. Skipped trace rows are separate JSONL records with no fingerprint; assert both rows while retaining all fingerprint, no-extra-observation, and execution-budget checks.
 
 - 2026-10-17 (PR #467 repair): Geany status Text and its accessible name can disagree. Prefer the native Text message when present, falling back to the name only when Text is empty; concatenating them lets an older line number override live evidence and can cause either false refusal or false confirmation. Preserve focused-caret fallback and the explicit double-click.
+
+- 2026-10-17 (#594 reopened): Qt Quick ComboBox popups can appear as sibling AT-SPI dialogs, not menus. Bounded readiness polling must refresh the popup container itself, not only its parent, to observe cached SHOWING state and newly published rows. Retain event-thread-free waits and value-plus-popup-close verification.
+
+- 2026-10-17 (PR #467 repair): A restricted origin fetch refspec can leave a Cursor PR's tracking ref stale even after `git fetch origin`. Compare it with GitHub's headRefOid and fetch that branch explicitly before merging or interpreting CI logs. Geany symbol navigation and Scintilla search passed together after merging current main in a private 1280x800 Xvfb/D-Bus session with xfwm4; this does not establish the loaded Ubuntu CI result.
