@@ -411,7 +411,7 @@ _US_KEYCODES: dict[str, int] = {
     "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98,
     "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
     # named keys ("enter"/"backspace"/"esc" are aliases)
-    "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51,
+    "return": 36, "enter": 36, "kp_enter": 76, "tab": 48, "space": 49, "delete": 51,
     "backspace": 51, "forward_delete": 117, "escape": 53, "esc": 53,
     "left": 123, "right": 124, "down": 125, "up": 126, "home": 115,
     "end": 119, "pageup": 116, "pagedown": 121,

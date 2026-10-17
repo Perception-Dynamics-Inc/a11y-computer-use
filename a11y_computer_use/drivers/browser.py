@@ -178,6 +178,7 @@ _MOD_BIT = {"alt": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4, "command": 4
 _NAMED_KEY = {
     "enter": ("Enter", "Enter", 13),
     "return": ("Enter", "Enter", 13),
+    "kp_enter": ("Enter", "NumpadEnter", 13),
     "tab": ("Tab", "Tab", 9),
     "escape": ("Escape", "Escape", 27),
     "esc": ("Escape", "Escape", 27),
