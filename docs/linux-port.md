@@ -731,3 +731,10 @@ After a targeted check, actions requiring a tree comparison refresh their
 baseline before input; the old tree is not treated as current. Process-exit
 checks remain active. This path has hermetic regression coverage; no live Calc
 latency measurement is claimed.
+
+Chromium content clipped by CSS (for example a collapsed `max-height:0;
+overflow:hidden` panel) can retain on-screen AT-SPI bounds. Page children
+reporting `VISIBLE` without `SHOWING` are omitted from snapshots and find.
+Previously issued refs are refused with `not_showing` before input; reveal the
+panel and find the control again. This uses native visibility state and does
+not establish general hit-test protection against overlapping page controls.

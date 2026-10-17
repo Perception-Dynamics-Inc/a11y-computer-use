@@ -16127,3 +16127,106 @@ def test_scribus_real_palette_layout_and_find_context(monkeypatch, interfaces, c
     assert "no elements match" in missed
     assert ("Embedded widgets are not exposed" in missed) is (not interfaces)
     assert ("Embedded widgets are not exposed" in observe.render_matches(snap, [target])) is (not interfaces)
+
+
+def _chrome_collapsed_panel():
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    claim = _GeckoNode("push button", "Start claim", ("VISIBLE", "FOCUSABLE", "ENABLED"))
+    claim.actions = ["click"]
+    text = _GeckoNode("static", "Warranty covers 2 years.", ("VISIBLE",))
+    panel = _GeckoNode("section", "", ("SHOWING", "VISIBLE"), [claim, text])
+    header = _GeckoNode("push button", "Warranty", ("SHOWING", "VISIBLE", "EXPANDABLE"))
+    more = _GeckoNode("push button", "More options", ("SHOWING", "VISIBLE"))
+    header.actions = more.actions = ["click"]
+    document = _GeckoNode("document web", "READY", ("SHOWING", "VISIBLE"), [header, panel, more])
+    frame = _GeckoNode("frame", "READY - Google Chrome", ("SHOWING", "VISIBLE"), [document])
+    for node in (claim, text, panel, header, more, document, frame):
+        node.application = app
+    return frame, panel, claim, text
+
+
+def test_chromium_clipped_content_is_absent_from_snapshot_and_find(monkeypatch):
+    frame, panel, claim, text = _chrome_collapsed_panel()
+    accessor = _atspi.ATSPIAccessor()
+    # All native rectangles overlap: geometry cannot distinguish the hidden
+    # claim button from More options. Exercise the real child filter.
+    monkeypatch.setattr(accessor, "read", lambda node: RawNode(
+        role=_atspi._ROLE.get(node.role, "AXGroup"), title=node.name,
+        actions=("AXPress",) if node.actions else (),
+        position=(24.0, 128.0), size=(318.0, 36.0),
+    ))
+    snap = build_snapshot(frame, accessor, scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    assert not observe.find_elements(snap, text="Start claim")
+    assert not observe.find_elements(snap, text="Warranty covers")
+    assert observe.find_elements(snap, text="More options")
+    assert "Start claim" not in observe.render_text(snap, mode="interactive")
+    assert "Warranty covers" not in observe.render_text(snap, mode="full")
+    claim.states.add("SHOWING")
+    text.states.add("SHOWING")
+    assert accessor.children(panel) == [claim, text]
+    snap = build_snapshot(frame, accessor, scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    assert observe.find_elements(snap, text="Start claim")[0].clickable
+
+
+@pytest.mark.parametrize("operation", ["click", "press_element", "resolve_ref"])
+def test_chromium_clipped_ref_refused_before_any_input(monkeypatch, operation):
+    from a11y_computer_use.drivers import linux, _cdp_forms
+
+    _frame, _panel, claim, _text = _chrome_collapsed_panel()
+    element = Element("e1", "AXButton", "Start claim", None,
+                      Bounds(0, 24, 128, 79, 21), "clipped-old", clickable=True)
+    old = Snapshot("clipped-old", Scope.WINDOW, "chrome", 1, 0.0, (), (element,))
+    fresh = Snapshot("clipped-new", Scope.WINDOW, "chrome", 1, 0.0, (), ())
+    observe._register_epoch(old.snapshot_id, {}, {element.ref: claim})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "snapshot", lambda *a, **kw: fresh)
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("clipped target reached input or window activation")
+
+    monkeypatch.setattr(driver, "_raise_handle_window", unexpected)
+    monkeypatch.setattr(_linux_input, "click", unexpected)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", unexpected)
+    with pytest.raises(ComputerUseError) as exc:
+        if operation == "resolve_ref":
+            driver.resolve_ref(old, element.ref)
+        else:
+            getattr(driver, operation)(element)
+    assert exc.value.detail["reason"] == "not_showing"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "expand" in exc.value.detail["hint"]
+    assert not claim.pressed
+
+
+def test_chromium_clipping_requires_native_page_state():
+    frame, _panel, claim, _text = _chrome_collapsed_panel()
+    assert _atspi.chromium_clipped_target(claim)
+    claim.states.clear()
+    assert not _atspi.chromium_clipped_target(claim)
+    claim.states.update({"VISIBLE", "SHOWING"})
+    assert not _atspi.chromium_clipped_target(claim)
+    claim.states.remove("SHOWING")
+    claim.parent = frame  # Browser toolbar, outside the web document.
+    assert not _atspi.chromium_clipped_target(claim)
+    claim.application.toolkit = "GTK"
+    claim.application.name = "Editor"
+    assert not _atspi.chromium_clipped_target(claim)
+
+
+def test_chromium_clipping_reads_native_stateset(monkeypatch):
+    _frame, panel, claim, _text = _chrome_collapsed_panel()
+    del claim.states
+    tokens = _NS(VISIBLE=object(), SHOWING=object())
+    reported = {tokens.VISIBLE}
+    claim.get_state_set = lambda: _NS(contains=lambda token: token in reported)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(StateType=tokens))
+    assert _atspi.chromium_clipped_target(claim)
+    assert claim not in _atspi.ATSPIAccessor().children(panel)
+    reported.add(tokens.SHOWING)
+    assert not _atspi.chromium_clipped_target(claim)
+    assert claim in _atspi.ATSPIAccessor().children(panel)

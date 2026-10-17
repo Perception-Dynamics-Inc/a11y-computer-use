@@ -4600,6 +4600,7 @@ class ATSPIAccessor:
             child for child in kids
             if not _evince_page(child) or _state_has(child, "SHOWING")
         ]
+        kids = [child for child in kids if not chromium_clipped_target(child)]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
@@ -17961,8 +17962,29 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
     return hidden and not showing
 
 
+def chromium_clipped_target(acc) -> bool:
+    """A VISIBLE Chromium page node whose native state says it is not painted.
+
+    CSS overflow clipping can leave plausible on-screen bounds even when the
+    document and containing region are SHOWING. Empty state sets and browser
+    chrome are not evidence of this condition.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    states = _state_names(acc)
+    if "VISIBLE" not in states or "SHOWING" in states:
+        return False
+    for node in _ancestor_chain(acc, 32):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            return _state_has(node, "SHOWING")
+        if role in {"frame", "window", "application"}:
+            break
+    return False
+
+
 def hidden_web_target(acc) -> bool:
-    """True when ``acc`` sits in a browser document that is not showing.
+    """True for hidden browser documents or clipped Chromium page content.
 
     False for GTK, and for browser chrome (the tab strip, the toolbar).
     A click on a link in a background tab is this case: the link's document
@@ -17972,7 +17994,7 @@ def hidden_web_target(acc) -> bool:
     if acc is None:
         return False
     if _chromium_app(acc) and not _gecko_app(acc):
-        return _chromium_document_hidden(acc)
+        return chromium_clipped_target(acc) or _chromium_document_hidden(acc)
     if not _gecko_app(acc):
         return False
     node = acc
