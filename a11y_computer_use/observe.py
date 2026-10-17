@@ -54,6 +54,8 @@ AX_MESSAGING_TIMEOUT_S = 2.0
 #: dozen generic web wrappers is still shown. The kept depth is exact during
 #: the walk (a wrapper adds a level unless it will collapse), so this cap also
 #: bounds the walk cost on cyclic trees with fan-out, as it always did.
+#: Chromium AT-SPI page content counts from its document root, excluding
+#: browser chrome; the raw-depth backstop still includes all ancestors.
 MAX_DEPTH = 12
 
 #: Backstop on RAW recursion depth for the one shape `MAX_DEPTH` cannot bound:
@@ -248,8 +250,8 @@ class RawNode:
     #: trees keep today's walk and token budget. ``"page"`` is a Chromium
     #: ``document web``, ``"docframe"`` a ``document frame``, ``"iframe"`` an
     #: ``internal frame``. A zero-size non-interactive wrapper under any of
-    #: these is hollow. A nested iframe, or a document web already inside a
-    #: page, restarts the kept-depth budget.
+    #: these is hollow. A document web starts a page-relative kept-depth
+    #: budget; nested iframes/documents use bounded restarts.
     atspi_web: str = ""
     #: AT-SPI ``FOCUSABLE``. Default false, so macOS, Windows, and the browser
     #: do not grow a new signal. A zero-size web wrapper that can take focus
@@ -2185,7 +2187,8 @@ def _prune_inner(
     Linux AT-SPI web content is the exception. ``in_web`` means this node sits
     under a Chromium document web, document frame, or internal frame. A
     zero-size non-interactive wrapper there is hollow, the same as GTK's
-    negative extent. A nested iframe restarts ``kept_depth``. Nodes with an
+    negative extent. The outer document starts ``kept_depth`` at zero; a
+    nested iframe restarts it. Nodes with an
     empty ``atspi_web`` (macOS, Windows, the browser) never set ``in_web``.
     """
     kind = raw.atspi_web
@@ -2194,6 +2197,11 @@ def _prune_inner(
     # document directly under a frame that just restarted does not spend a
     # second restart. One iframe then costs one restart, and four restarts
     # cover four frames.
+    # Browser chrome is not part of the outer document content budget.
+    # This does not spend an iframe restart; in_page prevents descendants
+    # from resetting the budget again without spending a bounded restart.
+    if kind == "page" and not in_page:
+        kept_depth = 0
     restart = kind == "iframe" or (kind == "page" and in_page and kept_depth > 1)
     if web is not None and web.restarts > 0 and depth < _MAX_RAW_DEPTH and restart:
         web.restarts -= 1
