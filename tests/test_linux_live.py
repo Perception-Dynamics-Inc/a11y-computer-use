@@ -5157,6 +5157,18 @@ def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
         for sample in ("abc", "x y", "ünï", "日本"):
             append_from_start(sample)
 
+        for sample in ("😀👍🏽", "👩‍💻", "a😀b"):
+            edit = find(current(), "Qt name")
+            assert "set " in runtime.set_value(edit.ref, sample)
+            _wait_qt_line(state, sample)
+            edit = find(current(), "Qt name")
+            runtime.click(edit.ref)
+            runtime.key("end")
+            edit = find(current(), "Qt name")
+            typed = runtime.type_text("𠀀", ref=edit.ref)
+            assert "typed 1 characters" in typed, typed
+            _wait_qt_line(state, sample + "𠀀")
+
         append_from_start("ünï")
         shot = current()
         edit = find(shot, "Qt name")

@@ -1589,3 +1589,100 @@ def test_qt_quick_combo_refreshes_delayed_popup_container(atspi, monkeypatch, ro
     assert display.text == "Cherry"
     assert "SHOWING" not in popup.states
     assert combo.action_log == []
+
+
+class _Utf16QtField(_Field):
+    """QString storage with native UTF-16 insertion/deletion offsets."""
+
+    def __init__(self, text="", caret=None, selection=None):
+        super().__init__(text, caret, toolkit="Qt")
+        self.caret = len(text.encode("utf-16-le")) // 2 if caret is None else caret
+        self.selection = selection
+        self.deletions = []
+
+    def insert_text(self, pos, text, length):
+        self.lengths.append(length)
+        raw = self.text.encode("utf-16-le")
+        chunk = text.encode("utf-16-le")[:length * 2]
+        self.text = (raw[:pos * 2] + chunk + raw[pos * 2:]).decode("utf-16-le", errors="replace")
+        self.caret = pos + length
+        return True
+
+    def delete_text(self, start, end):
+        self.deletions.append((start, end))
+        raw = self.text.encode("utf-16-le")
+        self.text = (raw[:start * 2] + raw[end * 2:]).decode("utf-16-le")
+        self.caret = start
+        self.selection = None
+        return True
+
+    def set_text_contents(self, text):
+        self.text = text
+        return True
+
+
+@pytest.fixture
+def utf16_atspi(atspi, monkeypatch):
+    monkeypatch.setattr(_Atspi.Text, "get_character_count",
+                        staticmethod(lambda acc: len(acc.text.encode("utf-16-le")) // 2))
+    monkeypatch.setattr(_Atspi.Text, "get_n_selections",
+                        staticmethod(lambda acc: int(acc.selection is not None)))
+    monkeypatch.setattr(_Atspi.Text, "get_selection",
+                        staticmethod(lambda acc, index: acc.selection), raising=False)
+
+
+@pytest.mark.parametrize("text", ["😀👍🏽", "👩‍💻", "a😀b", "𠀀", "日本語", "e\u0301"])
+def test_qt_utf16_insert_and_set_text(utf16_atspi, text):
+    field = _Utf16QtField()
+    assert _atspi.insert_text(field, text) == len(text)
+    assert field.text == text
+    assert field.lengths == [len(text.encode("utf-16-le")) // 2]
+    field = _Utf16QtField("old")
+    assert _atspi.set_text(field, text)
+    assert field.text == text
+
+
+@pytest.mark.parametrize("caret", [2, None])
+def test_qt_insert_after_astral_prefix(utf16_atspi, caret):
+    field = _Utf16QtField("😀", caret=caret)
+    assert _atspi.insert_text(field, "b") == 1
+    assert field.text == "😀b"
+    assert field.caret == 3
+
+
+def test_qt_insert_in_middle_after_astral_prefix(utf16_atspi):
+    field = _Utf16QtField("😀tail", caret=2)
+    assert _atspi.insert_text(field, "👩‍💻") == 3
+    assert field.text == "😀👩‍💻tail"
+    assert field.caret == 7
+
+
+def test_qt_replace_selection_with_astral_prefix_and_suffix(utf16_atspi):
+    field = _Utf16QtField("😀a👍🏽z𠀀", caret=7, selection=(2, 7))
+    assert _atspi.insert_text(field, "👩‍💻") == 3
+    assert field.text == "😀👩‍💻z𠀀"
+    assert field.deletions == [(2, 7)]
+    assert field.caret == 7
+
+
+@pytest.mark.parametrize("selection", [None, (1, 2)])
+def test_qt_refuses_split_surrogate_before_mutation(utf16_atspi, selection):
+    field = _Utf16QtField("😀", caret=1, selection=selection)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.insert_text(field, "b")
+    assert exc.value.detail["reason"] == "invalid_text_offset"
+    assert field.text == "😀"
+    assert field.lengths == []
+    assert field.deletions == []
+
+
+def test_qt_astral_readback_still_rejects_hidden_suffix(utf16_atspi):
+    field = _Utf16QtField("😀\x00junk")
+    assert not _atspi._confirm_text(field, "😀")
+
+
+def test_gtk_astral_insert_keeps_codepoint_offsets(atspi):
+    field = _ByteField("😀tail", caret=1, toolkit="gtk")
+    assert _atspi.insert_text(field, "👩‍💻") == 3
+    assert field.text == "😀👩‍💻tail"
+    assert field.lengths == [len("👩‍💻".encode("utf-8"))]
