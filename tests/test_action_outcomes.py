@@ -1758,3 +1758,87 @@ def test_linux_resolved_cover_evidence_is_target_bound_and_single_use():
     driver._resolved_popover_cover = (target, None)
     assert driver.take_resolved_popover_cover(target) == (True, None)
     assert driver.take_resolved_popover_cover(target) == (False, None)
+
+
+def test_calc_verified_type_avoids_window_reread(monkeypatch):
+    """Use the driver's real settled read once, without a window traversal."""
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *_args: pytest.fail("full window reread"))
+    assert runtime._judge_mutation("soffice.bin", None, None, "42", previous="") == (
+        "confirmed", "read back '42'",
+    )
+    assert runtime.driver._sheet_type_readback is None
+    assert runtime._capture("soffice.bin", targeted=True) is None
+    # The read cannot confirm another write or a click; failed probes fall back.
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    runtime._judge_mutation("soffice.bin", None, None, "42")
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("settled", [("other", "42"), ("soffice.bin", "24"), None])
+def test_calc_unverified_type_keeps_window_fallback(monkeypatch, settled):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime.driver._sheet_type_readback = settled
+    runtime._current = None
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    assert runtime._judge_mutation("soffice.bin", None, None, "42")[0] != "confirmed"
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("after_cell,fast", [("A2", True), ("A1", False), (None, False)])
+def test_calc_key_checks_live_cell_before_window(monkeypatch, after_cell, fast):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    monkeypatch.setattr(runtime, "_key_focus_probe", lambda _app: (None, None, None, None, after_cell))
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    judged, _ = runtime._judge_mutation(
+        "soffice.bin", None, None, None, key_focus=True,
+        focus_before=(None, None, None, None, "A1"), key_chord="Return",
+    )
+    assert (judged == "confirmed") is fast
+    assert len(reads) == (0 if fast else 1)
+
+
+def test_calc_fast_verification_preserves_process_death(monkeypatch):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    runtime._current = None
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: True)
+    assert runtime._judge_mutation("soffice.bin", None, None, "42")[0] == "partial"
+
+
+def test_calc_targeted_baseline_keeps_pid_and_refreshes_for_click(monkeypatch):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    before = runtime._freeze(runtime._current)
+    before.update(pid_alive=True, pid=1234)
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    checks = []
+    monkeypatch.setattr(outcome, "wait_until_dead", lambda pid, _timeout: checks.append(pid) or False)
+    runtime._judge_mutation("soffice.bin", before, None, "42", previous="")
+    assert runtime._capture("soffice.bin", targeted=True) is None
+    assert runtime._process_died(None) is False
+    assert checks == [1234, 1234]
+    reads = []
+    fresh = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    monkeypatch.setattr(runtime, "_probe_snapshot", lambda *args: reads.append(args) or fresh)
+    assert runtime._capture("soffice.bin")["snap"] is fresh
+    assert len(reads) == 1
