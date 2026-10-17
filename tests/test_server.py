@@ -4810,3 +4810,121 @@ def test_thunar_location_return_checks_destination_before_error_icon(path, prior
         dataclasses.replace(after.elements[0], title="parent - Thunar"), *after.elements[1:],
     ))
     assert rt._location_return_failure(before, unchanged).startswith("location not opened:")
+
+
+# --- drag ends from different snapshots or apps (#836) -----------------------
+
+
+def _two_app_drag_runtime(tmp_path, monkeypatch):
+    """Snapshot ``com.target`` (Mousepad), then ``com.test`` (the source).
+
+    Both snapshots issue ``e1``..``e3``. ``calls`` records every pointer
+    stroke the driver receives.
+    """
+    calls: list = []
+    source = _drag_rows("s-src", [("notes", 20, 40), ("dnd-file-Q9.txt", 20, 68)])
+    target = dataclasses.replace(
+        _drag_rows("s-dst", [("text view", 700, 40), ("drop zone", 700, 68)]),
+        app="com.target",
+    )
+
+    class _D:
+        resolves_apps = True
+        name = "fake"
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("com.test", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def snapshot(self, scope, app):
+            del scope
+            return target if app == "com.target" else source
+
+        def resolve_ref(self, snap, ref, *, live=None):
+            del live
+            return snap.element(ref)
+
+        def drag(self, start, end, *, button=None, path=(), pre_check=None, dry_run=False):
+            del button, pre_check, dry_run
+            calls.append((start, end, tuple(path)))
+
+        def click(self, *args, **kwargs):
+            calls.append(("click", args, kwargs))
+
+        def key(self, *args, **kwargs):
+            calls.append(("key", args, kwargs))
+
+        def type_text(self, *args, **kwargs):
+            calls.append(("type", args, kwargs))
+
+    monkeypatch.setattr(server.Runtime, "_DRAG_DROP_SETTLE_S", 0)
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.CLICK)
+    store.set_tier("com.target", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    rt.desktop_snapshot("com.target")
+    rt.desktop_snapshot("com.test")
+    return rt, calls, target
+
+
+@pytest.mark.parametrize("start_ref,end_ref", [("e3", "e2"), ("e2", "e3")])
+def test_drag_refuses_ends_from_another_apps_snapshot_before_any_input(
+    tmp_path, monkeypatch, start_ref, end_ref,
+) -> None:
+    """#836: an end ref from the target app's snapshot re-bound to the source app.
+
+    The file was moved into the source app's sidebar folder and the tool only
+    said "drop not confirmed". The drag is refused with no pointer event.
+    """
+    rt, calls, _target = _two_app_drag_runtime(tmp_path, monkeypatch)
+
+    with pytest.raises(server.ComputerUseError) as caught:
+        rt.drag(start_ref=start_ref, end_ref=end_ref)
+
+    err = caught.value
+    assert err.code is server.ErrorCode.STALE_REF
+    assert err.detail["reason"] == "other_snapshot"
+    assert err.detail["issued_by_app"] == "com.target"
+    assert err.detail["current_app"] == "com.test"
+    assert err.detail["outcome"] == "refused"
+    assert "drag was not sent" in err.message
+    assert calls == []
+
+
+def test_act_drag_step_refuses_ends_from_another_apps_snapshot(tmp_path, monkeypatch) -> None:
+    rt, calls, _target = _two_app_drag_runtime(tmp_path, monkeypatch)
+
+    rows = json.loads(rt.act_batch([{"do": "drag", "start_ref": "e3", "end_ref": "e2"}]))
+
+    assert rows[0]["ok"] is False
+    assert "stale_ref" in json.dumps(rows[0]) and "other_snapshot" in json.dumps(rows[0])
+    assert calls == []
+
+
+def test_drag_source_ref_to_other_apps_coordinates_still_runs(tmp_path, monkeypatch) -> None:
+    """The route that works: the source ref plus the target's x,y (18/18 live)."""
+    rt, calls, target = _two_app_drag_runtime(tmp_path, monkeypatch)
+    drop = target.element("e3").bounds
+
+    rt.drag(start_ref="e3", end_x=drop.x + 10, end_y=drop.y + 10)
+
+    assert len(calls) == 1
+    start, end, _path = calls[0]
+    assert start.title == "dnd-file-Q9.txt"
+    assert (end.x, end.y) == (drop.x + 10, drop.y + 10)
+
+
+def test_drag_refs_run_after_the_source_app_is_re_observed(tmp_path, monkeypatch) -> None:
+    """Two snapshots of the same app in a row: both refs are that app's."""
+    rt, calls, _target = _two_app_drag_runtime(tmp_path, monkeypatch)
+    rt.desktop_snapshot("com.test")
+
+    rt.drag(start_ref="e3", end_ref="e2")
+
+    assert len(calls) == 1
+    assert calls[0][0].title == "dnd-file-Q9.txt" and calls[0][1].title == "notes"

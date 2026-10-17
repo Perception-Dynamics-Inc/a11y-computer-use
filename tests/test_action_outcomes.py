@@ -2370,3 +2370,61 @@ def test_calc_edit_key_settles_before_reporting_unchanged(monkeypatch):
         sheet_before=before,
     ) == ("confirmed", "the selected cells' text changed")
     assert pauses == [0.05]
+
+
+# --- refs from another app's snapshot (#836) --------------------------------
+
+
+def _two_app_covered_runtime(tmp_path, monkeypatch, driver: _CoveredLinuxDriver):
+    """A covered-click runtime whose agent observed ``mousepad`` first, then APP.
+
+    Both snapshots issue ``e1``..``eN``, so the agent's Mousepad ``e2`` and
+    APP's ``e2`` are the same string.
+    """
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+    monkeypatch.setattr(server, "_running_app", lambda identifier: (None, identifier))
+    runtime.store.set_tier("mousepad", safety.Tier.FULL)
+    runtime.desktop_snapshot("mousepad")
+    runtime.desktop_snapshot(APP)
+    driver.calls.clear()
+    return runtime
+
+
+def test_linux_covered_click_with_a_ref_another_app_issued_is_refused(
+    tmp_path, monkeypatch,
+) -> None:
+    """#836 / #819 regression: a Mousepad ref after another app's snapshot.
+
+    The ref resolves to an unrelated control of the current app. Raising that
+    app and clicking it hit the terminal's scrollbar. It is refused as
+    ``stale_ref`` before any raise or pointer event.
+    """
+    driver = _CoveredLinuxDriver()
+    runtime = _two_app_covered_runtime(tmp_path, monkeypatch, driver)
+
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.click("e2")
+
+    err = caught.value
+    assert err.code is ErrorCode.STALE_REF
+    assert err.detail["reason"] == "other_snapshot"
+    assert err.detail["issued_by_app"] == "mousepad"
+    assert err.detail["current_app"] == APP
+    assert err.detail["outcome"] == "refused"
+    assert _clicks(driver) == []
+    assert not [call for call in driver.calls if call[0] == "activate"]
+
+
+def test_linux_covered_click_raises_again_after_the_app_is_re_observed(
+    tmp_path, monkeypatch,
+) -> None:
+    """A second snapshot of the same app clears the ambiguity; #815 still lands."""
+    driver = _CoveredLinuxDriver()
+    runtime = _two_app_covered_runtime(tmp_path, monkeypatch, driver)
+    runtime.desktop_snapshot(APP)
+    driver.calls.clear()
+
+    result = runtime.click("e2")
+
+    assert result.startswith("clicked e2")
+    assert _clicks(driver) == [("click", "e2", (10, 20))]
