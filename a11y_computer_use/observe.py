@@ -1916,6 +1916,7 @@ def align_refs(basis: Snapshot, current: Snapshot) -> Snapshot:
         created_at=current.created_at,
         displays=current.displays,
         elements=tuple(elements),
+        url=current.url,
     )
 
 
