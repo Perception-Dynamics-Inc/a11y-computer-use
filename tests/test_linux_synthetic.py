@@ -15885,3 +15885,104 @@ def test_scribus_embedded_properties_cell_explains_accessibility_gap(monkeypatch
     assert not observe.find_elements(snap, text="X-Pos")
     assert not any(el.parent == matches[0].ref for el in snap.elements)
     assert 'hint="Embedded widgets' in observe.render_text(snap)
+
+
+@pytest.mark.parametrize("case", ["opaque", "other_app", "other_scroll", "children", "named", "text", "detailed"])
+def test_pcmanfm_empty_icon_view_reports_missing_file_accessibility(monkeypatch, case):
+    """#670: label the limitation without fabricating named file targets."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_has_text_interface", lambda node: case == "text")
+    panel = _Acc("table" if case == "detailed" else "panel",
+                 name="Native" if case == "named" else "", width=525, height=468)
+    cell = _Acc("table cell", name="FILE-001.txt")
+    if case in {"children", "detailed"}:
+        _adopt(panel, cell)
+    scroll = _Acc("scroll pane", name="Other" if case == "other_scroll" else "View of folder contents")
+    app = _Acc("application", name="other" if case == "other_app" else "pcmanfm")
+    panel.get_application = lambda: app
+    _adopt(app, _adopt(_Acc("frame", name="Files"), _adopt(scroll, panel)))
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(panel)
+    assert raw.title == panel.name
+    assert raw.position == (0.0, 0.0)
+    assert raw.size == (525, 468)
+    if case == "opaque":
+        assert raw.surface_name == "PCManFM folder contents"
+        opaque = observe._as_opaque_region(raw, [], 0)
+        assert opaque.role == "opaque_region"
+        assert opaque.title == "PCManFM folder contents"
+        assert "not exposed by AT-SPI" in opaque.note
+        assert "Detailed List View" in opaque.note
+        assert opaque.value is None
+        assert accessor.children(panel) == []
+        # The panel commonly fills its parent; shared pruning must still
+        # publish the warning rather than discard a duplicate empty group.
+        tree = (RawNode(role="AXScrollArea", title=scroll.name,
+                        position=raw.position, size=raw.size), [(raw, [])])
+        snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                              app="pcmanfm", pid=670, geometry=_geometry())
+        regions = observe.find_elements(snap, role="opaque_region")
+        assert len(regions) == 1
+        assert regions[0].title == "PCManFM folder contents"
+        assert "Detailed List View" in regions[0].note
+        assert not observe.find_elements(snap, text="FILE-001")
+    else:
+        assert raw.surface_name == ""
+    if case == "detailed":
+        assert accessor.read(cell).title == "FILE-001.txt"
+
+
+@pytest.mark.parametrize("toolkit", ["Qt", "qt", "Qt 5.15.15", "Qt 6.8.2"])
+@pytest.mark.parametrize("offsets_available", [True, False])
+def test_qt_viewport_skips_bounded_ranges_and_rechecks_visibility(
+    monkeypatch, toolkit, offsets_available,
+):
+    """#687: repeated Qt reads never invoke the nonanswering range method."""
+    app = _NS(get_toolkit_name=lambda: toolkit)
+    editor = _NS(get_application=lambda: app)
+    text = "VISIBLE\nHIDDEN" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    checked = []
+    viewport = {"line": 0}
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def bounded(*args):
+        pytest.fail("Qt must never wait for GetBoundedRanges")
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        return text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        line = 0 if offset < 7 else 1 if 8 <= offset < 14 else 2
+        return _NS(x=20, y=40 if line == viewport["line"] else 900,
+                   width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=lambda acc, x, y, coord: (
+                (0 if y == 30 else 13) if offsets_available else -1
+            ),
+            get_character_count=lambda acc: len(text),
+            get_text=get_text,
+            get_character_extents=rectangle,
+        ),
+    ))
+    for line, expected in [(0, "VISIBLE"), (1, "HIDDEN"), (0, "VISIBLE")]:
+        viewport["line"] = line
+        assert _atspi._qt_viewport_text(editor) == expected
+    end = 14 if offsets_available else _atspi._PAGE_TEXT_CHARS
+    assert reads == [(0, end)] * 3
+    assert checked == list(range(end)) * 3
+    # A readable buffer without native geometry remains unverifiable.
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0),
+        Text=_NS(get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text), get_text=get_text,
+                 get_character_extents=lambda *args: None),
+    ))
+    assert _atspi._qt_viewport_text(editor) is None
