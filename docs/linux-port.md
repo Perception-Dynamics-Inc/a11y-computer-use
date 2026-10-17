@@ -698,8 +698,15 @@ unnamed, childless tree cell immediately after an expanded section. Such cells
 now carry a hint that the embedded widgets are not exposed to accessibility.
 The ref and native bounds still identify the whole cell; X-Pos and other hidden
 controls do not gain refs. Inspect a screenshot before choosing coordinate
-clicks or keyboard input. This hint has synthetic regression coverage; live
-Scribus verification is pending.
+clicks or keyboard input. Both snapshot modes and unsuccessful `find` results
+report this limitation. Detection checks the advertised AT-SPI interfaces:
+libatspi can return a zero Text character count even when Text is absent.
+Discovery checks sibling coverage at the center of the cell's intersection
+with its owning window, so an overhanging item widget is not labeled covered
+by the document behind its palette. Native cell bounds and action-time
+point checks remain unchanged. Synthetic regressions cover the leading column
+header, overhang, and genuinely covered palette; a manual Scribus 1.6.3 probe
+under Xvfb/xfwm4 confirmed the missing-Text sentinel and visible hint.
 
 Menu leaf presses also check for keyboard focus left on the menubar or its entries after the popup closes (for example, Qt menus in Okular). Cleanup sends Escape and verifies that both popup state and menubar keyboard tracking clear; a refusal reports retained tracking. If the first Escape closes the popup but leaves an active bar entry, a second Escape clears that entry within the existing cleanup polling bound. Qt Widgets can retain focus on the bar itself when no other widget takes focus; with no focused menu-item entry, that is idle widget focus, not an active menu. A showing dialog is left alone, and explicitly pressing a submenu still leaves it open. This cleanup is covered by synthetic menu regressions and the live Qt checkable-menu fixture; it has not been live-verified in Okular.
 

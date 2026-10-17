@@ -1469,8 +1469,8 @@ def render_matches(
     when nothing matched, instead of a bare miss.
     """
     if not matches:
-        note = next((el.content_note for el in snap.elements if el.content_note), "")
-        suffix = f" ({note})" if note else ""
+        notes = dict.fromkeys(el.content_note for el in snap.elements if el.content_note)
+        suffix = "".join(f" ({note})" for note in notes)
         return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match{suffix}"
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
     for el in matches:
