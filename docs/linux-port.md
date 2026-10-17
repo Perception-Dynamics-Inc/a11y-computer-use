@@ -644,3 +644,11 @@ Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
 read-back can match the requested percentage while the image scale stays
 unchanged. Use the zoom UI and verify the displayed image scale; the backend
 does not send an activation key or substitute a zoom-button click.
+
+Scribus's Qt 5 Properties palette can expose its embedded item widgets as an
+unnamed, childless tree cell immediately after an expanded section. Such cells
+now carry a hint that the embedded widgets are not exposed to accessibility.
+The ref and native bounds still identify the whole cell; X-Pos and other hidden
+controls do not gain refs. Inspect a screenshot before choosing coordinate
+clicks or keyboard input. This hint has synthetic regression coverage; live
+Scribus verification is pending.
