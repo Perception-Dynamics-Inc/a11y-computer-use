@@ -6226,6 +6226,38 @@ def toplevel_raise_target(node):
     return (_state_has(top, "ACTIVE"), title, pid_of(top), extents)
 
 
+_MODAL_ROLES = frozenset({"dialog", "alert", "file chooser", "color chooser"})
+
+
+def modal_blocker(node) -> str | None:
+    """Title of a modal dialog that blocks input to ``node``'s window, or None.
+
+    The dialog belongs to the same application, is SHOWING, MODAL, and
+    ACTIVE, and the window that owns ``node`` is not ACTIVE. That is a
+    modal like Calc's Format Cells: the grid behind it takes no pointer
+    input, and the point may not be under the dialog at all, so a cover
+    hit-test misses it. A target inside the dialog itself has an ACTIVE
+    toplevel and is None. Any failed read is None.
+    """
+    top = _toplevel_of(node)
+    if top is None or _state_has(top, "ACTIVE"):
+        return None
+    app = _application_of(top)
+    if app is None:
+        return None
+    for child in _fresh_application_children(app):
+        if child is top or _role_name(child) not in _MODAL_ROLES:
+            continue
+        if not (
+            _state_has(child, "MODAL")
+            and _state_has(child, "SHOWING")
+            and _state_has(child, "ACTIVE")
+        ):
+            continue
+        return _node_name(child) or "a modal dialog"
+    return None
+
+
 def desktop_application_roots() -> DesktopApplications:
     """Every application under the AT-SPI desktop.
 

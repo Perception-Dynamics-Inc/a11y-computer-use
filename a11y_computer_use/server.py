@@ -5046,6 +5046,27 @@ class Runtime:
                             "evidence": f"the window is covered by {cover}",
                         },
                     )
+                # A modal dialog of the same app blocks the window behind it
+                # even where it does not cover the point (#813). The click
+                # would go nowhere, and a later tree change in the dialog
+                # must not read as confirmation.
+                modal_cover = getattr(self.driver, "modal_dialog_cover", None)
+                blocker = modal_cover(act) if callable(modal_cover) else None
+                if blocker:
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{act.ref} is blocked by the modal dialog {blocker!r}; nothing was sent",
+                        detail={
+                            "ref": act.ref, "role": act.role,
+                            "reason": "modal_dialog", "outcome": "refused",
+                            "dialog": blocker,
+                            "next": ["ref"],
+                            "evidence": (
+                                f"the modal dialog {blocker!r} is open, so the window "
+                                "behind it takes no input; close the dialog or act inside it"
+                            ),
+                        },
+                    )
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier

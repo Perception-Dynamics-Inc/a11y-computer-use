@@ -2043,3 +2043,49 @@ def test_live_sheet_cell_requires_the_same_showing_grid_cell(monkeypatch, case):
         assert found is not None and found.position == (1.0, 2.0)
     else:
         assert found is None
+
+
+def test_linux_click_behind_a_modal_dialog_is_refused_before_any_input(tmp_path) -> None:
+    """#813: a cell click while Format Cells is open never reports confirmed.
+
+    The modal dialog takes the app's input even where it does not cover the
+    point. Nothing is pressed or clicked, and the refusal names the dialog.
+    """
+    driver = TreeDriver()
+    driver.modal_dialog_cover = lambda element: "Format Cells" if element.ref == "e2" else None
+    runtime = _runtime(tmp_path, driver)
+
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.click("e2")
+
+    err = caught.value
+    assert err.code is ErrorCode.UNSUPPORTED
+    assert "modal dialog 'Format Cells'" in err.message
+    assert "clicked" not in err.message
+    assert err.detail["reason"] == "modal_dialog"
+    assert err.detail["outcome"] == "refused"
+    assert err.detail["dialog"] == "Format Cells"
+    assert err.detail["next"] == ["ref"]
+    assert driver.calls == []
+    # A target the dialog does not block clicks as before.
+    assert runtime.click("e4").startswith("clicked e4")
+
+
+def test_linux_driver_modal_dialog_cover_reads_the_ref_handle(monkeypatch) -> None:
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    linux = LinuxDriver()
+    monkeypatch.setattr(linux, "_run", lambda fn: fn())
+    cell = _element("e9", "AXCell", "C4")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snap, ref: "handle" if ref == "e9" else None)
+    monkeypatch.setattr(_atspi, "modal_blocker", lambda handle: "Format Cells" if handle == "handle" else None)
+    assert linux.modal_dialog_cover(cell) == "Format Cells"
+    assert linux.modal_dialog_cover(_element("e1", "AXWindow", "Demo")) is None
+
+    def broken(handle):
+        raise RuntimeError("bus gone")
+
+    monkeypatch.setattr(_atspi, "modal_blocker", broken)
+    assert linux.modal_dialog_cover(cell) is None  # no evidence keeps the click

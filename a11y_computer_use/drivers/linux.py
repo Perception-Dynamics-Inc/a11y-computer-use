@@ -4927,6 +4927,25 @@ class LinuxDriver:
             pass
         return None
 
+    def modal_dialog_cover(self, element: Element) -> str | None:
+        """Title of a same-app modal dialog that blocks ``element``, or None.
+
+        A modal dialog takes the app's input even where it does not cover
+        the point, so the pointer and an AT-SPI press on the window behind
+        it do nothing. Missing evidence is None, which keeps the click.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None:
+                return None
+            found = self._run(lambda: _atspi.modal_blocker(handle))
+        except Exception:  # noqa: BLE001 - no bus evidence keeps the click
+            return None
+        return found if isinstance(found, str) and found else None
+
     def occlusion(self, element: Element, app: str | None) -> str | None:
         """None when the element's center belongs to ``app``.
 

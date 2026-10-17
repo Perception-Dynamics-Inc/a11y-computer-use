@@ -12509,6 +12509,39 @@ def test_showing_toplevels_lists_showing_windows_active_first() -> None:
     assert [node.name for node in _atspi.showing_toplevels(only)] == ["Only"]
 
 
+def _calc_with_dialog(*, dialog_states, frame_states=("SHOWING",), dialog_role="dialog"):
+    cell = _WindowNode("table cell", "C4", states={"SHOWING"})
+    table = _WindowNode("table", "Sheet Sheet1", states={"SHOWING"}, children=[cell])
+    frame = _WindowNode("frame", "Untitled 1 - LibreOffice Calc", states=set(frame_states),
+                        children=[table])
+    ok = _WindowNode("push button", "OK", states={"SHOWING"})
+    dialog = _WindowNode(dialog_role, "Format Cells", states=set(dialog_states), children=[ok])
+    _WindowNode("application", "soffice", children=[frame, dialog])
+    return cell, ok
+
+
+def test_modal_blocker_names_a_modal_dialog_that_does_not_cover_the_cell() -> None:
+    """#813: Calc's Format Cells blocks the grid even where it is not over C4."""
+    cell, ok = _calc_with_dialog(dialog_states={"SHOWING", "ACTIVE", "MODAL"})
+    assert _atspi.modal_blocker(cell) == "Format Cells"
+    # A control inside the dialog itself is not blocked by it.
+    assert _atspi.modal_blocker(ok) is None
+
+
+@pytest.mark.parametrize("dialog_states,frame_states,role", [
+    ({"SHOWING", "ACTIVE"}, {"SHOWING"}, "dialog"),  # not modal
+    ({"SHOWING", "MODAL"}, {"SHOWING"}, "dialog"),  # the user is in another app
+    ({"ACTIVE", "MODAL"}, {"SHOWING"}, "dialog"),  # not showing
+    ({"SHOWING", "ACTIVE", "MODAL"}, {"SHOWING", "ACTIVE"}, "dialog"),  # the window is active
+    ({"SHOWING", "ACTIVE", "MODAL"}, {"SHOWING"}, "frame"),  # a second document, not a dialog
+])
+def test_modal_blocker_needs_an_active_showing_modal_dialog(dialog_states, frame_states, role) -> None:
+    cell, _ok = _calc_with_dialog(
+        dialog_states=dialog_states, frame_states=frame_states, dialog_role=role,
+    )
+    assert _atspi.modal_blocker(cell) is None
+
+
 def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
     dialog = _WindowNode("dialog", "Form", states={"SHOWING"})
     popup = _WindowNode("window", "", states={"SHOWING", "ACTIVE"})
