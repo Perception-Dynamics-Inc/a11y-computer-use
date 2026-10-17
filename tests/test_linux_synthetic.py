@@ -3432,6 +3432,63 @@ def _toggle_click_target(monkeypatch, *, toolkit="Qt", role="check box",
     return driver, control, element, action_log, events
 
 
+def test_push_button_menu_is_discoverable_as_button():
+    tree = _node("AXWindow", "Okular", children=[
+        _node(_atspi._ROLE["push button menu"], "Text Selection",
+              actions=_atspi_actions("ShowMenu", "ShowMenu", "SetFocus"),
+              pos=(40.0, 60.0), size=(100.0, 20.0)),
+    ])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="okular", pid=653, geometry=_geometry())
+    matches = observe.find_elements(snap, role="button", text="Text Selection")
+    assert len(matches) == 1
+    assert matches[0].clickable
+    assert matches[0].bounds == Bounds(0, 40, 60, 100, 20)
+
+
+@pytest.mark.parametrize("actions", [
+    ("ShowMenu", "ShowMenu", "SetFocus"), ("SetFocus",), (),
+])
+@pytest.mark.parametrize("bounds", [None, Bounds(0, 40, 60, 100, 20)])
+def test_qt_menu_button_without_main_press_refuses_without_input(
+    fake_atspi, monkeypatch, actions, bounds,
+):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role="push button menu", actions=actions, bounds=bounds,
+    )
+    with pytest.raises(ComputerUseError, match="no main-button press action") as exc:
+        driver.press_element(element)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert action_log == []
+    assert events == []
+
+
+@pytest.mark.parametrize("action", ["Press", "Click", "Activate"])
+def test_qt_menu_button_prefers_main_press_over_showmenu(fake_atspi, monkeypatch, action):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role="push button menu", actions=("ShowMenu", action, "SetFocus"),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == [action]
+    assert events == [("raise", control)]
+
+
+def test_non_qt_menu_button_keeps_native_menu_action(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="push button menu", actions=("ShowMenu",),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["ShowMenu"]
+
+
+def test_qt_menu_button_do_press_never_substitutes_showmenu(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role="push button menu", actions=("ShowMenu", "SetFocus"),
+    )
+    assert _atspi.do_press(control) is False
+    assert action_log == []
+
+
 @pytest.mark.parametrize("role", ["check box", "toggle button", "radio button", "list item"])
 @pytest.mark.parametrize("actions", [("Toggle",), ("SetFocus", "Toggle")])
 def test_qt_toggle_only_ref_click_runs_the_pointer_handler(fake_atspi, monkeypatch, role, actions):
@@ -15520,6 +15577,65 @@ def test_qt_answered_bounded_ranges_does_not_drain(monkeypatch):
     assert drained == []
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_top_level_enumeration_bypasses_stale_application_children(
+    fake_atspi, monkeypatch, fail,
+) -> None:
+    """A new Story Editor is discovered despite a persistent native child cache."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    main = _WindowNode("frame", "Scribus", states={"SHOWING"})
+    editor = _WindowNode("frame", "Story Editor - Text1", states={"SHOWING", "ACTIVE"})
+    app = _WindowNode("application", "scribus", children=[main, editor])
+    desktop = _WindowNode("desktop", children=[app])
+    fake_atspi.desktop = desktop
+    for node in (app, main, editor):
+        node.get_application = lambda: app
+    masks = []
+    state = {"mask": 1}
+
+    def set_mask(mask):
+        masks.append(mask)
+        state["mask"] = mask
+
+    def count():
+        if state["mask"] == 0:
+            return 2
+        return 1
+
+    def child(index):
+        if state["mask"] == 0 and index == 1:
+            if fail:
+                raise RuntimeError("native read failed")
+            return editor
+        return main
+
+    app.set_cache_mask = set_mask
+    app.get_child_count = count
+    app.get_child_at_index = child
+    monkeypatch.setattr(_atspi, "_cache_masks", lambda: (0, 1))
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    monkeypatch.setattr(_atspi, "_combo_owning_popup", lambda node: None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, name: name in node.states)
+    # The native StateSet path used by find_root, rather than names fallback.
+    active = object()
+    monkeypatch.setattr(fake_atspi.StateType, "ACTIVE", active, raising=False)
+    for node in (main, editor):
+        node.get_state_set = lambda node=node: _NS(
+            contains=lambda flag: flag == active and "ACTIVE" in node.states,
+        )
+    with _atspi.read_cache():
+        assert _atspi._child_count(app) == 1
+        picked = _atspi.find_root("scribus", Scope.WINDOW)
+        assert picked is (main if fail else editor)
+        assert _atspi.snapshot_window_list(main) == ([main] if fail else [editor, main])
+    assert masks
+    assert masks == [0, 1] * (len(masks) // 2)
+    assert state["mask"] == 1
+
+
 def test_calc_viewport_bands_are_explicitly_synthetic(fake_atspi, monkeypatch) -> None:
     """The native sheet stays distinct from snapshot-only cell groups."""
     monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
@@ -15591,3 +15707,236 @@ def test_snapshot_bands_do_not_orphan_the_last_table_cell(fake_atspi, count, cac
         assert all(2 <= sum(el.parent == group.ref for el in published)
                    <= observe.MAX_CHILDREN for group in groups)
     _assert_no_elision(snap)
+
+
+@pytest.mark.parametrize("found", [True, False])
+def test_kate_scroll_search_uses_character_viewport(monkeypatch, found):
+    """Kate scrolls its editor, verifies the match, and avoids bounded ranges."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, True, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((20.0, 30.0), (800.0, 400.0)))
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda acc, coord: (20.0, 30.0, 800.0, 400.0))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: "TOKEN_001\nTOKEN_070")
+    monkeypatch.setattr(_atspi, "_qt_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {})
+    monkeypatch.setattr(_atspi, "_stable_id", lambda *args: None)
+    painted = ["TOKEN_001"]
+
+    def ranges(*args):
+        pytest.fail("Kate must not request disruptive bounded ranges")
+
+    buffer = "TOKEN_001\nTOKEN_070"
+    def character_rect(acc, offset, coord):
+        token = "TOKEN_001" if offset < 10 else "TOKEN_070"
+        return _NS(x=20, y=40 if token == painted[0] else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        Text=_NS(
+            get_bounded_ranges=ranges,
+            get_offset_at_point=lambda acc, x, y, coord: (
+                0 if y == 30 else len(buffer) - 1
+            ),
+            get_text=lambda acc, start, end: buffer[start:end],
+            get_character_extents=character_rect,
+        ), CoordType=_NS(SCREEN=0),
+        TextClipType=_NS(BOTH=3),
+    ))
+
+    class Editor:
+        def get_application(self):
+            return _Acc("application", name="Kate")
+
+        def get_role_name(self):
+            return "text"
+
+        def get_name(self):
+            return "Document"
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States({"MULTI_LINE", "EDITABLE"})
+
+    raw = _atspi.ATSPIAccessor().read(Editor())
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="kate", pid=1, geometry=_geometry())
+    assert not observe.find_elements(snap, text="TOKEN_070")
+    assert observe.find_elements(snap, text="TOKEN_001")
+    assert raw.editable
+    from a11y_computer_use import server
+
+    class Driver:
+        pass
+
+    driver = Driver()
+    driver.ensure_trusted = lambda: None
+    driver.scroll_offset = lambda anchor: None
+    driver.supports_in_page_find = lambda app: False
+    def snapshot(*args):
+        visible = _atspi.ATSPIAccessor().read(Editor())
+        breadcrumb = RawNode(role="AXList", title="Breadcrumbs", position=(20, 0), size=(800, 25))
+        root = RawNode(role="AXWindow", position=(0, 0), size=(1000, 800))
+        return build_snapshot((root, [(breadcrumb, []), (visible, [])]), _FakeAccessor(), scope=Scope.WINDOW,
+                              app="kate", pid=1, geometry=_geometry())
+    driver.snapshot = snapshot
+    scrolls = []
+    def scroll(anchor, *, dy):
+        assert anchor.role == "AXTextArea"
+        scrolls.append(dy)
+        if found:
+            painted[0] = "TOKEN_070"
+    driver.scroll = scroll
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._resolve_app = lambda app: (None, app)
+    runtime._run_gated = lambda action, app, execute, **kwargs: execute()
+    runtime._require_permission = lambda *args, **kwargs: None
+    runtime._recheck_target = lambda *args, **kwargs: None
+    result = runtime.scroll_to_find("kate", text="TOKEN_070", max_scrolls=3)
+    if found:
+        assert scrolls == [5]
+        assert "found after 1 scroll(s)" in result
+        assert "TOKEN_070" in result
+    else:
+        assert scrolls
+        assert result.startswith("not found after")
+
+
+@pytest.mark.parametrize("role", ["text", "entry", "password text"])
+@pytest.mark.parametrize("description", ["", "Enter the address of the server. Use a hostname or IP."])
+@pytest.mark.parametrize("case", ["label", "native", "no_relation", "no_geometry"])
+def test_entry_relation_labels_precede_tooltips(fake_atspi, monkeypatch, role, description, case):
+    """#657: FileZilla/Thunar field labels remain findable despite tooltips."""
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    field = _place_row(_Acc(role, name="Native" if case == "native" else "",
+                            states=("ENABLED", "VISIBLE", "SHOWING", "SINGLE_LINE", "EDITABLE")),
+                       220, 100, 240, 30)
+    field.get_description = lambda: description
+    label = _Acc("label", name="Password:" if role == "password text" else "Host:")
+    relation = _NS(get_relation_type=lambda: "labelled-by", get_n_targets=lambda: 1,
+                   get_target=lambda index: label)
+    field.get_relation_set = lambda: [] if case == "no_relation" else [relation]
+    if case == "no_geometry":
+        field.component = None
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(field)
+    expected = "Native" if case == "native" else "" if case == "no_relation" else label.name[:-1]
+    assert raw.title == expected
+    assert raw.description == description
+    assert raw.role == ("AXSecureTextField" if role == "password text" else "AXTextField")
+    if case == "no_geometry":
+        assert raw.position is None and raw.size is None
+    else:
+        snap = build_snapshot(field, accessor, scope=Scope.WINDOW,
+                              app="filezilla", pid=657, geometry=_geometry())
+        if expected:
+            found = observe.find_elements(snap, text=expected)
+            assert len(found) == 1
+            assert found[0].title == expected
+            assert found[0].bounds == Bounds(0, 220, 100, 240, 30)
+            assert observe.ax_handle_for(snap.snapshot_id, found[0].ref) is field
+            if role == "password text":
+                assert found[0].secure is True
+                assert found[0].value is None
+
+
+@pytest.mark.parametrize("case", ["opaque", "other_app", "other_scroll", "children", "named", "text", "detailed"])
+def test_pcmanfm_empty_icon_view_reports_missing_file_accessibility(monkeypatch, case):
+    """#670: label the limitation without fabricating named file targets."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_has_text_interface", lambda node: case == "text")
+    panel = _Acc("table" if case == "detailed" else "panel",
+                 name="Native" if case == "named" else "", width=525, height=468)
+    cell = _Acc("table cell", name="FILE-001.txt")
+    if case in {"children", "detailed"}:
+        _adopt(panel, cell)
+    scroll = _Acc("scroll pane", name="Other" if case == "other_scroll" else "View of folder contents")
+    app = _Acc("application", name="other" if case == "other_app" else "pcmanfm")
+    panel.get_application = lambda: app
+    _adopt(app, _adopt(_Acc("frame", name="Files"), _adopt(scroll, panel)))
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(panel)
+    assert raw.title == panel.name
+    assert raw.position == (0.0, 0.0)
+    assert raw.size == (525, 468)
+    if case == "opaque":
+        assert raw.surface_name == "PCManFM folder contents"
+        opaque = observe._as_opaque_region(raw, [], 0)
+        assert opaque.role == "opaque_region"
+        assert opaque.title == "PCManFM folder contents"
+        assert "not exposed by AT-SPI" in opaque.note
+        assert "Detailed List View" in opaque.note
+        assert opaque.value is None
+        assert accessor.children(panel) == []
+        # The panel commonly fills its parent; shared pruning must still
+        # publish the warning rather than discard a duplicate empty group.
+        tree = (RawNode(role="AXScrollArea", title=scroll.name,
+                        position=raw.position, size=raw.size), [(raw, [])])
+        snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                              app="pcmanfm", pid=670, geometry=_geometry())
+        regions = observe.find_elements(snap, role="opaque_region")
+        assert len(regions) == 1
+        assert regions[0].title == "PCManFM folder contents"
+        assert "Detailed List View" in regions[0].note
+        assert not observe.find_elements(snap, text="FILE-001")
+    else:
+        assert raw.surface_name == ""
+    if case == "detailed":
+        assert accessor.read(cell).title == "FILE-001.txt"
+
+
+@pytest.mark.parametrize("toolkit", ["Qt", "qt", "Qt 5.15.15", "Qt 6.8.2"])
+@pytest.mark.parametrize("offsets_available", [True, False])
+def test_qt_viewport_skips_bounded_ranges_and_rechecks_visibility(
+    monkeypatch, toolkit, offsets_available,
+):
+    """#687: repeated Qt reads never invoke the nonanswering range method."""
+    app = _NS(get_toolkit_name=lambda: toolkit)
+    editor = _NS(get_application=lambda: app)
+    text = "VISIBLE\nHIDDEN" + "x" * _atspi._PAGE_TEXT_CHARS
+    reads = []
+    checked = []
+    viewport = {"line": 0}
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+
+    def bounded(*args):
+        pytest.fail("Qt must never wait for GetBoundedRanges")
+
+    def get_text(acc, start, end):
+        reads.append((start, end))
+        return text[start:end]
+
+    def rectangle(acc, offset, coord):
+        checked.append(offset)
+        line = 0 if offset < 7 else 1 if 8 <= offset < 14 else 2
+        return _NS(x=20, y=40 if line == viewport["line"] else 900,
+                   width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=bounded,
+            get_offset_at_point=lambda acc, x, y, coord: (
+                (0 if y == 30 else 13) if offsets_available else -1
+            ),
+            get_character_count=lambda acc: len(text),
+            get_text=get_text,
+            get_character_extents=rectangle,
+        ),
+    ))
+    for line, expected in [(0, "VISIBLE"), (1, "HIDDEN"), (0, "VISIBLE")]:
+        viewport["line"] = line
+        assert _atspi._qt_viewport_text(editor) == expected
+    end = 14 if offsets_available else _atspi._PAGE_TEXT_CHARS
+    assert reads == [(0, end)] * 3
+    assert checked == list(range(end)) * 3
+    # A readable buffer without native geometry remains unverifiable.
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0),
+        Text=_NS(get_offset_at_point=lambda *args: -1,
+                 get_character_count=lambda acc: len(text), get_text=get_text,
+                 get_character_extents=lambda *args: None),
+    ))
+    assert _atspi._qt_viewport_text(editor) is None

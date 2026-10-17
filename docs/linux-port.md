@@ -28,6 +28,14 @@ hermetic snapshot and find tests; live Calc verification is pending.
 
 ## Files in opaque file-manager views
 
+PCManFM's default Icon View can publish a childless panel under `View of
+folder contents`, even while the status bar counts files. The driver labels
+this opaque region `PCManFM folder contents` and reports that file icons are
+unavailable to `find`, ref-based file clicks, and `scroll_to_find`. The pane ref
+identifies the whole surface, never an individual file. Explicitly choose
+View > Folder View Mode > Detailed List View to expose named table cells;
+the driver does not switch views automatically or synthesize icon targets.
+
 Thunar 4.20 exposes named cells in List View, but its Icon and Compact views
 can expose only an unnamed `opaque_region`. The Linux `files` helper supports
 named file tasks without clicking that surface. Configure the MCP server's
@@ -128,7 +136,7 @@ has not been performed for this change.
 - Qt on X11 joins the accessibility tree through the X root-window property `AT_SPI_BUS` (type `STRING`, 8-bit) or through `org.a11y.Bus` on the session bus. `at-spi-bus-launcher` writes that property when it starts. Tester launched a PyQt6 window with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` before the property existed, and the window never appeared in the tree. The live Qt fixture reads `org.a11y.Bus.GetAddress` and writes that address onto the root before the process starts. It does not export `AT_SPI_BUS_ADDRESS`: on Qt 6.4 that variable makes the bridge emit its enable signal before the slot is connected, and the application never registers. Set the root property, and leave the variable unset, when you launch Qt outside the fixture.
 - A Qt table and a Qt tree publish `table cell`, `table column header`, and `table row header`. Those map to `AXCell`, `AXColumn`, and `AXRow`. A table or outline with at most 24 children keeps every header and cell, so a 4×3 grid plus its headers is not cut at 12. A grid with more children than that still keeps 12. A live PyQt6 window finds `R3C2` by role `cell` and clicks it, then shows the Tree tab, where `Fruits` is a collapsed cell.
 - A ref click on a file-manager side pane, or on a tree or list row that opens a folder, uses that row's own activation. A Thunar shortcut cell's `activate` action and Return leave the folder where it was; the click is a pointer click at the row. A tree or list row whose own action is `activate` uses that action. Return is sent only when the row has no box and no activate action. The click is `confirmed` only when the location entry or the path bar changed. A row that was only selected is `partial`. A file row inside the folder view's tab still selects and does not open. A GTK tree with no location bar still selects through the parent's Selection interface.
-- A ref click on a Qt table cell is a pointer click at the cell's center. `Toggle` and `Selection.select_child` add the cell and leave `currentItem` where it was, so a later Delete or key would hit every selected cell and the old current cell. The click is a success only when that cell is the only selected cell and it is focused, which is the current cell. The outcome is `confirmed` when the accessibility state changed to that, and `refused` with `selection_unchanged` when the click did not. A tree item stays on `Toggle`, which selects the row and does not expand it.
+- A ref click on a Qt table cell is a pointer click at the cell's center. `Toggle` and `Selection.select_child` add the cell and leave `currentItem` where it was, so a later Delete or key would hit every selected cell and the old current cell. The click is a success only when that cell is the only selected cell and it is focused, which is the current cell. The outcome is `confirmed` when the accessibility state changed to that, and `refused` with `selection_unchanged` when the click did not. Other tree items stay on `Toggle`, which selects the row and does not expand it; Okular TOC cells refuse unverified activation as described below.
 - Accessibility must be ENABLED; it is the key runtime requirement. This is the exact opposite of the Grok-desktop default, which ships with a11y OFF and drives everything by vision+coordinates. a11y-computer-use's a11y-first path needs the AT-SPI2 registry reachable, which means: `at-spi2-core` installed and running (the `org.a11y.Bus` name present on the session bus), toolkits bridging into it (`gsettings set org.gnome.desktop.interface toolkit-accessibility true`; for non-GNOME sessions export `GTK_MODULES=gail:atk-bridge`), and Chromium/Electron apps launched with `--force-renderer-accessibility` (they otherwise expose an empty tree). `ensure_trusted` (`a11y_computer_use/drivers/linux.py`) checks only the first of these: it best-effort sets `org.a11y.Status.IsEnabled`/`ScreenReaderEnabled` true on the session bus (`_atspi.enable_a11y_status`, result not checked; opt out with `A11Y_COMPUTER_USE_NO_WEB_A11Y=1`) and then probes `Atspi.get_desktop(0)`; if the bindings fail to import or the desktop is unreachable it raises a structured `permission_denied_accessibility` error whose hint lists the apt, gsettings, and `--force-renderer-accessibility` steps. It does not verify that toolkits are bridged (gsettings / `GTK_MODULES`) or that Chromium/Electron apps were launched with `--force-renderer-accessibility`; an app whose tree is empty for those reasons still yields an empty snapshot, not an error. Turning an accessibility-OFF Linux desktop into an accessibility-FIRST one is the whole point of this backend.
 - A running app that appears in app/window lists but has no AT-SPI root returns `unsupported` with `reason: no_accessibility_bridge` from app-scoped snapshots, find, and menu listing. A window first listed after the registration eligibility check remains `app_not_found` for that observation so the next call can retry registration. Snapshots preserve the remaining existing 15 s startup grace for an unambiguous newly started window owner, so a GTK4 window may register its tree after it maps. A distinct GTK program name may identify that owner through WM_CLASS when the process runs under an interpreter; a window title alone does not establish ownership. Older non-LibreOffice apps get one short registration retry; LibreOffice retains its 15 s registration grace period. This also covers an app connected to the accessibility bus without exporting a root. The hint suggests screenshots with explicit coordinates, enabling the bridge, or retrying if the app is still starting. A registered app with an empty tree remains a valid snapshot; an app absent from both AT-SPI and the lists remains `app_not_found`.
 - VLC Qt AT-SPI registration can be intermittent. When VLC has no root, snapshots probe again after one short registration interval instead of waiting out process startup grace, then return `no_accessibility_bridge`. Enable Qt accessibility with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` and restart VLC. If the bridge is still absent, use screenshots and explicit coordinates rather than repeatedly retrying tree queries. A registered VLC tree continues through normal observation.
@@ -258,6 +266,13 @@ pane's text to verify the result. These are separate requested operations:
 an explicit gutter-arrow click must not be silently replaced with navigation
 or a header-bar action. If that arrow cannot be addressed, report the limitation.
 
+Okular Contents (TOC) cells that expose only AT-SPI `Toggle` (optionally
+`SetFocus`) refuse ref clicks with `toc_activation_unverified` before selecting
+or clicking. Toggle can highlight the row without navigating, and selection does
+not verify page activation. Use an explicit coordinate click inside the visible
+cell and verify the viewer's page number changed. This refusal is covered by
+hermetic tests; live Okular navigation has not been verified for this change.
+
 Okular's Thumbnails sidebar can expose its painted thumbnail strip as an
 empty AT-SPI filler, without page icons or page-label text. In the reported
 Sidebar structure (a Thumbnails label above a filler beside a scrollbar),
@@ -282,24 +297,18 @@ page text supplied by the application remain unchanged.
 
 ## Kate document text search
 Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
-omit Kate textarea buffer values because the editor bounds do not establish
-character visibility. `find` and `scroll_to_find` cannot verify individual
-document text matches; even visible buffer text is excluded until character
-visibility can be established. The editor ref remains available, with a hint
-to use in-document navigation. Single-line search fields keep their values.
-Kate skips the generic Qt viewport-text probe: that discarded read disrupts
-subsequent accessibility traversal on Kate 25.04.3. Native status controls such
-as `1:1`, `INSERT`, and `UTF-8` remain available to snapshots and `find`.
-This preservation was checked with a real Kate 25.04.3 under Xvfb/D-Bus for #646.
-Automatic `scroll_to_find` selects this editor view ahead of sibling breadcrumb
-lists. Text search returns `unsupported` with reason
-`document_text_visibility_unavailable` before wheel or Find input because the
-accessibility tree cannot confirm a visible match. An explicit container `ref`
-still selects that container. Editor selection and refusal were checked against
-Kate 25.04.3 under an isolated Xvfb/D-Bus session for #647.
+publish only text verified inside the measured editor viewport by native
+point offsets and character rectangles. They bypass `GetBoundedRanges`, whose
+Qt reply can disrupt subsequent accessibility traversal. Unavailable character
+geometry keeps the document value excluded and search returns `unsupported`
+with reason `document_text_visibility_unavailable` before input.
 
-The buffer suppression is covered by synthetic tests; no live Kate run
-was performed for #477.
+Automatic `scroll_to_find` selects the editor ahead of sibling breadcrumb lists,
+scrolls that view, and checks fresh visible text before reporting a match. A
+miss returns not found within the requested scroll budget; an explicit container
+`ref` still selects that container. Single-line search fields keep their values.
+This path is covered by synthetic regressions; no live Kate run was performed
+for #664.
 
 GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
 
@@ -355,11 +364,12 @@ entry/text roles outside GTK 3.
 Qt multiline editors (including FeatherPad) expose the entire document through
 AT-SPI Text. Native multiline states or attributes select this path; ordinary
 Qt line edits retain their text without requesting document viewport ranges.
-Snapshot values and text searches use `Text.get_bounded_ranges`
-inside the measured editor bounds, falling back to native point offsets and
-verified character rectangles when Qt omits bounded ranges. If that query
-fails, times out, or returns malformed ranges and point offsets are unavailable
-(as on Qt 5.15), a raw Text prefix capped at 4000 characters is read. Failed
+For applications identified by their Qt toolkit name, snapshot values and text
+searches bypass `Text.get_bounded_ranges`: Qt 5 and Qt 6 bridges can leave that
+request unanswered, stalling reads and marking the application hung in libatspi.
+Native point offsets and verified character rectangles establish visibility
+instead. If point offsets are unavailable (as on Qt 5.15), a raw Text prefix
+capped at 4000 characters is read. Failed
 explicit text reads retry `getText(0,-1)` only when the native character count
 fits that cap, then try 256-character chunks within the same cap. Each
 character's native rectangle is checked against the viewport. Unverified and
@@ -436,6 +446,14 @@ checked-state change. Missing or off-screen bounds, native Wayland, and an
 unchanged checked state return an error; no AT-SPI Toggle follows the click.
 This path is covered by hermetic tests; a live QML run has not been performed.
 
+Qt `push button menu` controls (for example Okular's Text Selection tool)
+appear as buttons and match `find(role="button")`. A ref click uses an explicit
+Press/Click/Activate action when available. If Qt exposes only ShowMenu/SetFocus,
+the click is refused with `menu_button_without_press`: these actions do not
+establish a main-button press. Use a screenshot and an explicit coordinate click
+on the desired segment; the whole-button bounds do not identify the arrow and
+main segment separately.
+
 Qt Quick sliders and spin buttons can report a working AT-SPI Value interface
 with broken minimum/maximum getters returning 0..0. These controls expose their
 finite current value and accept numeric `set_value` with unknown bounds; success
@@ -483,8 +501,10 @@ Unnamed GTK single-line text fields can use a sibling label when its measured
 box lies to the left and fully within the field's row. This fallback requires
 one label and no other text editor on that row; missing or ambiguous geometry
 leaves the name empty. Existing names, descriptions, and explicit label
-relations take precedence. It changes naming only and retains the native entry
-handle and bounds (including Claws Mail's Setup Wizard fields).
+relations take precedence over this geometry fallback. Unnamed text and password
+fields prefer explicit `labelled-by` names over tooltip descriptions, which remain
+available as hints; native names are preserved. It changes naming only and retains
+the native entry handle and bounds (including Claws Mail's Setup Wizard fields).
 
 Chrome HTML top-layer popover panels with a reported `ispopup` mode (`auto`,
 `manual`, or `hint`) and native `SHOWING` state are exposed as `AXPopover`.
@@ -492,7 +512,15 @@ Ref clicks and crops refuse with `not_visible` / `covered` when another
 popover's measured bounds contain the ref's center. Controls inside their own
 popover remain eligible; dismiss the covering popover before retrying a covered
 ref. This check uses the accessibility tree because Chrome's accessible
-hit test can return the underlying control.
+hit test can return the underlying control. Ref resolution retains the cover
+result from its already-required fresh tree, bound to that exact resolved
+element. The pre-input guard consumes this result once in constant time,
+without another AT-SPI page snapshot. This detects popovers opened since ref
+issuance as well as dismissed popovers. If no matching resolution evidence is
+available (for example, a different proxy target), the conservative refresh
+remains limited to recognized browsers, refs with a document URL, trees with
+`AXWebArea`, or trees that already contained an `AXPopover`. Native trees
+without those signals avoid the extra snapshot.
 
 
 Claws Mail's GTK folder and message lists can expose only childless panels
@@ -531,7 +559,9 @@ or an unchanged window title returns `suspected_noop` with `location not opened`
 and guidance to check the path or create missing folders from the nearest
 existing parent. An unchanged title alone does not prove that an error icon
 exists, so the result names the observed evidence. Successful navigation keeps
-the usual key result. Text read-back from `set_value` does not establish that a
+the usual key result: a changed window title naming the requested folder,
+together with a matching live location entry, overrides even a newly appearing
+error icon. Text read-back from `set_value` does not establish that a
 folder exists.
 
 Showing HTML popover panels reporting AT-SPI `ispopup=auto|manual|hint`
@@ -639,6 +669,15 @@ the border reaches the underlying app. Repeat with no bounds, disabled feedback,
 and pointer opt-in. Tests and all CI workflows disable feedback, including Calc's
 unchanged five-second timing test. See the R&D spec in `/workspace/research`;
 it may tune these prototype knobs.
+
+Top-level application children are enumerated with the native child cache disabled
+for both window-root selection and showing-window discovery. This prevents a
+new Qt window, such as Scribus's Story Editor, from remaining absent behind a
+stale cached application child list. The existing cache-mask helper keeps the
+count and indexed reads on the event thread and restores the default mask after
+the read. Regression coverage is synthetic; this change has not been live-verified
+against Scribus.
+
 GTK header-bar apps such as Eye of GNOME can expose a **Menu** or **Main Menu**
 button and a popover of ordinary buttons/checkboxes without a menu bar. Menu
 listing and paths remain unsupported for that shape; the error points to
@@ -653,3 +692,5 @@ Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
 read-back can match the requested percentage while the image scale stays
 unchanged. Use the zoom UI and verify the displayed image scale; the backend
 does not send an activation key or substitute a zoom-button click.
+
+Menu leaf presses also check for keyboard focus left on the menubar or its entries after the popup closes (for example, Qt menus in Okular). Cleanup sends Escape and verifies that both popup state and menubar keyboard tracking clear; a refusal reports retained tracking. If the first Escape closes the popup but leaves an active bar entry, a second Escape clears that entry within the existing cleanup polling bound. Qt Widgets can retain focus on the bar itself when no other widget takes focus; with no focused menu-item entry, that is idle widget focus, not an active menu. A showing dialog is left alone, and explicitly pressing a submenu still leaves it open. This cleanup is covered by synthetic menu regressions and the live Qt checkable-menu fixture; it has not been live-verified in Okular.

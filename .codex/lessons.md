@@ -210,8 +210,25 @@
 - 2026-10-16 (PR #696 repair): Keep VLC's bounded registration retry and VLC-specific Qt setup hint alongside the generic GTK2 bridge prerequisites when merging missing-tree diagnostics. Preserve both the VLC registration regressions and main's Qt text-recovery regressions.
 - 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
 
+- 2026-10-16 (PR #715 merge repair): Preserve stale top-level application-child cache regressions alongside table-band boundary regressions when both append to the Linux synthetic suite; window discovery and complete table-cell publication are independent behaviors.
+
+
 - 2026-10-16 (PR #711 repair): Calc viewport bands use the table role to retain sheet pruning limits, while ordinary table-cell bands use groups to avoid orphaned final cells. Preserve both representations and their regressions when merging adjacent band changes; label only the Calc synthetic bands.
 - 2026-10-16 (#651): Eye of GNOME GTK zoom entries can echo EditableText percentages without changing image scale. Buffer equality cannot verify applied zoom; refuse before mutation rather than send an unrequested activation. Preserve the independent header-bar menu guidance when merging adjacent backend notes.
 - 2026-10-16 (PR #701 main merge): Retain GTK numeric label tests alongside VLC registration tests and same-app cover documentation when adjacent additions conflict; they protect independent observation behaviors.
 - 2026-10-16 (visible actions): Keep X11 rendering and expiry on a daemon-owned connection and reuse one empty-input-shaped window. Keep native AT-SPI reads on their owner thread, never put typed text in feedback labels, and hold captures until unmap. Disable cosmetic feedback globally in tests/CI so existing timing budgets remain unchanged.
 - 2026-10-17 (PR #719): Ref typing uses ``type_into``, not ``type_text``. Announce the Type overlay on both paths; never put typed text in the label.
+
+- 2026-10-17 (PR #720 repair): Native popover-refresh gating and per-snapshot sibling-window cover caching address independent tree and window-scan costs. Preserve both complete regression blocks when merging their appended action-outcome tests.
+
+- 2026-10-17 (PR #720 Calc CI investigation): A live Calc failure in the initial LinuxDriver.snapshot loop occurs before Runtime creation, so Runtime popover-refresh gating cannot cause it. Check the failing phase before changing input code. The exact failed head 8eb1b60 passed test_linux_calc_range_formula_and_normalised_numbers_confirm alone in 164.23 s under private 1280x800 Xvfb, D-Bus, AT-SPI and Openbox; retain the unchanged startup assertions and limits.
+
+- 2026-10-17 (#652): Okular TOC QTreeView cells expose selection-only Toggle without CHECKABLE. Highlighting a row does not verify page navigation; refuse ref activation before mutation until navigation can be verified, and keep grid-cell and other tree-item handling separate.
+- 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
+
+- 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
+
+- 2026-10-17 (#670): PCManFM Icon View can expose no file children at all. Label only the childless folder panel under the native folder-content scroll pane; keep Detailed List View rows native and never infer icons from status counts.
+- 2026-10-17 (PR #735 repair): Preserve Kate character-viewport scroll-search regressions and GTK entry relation-label regressions together when merging appended tests; editor visibility and field naming are independent behaviors.
+
+- 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.

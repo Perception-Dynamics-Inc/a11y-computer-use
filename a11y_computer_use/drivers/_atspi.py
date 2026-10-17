@@ -48,6 +48,7 @@ from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 # because the strings are stable across atspi2 versions and bindings.
 _ROLE = {
     "push button": "AXButton",
+    "push button menu": "AXButton",
     "toggle button": "AXButton",
     "spin button": "AXTextField",
     "button": "AXButton",
@@ -3243,6 +3244,11 @@ def _qt_viewport_text(acc) -> str | None:
     box = _raw_rect(acc, "SCREEN")
     if box is None or box[2] <= 0 or box[3] <= 0:
         return None
+    if "qt" in _toolkit_name(acc):
+        # Qt 5 and Qt 6 bridges cannot marshal QSpiTextRangeList. Avoid
+        # paying a D-Bus timeout (and marking the app hung) on every read.
+        # The fallback still verifies every published character's bounds.
+        return _qt_character_viewport_text(acc, box)
     Atspi = _atspi()
     coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
@@ -3271,6 +3277,21 @@ def _qt_viewport_text(acc) -> str | None:
                 return "\n".join(contents)
         except Exception:
             pass
+    return _qt_character_viewport_text(acc, box)
+
+
+def _qt_character_viewport_text(acc, box=None) -> str | None:
+    """Read text verified by native character boxes without GetBoundedRanges.
+
+    KTextEditor cannot marshal bounded ranges reliably; keep that request
+    off its bridge while retaining native visibility checks.
+    """
+    if box is None:
+        box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     # Qt commonly leaves GetBoundedRanges unimplemented. Use native
     # point offsets and character rectangles instead, never the buffer
     # alone. These reads are repeated after every scroll.
@@ -4042,12 +4063,16 @@ class ATSPIAccessor:
         ):
             position, size = (-1.0, -1.0), (-1.0, -1.0)
         if (
-            role == "AXTextField"
-            and role_str in {"entry", "text"}
+            role in {"AXTextField", "AXSecureTextField"}
+            and role_str in {"entry", "text", "password text"}
             and not name.strip()
-            and not description.strip()
         ):
-            name = _gtk_entry_row_name(node)
+            # Explicit labels precede tooltips, including password labels.
+            # Relation evidence does not require geometry.
+            label = _plain_accessible_name(_labelled_by_name(node))
+            name = _strip_label_colon(label)
+            if not name and not description.strip() and role == "AXTextField":
+                name = _gtk_entry_row_name(node)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if (role_str in {"slider", "spin button"} and not name.strip()
@@ -4161,9 +4186,8 @@ class ATSPIAccessor:
             and _qt_app(node) and _reports_multiline(node, attrs)
         )
         if qt_document and owner_name.casefold() != "kate":
-            # Kate already refuses document text below. Probing Qt bounded
-            # ranges anyway disrupts its accessibility bridge, hiding later
-            # controls in this walk (including the status bar).
+            # Kate uses character geometry below. Probing bounded ranges
+            # disrupts its bridge, hiding later controls in this walk.
             value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
             value = button_name
@@ -4173,15 +4197,18 @@ class ATSPIAccessor:
                 # KTextEditor publishes the whole buffer, including off-screen
                 # characters. Its widget box cannot verify substring visibility,
                 # even for a document containing one long line. Keep the ref.
-                value = None
-                description = (
-                    f"{description} Document text visibility unavailable; "
-                    "use in-document navigation to locate text."
-                ).strip()
+                value = _qt_character_viewport_text(node) if qt_document else None
+                if value is None:
+                    description = (
+                        f"{description} Document text visibility unavailable; "
+                        "use in-document navigation to locate text."
+                    ).strip()
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        if qt_document and owner_name.casefold() == "kate" and value is not None:
+            hint = (hint + "; " if hint else "") + "Native character viewport text"
         if qt_document and value is None:
             hint = (hint + "; " if hint else "") + (
                 "Visible document text unavailable; use in-document Find or line navigation"
@@ -4192,6 +4219,25 @@ class ATSPIAccessor:
             if search_value is not None else ""
         )
         panel_note = ""
+        if (
+            role_str == "panel" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
+            and value is None and _child_count(node) == 0
+            and _application_name(node).casefold() == "pcmanfm"
+            and _role_name(_parent_of(node)) == "scroll pane"
+            and _node_name(_parent_of(node)).casefold() == "view of folder contents"
+            and not _has_text_interface(node)
+        ):
+            # A painted file surface, even when its box duplicates the scroll pane.
+            role = "AXCanvas"
+            surface_name = "PCManFM folder contents"
+            panel_note = (
+                "File and folder icons are not exposed by AT-SPI; find and "
+                "scroll_to_find cannot read or target them. This ref identifies "
+                "the whole pane. Explicitly switch to Detailed List View for "
+                "accessible named rows."
+            )
+
         if (
             role_str == "panel" and role == "AXGroup"
             and not str(name).strip() and not str(description).strip()
@@ -5868,15 +5914,7 @@ def find_root(app: str, scope) -> object | None:
     active = getattr(st, "ACTIVE", None)
 
     def _frames(acc):
-        n = _child_count(acc)
-        if n < 0:
-            n = 0
-        out = []
-        for j in range(int(n)):
-            frame = _call_first(acc, ("get_child_at_index",), j)
-            if frame is not None:
-                out.append(frame)
-        return out
+        return _fresh_application_children(acc)
 
     def _is_active(frame) -> bool:
         sset = _call_first(frame, ("get_state_set",))
@@ -6010,6 +6048,23 @@ def _toplevel_of(node):
     return None
 
 
+def _fresh_application_children(app) -> list:
+    """Read top-level children without libatspi's stale application cache.
+
+    A newly opened Qt window can be absent from the cached array indefinitely.
+    Keep the count and indexed reads under the same cache mask; clearing cached
+    properties alone allows reentrant cache events to restore the stale array.
+    """
+    def read_children():
+        count = _child_count(app)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return []
+        return [child for index in range(count)
+                if (child := _child_at(app, index)) is not None]
+
+    return _without_child_cache(app, read_children)
+
+
 def showing_toplevels(node) -> list:
     """Showing top-level windows of ``node``'s application, active first.
 
@@ -6031,13 +6086,9 @@ def showing_toplevels(node) -> list:
     identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
     if identity in _linux_system._PORTAL_BACKENDS:
         return [node]
-    count = _child_count(app)
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        count = 0
     frames = []
-    for index in range(int(count)):
-        child = _child_at(app, index)
-        if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
+    for child in _fresh_application_children(app):
+        if _role_name(child) not in _TOPLEVEL_ROLES:
             continue
         if not _state_has(child, "SHOWING"):
             continue
@@ -7409,6 +7460,17 @@ def qt_quick_checkable(acc) -> bool:
     )
 
 
+def okular_toc_toggle_cell(acc) -> bool:
+    """Identify Okular tree cells whose Toggle only changes selection."""
+    return (
+        _role_name(acc) == "table cell"
+        and _qt_app(acc)
+        and _application_name(acc).casefold() == "okular"
+        and set(_raw_action_names(acc)) - {"setfocus"} == {"toggle"}
+        and any(_role_name(parent) == "tree" for parent in _ancestor_nodes(acc))
+    )
+
+
 def qt_toggle_only_control(acc) -> bool:
     """Qt buttons and list items whose only activating action is Toggle.
 
@@ -7456,15 +7518,29 @@ def click_gtk4_tree_expander(acc) -> bool:
     return _do_action_named(acc, frozenset({name}))
 
 
+def qt_menu_button(acc) -> bool:
+    """Qt split/menu tool button whose menu action is not a main press."""
+    return _role_name(acc) == "push button menu" and _qt_app(acc)
+
+
+_MAIN_BUTTON_ACTIONS = frozenset({"click", "press", "activate"})
+
+
+def qt_menu_button_without_press(acc) -> bool:
+    """True when Qt provides no explicit main-button activation action."""
+    return qt_menu_button(acc) and not (_MAIN_BUTTON_ACTIONS & set(_raw_action_names(acc)))
+
+
 def do_press(acc) -> bool:
     """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
     action = _action_iface(acc)
     if action is None:
         return False
     n = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    allowed = _MAIN_BUTTON_ACTIONS if qt_menu_button(acc) else _PRESS_ACTION_NAMES | _PICK_ACTION_NAMES
     for i in range(int(n)):
         raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
-        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+        if raw in allowed:
             if _call_first(action, ("do_action", "doAction"), i, default=False):
                 return True
     return False

@@ -866,9 +866,10 @@ def _scroll_anchor(snap):
     if not candidates:
         return None
 
-    # A suppressed document buffer still identifies the editor view. Do not
-    # let a sibling breadcrumb list become the search container instead.
-    editors = [el for el in candidates if _document_text_unavailable(el)
+    # Keep document editors ahead of sibling breadcrumb lists, including
+    # Kate after native character geometry makes its text searchable.
+    editors = [el for el in candidates if (_document_text_unavailable(el)
+               or (el.role == "AXTextArea" and "Native character viewport text" in el.hint))
                and el.enabled and not el.secure and _positive_box(el)]
     if editors:
         focused = [el for el in editors if el.focused]
@@ -3043,6 +3044,18 @@ class Runtime:
         windows = [e for e in after.elements if e.role == "AXWindow" and e.path == parent.path]
         window = windows[0] if len(windows) == 1 else None
         unchanged = window is not None and bool(parent.title) and window.title == parent.title
+        # An icon can appear during successful navigation too. Require the
+        # live entry and changed window title to agree with the requested
+        # folder before letting that observed navigation override the icon.
+        requested = (entry.value or "").rstrip("/")
+        folder = requested.rsplit("/", 1)[-1]
+        if (
+            window is not None and not unchanged and parent.title
+            and requested.startswith("/") and folder
+            and fresh is not None and (fresh.value or "").rstrip("/") == requested
+            and window.title == f"{folder} - Thunar"
+        ):
+            return None
         if not error and not unchanged:
             return None
         reason = "the entry shows an error icon" if error else "the window title did not change"
@@ -4612,6 +4625,7 @@ class Runtime:
             )
         cover = self._popover_cover(element, refresh=True) or self._cover_owner(
             element, self._current.app if self._current is not None else None,
+            popover_checked=True,
         )
         if cover == "off_screen":
             raise _not_visible(ref, "off_screen", bounds, "the ref is outside the visible viewport")
@@ -4666,6 +4680,24 @@ class Runtime:
         if snap is None:
             return None
         if refresh and self.driver.name == "linux" and callable(getattr(self.driver, "snapshot", None)):
+            # Linux ref resolution already read the live tree. Consume its
+            # target-bound evidence before considering another full snapshot.
+            take_cover = getattr(self.driver, "take_resolved_popover_cover", None)
+            if callable(take_cover):
+                available, cover = take_cover(element)
+                if available:
+                    return cover
+            from a11y_computer_use.drivers.linux import _named_browser
+
+            # Native GTK/Qt clicks need no extra tree walk. Web documents
+            # and observed popovers can gain or lose covers after ref issuance.
+            plausible = (
+                any(el.role in {"AXPopover", "AXWebArea"} for el in snap.elements)
+                or _named_browser(snap.app)
+                or self.element_document_url(element) is not None
+            )
+            if not plausible:
+                return None
             # Resolve against the same fresh tree used for cover geometry;
             # opening a popover can change refs since the issued snapshot.
             from dataclasses import replace
@@ -4683,9 +4715,10 @@ class Runtime:
                 return "popover" + (f" {cover.title!r}" if cover.title else "")
         return None
 
-    def _cover_owner(self, element: Element, app: str | None) -> str | None:
+    def _cover_owner(self, element: Element, app: str | None, *,
+                     popover_checked: bool = False) -> str | None:
         """None when the element's center is this app. ``off_screen`` or a cover name otherwise."""
-        popover = self._popover_cover(element)
+        popover = None if popover_checked else self._popover_cover(element)
         if popover:
             return popover
         fn = getattr(self.driver, "occlusion", None)
@@ -6311,9 +6344,10 @@ class Runtime:
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
-        body-scroll page, not the window's tab strip. An editor with unavailable
-        visible text is preferred over sibling lists and text search refuses
-        before input because a visible match cannot be verified.
+        body-scroll page, not the window's tab strip. Kate's editor is preferred
+        over sibling lists and searched using native character visibility.
+        Editors with unavailable visible text refuse text search before input
+        because a visible match cannot be verified.
         An opaque container without readable contents returns
         ``container_not_readable`` before input; the target's presence
         cannot be determined from that accessibility tree. An unscoped text
@@ -9744,9 +9778,10 @@ def build_server(
         control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. Automatic selection prefers an
-        editor with unavailable visible text over sibling lists; text search
-        there returns unsupported document_text_visibility_unavailable before
-        input. An explicit ref overrides automatic selection.
+        Kate editor or an editor with unavailable visible text over sibling
+        lists. Kate uses native character visibility; unavailable text returns
+        unsupported document_text_visibility_unavailable before input.
+        An explicit ref overrides automatic selection.
         An opaque container with no
         readable contents returns container_not_readable before sending input;
         this does not establish that the target is absent. An unscoped text search
@@ -10092,7 +10127,8 @@ def build_server(
     async def wait_until(condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
         """Wait for something outside the accessibility tree, polling every
         poll_s seconds up to timeout_s (max 1800). condition is an object with
-        exactly one of: {"file_exists": path, "min_bytes": n} (a regular file;
+        exactly one of: {"dir_exists": path} (a directory, including an empty one),
+        {"file_exists": path, "min_bytes": n} (a regular file;
         path may use ~ and globs; newest match wins; default min_bytes is 1),
         {"file_stable": path, "seconds": n} (a regular file whose size is
         unchanged for n seconds: a finished download or render),
