@@ -2080,6 +2080,20 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
+        if self._run(lambda: _atspi.qt_menu_button_without_press(handle)):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} Qt menu button has no main-button press action",
+                detail={
+                    "ref": element.ref,
+                    "reason": "menu_button_without_press",
+                    "hint": (
+                        "Use a screenshot and an explicit coordinate click on the desired "
+                        "button segment. AT-SPI reports only the whole button bounds; "
+                        "ShowMenu and SetFocus do not verify a main-button click."
+                    ),
+                },
+            )
         self._raise_handle_window(handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
@@ -2185,6 +2199,23 @@ class LinuxDriver:
                 ErrorCode.UNSUPPORTED,
                 f"{element.ref} ({element.role}) click did not change the checked state",
                 detail={"ref": element.ref, "role": element.role, "reason": "checked_unchanged"},
+            )
+        # Okular's TOC Toggle selects a row without navigating. Selection
+        # cannot verify activation, so refuse before mutating the item.
+        if self._run(lambda: _atspi.okular_toc_toggle_cell(handle)):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) TOC activation cannot be verified; "
+                "no click was sent",
+                detail={
+                    "ref": element.ref,
+                    "role": element.role,
+                    "reason": "toc_activation_unverified",
+                    "outcome": "refused",
+                    "hint": "Use a coordinate click inside the visible TOC cell, "
+                    "then verify the viewer's page number changed. "
+                    "AT-SPI Toggle only changes selection, not the displayed page.",
+                },
             )
         # A Qt grid cell's Toggle action adds the cell and leaves currentItem
         # where it was. Selection.select_child does the same on Qt 6.11. A
