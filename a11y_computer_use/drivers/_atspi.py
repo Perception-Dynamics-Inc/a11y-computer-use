@@ -12330,8 +12330,9 @@ def focused_key_evidence(app: str) -> tuple:
 
     Text is the focused node's text. An open Calc cell editor replaces it,
     because the grid's own text stays empty while the digits are in the
-    editor. The cell address is the selected sheet cell. Missing pieces
-    are None. This is not a password check.
+    editor. The cell address is the selected sheet cell, falling back to
+    the focused visible cell when Calc exposes an empty Selection. Missing
+    pieces are None. This is not a password check.
     """
     text = None
     caret = start = end = None
@@ -12367,6 +12368,11 @@ def focused_key_evidence(app: str) -> tuple:
             cell = selected_sheet_address(app)
         except Exception:
             cell = None
+        if cell is None:
+            try:
+                cell = _focused_sheet_address(app)
+            except Exception:
+                cell = None
     return (text, caret, start, end, cell)
 
 
