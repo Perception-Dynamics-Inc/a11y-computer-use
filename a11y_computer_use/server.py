@@ -3367,6 +3367,19 @@ class Runtime:
                 "refusing to write a secure field; secrets are entered by the human",
                 detail={"ref": ref, "role": anchor.role},
             )
+        if kind == "click":
+            # A Calc cell click is confirmed by the active cell address after
+            # it. One read of the cell's own handle replaces the full-window
+            # rematch when it proves the cell is unchanged; otherwise the
+            # full read below runs as before.
+            targeted = getattr(self.driver, "resolve_sheet_cell", None)
+            if callable(targeted):
+                try:
+                    cell = targeted(snap, ref)
+                except Exception:  # noqa: BLE001 - the full read decides
+                    cell = None
+                if isinstance(cell, Element):
+                    return snap, cell
         try:
             live = self.driver.resolve_ref(snap, ref)
         except ComputerUseError as exc:

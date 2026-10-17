@@ -12294,6 +12294,35 @@ def sheet_click_verdict(app: str, address: str) -> tuple[str, str] | None:
     return "partial", f"the selected cell is not {wanted}"
 
 
+def live_sheet_cell(acc, address: str):
+    """Fresh ``RawNode`` of an issued Calc cell handle, or None.
+
+    The handle has to be alive and SHOWING, still named ``address``, and a
+    child of the Calc grid. The read is the snapshot's own accessor, so the
+    box goes through the same LibreOffice placement as a full walk. Any
+    failed read is None, which keeps the full-tree resolution.
+    """
+    wanted = sheet_address(address)
+    if wanted is None or acc is None:
+        return None
+    try:
+        if accessible_gone(acc) or not _state_has(acc, "SHOWING"):
+            return None
+        if _node_name(acc) != wanted:
+            return None
+        parent = _parent_of(acc)
+        if parent is None or not _spreadsheet_table(parent):
+            return None
+        accessor = ATSPIAccessor()
+        accessor.libreoffice = True
+        raw = accessor.read(acc)
+    except Exception:
+        return None
+    if raw is None or (raw.title or "") != wanted:
+        return None
+    return raw
+
+
 def selected_sheet_address(app: str) -> str | None:
     """The selected Calc cell's address, or None.
 

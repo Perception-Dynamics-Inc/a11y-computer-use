@@ -1900,3 +1900,146 @@ def test_calc_key_cell_probe_preserves_selection_and_handles_failure(monkeypatch
     assert _atspi.focused_key_evidence("soffice.bin")[4] == (
         "A3" if selected == "A3" else None
     )
+
+
+def _calc_cell_snapshot(**changes) -> Snapshot:
+    cell = _element(
+        "e26", "AXCell", "A1", bounds=Bounds(0, 100, 200, 80, 20), clickable=True,
+    )
+    cell = dataclasses.replace(cell, snapshot_id="calc-snap", **changes)
+    return Snapshot(
+        snapshot_id="calc-snap", scope=Scope.WINDOW, app="soffice.bin", pid=777,
+        created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+        elements=(cell,),
+    )
+
+
+@pytest.mark.parametrize("case,vouched", [
+    ("same", True),
+    ("moved", False),
+    ("renamed", False),
+    ("other_pid", False),
+    ("disabled", False),
+    ("not_libreoffice", False),
+    ("not_a_cell", False),
+    ("popover", False),
+    ("no_handle", False),
+    ("read_failed", False),
+])
+def test_calc_cell_click_targeted_resolution_or_full_read(monkeypatch, case, vouched):
+    """#775: one read of the cell's own handle replaces the full-window rematch.
+
+    Anything the targeted read cannot vouch for is None, and the caller keeps
+    the full resolution.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.observe import RawNode
+
+    changes = {}
+    if case == "not_a_cell":
+        changes["role"] = "AXStaticText"
+    snap = _calc_cell_snapshot(**changes)
+    if case == "not_libreoffice":
+        snap = dataclasses.replace(snap, app="gnumeric")
+    if case == "popover":
+        snap = dataclasses.replace(snap, elements=snap.elements + (
+            dataclasses.replace(_element("p1", "AXPopover", "Autocomplete"), snapshot_id="calc-snap"),
+        ))
+    geometry = (observe.DisplayGeometry(Display(0, 800, 600, 1.0, True), (0.0, 0.0)),)
+    handle = object()
+    position = (100.0, 200.0) if case != "moved" else (100.0, 180.0)
+    raw = RawNode(
+        role="AXCell", title="A1", position=position, size=(80.0, 20.0),
+        enabled=case != "disabled",
+    )
+    monkeypatch.setattr(
+        observe, "ax_handle_for",
+        lambda sid, ref: None if case == "no_handle" else (handle if (sid, ref) == ("calc-snap", "e26") else None),
+    )
+
+    def live_cell(acc, address):
+        assert acc is handle and address == "A1"
+        if case == "renamed":
+            return None
+        if case == "read_failed":
+            raise RuntimeError("bus dropped")
+        return raw
+
+    monkeypatch.setattr(_atspi, "live_sheet_cell", live_cell)
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 778 if case == "other_pid" else 777)
+    monkeypatch.setattr(_atspi, "primary_geometry", lambda: geometry)
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda fn: fn()
+
+    def full_walk(*args):
+        pytest.fail("the targeted resolution never walks the window")
+
+    driver.snapshot = full_walk
+    found = driver.resolve_sheet_cell(snap, "e26")
+    if vouched:
+        assert found is snap.element("e26")
+        # No popover in the tree: the click guard consumes this evidence and
+        # does not walk the window either.
+        assert driver.take_resolved_popover_cover(found) == (True, None)
+    else:
+        assert found is None
+
+
+@pytest.mark.parametrize("vouched", [True, False])
+def test_calc_cell_click_uses_targeted_resolution_before_full_rematch(tmp_path, vouched):
+    """The full rematch runs only when the targeted check cannot vouch."""
+    driver = TreeDriver()
+    full: list[str] = []
+    targeted: list[str] = []
+    original = driver.resolve_ref
+
+    def resolve_ref(snap, ref, *, live=None):
+        full.append(ref)
+        return original(snap, ref, live=live)
+
+    def resolve_sheet_cell(snap, ref):
+        targeted.append(ref)
+        return snap.element(ref) if vouched else None
+
+    driver.resolve_ref = resolve_ref
+    driver.resolve_sheet_cell = resolve_sheet_cell
+    runtime = _runtime(tmp_path, driver)
+    runtime.click("e4")
+    assert targeted == ["e4"]
+    assert full == ([] if vouched else ["e4"])
+    assert ("press", "e4") in driver.calls
+
+
+def test_calc_cell_targeted_resolution_is_click_only(tmp_path):
+    driver = TreeDriver()
+    asked: list[str] = []
+    driver.resolve_sheet_cell = lambda snap, ref: asked.append(ref) or snap.element(ref)
+    runtime = _runtime(tmp_path, driver)
+    for kind in ("hover", "scroll", "drag", "typetext"):
+        runtime._resolve("e4", kind)
+    assert asked == []
+
+
+@pytest.mark.parametrize("case", ["live", "gone", "hidden", "renamed", "not_grid", "title"])
+def test_live_sheet_cell_requires_the_same_showing_grid_cell(monkeypatch, case):
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.observe import RawNode
+
+    cell, grid = object(), object()
+    monkeypatch.setattr(_atspi, "accessible_gone", lambda acc: case == "gone")
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: case != "hidden")
+    monkeypatch.setattr(_atspi, "_node_name", lambda acc: "B1" if case == "renamed" else "A1")
+    monkeypatch.setattr(_atspi, "_parent_of", lambda acc: grid)
+    monkeypatch.setattr(_atspi, "_spreadsheet_table", lambda node: case != "not_grid" and node is grid)
+    title = "A1 " if case == "title" else "A1"
+    monkeypatch.setattr(
+        _atspi.ATSPIAccessor, "read",
+        lambda self, acc: RawNode(role="AXCell", title=title, position=(1.0, 2.0), size=(3.0, 4.0)),
+    )
+    found = _atspi.live_sheet_cell(cell, "A1")
+    if case == "live":
+        assert found is not None and found.position == (1.0, 2.0)
+    else:
+        assert found is None
