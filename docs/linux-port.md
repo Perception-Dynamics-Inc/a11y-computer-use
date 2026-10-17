@@ -364,11 +364,12 @@ entry/text roles outside GTK 3.
 Qt multiline editors (including FeatherPad) expose the entire document through
 AT-SPI Text. Native multiline states or attributes select this path; ordinary
 Qt line edits retain their text without requesting document viewport ranges.
-Snapshot values and text searches use `Text.get_bounded_ranges`
-inside the measured editor bounds, falling back to native point offsets and
-verified character rectangles when Qt omits bounded ranges. If that query
-fails, times out, or returns malformed ranges and point offsets are unavailable
-(as on Qt 5.15), a raw Text prefix capped at 4000 characters is read. Failed
+For applications identified by their Qt toolkit name, snapshot values and text
+searches bypass `Text.get_bounded_ranges`: Qt 5 and Qt 6 bridges can leave that
+request unanswered, stalling reads and marking the application hung in libatspi.
+Native point offsets and verified character rectangles establish visibility
+instead. If point offsets are unavailable (as on Qt 5.15), a raw Text prefix
+capped at 4000 characters is read. Failed
 explicit text reads retry `getText(0,-1)` only when the native character count
 fits that cap, then try 256-character chunks within the same cap. Each
 character's native rectangle is checked against the viewport. Unverified and

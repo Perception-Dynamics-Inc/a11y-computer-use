@@ -3244,6 +3244,11 @@ def _qt_viewport_text(acc) -> str | None:
     box = _raw_rect(acc, "SCREEN")
     if box is None or box[2] <= 0 or box[3] <= 0:
         return None
+    if "qt" in _toolkit_name(acc):
+        # Qt 5 and Qt 6 bridges cannot marshal QSpiTextRangeList. Avoid
+        # paying a D-Bus timeout (and marking the app hung) on every read.
+        # The fallback still verifies every published character's bounds.
+        return _qt_character_viewport_text(acc, box)
     Atspi = _atspi()
     coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
