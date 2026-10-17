@@ -161,3 +161,41 @@ def test_load_process_crash_writes_a_failed_report(monkeypatch, tmp_path, crash_
     report = json.loads(output.read_text())
     assert report["completed"] == 0 and report["expected"] == 2 and report["errors"] == 2
     assert "failed" in report["worker_results"][0]["errors"][0]
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='reads /proc')
+def test_calc_profiler_kills_only_the_sessions_it_started() -> None:
+    """A shared box runs every agent as one uid; a foreign process survives."""
+    import subprocess
+    import time
+
+    spec = importlib.util.spec_from_file_location(
+        'box_profile_calc', _SCRIPT.with_name('profile_calc_actions.py'))
+    assert spec is not None and spec.loader is not None
+    profiler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiler)
+
+    source = _SCRIPT.with_name('profile_calc_actions.py').read_text()
+    assert 'pkill' not in source and 'killall' not in source
+
+    foreign = subprocess.Popen(['sleep', '60'], start_new_session=True)
+    owned = profiler.OwnedProcesses()
+    # A session leader whose child stays in the session, like oosplash and soffice.bin.
+    leader = owned.popen(['sh', '-c', 'sleep 60 & wait'], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while len(owned.members()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        members = owned.members()
+        assert leader.pid in members and len(members) >= 2
+        assert foreign.pid not in members
+        owned.kill()
+        assert leader.wait(timeout=5) is not None
+        assert owned.members() == []
+        assert foreign.poll() is None
+    finally:
+        foreign.kill()
+        foreign.wait()
+        if leader.poll() is None:
+            leader.kill()
+            leader.wait()
