@@ -769,11 +769,23 @@ Previously issued refs are refused with `not_showing` before input; reveal the
 panel and find the control again. This uses native visibility state and does
 not establish general hit-test protection against overlapping page controls.
 
-Chromium page ref pointer clicks additionally hit-test the requested point
-through the document's AT-SPI Component interface. The hit must identify the
-requested accessible or its descendant by native identity, even when stale
-bounds and `SHOWING` still describe an old carousel slide. A different,
-missing, or unavailable hit returns `stale_ref` with `hit_test_unverified`
-before pointer input. Browser toolbar refs and explicit coordinate clicks are
-outside this check. This guard has synthetic regression coverage; it is not
-live verification of Chromium's hit-test freshness or general overlap safety.
+Chromium page push buttons (native `button` or `push button`) use a node-bound AT-SPI `click` or `press` action for
+plain left ref clicks through the Runtime/MCP tool. The result names the
+mechanism (`via AT-SPI doAction(press)` or `doAction(click)`), and normal
+post-action effect verification still decides the outcome; an action
+acknowledgement alone is not confirmation. A missing or failed action never
+falls back to pointer input. Right, multiple, modified, and forced-pointer
+(`A11Y_COMPUTER_USE_AX_CLICKS=0`) ref clicks on these buttons are refused with
+`chromium_button_action_unavailable`. Use a current screenshot and explicit
+coordinates for pointer-specific input. Native GTK buttons and browser toolbar
+buttons retain their existing routes. Native `toggle button` controls also retain
+the existing click path, even though they map to `AXButton`; this route does not
+substitute their advertised `toggle` action for a click.
+
+Other Chromium page ref pointer paths retain the document AT-SPI hit-test
+identity check (`hit_test_unverified` on a missing/different hit). That check
+is **not a freshness signal**: Chromium can retain both old extents and old
+hit-test answers after a timer-driven CSS transform. The node-bound button
+route avoids that geometry; it does not establish freshness for other roles
+or for direct low-level `LinuxDriver.click` pointer calls. Explicit coordinate
+clicks continue to send the requested pointer input.

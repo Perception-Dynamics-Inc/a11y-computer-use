@@ -18447,6 +18447,34 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
     return hidden and not showing
 
 
+def chromium_page_button(acc) -> bool:
+    """Whether this is a native Chromium push button inside a web document."""
+    # AXButton also represents native toggle buttons. Keep those on the
+    # existing click path; their advertised toggle is not a click/press action.
+    if acc is None or _role_name(acc) not in {"button", "push button"} or not _chromium_app(acc):
+        return False
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            return True
+        if role in {"frame", "window", "application"}:
+            break
+    return False
+
+
+def chromium_button_click_action(acc):
+    """Return one exact click/press action; never a toggle, menu, or focus action."""
+    action = _action_iface(acc)
+    if action is None:
+        return None
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for index in range(int(count)):
+        name = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if name in {"click", "press"}:
+            return action, index, name
+    return None
+
+
 def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     """Verify a Chromium page ref against the document's native hit test.
 
