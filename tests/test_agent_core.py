@@ -2791,14 +2791,17 @@ def test_scripted_spec_and_schemas(tmp_path):
 
 
 def test_validate_action_rejects_unknown_fields() -> None:
-    from a11y_computer_use.agent.actions import ACTION_NAMES, EXEC_ACTION_NAMES, Action, validate_action
+    from a11y_computer_use.agent.actions import (
+        ACTION_NAMES, EXEC_ACTION_NAMES, EXEC_DISABLED_ERROR, Action, validate_action,
+    )
 
+    assert EXEC_DISABLED_ERROR.startswith("exec is not allowed")
     for name in sorted(ACTION_NAMES):
         problem = validate_action(Action(name, {"not_a_real_argument": "x"}))
         assert problem is not None and problem.startswith(f"invalid_arguments: {name}:"), problem
         assert "unknown field 'not_a_real_argument'" in problem
     for name in sorted(EXEC_ACTION_NAMES):
-        assert validate_action(Action(name, {"not_a_real_argument": "x"})) == "exec is not allowed"
+        assert validate_action(Action(name, {"not_a_real_argument": "x"})) == EXEC_DISABLED_ERROR
         problem = validate_action(
             Action(name, {"not_a_real_argument": "x"}), allow_exec=True,
         )
