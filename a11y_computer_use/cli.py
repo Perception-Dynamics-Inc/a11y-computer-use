@@ -71,6 +71,8 @@ def _build_parser() -> argparse.ArgumentParser:
     grant.set_defaults(handler=_cmd_grant)
 
     mcp = sub.add_parser("mcp", help="run the MCP server over stdio")
+    mcp.add_argument("--visible-actions", action=argparse.BooleanOptionalAction, default=None,
+                     help="enable cosmetic Linux X11 action feedback")
     mcp.add_argument(
         "--fence-untrusted",
         action="store_true",
@@ -294,6 +296,7 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     # Patch libatspi before the first tool. A bus error must not exit stdio.
     _dbus_guard.install()
     server.build_server(
+        visible_actions=args.visible_actions,
         fence_untrusted=True if args.fence_untrusted else None,
         allowed_domains=args.allowed_domains,
         blocked_domains=args.blocked_domains,

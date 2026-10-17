@@ -429,7 +429,7 @@ def _check_coordinate_input() -> CheckResult:
         return {
             "check": "coordinate_input",
             "ok": False,
-            "detail": "Wayland: raw coordinate clicks and key chords are UNSUPPORTED (a11y actions work)",
+            "detail": "Wayland: raw coordinate clicks and key chords are UNSUPPORTED (a11y actions work); visible actions overlay is unavailable",
             "fix": "Use ref-based actions (click ref, set_value, type via EditableText); libei/RemoteDesktop portal input is pending.",
         }
     try:
