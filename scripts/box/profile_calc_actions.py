@@ -9,7 +9,9 @@ Run in a disposable Xvfb/D-Bus desktop with a working window manager::
 Omit --raw for native call counts/timings, and add --profile-dir /tmp/calc-prof
 for cProfile data from the AT-SPI event thread. Instrumentation adds overhead.
 The test's five-second assertions and cell-value verification remain intact.
-The extracted setup terminates LibreOffice processes, just as the test does.
+The extracted test's machine-wide ``_kill_libreoffice`` is replaced: the
+profiler stops only the sessions of processes it started itself, so another
+agent's LibreOffice on a shared box (same uid) is left running.
 """
 
 from __future__ import annotations
@@ -26,12 +28,76 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from a11y_computer_use.drivers import _atspi
 from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
+
+
+def _session_of(pid: int) -> int | None:
+    """Session id of ``pid`` from /proc, or None when it is gone."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            stat = fh.read()
+    except OSError:
+        return None
+    # Fields after the ")" that closes comm: state ppid pgrp session ...
+    fields = stat.rsplit(")", 1)[-1].split()
+    try:
+        return int(fields[3])
+    except (IndexError, ValueError):
+        return None
+
+
+class OwnedProcesses:
+    """Popen wrapper that records every child it starts, and kills only those.
+
+    The live test starts soffice with ``start_new_session=True``, so the
+    recorded pid is also the session id that oosplash and soffice.bin
+    inherit. A kill covers the recorded pids and members of their sessions,
+    never a process found by name.
+    """
+
+    def __init__(self) -> None:
+        self.pids: set[int] = set()
+
+    def popen(self, *args, **kwargs) -> subprocess.Popen:
+        proc = subprocess.Popen(*args, **kwargs)
+        self.pids.add(proc.pid)
+        return proc
+
+    def members(self) -> list[int]:
+        if not self.pids:
+            return []
+        found = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return []
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            if pid in self.pids or _session_of(pid) in self.pids:
+                found.append(pid)
+        return found
+
+    def kill(self) -> None:
+        for _ in range(15):
+            alive = self.members()
+            if not alive:
+                return
+            for pid in alive:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.2)
 
 
 def main() -> None:
@@ -56,8 +122,17 @@ def main() -> None:
             isinstance(target, ast.Name) and target.id == "_LO_REGISTRY" for target in node.targets
         ):
             selected.append(node)
+    owned = OwnedProcesses()
     namespace = dict(globals())
+    # The test's subprocess.Popen goes through the recorder; everything else
+    # in subprocess is the real module.
+    namespace["subprocess"] = SimpleNamespace(
+        **{name: getattr(subprocess, name) for name in dir(subprocess) if not name.startswith("__")},
+    )
+    namespace["subprocess"].Popen = owned.popen
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), namespace)
+    # Replace the machine-wide kill by comm with a kill of our own sessions.
+    namespace["_kill_libreoffice"] = owned.kill
 
     calls = Counter()
     elapsed = Counter()
@@ -135,6 +210,7 @@ def main() -> None:
             proc.terminate()
         for proc in stress:
             proc.wait()
+        owned.kill()
 
 
 if __name__ == "__main__":
