@@ -1897,7 +1897,8 @@ class LinuxDriver:
                 "reason": "not_showing",
                 "outcome": "refused",
                 "next": ["foreground", "ref"],
-                "evidence": f"{ref} is still in the tree but its document is not showing",
+                "evidence": f"{ref} is still in the tree but it or its document is not showing",
+                "hint": "Reveal the target (expand its panel or foreground its tab), then find it again.",
             },
         )
 
@@ -1972,12 +1973,10 @@ class LinuxDriver:
         )
 
     def _refuse_hidden(self, element: Element, handle) -> None:
-        """Raise when ``handle`` is in a Firefox document that is not showing.
+        """Refuse hidden browser documents and clipped Chromium page targets.
 
-        A link in a background tab has on-screen bounds and its action
-        reports success. The click did not happen on screen. GTK and
-        Chromium handles are not this case. A destroyed accessible is not
-        this case either: that stays a stale ref from resolution.
+        Their bounds and action acknowledgments do not prove visibility.
+        Destroyed accessibles stay stale refs from resolution.
         """
         from a11y_computer_use.drivers import _atspi
 
@@ -2149,6 +2148,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_hidden(element, handle)
         self._refuse_gnumeric_go_jump(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
         pressed = _cdp_forms.press_checkable(
@@ -2164,7 +2164,6 @@ class LinuxDriver:
             return False
         if handle is None:
             return False
-        self._refuse_hidden(element, handle)
         if self._run(lambda: _atspi.qt_menu_button_without_press(handle)):
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
