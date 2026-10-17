@@ -1583,3 +1583,18 @@ def test_live_contenteditable_set_value_and_type() -> None:
     )["result"]["value"]
     assert "more" in shown.replace("\u00a0", " ")
     d._reset()
+
+
+def test_snapshot_url_reuses_existing_frame_tree_read():
+    def responder(method, params):
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "MAIN", "url": "https://example.test/form"}}}
+        return _fixture_responder(method, params)
+
+    driver, transport = _driver_on(responder)
+    snap = driver.snapshot(Scope.WINDOW, "TAB1")
+    assert snap.url == "https://example.test/form"
+    baseline, baseline_transport = _driver_on()
+    baseline.snapshot(Scope.WINDOW, "TAB1")
+    assert transport.methods() == baseline_transport.methods()
+    assert transport.methods().count("Page.getFrameTree") == 1
