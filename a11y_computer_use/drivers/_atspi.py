@@ -15345,7 +15345,9 @@ def geany_symbol_arrived(destination: tuple[int, list]) -> bool:
     """Verify the native status or focused editor caret, never the row label."""
     line, statuses = destination
     for status in statuses:
-        message = f"{_node_name(status)} {_direct_text(status)}"
+        # Text is the live message; the accessible name may still contain
+        # the previous caret line. Never let that older label win the match.
+        message = _direct_text(status) or _node_name(status)
         match = re.search(r"\bline:\s*(\d+)\s*/", message)
         if match is not None and int(match.group(1)) == line:
             return True

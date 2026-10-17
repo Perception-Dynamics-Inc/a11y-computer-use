@@ -16421,3 +16421,14 @@ def test_geany_navigation_finds_evidence_before_large_menu_subtrees(
     destination = _atspi.geany_symbol_destination(symbol)
     assert destination == (301, [status])
     assert _atspi.geany_symbol_arrived(destination) is True
+
+
+@pytest.mark.parametrize("label_line,text_line,arrived", [
+    (1, 301, True), (301, 1, False),
+])
+def test_geany_navigation_prefers_live_status_text_over_old_name(
+    fake_atspi, monkeypatch, label_line, text_line, arrived,
+):
+    status = _Acc("status bar", name=f"line: {label_line} / 303")
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: f"line: {text_line} / 303")
+    assert _atspi.geany_symbol_arrived((301, [status])) is arrived
