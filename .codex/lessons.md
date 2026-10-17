@@ -330,3 +330,10 @@
 - 2026-10-17 (#604): Claws Mail wizard page headers can start with filler → filler → icon, with the title in a later sibling. Recognize the native dialog as well as frame ancestry, and skip decorative icons along the leading layout path, but stop at controls so field captions cannot become page names; preserve hidden tabs without geometry or actions.
 
 - 2026-10-17 (PR #467 repair): Breadth-first traversal alone does not protect nested Geany caret/status evidence from large shallow menus. Exclude menu subtrees from navigation-only evidence walks while retaining the existing node budget, focused-caret checks, and explicit pointer double-click.
+
+
+- 2026-10-17 (#796): Chromium CSS overflow clipping can leave a VISIBLE child with on-screen bounds under a SHOWING region/document while the child lacks SHOWING. Filter the child itself and recheck old refs before both pointer and optional CDP activation; document visibility alone does not establish target visibility.
+
+
+
+- 2026-10-17 (PR #803 repair): Chromium also clears SHOWING on scrolled-off rows and containers with painted descendants. Keep traversing containers and preserve native off-screen geometry handling before classifying CSS-clipped leaves, including NOT_VISIBLE for old scrolled-off refs. Run the live infobox-expand, find-bar-close, and off-screen-crop regressions together.
