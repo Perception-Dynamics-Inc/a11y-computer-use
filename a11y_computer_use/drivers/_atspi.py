@@ -12265,6 +12265,21 @@ def sheet_click_verdict(app: str, address: str) -> tuple[str, str] | None:
     except Exception:
         return None
     if not sheet:
+        # Scope.WINDOW follows the active window. A Calc modal replaces
+        # the sheet root, so lack of a grid here is not evidence that this
+        # was a non-Calc click. Do not let dialog/tree changes confirm it.
+        try:
+            from a11y_computer_use.schema import Scope
+
+            root = find_root(app, Scope.WINDOW)
+            if root is not None and _role_name(root) in {"dialog", "alert"}:
+                name = _node_name(root) or "unnamed dialog"
+                return "partial", (
+                    f"active dialog {name!r}; the selected cell {wanted} "
+                    "could not be verified"
+                )
+        except Exception:
+            pass
         return None
     latest: str | None = None
     for attempt in range(6):

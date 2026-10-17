@@ -264,3 +264,5 @@
 - 2026-10-17 (#812): XTEST Unicode runs must flush and retain the existing client-translation wait before restoring or reusing spare keycodes. Keep baseline key resolution separate from run bindings, and preflight zero capacity before any ASCII prefix.
 
 - 2026-10-17 (PR #814 repair): Preserve Chromium visibility regressions alongside Unicode keymap-run regressions when their appended tests conflict. A Firefox page-setup failure before input is not evidence of an XTEST regression; inspect the actual startup dialog and browser version before changing typing code.
+
+- 2026-10-17 (#813): Calc click verification uses the active window root. Format Cells replaces that root with a dialog, so spreadsheet_open=False must not silently delegate to generic tree-change confirmation. Return an explicit partial verdict naming the dialog when the cell selection cannot be verified.

@@ -16343,3 +16343,50 @@ def test_chromium_scrolled_leaf_keeps_offscreen_diagnosis(monkeypatch):
     assert claim in _atspi.ATSPIAccessor().children(panel)
     assert not _atspi.hidden_web_target(claim)
     assert _atspi.offscreen_extents(claim) == ((24.0, -100.0), (79.0, 21.0))
+
+
+@pytest.mark.parametrize("role", ["dialog", "alert"])
+def test_calc_ref_click_with_active_dialog_cannot_confirm(monkeypatch, role) -> None:
+    """A modal replacing the window root must not bypass cell verification."""
+    from a11y_computer_use import server
+
+    dialog = _NS(
+        get_role_name=lambda: role,
+        get_name=lambda: "Format Cells",
+        get_child_count=lambda: 0,
+    )
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: dialog)
+    # Use the real spreadsheet_open: the active dialog contains no grid.
+    assert not _atspi.spreadsheet_open("soffice")
+    cell = Element("e1", "AXCell", "C4", None, Bounds(0, 100, 200, 82, 17), "s")
+    snap = Snapshot("s", Scope.WINDOW, "soffice", 0, 0.0, (), (cell,))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt._view = "compact"
+    clicks = []
+    rt.driver = _NS(
+        name="linux",
+        click=lambda target, **kwargs: clicks.append(target),
+        press_element=lambda target: False,
+        _run=lambda fn: fn(),
+    )
+    rt._target = lambda *args, **kwargs: (cell, "soffice")
+    rt._capture = lambda: {}
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._resolves_apps = lambda: False
+    for name in (
+        "_reject_coordinate", "_refuse_disabled", "_refuse_secure",
+        "_recheck_target", "_guard_user", "_popover_cover", "_cover_owner",
+        "_paragraph_click_verdict", "_opaque_click_verdict",
+        "_navigating_row_location",
+    ):
+        setattr(rt, name, lambda *args, **kwargs: None)
+    # Generic tree changes would otherwise claim success when the dialog
+    # intercepts the click. Keep the real Runtime verdict/conclusion path.
+    rt._judge_mutation = lambda *args, **kwargs: ("confirmed", "tree changed")
+    result = rt.click(ref="e1")
+    assert clicks == [cell]
+    assert result.outcome == "partial"
+    assert result.evidence == (
+        "active dialog 'Format Cells'; the selected cell C4 could not be verified"
+    )
