@@ -5112,6 +5112,7 @@ class Runtime:
         before = self._capture()
 
         menu_note: list[str] = []
+        button_mechanism: list[str] = []
         # A non-clickable text ref that stands for a button or link. The
         # click lands on that control. Empty when the ref is the control.
         activated: list[Element] = []
@@ -5229,6 +5230,19 @@ class Runtime:
                 if probed is not None:
                     before = self._freeze(probed)
             self._guard_user(app)
+            # Chromium page button bounds AND native hit tests can remain
+            # stale after timer-driven transforms. A node-bound click/press
+            # avoids the old point; the normal outcome judge still verifies
+            # effect, and the receipt below names the actual mechanism.
+            button_action = getattr(self.driver, "click_button_action", None)
+            if isinstance(act, Element) and button_action is not None:
+                mechanism = button_action(
+                    act, button=parsed_button, count=count, modifiers=mods,
+                    allow_action=PREFER_AX_ACTIONS,
+                )
+                if mechanism is not None:
+                    button_mechanism.append(mechanism)
+                    return
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
@@ -5256,7 +5270,8 @@ class Runtime:
         if activated:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
-        msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
+        mechanism_note = f" via {button_mechanism[0]}" if button_mechanism else ""
+        msg = f"clicked {self._label(ref, target)}{mechanism_note}{control_note}{''.join(menu_note)}"
         outline_note = (
             isinstance(target, Element)
             and not activated
@@ -9721,6 +9736,10 @@ def build_server(
         invalid_arguments and sends no input. An unknown display_id is
         invalid_arguments and names the valid ids. button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
+        Linux Chromium page push buttons use a node-bound AT-SPI click/press for
+        plain left clicks and name that mechanism in the result. Unsupported
+        variants or unavailable actions are refused rather than using stale
+        accessibility geometry; explicit coordinate clicks remain pointer input.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
         app moved over the target — re-observe. A ref the snapshot marks
