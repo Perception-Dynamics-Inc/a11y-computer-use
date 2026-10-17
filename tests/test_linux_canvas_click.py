@@ -326,3 +326,21 @@ def test_canvas_fallback_refuses_when_activation_cannot_be_done(atspi, monkeypat
     assert "no pointer click was sent" in exc.value.message
     assert node.pointer == []
     assert node.action_log == []
+
+
+def test_image_pointer_fallback_refuses_unverified_chromium_hit(atspi, monkeypatch):
+    node = _Node("image", "Drawing board", actions=["click"], x=40, y=80, w=600, h=400)
+    element = _element("AXImage", Bounds(0, 40, 80, 600, 400))
+    probes = []
+
+    def hit_test(handle, x, y):
+        probes.append((handle, x, y))
+        return False
+
+    monkeypatch.setattr(_atspi, "chromium_pointer_target", hit_test)
+    with pytest.raises(ComputerUseError) as exc:
+        _press(node, element, monkeypatch)
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert probes == [(node, 340, 280)]
+    assert node.pointer == []
+    assert node.action_log == []

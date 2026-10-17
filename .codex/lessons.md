@@ -338,6 +338,14 @@
 
 - 2026-10-17 (PR #803 repair): Chromium also clears SHOWING on scrolled-off rows and containers with painted descendants. Keep traversing containers and preserve native off-screen geometry handling before classifying CSS-clipped leaves, including NOT_VISIBLE for old scrolled-off refs. Run the live infobox-expand, find-bar-close, and off-screen-crop regressions together.
 
+- 2026-10-17 (#812): XTEST Unicode runs must flush and retain the existing client-translation wait before restoring or reusing spare keycodes. Keep baseline key resolution separate from run bindings, and preflight zero capacity before any ASCII prefix.
+
+- 2026-10-17 (PR #814 repair): Preserve Chromium visibility regressions alongside Unicode keymap-run regressions when their appended tests conflict. A Firefox page-setup failure before input is not evidence of an XTEST regression; inspect the actual startup dialog and browser version before changing typing code.
+
 - 2026-10-17 (#813): Calc click verification uses the active window root. Format Cells replaces that root with a dialog, so spreadsheet_open=False must not silently delegate to generic tree-change confirmation. Return an explicit partial verdict naming the dialog when the cell selection cannot be verified.
 
 - 2026-10-17 (PR #819 repair): A synthetic Linux pointer driver must keep resolves_apps=False to exercise native point guards. Stub the host _running_app lookup separately; otherwise macOS rejects the fake app during the initial snapshot before any occlusion assertion runs.
+
+- 2026-10-18 (#800): Chromium timer-driven transform changes can retain both old extents and SHOWING, so #796's visibility guard alone cannot protect ref pointer clicks. Use document hit-test identity (including text descendants and fresh native proxies), refuse unavailable hits, and keep this separate from explicit coordinate input. Synthetic hits do not establish live Chromium hit-test freshness.
+
+- 2026-10-18 (PR #826 repair): Preserve Chromium ref hit-testing immediately before pointer input alongside Geany destination capture and post-click navigation verification. Retain both Geany evidence-walk and Unicode keymap regressions when their appended tests conflict. The Geany symbol, Scintilla reveal, and GTK TextView reveal live tests passed together after this merge under private Xvfb/Openbox/D-Bus; this does not establish the cause of the earlier CI navigation refusal.

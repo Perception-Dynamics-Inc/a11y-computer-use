@@ -2203,3 +2203,170 @@ def test_linux_uncovered_click_does_not_raise_the_app(tmp_path, monkeypatch) -> 
 
     assert not [call for call in driver.calls if call[0] == "activate"]
     assert _clicks(driver) == [("click", "e2", (10, 20))]
+
+
+@pytest.mark.parametrize("chord", ["Delete", "BackSpace", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+d", "ctrl+c", "ctrl+insert"])
+@pytest.mark.parametrize("state", ["changed", "unchanged", "missing"])
+def test_calc_edit_key_targeted_outcome(monkeypatch, chord, state):
+    from a11y_computer_use.drivers import _atspi
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    before = (object(), ((object(), "A1", "abc"),))
+    after = (before[0], ((before[1][0][0], "A1", ""),)) if state == "changed" else before
+    if state == "missing":
+        after = None
+    reads = []
+    native = []
+    monkeypatch.setattr(_atspi, "sheet_key_state", lambda app, previous: native.append((app, previous)) or after)
+    monkeypatch.setattr(runtime, "_process_died", lambda _: False)
+    monkeypatch.setattr(runtime, "_key_focus_probe", lambda _: (None, None, None, None, "A1"))
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    result, evidence = runtime._judge_mutation(
+        "soffice.bin", None, None, None, key_focus=True, key_chord=chord,
+        focus_before=(None, None, None, None, "A1"), sheet_before=before,
+    )
+    copy = chord in {"ctrl+c", "ctrl+insert"}
+    assert result == ("confirmed" if state == "changed" and not copy else "unverifiable")
+    assert len(reads) == (1 if state == "missing" and not copy else 0)
+    assert len(native) == (0 if copy else (2 if state == "unchanged" else 1))
+    if copy:
+        assert "clipboard" in evidence
+    elif state == "changed":
+        assert "text changed" in evidence
+    if not reads:
+        assert runtime._action_baseline["capture"] is None
+
+
+def test_calc_selection_text_reads_same_handles_and_preserves_empty(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    class Cell:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    class Table:
+        def get_selection_iface(self):
+            return self
+
+        def get_n_selected_children(self):
+            return len(cells)
+
+        def get_selected_child(self, index):
+            return cells[index]
+
+    cells = [Cell("A1", "abc"), Cell("A2", "def")]
+    table = Table()
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: table)
+    monkeypatch.setattr(_atspi, "_find_spreadsheet", lambda root, budget: root)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (cells[0], False))
+    monkeypatch.setattr(_atspi, "_role_name", lambda cell: "table cell")
+    monkeypatch.setattr(_atspi, "_node_name", lambda cell: cell.name)
+    monkeypatch.setattr(_atspi, "_full_text", lambda cell: cell.text)
+    monkeypatch.setattr(_atspi, "is_secure", lambda cell: False)
+    before = _atspi.sheet_key_state("soffice.bin")
+    assert [row[2] for row in before[1]] == ["abc", "def"]
+    cells[1].text = ""
+    # Reread the original selection even if the published selection changes.
+    monkeypatch.setattr(table, "get_selected_child", lambda index: pytest.fail("selection reread"))
+    after = _atspi.sheet_key_state("soffice.bin", before)
+    assert [row[2] for row in after[1]] == ["abc", ""]
+    cells[1].text = None
+    assert _atspi.sheet_key_state("soffice.bin", before) is None
+    cells[1].text = "def"
+    cells[1].name = "B2"
+    assert _atspi.sheet_key_state("soffice.bin", before) is None
+    monkeypatch.setattr(table, "get_n_selected_children", lambda: 257)
+    assert _atspi.sheet_key_state("soffice.bin") is None
+    monkeypatch.setattr(table, "get_n_selected_children", lambda: 0)
+    monkeypatch.setattr(_atspi, "_sheet_window_cells", lambda grid: cells)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda cell: (True, cell is cells[0], False, False))
+    focused = _atspi.sheet_key_state("soffice.bin")
+    assert focused[1] == ((cells[0], "A1", "abc"),)
+    monkeypatch.setattr(_atspi, "_find_spreadsheet", lambda root, budget: None)
+    assert _atspi.sheet_key_state("soffice.bin", before) is None
+    monkeypatch.setattr(_atspi, "_find_spreadsheet", lambda root, budget: root)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (None, True))
+    assert _atspi.sheet_key_state("soffice.bin", before) is None
+
+
+def test_calc_edit_probe_uses_owner_thread_and_rejects_other_keys(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    calls = []
+    state = (object(), ())
+
+    def run(read):
+        calls.append("owner")
+        return read()
+
+    monkeypatch.setattr(runtime.driver, "_run", run, raising=False)
+    monkeypatch.setattr(_atspi, "sheet_key_state", lambda app, previous: calls.append(app) or state)
+    assert runtime._sheet_key_probe("soffice.bin", "ctrl+v") == state
+    assert calls == ["owner", "soffice.bin"]
+    calls.clear()
+    assert runtime._sheet_key_probe("soffice.bin", "Right") is None
+    assert runtime._sheet_key_probe("gedit", "ctrl+v") is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("chord", ["ctrl+v", "ctrl+c"])
+def test_calc_key_carries_selection_evidence_through_conclusion(tmp_path, monkeypatch, chord):
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    driver.name = "linux"
+    state = ["before"]
+    monkeypatch.setattr(runtime, "_linux_keyboard_window", lambda app: (APP, {}, []))
+    monkeypatch.setattr(runtime, "_ensure_linux_window", lambda *args: False)
+    monkeypatch.setattr(runtime, "_guard_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "_open_menu_app", lambda app: None)
+    monkeypatch.setattr(runtime, "_open_mnemonic_menu", lambda *args: False)
+    monkeypatch.setattr(runtime, "_key_focus_probe", lambda app: (None, None, None, None, "A1"))
+    monkeypatch.setattr(_atspi, "libreoffice_app", lambda app: app == APP)
+    monkeypatch.setattr(_atspi, "sheet_key_state", lambda app, previous: ("table", (("cell", "A1", state[0]),)))
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("full window outcome read"))
+    driver.key_effect = lambda key: state.__setitem__(0, "after")
+    result = runtime.key(chord, app=APP)
+    assert result.outcome == ("confirmed" if chord == "ctrl+v" else "unverifiable")
+    assert driver.calls == [("key", chord)]
+
+
+def test_calc_copy_with_address_but_unreadable_text_does_not_claim_focus_change(monkeypatch):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    monkeypatch.setattr(runtime, "_process_died", lambda _: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("copy window read"))
+    assert runtime._judge_mutation(
+        "soffice.bin", None, None, None, key_focus=True, key_chord="ctrl+c",
+        focus_before=(None, None, None, None, "A1"),
+    ) == ("unverifiable", "clipboard ownership was not verified")
+
+
+
+def test_calc_edit_key_settles_before_reporting_unchanged(monkeypatch):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    before = ("table", (("cell", "A1", ""),))
+    after = ("table", (("cell", "A1", "abc"),))
+    readings = iter([before, after])
+    monkeypatch.setattr(runtime, "_sheet_key_probe", lambda *args: next(readings))
+    monkeypatch.setattr(runtime, "_process_died", lambda _: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("full window read"))
+    pauses = []
+    monkeypatch.setattr(server.time, "sleep", pauses.append)
+    assert runtime._judge_mutation(
+        "soffice.bin", None, None, None, key_focus=True, key_chord="ctrl+v",
+        sheet_before=before,
+    ) == ("confirmed", "the selected cells' text changed")
+    assert pauses == [0.05]

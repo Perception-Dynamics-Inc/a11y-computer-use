@@ -2896,7 +2896,7 @@ def test_text_binds_complete_keymap_before_first_keystroke(xtest_recorder, monke
     assert {kc: syms for kc, syms in display.keymap.items() if any(syms)} == original_mapping
 
 
-def test_text_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, monkeypatch) -> None:
+def test_bind_all_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, monkeypatch) -> None:
     """Exhausted keycodes must not silently truncate a partly typed string."""
     import time
 
@@ -2907,7 +2907,7 @@ def test_text_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, mo
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
     with pytest.raises(ValueError, match="2 unmapped characters.*1 spare keycodes"):
-        _linux_input.type_string("q@ü")
+        _linux_input._TempKeymap().bind_all([ord("@"), ord("ü")])
 
     assert events == []
     assert display.remapped == []
@@ -16622,6 +16622,78 @@ def test_geany_navigation_ignores_menus_before_nested_evidence(
     assert _atspi.geany_symbol_arrived(destination) is True
 
 
+@pytest.mark.parametrize("text,capacity", [
+    ("q@üq@", 1),
+    ("qабвгдежзийклмнопрстуфхцчшщъыьэюяq", 19),
+    ("مرحبا بكم في موقعنا الجديد، نتمنى لكم تجربة ممتعة وسهلة", 19),
+])
+def test_text_runs_settle_before_reusing_keycodes(xtest_recorder, monkeypatch, text, capacity):
+    import time
+
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: list(range(256 - capacity, 256)))
+    pending = []
+    translated = []
+    flushed = False
+
+    def tap(kc, shift):
+        pending.append((kc, shift))
+
+    def flush():
+        nonlocal flushed
+        flushed = True
+
+    def sleep(seconds):
+        nonlocal flushed
+        if seconds == 0.05:
+            assert flushed
+            translated.extend(display.keycode_to_keysym(kc, int(shift)) for kc, shift in pending)
+            pending.clear()
+            flushed = False
+
+    change = display.change_keyboard_mapping
+
+    def checked_change(first, mapping):
+        assert not pending, "mapping changed before the client translated queued input"
+        change(first, mapping)
+
+    monkeypatch.setattr(display, "change_keyboard_mapping", checked_change)
+    monkeypatch.setattr(_linux_input, "_tap_keycode", tap)
+    monkeypatch.setattr(_linux_input, "_flush", flush)
+    monkeypatch.setattr(time, "sleep", sleep)
+    _linux_input.type_string(text)
+    assert translated == [_linux_input._char_keysym(ch) for ch in text]
+    assert not pending
+    assert all(not any(display.keymap[kc]) for kc in range(256 - capacity, 256))
+
+
+def test_text_no_spares_refuses_before_ascii_prefix(xtest_recorder, monkeypatch):
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: [])
+    with pytest.raises(ValueError, match="1 unmapped characters.*0 spare keycodes"):
+        _linux_input.type_string("qü")
+    assert events == []
+    assert display.remapped == []
+
+
+def test_text_run_restores_keymap_on_input_failure(xtest_recorder, monkeypatch):
+    import time
+
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: [255])
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    def fail(*args):
+        raise RuntimeError("input failed")
+
+    monkeypatch.setattr(_linux_input, "_tap_keycode", fail)
+    with pytest.raises(RuntimeError, match="input failed"):
+        _linux_input.type_string("ü@")
+    assert display.remapped == [(255, ord("ü")), (255, 0)]
 
 def test_chromium_nonshowing_container_preserves_showing_descendants():
     _frame, panel, claim, text = _chrome_collapsed_panel()
@@ -16688,3 +16760,99 @@ def test_calc_ref_click_with_active_dialog_cannot_confirm(monkeypatch, role) -> 
     assert result.evidence == (
         "active dialog 'Format Cells'; the selected cell C4 could not be verified"
     )
+
+
+@pytest.mark.parametrize("hit_kind", ["other", "same_name", "missing", "self", "error", "target", "text"])
+def test_chromium_transform_click_requires_native_hit(monkeypatch, hit_kind):
+    """SHOWING and unchanged bounds must not authorize a carousel misclick."""
+    from a11y_computer_use.drivers import linux
+
+    frame, panel, target, text = _chrome_collapsed_panel()
+    document = panel.parent
+    target.states.add("SHOWING")
+    text.parent = target
+    other = _GeckoNode("push button", "Item B", ("VISIBLE", "SHOWING"))
+    other.parent = panel
+    if hit_kind == "same_name":
+        other.name = target.name
+    hit = {"other": other, "same_name": other, "missing": None,
+           "self": document, "error": None, "target": target, "text": text}[hit_kind]
+    probes = []
+
+    def native_hit(x, y, coord):
+        probes.append((x, y, coord))
+        if hit_kind == "error":
+            raise RuntimeError("bridge unavailable")
+        return hit
+
+    document.get_component_iface = lambda: _NS(get_accessible_at_point=native_hit)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    element = Element("e1", "AXButton", target.name, None,
+                      Bounds(0, 22, 115, 280, 40), "carousel", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: target})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *a: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda *a: None)
+    clicks = []
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+    if hit_kind in {"target", "text"}:
+        driver.click(element)
+        assert clicks == [((162, 135), {"button": "left", "count": 1})]
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.click(element)
+        assert exc.value.code == ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == "hit_test_unverified"
+        assert exc.value.detail["outcome"] == "refused"
+        assert not clicks
+    assert probes == [(162, 135, 0)]
+    assert not target.pressed and not other.pressed
+
+
+def test_chromium_hit_test_descends_and_matches_native_identity(monkeypatch):
+    _frame, panel, target, _text = _chrome_collapsed_panel()
+    document = panel.parent
+    proxy = _GeckoNode("push button", target.name)
+    # The hit-test returns a fresh proxy for the same native accessible.
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key",
+                        lambda node: (":1.2", "/button") if node in (target, proxy) else None)
+    document.get_component_iface = lambda: _NS(get_accessible_at_point=lambda *a: panel)
+    panel.get_component_iface = lambda: _NS(get_accessible_at_point=lambda *a: proxy)
+    assert _atspi.chromium_pointer_target(target, 162, 135) is True
+    panel.get_component_iface = lambda: _NS(get_accessible_at_point=lambda *a: document)
+    assert _atspi.chromium_pointer_target(target, 162, 135) is False
+
+
+def test_chromium_hit_test_excludes_toolbar_and_native_apps():
+    frame, _panel, target, _text = _chrome_collapsed_panel()
+    target.parent = frame
+    assert _atspi.chromium_pointer_target(target, 162, 135) is None
+    frame, _panel, target, _text = _chrome_collapsed_panel()
+    target.application.toolkit = "GTK"
+    target.application.name = "Editor"
+    assert _atspi.chromium_pointer_target(target, 162, 135) is None
+
+
+def test_chromium_hit_guard_does_not_change_explicit_coordinate_click(monkeypatch):
+    from a11y_computer_use.drivers import linux
+    from a11y_computer_use.schema import MouseButton, Point
+    from contextlib import nullcontext
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda *a: None)
+    monkeypatch.setattr(_atspi, "chromium_pointer_target",
+                        lambda *a: pytest.fail("coordinate click was treated as a ref"))
+    clicks = []
+    modifiers = []
+    monkeypatch.setattr(_linux_input, "held", lambda mods: (modifiers.append(mods), nullcontext())[1])
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+    driver.click(Point(0, 162, 135), button=MouseButton.RIGHT, count=2, modifiers=("shift",))
+    assert clicks == [((162, 135), {"button": "right", "count": 2})]
+    assert modifiers == [("shift",)]

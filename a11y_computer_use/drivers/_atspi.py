@@ -12665,6 +12665,55 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
+def sheet_key_state(app: str, previous: tuple | None = None) -> tuple | None:
+    """Read a bounded Calc selection, then reread those exact native cells.
+
+    No truncated selection is used as evidence. Missing Text, changed windows,
+    editors and dialogs retain the ordinary outcome fallback.
+    """
+    if not libreoffice_app(app):
+        return None
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    table = _find_spreadsheet(root, [80])
+    if table is None:
+        return None
+    focused, truncated = _focused_node(app)
+    if truncated or focused is None or _role_name(focused) not in {"table", "table cell"}:
+        return None
+    if previous is not None:
+        old_table, records = previous
+        if table != old_table:
+            return None
+        cells = [record[0] for record in records]
+    else:
+        iface = _call_first(table, ("get_selection_iface", "get_selection"))
+        count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+        if not isinstance(count, int) or count < 0 or count > 256:
+            return None
+        cells = [
+            _call_first(iface, ("get_selected_child", "getSelectedChild"), index)
+            for index in range(count)
+        ]
+        if not cells:
+            cells = [cell for cell in _sheet_window_cells(table) if _state_flags(cell)[1]]
+            if len(cells) != 1:
+                return None
+    result = []
+    for index, cell in enumerate(cells):
+        if cell is None or _role_name(cell) != "table cell" or is_secure(cell):
+            return None
+        address = sheet_address(_node_name(cell))
+        text = _full_text(cell)
+        if address is None or text is None:
+            return None
+        if previous is not None and address != records[index][1]:
+            return None
+        result.append((cell, address, text))
+    return (table, tuple(result))
+
+
 def focused_key_evidence(app: str) -> tuple:
     """``(text, caret, selection start, selection end, cell address)``.
 
@@ -18367,6 +18416,48 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
         for index in range(count):
             queue.append(_child_at(node, index))
     return hidden and not showing
+
+
+def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
+    """Verify a Chromium page ref against the document's native hit test.
+
+    None means this is not Chromium page content. False includes unavailable
+    hit tests: extents and SHOWING can both remain stale after CSS transforms.
+    Compare native identity, never names or overlapping rectangles. A text
+    descendant of the requested control is a valid hit.
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    document = None
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            document = node
+            break
+        if role in {"frame", "window", "application"}:
+            break
+    if document is None:
+        return None
+    target_key = _ancestor_key(acc)
+    node = document
+    seen: set[object] = set()
+    pinned = []
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            return False
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            return False
+        hit = _hit_at(comp, x, y)
+        if hit is None:
+            return False
+        if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
+            return True
+        node = hit
+    return False
 
 
 def chromium_clipped_target(acc) -> bool:
