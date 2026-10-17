@@ -234,3 +234,6 @@
 - 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.
 
 - 2026-10-17 (PR #738 repair): Preserve Calc editor-first read-back regressions alongside PCManFM opaque-view and Qt viewport regressions when appended tests conflict. The failed Linux job contained only the tracked Calc five-second timing flake; retain all action verification and timing bounds.
+
+
+- 2026-10-17 (PR #746 repair): Preserve Scribus embedded Properties-cell hints alongside PCManFM opaque-folder labels and Qt viewport regressions when merging appended tests; each describes a separate native accessibility limitation. Keep both the Scribus guidance and Qt menu-cleanup documentation.
