@@ -357,3 +357,43 @@ def test_glide_pointer_at_target_when_call_returns(feedback, monkeypatch):
     assert server["pointer"] == (115, 220)
     # Intermediate steps reached the server too, so the glide was visible.
     assert len(server["seen"]) == 9
+
+
+def test_prepare_glide_false_keeps_highlight_without_pointer_motion(feedback, monkeypatch):
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_POINTER", "1")
+    monkeypatch.setattr(feedback, "_glide", lambda *args: pytest.fail("glide=False must not move the pointer"))
+    feedback.prepare("Click", "Save", Bounds(0, 10, 20, 30, 40), glide=False)
+    assert not feedback.pending.empty()
+
+
+@pytest.mark.parametrize("gtk4, expect_glide", [(True, False), (False, True)])
+def test_gtk4_click_skips_glide_in_pointer_mode(monkeypatch, gtk4, expect_glide):
+    """PR #719: the ~80 ms glide sat on the GTK 4 click path with nothing to
+    overlap it (+169/+317 ms p50/p95 live). GTK 4 clicks keep the highlight
+    and send no glide; other toolkits still glide."""
+    from a11y_computer_use.drivers import _atspi
+    monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_POINTER", "1")
+    driver = LinuxDriver()
+    handle = object()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda h: gtk4 if h is handle else pytest.fail("wrong handle"))
+    calls = []
+    monkeypatch.setattr(visible.visible_actions, "prepare",
+                        lambda kind, label, b, config=None, **kw: calls.append((kind, kw)))
+    target = SimpleNamespace(title="Save", bounds=Bounds(0, 10, 20, 30, 40), secure=False)
+    driver._visible_action(target, "Click", handle)
+    assert len(calls) == 1 and calls[0][0] == "Click"
+    assert calls[0][1].get("glide", True) is expect_glide
+
+
+def test_click_glide_check_costs_nothing_when_pointer_mode_off(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+    monkeypatch.delenv("A11Y_VISIBLE_ACTIONS_POINTER", raising=False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda h: pytest.fail("no toolkit probe without pointer mode"))
+    calls = []
+    monkeypatch.setattr(visible.visible_actions, "prepare",
+                        lambda kind, label, b, config=None, **kw: calls.append(kw))
+    driver._visible_action(SimpleNamespace(title="Save", bounds=None, secure=False), "Click", object())
+    assert calls == [{"secure": False}]

@@ -35,10 +35,15 @@ class VisibleActions:
         self.capturing = 0
         self.mapped = False
 
-    def prepare(self, kind, label, bounds, config=None, *, secure=False):
-        """Optional caller-thread glide, followed by asynchronous announcement."""
+    def prepare(self, kind, label, bounds, config=None, *, secure=False, glide=True):
+        """Optional caller-thread glide, followed by asynchronous announcement.
+
+        ``glide=False`` keeps the highlight but sends no pointer motion; the
+        driver passes it where the glide would sit on the action's critical
+        path (GTK 4 clicks, PR #719).
+        """
         try:
-            if enabled(config) and not self.disabled and usable(bounds) and not secure:
+            if glide and enabled(config) and not self.disabled and usable(bounds) and not secure:
                 if os.environ.get("A11Y_VISIBLE_ACTIONS_POINTER", "0") == "1":
                     self._glide(bounds)
         except Exception:

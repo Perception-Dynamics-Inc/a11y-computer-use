@@ -2051,13 +2051,29 @@ class LinuxDriver:
             },
         )
 
-    def _visible_action(self, target, action: str) -> None:
-        """Schedule cosmetic feedback without influencing dispatch or outcome."""
+    def _visible_action(self, target, action: str, handle=None) -> None:
+        """Schedule cosmetic feedback without influencing dispatch or outcome.
+
+        A GTK 4 click gets the highlight but no pointer glide. Measured live
+        (gnome-text-editor, PR #719), the glide added its full ~80 ms to every
+        GTK 4 click with nothing to overlap it, and Tester saw +169/+317 ms
+        (p50/p95) end to end, over the 150 ms budget.
+        """
         try:
+            import os
             from a11y_computer_use.visible import visible_actions
+            extra = {}
+            if (
+                action == "Click"
+                and handle is not None
+                and os.environ.get("A11Y_VISIBLE_ACTIONS_POINTER", "0") == "1"
+            ):
+                from a11y_computer_use.drivers import _atspi
+                if self._run(lambda: _atspi._gtk4_app(handle)):
+                    extra["glide"] = False
             visible_actions.prepare(action, getattr(target, 'title', ''),
                                      getattr(target, 'bounds', None), self.visible_actions,
-                                     secure=getattr(target, 'secure', False))
+                                     secure=getattr(target, 'secure', False), **extra)
         except Exception:
             import logging
             logging.getLogger(__name__).debug("Visible action failed", exc_info=True)
@@ -2118,7 +2134,7 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
-        self._visible_action(element, "Click")
+        self._visible_action(element, "Click", handle)
         self._raise_handle_window(handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
@@ -2676,7 +2692,7 @@ class LinuxDriver:
                         "reason": "not_actionable", "outcome": "refused",
                     },
                 )
-        self._visible_action(target, "Click")
+        self._visible_action(target, "Click", handle)
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
