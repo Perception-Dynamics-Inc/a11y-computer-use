@@ -1362,3 +1362,127 @@ def test_qt_quick_driver_keeps_wait_outside_native_dispatch(atspi, monkeypatch):
     element = Element("e1", "AXComboBox", "Fruit", "Apple", None, "snap")
     assert driver._apply_set_value(element, "Cherry", combo) is True
     assert calls == [True]
+
+
+@pytest.mark.parametrize("page_role", ["frame", "window"])
+@pytest.mark.parametrize("active_dialog", [True, False])
+@pytest.mark.parametrize("write_lands", [True, False])
+def test_qt_dialog_spin_write_raises_owning_dialog_and_verifies(
+    monkeypatch, page_role, active_dialog, write_lands,
+):
+    """Scribus's unnamed tab-page window must not raise its blocked main window."""
+    import time
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Element
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    spin = _Node("spin button", "Number of Pages:", text="1", value=1.0,
+                 minimum=1.0, maximum=999.0, toolkit="Qt")
+    page = _Node(page_role, children=[spin], toolkit="Qt", x=280, y=180, w=700, h=456)
+    dialog = _Node("dialog", "New Document", children=[page], toolkit="Qt",
+                   x=269, y=142, w=722, h=536)
+    app = _Node("application", "scribus", children=[dialog], toolkit="Qt")
+    for node in (spin, page, dialog):
+        node.get_application = lambda: app
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 99)
+    calls = []
+
+    def bounded(*args):
+        calls.append("bounded")
+        raise RuntimeError("Qt cannot marshal QSpiTextRangeList")
+
+    def write(node, value):
+        calls.append("write")
+        if write_lands:
+            node.value = value
+            node.text = str(int(value))
+        return True  # An acknowledgement alone must not verify success.
+
+    def read(node):
+        calls.append("read")
+        return node.value
+
+    monkeypatch.setattr(_Atspi.Text, "get_bounded_ranges", bounded, raising=False)
+    monkeypatch.setattr(_Atspi.Value, "set_current_value", write, raising=False)
+    monkeypatch.setattr(_Atspi.Value, "get_current_value", read)
+    rows = [
+        dict(window_id=1, title="Scribus 1.6.3", pid=99, on_screen=True,
+             bounds=dict(x=128, y=90, width=1024, height=720)),
+        dict(window_id=2, title="New Document", pid=99, on_screen=True,
+             bounds=dict(x=269, y=142, width=722, height=536)),
+    ]
+    monkeypatch.setattr(_linux_system, "windows", lambda: rows)
+    monkeypatch.setattr(_linux_system, "active_window",
+                        lambda: dict(window_id=2 if active_dialog else 3))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: spin)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_visible_action", lambda *args: None)
+    raised = []
+
+    def raise_window(window_id):
+        assert window_id == 2, "blocked main window would exhaust the activation wait"
+        raised.append(window_id)
+
+    monkeypatch.setattr(driver, "raise_window", raise_window)
+    element = Element("e1", "AXSpinButton", spin.name, "1", None, "snap")
+    start = time.perf_counter()
+    if write_lands:
+        assert driver.set_value(element, "3") is True
+        assert spin.value == 3.0 and spin.text == "3"
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.set_value(element, "3")
+        assert exc.value.detail["reason"] == "text_mismatch"
+        assert spin.value == 1.0
+    assert time.perf_counter() - start < 0.25
+    assert raised == ([] if active_dialog else [2])
+    assert "bounded" not in calls
+    assert calls.count("write") == 1
+    # Success ends the read-back poll on the first matching Value response.
+    assert calls[calls.index("write") + 1:] == ["read"] * (1 if write_lands else 4)
+
+
+@pytest.mark.parametrize("toolkit,name,role", [
+    ("gtk", "", "window"), ("Qt", "Named window", "window"),
+    ("Qt", "", "dialog"),
+])
+def test_dialog_raise_target_preserves_other_window_shapes(atspi, toolkit, name, role):
+    child = _Node(role, name, toolkit=toolkit)
+    _Node("dialog", "Parent dialog", children=[child], toolkit=toolkit)
+    assert _atspi.toplevel_raise_target(child)[1] == name
+
+
+def test_unanswered_bounded_ranges_are_remembered_per_app_instance(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(_atspi, "_unanswered_bounded_range_apps", set())
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "unknown")
+    monkeypatch.setattr(_atspi, "app_instance_id", lambda node: node.instance)
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (10, 10, 100, 30))
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda: None)
+    bounded_calls = []
+    visible_reads = []
+
+    def bounded(node, *args):
+        bounded_calls.append(node.instance)
+        raise RuntimeError("Did not receive a reply")
+
+    def visible(node, box):
+        visible_reads.append(node.instance)
+        return node.visible
+
+    monkeypatch.setattr(_atspi, "_qt_character_viewport_text", visible)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: NS(
+        CoordType=NS(SCREEN=0), TextClipType=NS(BOTH=3),
+        Text=NS(get_bounded_ranges=bounded),
+    ))
+    first = NS(instance="pid:9|start:1|bus::1.2", visible="first")
+    sibling = NS(instance=first.instance, visible="scrolled")
+    restarted = NS(instance="pid:9|start:2|bus::1.3", visible="new process")
+    for node in (first, sibling, restarted):
+        assert _atspi._qt_viewport_text(node) == node.visible
+    assert bounded_calls == [first.instance, restarted.instance]
+    assert visible_reads == [first.instance, sibling.instance, restarted.instance]
