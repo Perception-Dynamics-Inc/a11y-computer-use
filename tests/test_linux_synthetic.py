@@ -16057,3 +16057,73 @@ def test_chromium_table_depth_starts_at_document(sections, marked) -> None:
     found_link = next(el for el in matches if el.role == "AXLink")
     assert found_link.parent == found_cell.ref
     assert found_cell.bounds == Bounds(0, 0, 0, 1200, 700)
+
+
+@pytest.mark.parametrize("interfaces", [[], ["Text"], ["EditableText"]])
+@pytest.mark.parametrize("covered", [False, True])
+def test_scribus_real_palette_layout_and_find_context(monkeypatch, interfaces, covered):
+    """#686: native no-Text sentinel, leading column, and overhanging cell."""
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), Text=_NS(get_character_count=lambda node: 0)))
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    app = _Acc("application", name="scribus")
+    main = _Acc("frame", name="Scribus 1.6.3 - [Document-1*]", width=1000, height=800)
+    frame = _Acc("frame", name="Properties")
+    frame.component = _Geom(258, 213, 511, 293)
+    tree = _Acc("tree")
+    tree.component = _Geom(240, 190, 513, 316)
+    column = _Acc("table column header", name="1", width=240, height=0)
+    header = _Acc("table cell", name="X, Y, &Z", states=("EXPANDED",))
+    header.component = _Geom(240, 21, 513, 316)
+    cell = _Acc("table cell")
+    cell.component = _Geom(240, 387, 513, 337)
+    cell.get_interfaces = lambda: ["Accessible", "Action", "Component", *interfaces]
+    monkeypatch.setattr(_atspi, "_action_names", lambda node: ("AXPress",) if node is cell else ())
+    shadow = _Acc("table cell", name="Drop Shadow", width=240, height=21)
+    sections = [_Acc("table cell", name=name, width=240, height=23)
+                for name in ("Shape", "&Line", "&Colors", "&Transparency")]
+    _adopt(app, main, _adopt(frame, _adopt(tree, column, header, cell, shadow, *sections)))
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(cell)
+    assert ("Embedded widgets" in raw.hint) is (not interfaces)
+    source = build_snapshot(app, accessor, scope=Scope.APP, app="scribus", pid=1,
+                            geometry=_geometry())
+    # The main document may already carry a different opaque-content note.
+    from dataclasses import replace
+    source = replace(source, elements=(
+        replace(source.elements[0], content_note="Document content unavailable"),
+        *source.elements[1:],
+    ))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda *args: False)
+    monkeypatch.setattr(driver, "_run", lambda fn: source if fn.__name__ == "_do" else fn())
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda node: (
+        False, node.name, 1,
+        (511, 293, 258, 213) if node is frame else (0, 0, 1000, 800)))
+    rows = [
+        {"window_id": 1, "title": main.name, "pid": 1, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 1000, "height": 800}},
+        {"window_id": 2, "title": "Properties", "pid": 1, "on_screen": True,
+         "bounds": {"x": 511, "y": 293, "width": 258, "height": 213}},
+    ]
+    monkeypatch.setattr(_linux_system, "window_cover_rows", lambda: rows[::-1] if covered else rows)
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel",
+                        lambda **kw: 2 if kw["title"] == "Properties" else 1)
+    snap = driver._snapshot_root("scribus", object(), Scope.APP)
+    target = next(el for el in snap.elements
+                  if observe.ax_handle_for(snap.snapshot_id, el.ref) is cell)
+    assert target.bounds == Bounds(0, 513, 337, 240, 387)
+    assert ("covered by" in (target.note or "")) is covered
+    for mode in observe.RENDER_MODES:
+        rendered = observe.render_text(snap, mode=mode)
+        assert ('hint="Embedded widgets are not exposed' in rendered) is (not interfaces)
+    matches = observe.find_elements(snap, text="X-Pos")
+    assert not matches
+    missed = observe.render_matches(snap, matches, text="X-Pos")
+    assert "no elements match" in missed
+    assert ("Embedded widgets are not exposed" in missed) is (not interfaces)
+    assert ("Embedded widgets are not exposed" in observe.render_matches(snap, [target])) is (not interfaces)
