@@ -3263,6 +3263,9 @@ def _drain_atspi_replies(budget_s: float = 0.25) -> None:
                 break
 
 
+_unanswered_bounded_range_apps: set[str] = set()
+
+
 def _qt_viewport_text(acc) -> str | None:
     """Only native text ranges inside a Qt editor's measured viewport.
 
@@ -3277,6 +3280,9 @@ def _qt_viewport_text(acc) -> str | None:
         # paying a D-Bus timeout (and marking the app hung) on every read.
         # The fallback still verifies every published character's bounds.
         return _qt_character_viewport_text(acc, box)
+    instance = app_instance_id(acc)
+    if instance is not None and instance in _unanswered_bounded_range_apps:
+        return _qt_character_viewport_text(acc, box)
     Atspi = _atspi()
     coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
@@ -3286,6 +3292,8 @@ def _qt_viewport_text(acc) -> str | None:
             acc, *map(int, box), coord, clip, clip,
         ))
     if clip is not None and _reply_local.last_failed:
+        if instance is not None:
+            _unanswered_bounded_range_apps.add(instance)
         # Qt 5 cannot marshal QSpiTextRangeList, so GetBoundedRanges never
         # answers. libatspi then marks the whole application hung until its
         # follow-up Peer.Ping reply is dispatched, which fails every later
@@ -6181,6 +6189,16 @@ def toplevel_raise_target(node):
     top = _toplevel_of(node)
     if top is None:
         return None
+    if _role_name(top) in {"frame", "window"} and not _node_name(top) and _qt_app(top):
+        # Qt exposes stacked/tab pages as unnamed windows inside QDialog.
+        # Their box overlaps both the dialog and the blocked main window;
+        # choosing by overlap can spend the whole activation wait on the
+        # main window. Use the enclosing native dialog's title and bounds.
+        enclosing = _toplevel_of(_parent_of(top))
+        if enclosing is not None and _role_name(enclosing) in {
+            "dialog", "alert", "file chooser", "color chooser",
+        }:
+            top = enclosing
     title = str(_call_first(top, ("get_name", "getName"), default="") or "")
     position, size = _extents(top)
     extents = None

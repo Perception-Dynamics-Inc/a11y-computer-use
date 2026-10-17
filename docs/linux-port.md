@@ -702,3 +702,12 @@ clicks or keyboard input. This hint has synthetic regression coverage; live
 Scribus verification is pending.
 
 Menu leaf presses also check for keyboard focus left on the menubar or its entries after the popup closes (for example, Qt menus in Okular). Cleanup sends Escape and verifies that both popup state and menubar keyboard tracking clear; a refusal reports retained tracking. If the first Escape closes the popup but leaves an active bar entry, a second Escape clears that entry within the existing cleanup polling bound. Qt Widgets can retain focus on the bar itself when no other widget takes focus; with no focused menu-item entry, that is idle widget focus, not an active menu. A showing dialog is left alone, and explicitly pressing a submenu still leaves it open. This cleanup is covered by synthetic menu regressions and the live Qt checkable-menu fixture; it has not been live-verified in Okular.
+
+For Qt controls inside an unnamed frame/window under a dialog (including
+Scribus's New Document page-count spin box), input preparation uses the
+containing dialog's native title and bounds. This avoids trying to activate
+the blocked main window when both windows overlap the child widget. Numeric
+writes still require matching Value read-back. Qt viewport reads bypass
+`GetBoundedRanges`; for other or unidentified toolkits, a failed bounded-range
+request is remembered for that application instance, while character geometry
+is checked afresh on every fallback read.
