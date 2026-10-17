@@ -227,3 +227,5 @@
 - 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
 
 - 2026-10-17 (PR #735 repair): Preserve Kate character-viewport scroll-search regressions and GTK entry relation-label regressions together when merging appended tests; editor visibility and field naming are independent behaviors.
+
+- 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.

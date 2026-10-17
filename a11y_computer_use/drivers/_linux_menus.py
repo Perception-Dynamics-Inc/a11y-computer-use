@@ -953,12 +953,21 @@ def _open_branch(app: object, path: str, settle) -> object:
 def _menubar_has_focus(app: object) -> bool:
     """Detect keyboard tracking even when the popup has already closed."""
     bar = _require_bar(app)
-    return _has_state(bar, "FOCUSED") or any(
-        _has_state(item, "FOCUSED") for item in entries_of(bar)
-    )
+    items = entries_of(bar)
+    if any(_has_state(item, "FOCUSED") for item in items):
+        return True
+    # QMenuBar can retain widget focus after Escape clears activeAction(),
+    # especially in a window with no other focusable widget. Qt exposes that
+    # action as FOCUSED on a menu-item child; bare widget focus is not tracking.
+    # Keep the bar check for other toolkits and Qt Quick's nested bar entries.
+    from a11y_computer_use.drivers._atspi import _qt_app
+
+    if items and all(_role(item) == "menu item" for item in items) and _qt_app(app):
+        return False
+    return _has_state(bar, "FOCUSED")
 
 
-def _close_leftover_popup(app: object, path: str, settle, dismiss) -> None:
+def _close_leftover_popup(app: object, path: str, settle, dismiss, *, force: bool = False) -> None:
     """Close a leftover popup or menubar keyboard tracking after the leaf ran.
 
     A dialog the leaf opened is left alone: Escape would cancel it. A Java
@@ -968,13 +977,22 @@ def _close_leftover_popup(app: object, path: str, settle, dismiss) -> None:
     """
     if _tree_has_showing_dialog(app):
         return
-    if not menu_state(app).get("open") and not _menubar_has_focus(app):
+    popup_was_open = bool(menu_state(app).get("open"))
+    if not force and not popup_was_open and not _menubar_has_focus(app):
         return
     dismiss()
     after = menu_state(app)
     for _attempt in range(3):
-        if not after.get("open") and not _menubar_has_focus(app):
+        if _tree_has_showing_dialog(app):
             return
+        if not after.get("open"):
+            if not _menubar_has_focus(app):
+                return
+            if popup_was_open:
+                # First Escape closed the popup; the next ends bar tracking.
+                # Send it only after observing that transition, once.
+                popup_was_open = False
+                dismiss()
         settle(menus.MENU_OPEN_SETTLE_S)
         after = menu_state(app)
     if not after.get("open") and not _menubar_has_focus(app):
@@ -982,12 +1000,12 @@ def _close_leftover_popup(app: object, path: str, settle, dismiss) -> None:
     still = [str(part) for part in (after.get("path") or [])]
     raise ComputerUseError(
         ErrorCode.UNSUPPORTED,
-        "the menu is still open or the menubar still has focus after the item was pressed",
+        "the menu is still open or the menubar still has focus after Escape",
         detail={
             "path": path,
             "reason": "menu_still_open",
             "open": still,
-            "hint": "Escape was sent after the item ran; the popup or menubar keyboard focus remains.",
+            "hint": "Escape was sent; the popup or menubar keyboard tracking remains.",
         },
     )
 
@@ -1017,21 +1035,7 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
     def abandon() -> None:
         if not opened:
             return
-        if _tree_has_showing_dialog(app):
-            return
-        dismiss()
-        after = menu_state(app)
-        if after.get("open") or _menubar_has_focus(app):
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
-                "the menu stayed open or the menubar still has focus after Escape; the previous state was not restored",
-                detail={
-                    "path": path,
-                    "reason": "menu_still_open",
-                    "open": [str(part) for part in (after.get("path") or [])],
-                    "hint": "Pressing the menu-bar entry again does not end GTK menu tracking.",
-                },
-            )
+        _close_leftover_popup(app, path, settle, dismiss, force=True)
 
     for depth, wanted in enumerate(components):
         try:

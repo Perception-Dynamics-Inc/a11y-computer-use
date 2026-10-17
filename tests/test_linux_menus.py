@@ -1343,3 +1343,65 @@ def test_menu_press_keeps_dialog_when_menubar_retains_focus():
         dismiss=lambda: sent.append("escape"),
     ) == "Open"
     assert sent == []
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("clears_entry", [False, True])
+def test_qt_popup_cleanup_ends_active_action_but_allows_idle_widget_focus(
+    disabled, clears_entry,
+):
+    leaf = _item("Option X", states=() if disabled else ("enabled", "sensitive"))
+    popup = _menu("Tools", leaf)
+    entry = Acc("menu item", "Tools", [popup], states={"enabled", "sensitive"})
+    bar = Acc("menu bar", children=[entry], states={"showing"})
+    app = Acc("application", children=[Acc("frame", children=[bar])])
+    app.get_toolkit_name = lambda: "Qt"
+
+    class Open(_Action):
+        def do_action(self, index):
+            popup.states.add("showing")
+            bar.states.add("focused")
+            entry.states.add("focused")
+            return super().do_action(index)
+
+    entry.get_action_iface = lambda: Open(entry)
+    sent = []
+
+    def dismiss():
+        sent.append("escape")
+        if "showing" in popup.states:
+            popup.states.remove("showing")
+        elif clears_entry:
+            entry.states.discard("focused")
+
+    if disabled or not clears_entry:
+        with pytest.raises(ComputerUseError) as exc:
+            _linux_menus.menu_press(app, "Tools > Option X", settle=lambda _: None, dismiss=dismiss)
+        assert exc.value.detail["reason"] == ("disabled" if clears_entry else "menu_still_open")
+    else:
+        assert _linux_menus.menu_press(
+            app, "Tools > Option X", settle=lambda _: None, dismiss=dismiss,
+        ) == "Option X"
+    assert sent == ["escape", "escape"]
+    assert "focused" in bar.states
+    assert leaf.pressed == ([] if disabled else ["click"])
+    assert _linux_menus._menubar_has_focus(app) is not clears_entry
+
+
+def test_popup_cleanup_does_not_send_second_escape_to_new_dialog():
+    leaf = _item("Open")
+    entry = _menu("File", leaf, states={"selected", "focused", "sensitive"})
+    bar = Acc("menu bar", children=[entry])
+    frame = Acc("frame", children=[bar])
+    app = Acc("application", children=[frame])
+    sent = []
+
+    def dismiss():
+        sent.append("escape")
+        entry.states.discard("selected")
+        frame.children.append(Acc("dialog", "Open Document", states={"showing"}))
+
+    assert _linux_menus.menu_press(
+        app, "File > Open", settle=lambda _: None, dismiss=dismiss,
+    ) == "Open"
+    assert sent == ["escape"]
