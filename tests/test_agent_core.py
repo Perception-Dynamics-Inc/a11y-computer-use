@@ -4831,3 +4831,106 @@ def test_directory_condition_rejects_files_options_and_outside_home(tmp_path, mo
     checked = check_conditions([{"dir_exists": str(tmp_path)}], None)[0]
     assert not checked["ok"]
     assert "outside the home" in checked["detail"]
+
+
+@pytest.mark.parametrize("operation", ["move", "rename", "untouched"])
+def test_relocation_done_freshness(tmp_path, monkeypatch, operation):
+    """Exercise real path changes with deterministic POSIX metadata timestamps."""
+    from pathlib import Path
+    from a11y_computer_use.agent import core
+
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    source = tmp_path / "notes-old.txt"
+    folder = tmp_path / "Projects" / "2026"
+    destination = folder / ("notes-old.txt" if operation == "move" else "notes-2025.txt")
+    source.write_text("existing notes")
+    os.utime(source, (1, 1))
+    if operation == "untouched":
+        folder.mkdir(parents=True)
+        source.rename(destination)
+    real_stat = Path.stat
+    changed = False
+
+    def stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == destination:
+            # Preserve file type/size for the shared checker. Only timestamp
+            # values are controlled, independent of host filesystem resolution.
+            return SimpleNamespace(
+                st_mode=result.st_mode, st_size=result.st_size,
+                st_mtime=result.st_mtime, st_ctime=101 if changed else 99.5,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(core, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
+    monkeypatch.setattr(core.time, "time", lambda: 100)
+
+    def respond(messages):
+        nonlocal changed
+        if operation != "untouched":
+            folder.mkdir(parents=True)
+            source.rename(destination)
+            changed = True
+        return turn(done("organized", [
+            {"dir_exists": str(folder)},
+            {"file_exists": str(destination), "contains": "existing notes"},
+        ]))
+
+    model = ScriptedModel(respond)
+    agent = Agent(model, runtime=FakeRuntime(window()), trace_dir=tmp_path / "trace", max_steps=1)
+    goal = (
+        f"In the Thunar file manager, create a folder {folder}, move files into it, "
+        "and rename notes-old.txt to notes-2025.txt."
+    )
+    # One done attempt is enough to distinguish success from a rejected proof.
+    result = agent.run(goal)
+    assert result.conditions[0]["ok"]
+    assert result.conditions[1]["ok"] is (operation != "untouched")
+    assert (result.status == "success") is (operation != "untouched")
+    assert destination.stat().st_mtime == 1
+    if operation == "untouched":
+        assert "not modified after task start" in result.conditions[1]["detail"]
+
+
+@pytest.mark.parametrize("goal", [
+    "Save notes.txt", "Move notes.txt and save it", "Rename notes.txt and edit it",
+])
+def test_relocation_metadata_does_not_prove_content_write(tmp_path, monkeypatch, goal):
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "notes.txt"
+    path.write_text("old contents")
+    os.utime(path, (1, 1))
+    checked = check_conditions(
+        [{"file_exists": str(path)}], None, goal, written_after=100,
+    )
+    assert not checked[0]["ok"]
+
+
+@pytest.mark.parametrize("platform, ctime, expected", [
+    ("posix", 99, False), ("posix", 100, False), ("posix", 101, True),
+    ("nt", 101, False),
+])
+def test_relocation_ctime_boundary(tmp_path, monkeypatch, platform, ctime, expected):
+    from pathlib import Path
+    from a11y_computer_use.agent import core
+
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "notes.txt"
+    path.write_text("notes")
+    os.utime(path, (1, 1))
+    real_stat = Path.stat
+
+    def stat(target, *args, **kwargs):
+        result = real_stat(target, *args, **kwargs)
+        if target == path:
+            return SimpleNamespace(st_mode=result.st_mode, st_size=result.st_size,
+                                   st_mtime=1, st_ctime=ctime)
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(core, "os", SimpleNamespace(**{**vars(os), "name": platform}))
+    checked = check_conditions(
+        [{"file_exists": str(path)}], None, "Rename old.txt to notes.txt", written_after=100,
+    )
+    assert checked[0]["ok"] is expected

@@ -41,7 +41,7 @@ class StepRecord:
     ``target`` is ``{"ref", "role", "name"}``. ``args`` never contain a
     secret. ``verified`` is true only when the post-action check passed.
     ``skipped`` lists later calls in the same turn that did not run.
-    ``turn_stop`` is ``failure``, ``refusal``, ``needs_human``, or None.
+    ``turn_stop`` is ``failure``, ``refusal``, ``needs_human``, ``screen_change``, or None.
     ``status`` normalizes existing evidence; it does not change verification.
     """
 
@@ -55,6 +55,7 @@ class StepRecord:
     duration_s: float
     skipped: list = field(default_factory=list)
     turn_stop: str | None = None
+    fingerprint: dict[str, str] | None = None
     status: StepStatus | None = None
 
     def __post_init__(self) -> None:
