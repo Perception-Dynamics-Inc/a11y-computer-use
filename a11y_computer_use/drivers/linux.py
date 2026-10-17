@@ -1662,9 +1662,9 @@ class LinuxDriver:
                 return merged
 
         snap = self._run(_do)
-        # The click gate already checks native window ownership at the
-        # control's measured center. Carry that evidence into discovery too,
-        # so a covered toolbar button is distinguishable from its dialog twin.
+        # Carry native window ownership evidence into discovery, using the
+        # control's intersection with its owner so overhanging cells do not
+        # sample the document behind a floating palette.
         # Single-window trees need no sibling-window hit tests.
         windows = sum(el.role in {"AXWindow", "AXDialog", "AXSheet"} for el in snap.elements)
         if windows < 2:
@@ -4842,6 +4842,17 @@ class LinuxDriver:
             cx = float(bounds.x) + float(bounds.width) / 2.0
             cy = float(bounds.y) + float(bounds.height) / 2.0
             if _discovery is not None:
+                # Item-widget cells can extend beyond their floating palette.
+                # Discovery tests the measured intersection with the owner;
+                # action checks below still test the actual requested point.
+                if extents is not None:
+                    x, y, width, height = extents
+                    left, top = max(bounds.x, x), max(bounds.y, y)
+                    right = min(bounds.x + bounds.width, x + width)
+                    bottom = min(bounds.y + bounds.height, y + height)
+                    if right <= left or bottom <= top:
+                        return None
+                    cx, cy = (left + right) / 2.0, (top + bottom) / 2.0
                 front = next((row for row in reversed(rows) if _window_covers(row, cx, cy)), None)
                 if (pid and front and front.get("pid") and int(front["pid"]) == int(pid)
                         and target_id is not None and front["window_id"] != target_id):
