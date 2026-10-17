@@ -81,8 +81,9 @@ def _phone_page(*, web: str) -> dict:
         ],
     )
     node = phone
-    # page is kept-depth 1. ``MAX_DEPTH - 2`` wrappers put Phone at the cap.
-    for i in range(MAX_DEPTH - 2):
+    # The web page is depth zero; unmarked trees still count the window.
+    # Keep Phone exactly at the cap in both cases.
+    for i in range(MAX_DEPTH - (1 if web else 2)):
         node = _ax(
             "AXGroup",
             "",
@@ -252,7 +253,8 @@ def test_web_scan_does_not_read_past_the_existing_budget() -> None:
     late = _ax("AXButton", "Late", actions=("AXPress",), size=(80.0, 24.0))
     phone = _ax("AXGroup", "Phone", children=[early, *padding, late])
     node = phone
-    for i in range(MAX_DEPTH - 2):
+    # Put Phone at the page-relative cap so this exercises the buried scan.
+    for i in range(MAX_DEPTH - 1):
         node = _ax(
             "AXGroup",
             "",
