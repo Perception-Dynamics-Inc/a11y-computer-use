@@ -69,7 +69,7 @@ from a11y_computer_use.agent.models.base import (
     make_model,
 )
 from a11y_computer_use.agent.models.sampling import parse_seed, parse_temperature, sampling_trace
-from a11y_computer_use.agent.result import RunResult, StepRecord
+from a11y_computer_use.agent.result import RunResult, StepRecord, step_status
 from a11y_computer_use.agent.trace import (
     Trace,
     redact_args,
@@ -593,6 +593,7 @@ class Agent:
         # Relocation metadata must not admit an untouched file from the slack window.
         self._path_task_started_wall = self._task_started_wall + 1.0
         self._steps: list[StepRecord] = []
+        self._skipped_steps: list[StepRecord] = []
         self._conditions: list[dict] = []
         self._messages: list[Message] = []
         self._levels: dict[tuple, int] = {}
@@ -882,6 +883,7 @@ class Agent:
                 ))
                 continue
             self._nudges = 0
+            statuses = []
             for position, call in enumerate(turn.calls):
                 if self._stop_requested():
                     raise _Cancelled()
@@ -893,11 +895,31 @@ class Agent:
                     return
                 remaining = [_call_view(item) for item in turn.calls[position + 1:]]
                 prior = [_call_view(item) for item in turn.calls[:position]]
+                count_before = len(self._steps)
                 outcome = yield from self._one_call(call, turn, started, remaining, prior)
-                if outcome == "stop_run":
-                    return
-                if outcome == "stop_turn":
+                if len(self._steps) > count_before:
+                    statuses.append((call.name, self._steps[-1].status))
+                if outcome in {"stop_run", "stop_turn"}:
+                    pending = turn.calls[position + 1:]
+                    if len(self._steps) == count_before:
+                        pending = turn.calls[position:]
+                    for item in pending:
+                        record = self._record_skipped(item)
+                        statuses.append((item.name, record.status))
+                        yield Event("step_finished", {
+                            **_step_finished(record.index, verified=False, error=None),
+                            "status": record.status, "action": item.name,
+                            "call_id": item.id, "after_index": len(self._steps),
+                        })
                     break
+            if len(turn.calls) > 1:
+                self._messages.append(Message(
+                    role="user",
+                    content="statuses: " + ", ".join(f"{name}={status}" for name, status in statuses),
+                ))
+            if self._result is not None:
+                self._result.skipped_steps = list(self._skipped_steps)
+                return
             self._verify_finish_turn = False
 
     def _one_call(
@@ -1184,6 +1206,7 @@ class Agent:
             requested, executed, result, verified=verified, error=error,
             duration=time.perf_counter() - started_at, recovery=recovery,
             turn=turn, started_at=started_at, skipped=skipped, turn_stop=turn_stop,
+            marker=marker,
             fingerprint=after_screen.hashed(),
             target=target_view(executed, pre_snap),
             sensitive=target_human_kind(executed, pre_snap) is not None,
@@ -1197,7 +1220,7 @@ class Agent:
         })
         ran = [*prior, _call_view(call)] if turn_stop else None
         yield Event("step_finished", _step_finished(
-            index, verified=verified, error=error, result=result,
+            index, verified=verified, error=error, result=result, marker=marker,
             skipped=skipped, turn_stop=turn_stop, ran=ran,
         ))
         feedback = self._with_resolution(_tool_feedback(
@@ -2710,6 +2733,22 @@ class Agent:
         self._messages.append(Message(role="user", content=_REPLAN))
         return "replan"
 
+    def _record_skipped(self, call: ToolCall) -> StepRecord:
+        """Record an unexecuted call without captures or execution-budget changes."""
+        action = Action.from_call(call)
+        args, _secrets = redact_args(_public_args(action.args), sensitive=True)
+        step = StepRecord(
+            index=len(self._skipped_steps) + 1, action=action.name,
+            target={}, args=args, result="", error=None, verified=False,
+            duration_s=0.0, status=step_status(False, None, skipped=True),
+        )
+        self._skipped_steps.append(step)
+        if self.trace is not None:
+            entry = {**step.to_dict(), "kind": "skipped_step",
+                     "call_id": call.id, "after_index": len(self._steps)}
+            self.trace.record(entry, entry)
+        return step
+
     def _commit(
         self,
         requested: Action,
@@ -2727,6 +2766,7 @@ class Agent:
         turn_stop: str | None = None,
         target: dict | None = None,
         sensitive: bool | None = None,
+        marker: outcome.ActionResult | None = None,
         fingerprint: dict[str, str] | None = None,
     ) -> None:
         del started_at
@@ -2746,6 +2786,7 @@ class Agent:
             error=error,
             verified=verified,
             duration_s=duration,
+            status=step_status(verified, error, None if marker is None else marker.outcome),
             skipped=list(skipped or []),
             turn_stop=turn_stop,
             fingerprint=fingerprint,
@@ -2786,6 +2827,7 @@ class Agent:
             "result": step.result,
             "error": error,
             "verified": verified,
+            "status": step.status,
             "duration_s": step.to_dict()["duration_s"],
             "recovery": [note for note in recovery if note],
             "screenshot": self._save_shot(step.index),
@@ -2970,6 +3012,7 @@ class Agent:
             needs_human=needs_human,
             trace_dir="" if self.trace is None else str(self.trace.dir),
             step_log=list(self._steps),
+            skipped_steps=list(self._skipped_steps),
             evidence=evidence,
         )
 
@@ -5243,9 +5286,11 @@ def _step_finished(
     turn_stop: str | None = None,
     result: str | None = None,
     ran: list | None = None,
+    marker: outcome.ActionResult | None = None,
 ) -> dict:
     data = {
         "index": index,
+        "status": step_status(verified, error, None if marker is None else marker.outcome),
         "verified": verified,
         "error": error,
         "skipped": list(skipped or []),
