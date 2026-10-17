@@ -9,11 +9,16 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.70] - 2026-10-17
 
-Two commits since v0.4.69, through #792.
+Four commits since v0.4.69, through #792.
 
 ### Agent and vision
 
 - The screen-change check that stops queued calls ignores window-title changes that only add or remove an unsaved marker (leading or trailing `*`, `●`, `•`, or a trailing `(modified)`, `[modified]`, `- modified`). The first edit in Mousepad, gedit, or VS Code no longer drops the rest of a multi-step turn as `screen_change`; any other title change, including a real external dialog, still stops it. This fixes the 0.4.69 regression from #774. Fixes #787 (#792) (1b05a6d, 2026-10-17).
+
+### Linux drivers
+
+- Chrome snapshots count AT-SPI depth from the start of the web document rather than from the window, so the browser's own window controls no longer use up about half the depth budget. A visible table under six or eight nested sections keeps its cell and link refs for `find` and `scroll_to_find`; content beyond the page-relative cap is still pruned. Fixes #772 (#776) (802bc94, 2026-10-17).
+- Qt Quick ComboBox selection recognizes a popup published as a sibling AT-SPI `dialog` and refreshes each candidate popup container before checking it is showing and reading its options, so a delayed popup no longer fails as `popup_missing`. Fixes #594 (#786) (cd0c391, 2026-10-17).
 
 ### Performance
 
