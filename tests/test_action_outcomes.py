@@ -1842,3 +1842,61 @@ def test_calc_targeted_baseline_keeps_pid_and_refreshes_for_click(monkeypatch):
     monkeypatch.setattr(runtime, "_probe_snapshot", lambda *args: reads.append(args) or fresh)
     assert runtime._capture("soffice.bin")["snap"] is fresh
     assert len(reads) == 1
+
+
+@pytest.mark.parametrize("after_cell,fast", [("A2", True), ("A1", False), (None, False)])
+def test_calc_key_empty_selection_uses_visible_focus(monkeypatch, after_cell, fast):
+    """Exercise the native evidence producer, not a fabricated five-item tuple."""
+    from a11y_computer_use.drivers import _atspi
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    cell = object()
+    address = ["A1"]
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app: (None, False))
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_selected_sheet_cell", lambda _app: None)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args: object())
+    monkeypatch.setattr(_atspi, "_find_spreadsheet", lambda *_args: object())
+    monkeypatch.setattr(_atspi, "_sheet_window_cells", lambda _table: [cell])
+    monkeypatch.setattr(_atspi, "_node_name", lambda _cell: address[0])
+    monkeypatch.setattr(_atspi, "_state_flags", lambda _cell: (True, True, False, False))
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+
+    before = runtime._key_focus_probe("soffice.bin")
+    assert before[4] == "A1"
+    address[0] = after_cell
+    judged, _ = runtime._judge_mutation(
+        "soffice.bin", None, None, None, key_focus=True,
+        focus_before=before, key_chord="Return",
+    )
+    assert (judged == "confirmed") is fast
+    assert len(reads) == (0 if fast else 1)
+
+
+@pytest.mark.parametrize("selected", ["A3", None, "error"])
+def test_calc_key_cell_probe_preserves_selection_and_handles_failure(monkeypatch, selected):
+    from a11y_computer_use.drivers import _atspi
+
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app: (None, False))
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+
+    def selection(_app):
+        if selected == "error":
+            raise RuntimeError("Selection unavailable")
+        return selected
+
+    def focused(_app):
+        if selected == "A3":
+            pytest.fail("a published Selection must take precedence")
+        raise RuntimeError("visible cell unavailable")
+
+    monkeypatch.setattr(_atspi, "selected_sheet_address", selection)
+    monkeypatch.setattr(_atspi, "_focused_sheet_address", focused)
+    assert _atspi.focused_key_evidence("soffice.bin")[4] == (
+        "A3" if selected == "A3" else None
+    )
