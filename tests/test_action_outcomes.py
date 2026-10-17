@@ -2098,6 +2098,9 @@ class _CoveredLinuxDriver(TreeDriver):
 def _covered_runtime(tmp_path, monkeypatch, driver: _CoveredLinuxDriver):
     from a11y_computer_use.drivers import _linux_system
 
+    # This driver uses native point guards, but its app is synthetic on every
+    # host (including macOS, where app resolution consults NSWorkspace).
+    monkeypatch.setattr(server, "_running_app", lambda identifier: (None, APP))
     monkeypatch.setattr(_linux_system, "pid_at_point",
                         lambda x, y: 777 if driver.covered else driver.pid)
     monkeypatch.setattr(server, "_app_at_point",
