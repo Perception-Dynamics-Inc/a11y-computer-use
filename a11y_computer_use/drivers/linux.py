@@ -1242,7 +1242,8 @@ class LinuxDriver:
     #: What `app quit` sends: the desktop convention (cmd+q means Super+q on X, a nop).
     quit_chord = "ctrl+q"
 
-    def __init__(self) -> None:
+    def __init__(self, *, visible_actions: bool | None = None) -> None:
+        self.visible_actions = visible_actions
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
@@ -2081,6 +2082,59 @@ class LinuxDriver:
             },
         )
 
+    def _visible_action(self, target, action: str, handle=None) -> None:
+        """Schedule cosmetic feedback without influencing dispatch or outcome.
+
+        A GTK 4 click gets the highlight but no pointer glide. Measured live
+        (gnome-text-editor, PR #719), the glide added its full ~80 ms to every
+        GTK 4 click with nothing to overlap it, and Tester saw +169/+317 ms
+        (p50/p95) end to end, over the 150 ms budget.
+        """
+        try:
+            import os
+            from a11y_computer_use.visible import visible_actions
+            extra = {}
+            if (
+                action == "Click"
+                and handle is not None
+                and os.environ.get("A11Y_VISIBLE_ACTIONS_POINTER", "0") == "1"
+            ):
+                from a11y_computer_use.drivers import _atspi
+                if self._run(lambda: _atspi._gtk4_app(handle)):
+                    extra["glide"] = False
+            visible_actions.prepare(action, getattr(target, 'title', ''),
+                                     getattr(target, 'bounds', None), self.visible_actions,
+                                     secure=getattr(target, 'secure', False), **extra)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).debug("Visible action failed", exc_info=True)
+
+    def _screen_bounds_for_visible(self, handle) -> Bounds | None:
+        """SCREEN bounds for overlay feedback, or None when untrusted.
+
+        Matches the snapshot path: ``_extents`` then ``gtk4_recovered_box``.
+        GTK 4 reports SCREEN at (0, 0) while WINDOW is client-relative; recovery
+        adds the X client origin. When that screen rect cannot be determined,
+        return None so no overlay is drawn (never fabricate (0, 0)).
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        position, size = self._run(lambda: _atspi._extents(handle))
+        if position is None or size is None:
+            return None
+        recovered = self._run(lambda: _atspi.gtk4_recovered_box(handle, position, size))
+        if recovered is not None:
+            position, size = recovered
+        elif (
+            abs(float(position[0])) <= 0.5
+            and abs(float(position[1])) <= 0.5
+            and self._run(lambda: _atspi.published_origin_untrusted(handle))
+        ):
+            return None
+        return Bounds(
+            0, float(position[0]), float(position[1]), float(size[0]), float(size[1])
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -2125,6 +2179,7 @@ class LinuxDriver:
                     ),
                 },
             )
+        self._visible_action(element, "Click", handle)
         self._raise_handle_window(handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
@@ -2493,6 +2548,7 @@ class LinuxDriver:
             except Exception:
                 peers = {}
         try:
+            self._visible_action(element, "Set value")
             return self._apply_set_value(element, value, handle)
         except ComputerUseError as exc:
             self._refuse_changed_peers(handle, peers, element, exc)
@@ -2698,6 +2754,7 @@ class LinuxDriver:
                         "reason": "not_actionable", "outcome": "refused",
                     },
                 )
+        self._visible_action(target, "Click", handle)
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
@@ -3117,6 +3174,7 @@ class LinuxDriver:
         """
         if dry_run:
             return None
+        self._visible_action(target, "Scroll")
         resolved = ScrollUnit(unit)
         if resolved is ScrollUnit.PIXELS:
             self._focused_editable = None
@@ -3431,6 +3489,9 @@ class LinuxDriver:
         self._raise_handle_window(handle)
         if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
             raise _not_editable(element)
+        # Ref typing goes through type_into, not type_text; announce here so
+        # type(ref=...) shows the same overlay as click/scroll/set_value.
+        self._visible_action(element, "Type")
         if self._run(lambda: _atspi.drawing_text_editable(handle)):
             # The paragraph often has no Component. Focus lands on it or on
             # the shape panel, and EditableText inserts on the paragraph.
@@ -3629,6 +3690,17 @@ class LinuxDriver:
                     raise _secure_focus_error(
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
+        if handle is not None:
+            try:
+                from a11y_computer_use.visible import enabled, visible_actions
+                if enabled(self.visible_actions):
+                    bounds = self._screen_bounds_for_visible(handle)
+                    label = self._run(lambda: handle.get_name())
+                    if bounds is not None:
+                        visible_actions.prepare("Type", label, bounds, self.visible_actions)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).debug("Visible typing feedback failed", exc_info=True)
         if app_id:
             # The find field latches this process even when the open bar is
             # not in a snapshot. scroll_to_find types and closes it first.
@@ -5377,6 +5449,12 @@ def _region_mean_change(before, after) -> float | None:
 
 
 def _grab_png() -> bytes:
+    from a11y_computer_use.visible import visible_actions
+    with visible_actions.capture():
+        return _grab_png_uncovered()
+
+
+def _grab_png_uncovered() -> bytes:
     """A full-screen PNG. On Wayland uses grim; on X11/XWayland uses PIL's grab.
     Raises a structured screen-permission error when no capture path works."""
     import io

@@ -216,6 +216,8 @@
 - 2026-10-16 (PR #711 repair): Calc viewport bands use the table role to retain sheet pruning limits, while ordinary table-cell bands use groups to avoid orphaned final cells. Preserve both representations and their regressions when merging adjacent band changes; label only the Calc synthetic bands.
 - 2026-10-16 (#651): Eye of GNOME GTK zoom entries can echo EditableText percentages without changing image scale. Buffer equality cannot verify applied zoom; refuse before mutation rather than send an unrequested activation. Preserve the independent header-bar menu guidance when merging adjacent backend notes.
 - 2026-10-16 (PR #701 main merge): Retain GTK numeric label tests alongside VLC registration tests and same-app cover documentation when adjacent additions conflict; they protect independent observation behaviors.
+- 2026-10-16 (visible actions): Keep X11 rendering and expiry on a daemon-owned connection and reuse one empty-input-shaped window. Keep native AT-SPI reads on their owner thread, never put typed text in feedback labels, and hold captures until unmap. Disable cosmetic feedback globally in tests/CI so existing timing budgets remain unchanged.
+- 2026-10-17 (PR #719): Ref typing uses ``type_into``, not ``type_text``. Announce the Type overlay on both paths; never put typed text in the label.
 
 - 2026-10-17 (PR #720 repair): Native popover-refresh gating and per-snapshot sibling-window cover caching address independent tree and window-scan costs. Preserve both complete regression blocks when merging their appended action-outcome tests.
 
