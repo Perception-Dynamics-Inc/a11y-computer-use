@@ -244,7 +244,7 @@ def test_cli_config():
     assert _build_parser().parse_args(["mcp", "--no-visible-actions"]).visible_actions is False
 
 
-def test_x11_window_reuse_and_input_shape(monkeypatch, tmp_path):
+def test_x11_window_reuse_and_input_shape(monkeypatch, tmp_path, request):
     """Run explicitly under Xvfb; headless/platform runs retain an honest skip."""
     import shutil
     import subprocess
@@ -252,22 +252,44 @@ def test_x11_window_reuse_and_input_shape(monkeypatch, tmp_path):
     if not shutil.which("Xvfb"):
         pytest.skip("requires Xvfb for isolated X11 integration")
     pytest.importorskip("Xlib")
-    number_path = tmp_path / "display"
-    with number_path.open("w") as output:
-        process = subprocess.Popen(["Xvfb", "-displayfd", str(output.fileno()),
-                                    "-screen", "0", "800x600x24"], pass_fds=(output.fileno(),))
-    def cleanup():
-        process.terminate()
-        process.wait()
-    # Fixture finalizer also runs if initialization or an assertion fails.
-    import atexit
-    atexit.register(cleanup)
-    for _ in range(100):
-        number = number_path.read_text().strip()
-        if number:
-            break
-        time.sleep(0.01)
-    assert number
+    import os
+    import select
+    # Xvfb writes its display number to the -displayfd pipe once it accepts
+    # clients. Block on that event instead of polling a file for a fixed 1 s:
+    # a cold CI runner (xkbcomp, font setup) can take longer than that, which
+    # failed main 8780e1a with an empty display number.
+    read_fd, write_fd = os.pipe()
+    log = (tmp_path / "xvfb.log").open("w+")
+    process = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "800x600x24"],
+                               pass_fds=(write_fd,), stdout=log, stderr=subprocess.STDOUT)
+    os.close(write_fd)
+
+    closed = []
+
+    def cleanup():  # idempotent: the finally below and the finalizer both call it
+        if closed:
+            return
+        closed.append(True)
+        os.close(read_fd)
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+        log.close()
+
+    request.addfinalizer(cleanup)
+    data = b""
+    deadline = time.monotonic() + 30  # setup readiness only; no overlay bound changes
+    while not data.endswith(b"\n") and time.monotonic() < deadline:
+        ready, _, _ = select.select([read_fd], [], [], 0.1)
+        if ready:
+            chunk = os.read(read_fd, 64)
+            if not chunk:
+                break  # Xvfb closed the pipe (exited) without a display number
+            data += chunk
+    number = data.decode().strip()
+    if not number:
+        log.seek(0)
+        pytest.fail(f"Xvfb gave no display number (exit={process.poll()}): {log.read()[-2000:]}")
     monkeypatch.setenv("DISPLAY", f":{number}")
     from Xlib import X, display
     from Xlib.ext import shape
@@ -300,7 +322,6 @@ def test_x11_window_reuse_and_input_shape(monkeypatch, tmp_path):
         app.destroy()
         connection.close()
         cleanup()
-        atexit.unregister(cleanup)
 
 
 def test_capture_waits_for_worker_unmap(feedback, monkeypatch):
