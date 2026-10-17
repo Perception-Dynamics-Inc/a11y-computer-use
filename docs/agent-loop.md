@@ -184,3 +184,23 @@ Folder-creation goals require a `done` condition `{"dir_exists": "~/Projects/202
 This checks the actual directory, including an empty folder, under the same home-path
 restriction as file conditions. `file_exists` still requires a regular file;
 a goal that also saves a file needs file evidence as well.
+
+### Per-call status
+
+Each goal-agent `StepRecord`, `step_finished` event, and action trace row has
+an additive `status`: `confirmed`, `unverifiable`, `no_op`, `failed`, or
+`skipped`. Status uses existing verification and action-outcome evidence;
+it performs no extra observation. Errors take precedence over outcomes;
+`partial` and `refused` mean `failed`, and `suspected_noop` means `no_op`.
+Without an outcome, the existing verification flag determines `confirmed`
+or `no_op`. Exec success is `confirmed` and exec errors are `failed`.
+The existing `verified`, `error`, stop rules, and result text remain intact.
+
+Multi-call turns receive one compact `statuses: name=status, ...` feedback
+line in call order. Calls not run after a stop have individual `StepRecord`s
+in `RunResult.skipped_steps`, plus rows in both trace files and
+`step_finished` events. Skipped records are indexed separately from executed
+steps; their trace rows have `kind=skipped_step`, `call_id`, and `after_index`
+(the last executed step). They have no execution, capture, or budget cost.
+`step_log`, `steps`, and the stopping step's existing `skipped` list retain
+their historical meaning. This status layer adds no batch tool or schema.

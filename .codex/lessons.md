@@ -241,3 +241,5 @@
 - 2026-10-17 (PR #746 repair): Preserve Scribus embedded Properties-cell hints alongside PCManFM opaque-folder labels and Qt viewport regressions when merging appended tests; each describes a separate native accessibility limitation. Keep both the Scribus guidance and Qt menu-cleanup documentation.
 
 - 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.
+
+- 2026-10-17 (#755): Agent step_log ordering and length control execution budgets and replay. Keep per-skipped-call records separate, and never use _commit for them: it captures screenshots and advances progress counters.
