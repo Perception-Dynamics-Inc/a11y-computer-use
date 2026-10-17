@@ -2854,6 +2854,7 @@ class Runtime:
     def _calc_mutation_verdict(
         self, app: str | None, requested: str | None, previous: str | None,
         selection: tuple[int, int] | None, key_focus: bool, focus_before: tuple | None,
+        key_chord: str | None, sheet_before: tuple | None,
     ) -> tuple[str, str] | None:
         """Use actual Calc text/cell reads before paying for a window walk."""
         if getattr(self.driver, "name", None) != "linux":
@@ -2865,7 +2866,26 @@ class Runtime:
             return None
         verdict = None
         if (
-            requested is not None and isinstance(settled, tuple) and len(settled) == 2
+            key_focus and (key_chord or "").casefold() in {"ctrl+c", "ctrl+insert"}
+            and (sheet_before is not None or (
+                isinstance(focus_before, tuple) and len(focus_before) == 5 and focus_before[4]
+            ))
+        ):
+            verdict = ("unverifiable", "clipboard ownership was not verified")
+        elif key_focus and sheet_before is not None:
+            after = self._sheet_key_probe(app, key_chord, sheet_before)
+            if after == sheet_before:
+                # XTEST delivery is asynchronous. Leave the native event
+                # thread free before one short, targeted settlement read.
+                time.sleep(0.05)
+                after = self._sheet_key_probe(app, key_chord, sheet_before)
+            if after is not None:
+                if after != sheet_before:
+                    verdict = ("confirmed", "the selected cells' text changed")
+                else:
+                    verdict = ("unverifiable", "the selected cells' text is unchanged")
+        if (
+            verdict is None and requested is not None and isinstance(settled, tuple) and len(settled) == 2
             and settled[0] == app and isinstance(settled[1], str)
             and _atspi._typed_visible(previous, settled[1], requested, selection=selection)
         ):
@@ -2876,7 +2896,7 @@ class Runtime:
             )
             if verdict[0] != "confirmed":
                 verdict = None
-        elif key_focus and isinstance(focus_before, tuple) and len(focus_before) == 5:
+        elif verdict is None and key_focus and isinstance(focus_before, tuple) and len(focus_before) == 5:
             after = self._key_focus_probe(app)
             # Both reads must still identify a sheet cell. Dialogs and focus
             # leaving the sheet use the ordinary full-window verification.
@@ -2909,6 +2929,7 @@ class Runtime:
         key_focus: bool = False,
         key_chord: str | None = None,
         focus_before: tuple | None = None,
+        sheet_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> tuple[str, str]:
@@ -2921,7 +2942,7 @@ class Runtime:
         baseline = getattr(self, "_action_baseline", None)
         process = before or (baseline.get("process") if isinstance(baseline, dict) else None)
         calc = self._calc_mutation_verdict(
-            app, requested, previous, selection, key_focus, focus_before,
+            app, requested, previous, selection, key_focus, focus_before, key_chord, sheet_before,
         )
         if calc is not None:
             baseline = getattr(self, "_action_baseline", None)
@@ -3133,6 +3154,26 @@ class Runtime:
             "Create the missing folder from the nearest existing parent, or check the path."
         )
 
+    def _sheet_key_probe(
+        self, app: str | None, chord: str | None, previous: tuple | None = None,
+    ) -> tuple | None:
+        """Read bounded Calc selection text on the native owner thread."""
+        if getattr(self.driver, "name", None) != "linux" or not app:
+            return None
+        from a11y_computer_use.drivers import _atspi
+
+        if not _atspi.libreoffice_app(app) or (chord or "").casefold() not in {
+            "delete", "backspace", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y",
+            "ctrl+d", "ctrl+c", "ctrl+insert",
+        }:
+            return None
+        runner = getattr(self.driver, "_run", None)
+        try:
+            read = lambda: _atspi.sheet_key_state(app, previous)
+            return runner(read) if callable(runner) else read()
+        except Exception:
+            return None
+
     def _key_focus_probe(self, app: str | None) -> tuple | None:
         """Focused text, caret, selection, and sheet cell, or None off Linux.
 
@@ -3244,6 +3285,7 @@ class Runtime:
         key_focus: bool = False,
         key_chord: str | None = None,
         focus_before: tuple | None = None,
+        sheet_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> outcome.ActionResult:
@@ -3255,7 +3297,8 @@ class Runtime:
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
-                key_focus=key_focus, key_chord=key_chord, focus_before=focus_before, selection=selection,
+                key_focus=key_focus, key_chord=key_chord, focus_before=focus_before,
+                sheet_before=sheet_before, selection=selection,
                 cover_click=cover_click,
             )
         else:
@@ -5724,12 +5767,13 @@ class Runtime:
 
         before = self._capture(bundle, targeted=True)
         focus_before = self._key_focus_probe(bundle)
+        sheet_before = self._sheet_key_probe(bundle, chord)
         self._run_gated(action, bundle, execute)
         note = " (focused its window first)" if focused else ""
         return self._conclude(
             f"pressed {chord} in {bundle}{note}",
             tool="key", app=bundle, before=before,
-            key_focus=True, key_chord=chord, focus_before=focus_before,
+            key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
         )
 
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
@@ -5958,6 +6002,7 @@ class Runtime:
         if target is not None:
             bundle, pid = target
             focus_before = self._key_focus_probe(bundle)
+            sheet_before = self._sheet_key_probe(bundle, chord)
 
             def execute_bg() -> None:
                 self._guard_user(bundle, addressed=True)
@@ -5967,7 +6012,7 @@ class Runtime:
             return self._conclude(
                 f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
                 tool="key", app=bundle, before=before,
-                key_focus=True, key_chord=chord, focus_before=focus_before,
+                key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -5977,6 +6022,7 @@ class Runtime:
         # and click still dismiss, so typed text does not fall into the menu.
         target = self._open_menu_app(front) or front
         focus_before = self._key_focus_probe(target)
+        sheet_before = self._sheet_key_probe(target, chord)
 
         def execute() -> None:
             self._guard_user(target)
@@ -5992,7 +6038,7 @@ class Runtime:
         return self._conclude(
             f"pressed {chord}{''.join(note)}",
             tool="key", app=target, before=before,
-            key_focus=True, key_chord=chord, focus_before=focus_before,
+            key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
         )
 
     @_serialized
@@ -9746,7 +9792,9 @@ def build_server(
         'full'. The text is unchanged. Structured content adds outcome, next,
         and evidence. A key is confirmed when the focused text, caret,
         selection, or focused cell changes, including when the rest of the
-        page fingerprint does not. Thunar location-entry Return/KP_Enter reports
+        page fingerprint does not. Linux Calc edit keys also compare selected
+        cell text; copy remains unverifiable without clipboard evidence.
+        Thunar location-entry Return/KP_Enter reports
         suspected_noop when an error icon appears or the window title stays unchanged;
         check the path or create missing folders from the nearest existing parent."""
         return _publish(await run(runtime.key, chord, app, _outcome=True, _tool="key"))
