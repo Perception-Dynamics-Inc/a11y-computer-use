@@ -226,6 +226,8 @@
 - 2026-10-17 (#652): Okular TOC QTreeView cells expose selection-only Toggle without CHECKABLE. Highlighting a row does not verify page navigation; refuse ref activation before mutation until navigation can be verified, and keep grid-cell and other tree-item handling separate.
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
 
+- 2026-10-17 (#665): Calc type read-back prefers the transient cell editor over focused text. Probe that editor first to avoid a discarded focus-tree traversal; preserve the focused-text fallback for empty/missing editors and keep every read live across input. Standalone native call counts are instrumentation evidence, not proof of the loaded five-second CI bound.
+
 - 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
 
 - 2026-10-17 (#670): PCManFM Icon View can expose no file children at all. Label only the childless folder panel under the native folder-content scroll pane; keep Detailed List View rows native and never infer icons from status counts.
@@ -233,6 +235,10 @@
 
 - 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.
 
+- 2026-10-17 (PR #738 repair): Preserve Calc editor-first read-back regressions alongside PCManFM opaque-view and Qt viewport regressions when appended tests conflict. The failed Linux job contained only the tracked Calc five-second timing flake; retain all action verification and timing bounds.
+
+
 - 2026-10-17 (PR #746 repair): Preserve Scribus embedded Properties-cell hints alongside PCManFM opaque-folder labels and Qt viewport regressions when merging appended tests; each describes a separate native accessibility limitation. Keep both the Scribus guidance and Qt menu-cleanup documentation.
 
 - 2026-10-17 (#686 reopened): libatspi Text.get_character_count returns 0 even on Scribus cells advertising no Text interface; use the advertised interfaces for opaque-widget detection. Test real leading column headers and item-widget overhangs. Discovery cover probes need the owning-window intersection, while action probes retain the actual input point. Failed find results must retain all distinct content notes so a document note cannot hide a palette limitation.
+- 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.
