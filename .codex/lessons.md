@@ -270,3 +270,7 @@
 - 2026-10-17 (PR #819 repair): A synthetic Linux pointer driver must keep resolves_apps=False to exercise native point guards. Stub the host _running_app lookup separately; otherwise macOS rejects the fake app during the initial snapshot before any occlusion assertion runs.
 
 - 2026-10-18 (#800): Chromium timer-driven transform changes can retain both old extents and SHOWING, so #796's visibility guard alone cannot protect ref pointer clicks. Use document hit-test identity (including text descendants and fresh native proxies), refuse unavailable hits, and keep this separate from explicit coordinate input. Synthetic hits do not establish live Chromium hit-test freshness.
+
+- 2026-10-18 (#800 reopened): Chromium Component hit tests share stale transform-only geometry with extents and SHOWING; a matching native hit is not freshness evidence. Use exact node-bound click/press for Runtime page-button clicks, report doAction honestly, and never fall back after an absent/failed action. Live Chrome 155 reports native role `button` (not only `push button`); regression fixtures must cover both.
+
+- 2026-10-18 (PR #835 repair): AXButton includes Chromium native toggle buttons, whose advertised action need not be click/press. Scope the node-bound push-button route by native button/push button roles and retain the existing click path for toggles; never substitute toggle for an explicit click. Cover the distinction with synthetic routing tests and the unchanged live form-state test.

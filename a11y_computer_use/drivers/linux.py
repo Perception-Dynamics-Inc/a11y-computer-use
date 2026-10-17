@@ -2206,6 +2206,56 @@ class LinuxDriver:
             0, float(position[0]), float(position[1]), float(size[0]), float(size[1])
         )
 
+    def click_button_action(
+        self, element: Element, *, button: MouseButton, count: int,
+        modifiers: tuple[str, ...], allow_action: bool = True,
+    ) -> str | None:
+        """Use a node-bound click/press for Chromium page buttons only.
+
+        Chromium's Component hit test shares stale CSS-transform geometry.
+        Never fall through to that point after an absent or failed action,
+        and never translate right/multiple/modified clicks into activation.
+        The returned mechanism is a delivery receipt, not effect verification.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role != "AXButton":
+            return None
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if not self._run(lambda: _atspi.chromium_page_button(handle)):
+            return None
+        self._refuse_hidden(element, handle)
+        self._refuse_unverified_pdf_thumbnail(element, handle)
+        plain = allow_action and button is MouseButton.LEFT and count == 1 and not modifiers
+        attempted = False
+        self._focused_editable = None
+        if plain:
+            self._raise_handle_window(handle)
+            self._visible_action(element, "Click", handle)
+            # Select one advertised action, then send it once. A failed
+            # acknowledgement must not cause another action or pointer input.
+            action = self._run(lambda: _atspi.chromium_button_click_action(handle))
+            if action is not None:
+                iface, index, name = action
+                attempted = True
+                sent = self._run(lambda: _atspi._call_first(
+                    iface, ("do_action", "doAction"), index, default=False,
+                ))
+                if sent:
+                    return f"AT-SPI doAction({name})"
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role} {element.title!r}) could not be activated "
+            "by a node-bound click/press action; no pointer click was sent",
+            detail={
+                "ref": element.ref, "reason": "chromium_button_action_unavailable",
+                "outcome": "unconfirmed" if attempted else "refused",
+                "hint": "Chromium accessibility bounds and hit tests can both be stale. "
+                "Use a screenshot and explicit coordinates for pointer-specific clicks.",
+            },
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
