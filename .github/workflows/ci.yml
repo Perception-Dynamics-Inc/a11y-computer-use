@@ -17,6 +17,9 @@ permissions:
 # platform, a TCC grant, a display, or a CDP endpoint self-skip and print why.
 # Each job then adds the live proof only that runner can give. docs/ci.md
 # explains what each job proves and how to reproduce it locally.
+env:
+  A11Y_VISIBLE_ACTIONS: "0"
+
 jobs:
   macos:
     name: macOS · full suite

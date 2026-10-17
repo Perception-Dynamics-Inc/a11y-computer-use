@@ -2107,6 +2107,7 @@ class Runtime:
         fence_untrusted: bool | None = None,
         allowed_domains: str | object | None = None,
         blocked_domains: str | object | None = None,
+        visible_actions: bool | None = None,
         allow_exec: bool = False,
     ) -> None:
         self._operation_lock = RLock()
@@ -2122,6 +2123,8 @@ class Runtime:
         #: The OS backend. Every platform op (observe/act/capture) routes through
         #: it, so the Runtime is OS-agnostic; defaults to the current platform.
         self.driver = driver if driver is not None else drivers.get_driver()
+        if visible_actions is not None and getattr(self.driver, "name", None) == "linux":
+            self.driver.visible_actions = visible_actions
         self._current: Snapshot | None = None
         #: The rendering view ("full" | "interactive") the agent last asked for;
         #: diff snapshots and Effect Receipts render in it so an agent that chose
@@ -9000,6 +9003,7 @@ def build_server(
     store: safety.PermissionStore | None = None,
     audit: safety.AuditLog | None = None,
     runtime: "Runtime | None" = None,
+    visible_actions: bool | None = None,
     max_pending_calls: int = 32,
     queue_timeout_s: float = 30.0,
     fence_untrusted: bool | None = None,
@@ -9026,6 +9030,7 @@ def build_server(
         blocked_domains: Comma-separated hosts or origins that always fail
             with ``domain_blocked``. None reads
             ``A11Y_COMPUTER_USE_BLOCKED_DOMAINS``. Blocked wins over allowed.
+        visible_actions: Linux cosmetic feedback override (environment takes precedence).
         max_pending_calls: Maximum admitted calls, including the active call.
             Excess calls receive ``busy`` without starting a worker thread.
         queue_timeout_s: Maximum wait for the active call to finish. Expired
@@ -9053,11 +9058,14 @@ def build_server(
         raise ValueError("max_pending_calls must be a positive integer")
     if not math.isfinite(queue_timeout_s) or queue_timeout_s <= 0:
         raise ValueError("queue_timeout_s must be finite and positive")
+    if runtime is not None and visible_actions is not None and getattr(runtime.driver, "name", None) == "linux":
+        runtime.driver.visible_actions = visible_actions
     owns_runtime = runtime is None
     if runtime is None:
         runtime = Runtime(
             store=store,
             audit=audit,
+            visible_actions=visible_actions,
             fence_untrusted=fence_untrusted,
             allowed_domains=allowed_domains,
             blocked_domains=blocked_domains,
