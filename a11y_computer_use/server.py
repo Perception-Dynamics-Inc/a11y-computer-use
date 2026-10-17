@@ -5009,8 +5009,11 @@ class Runtime:
         # A hidden notebook tab has a name and no box. A pointer click at an
         # invented point would land on the page or the menu.
         unbound: list[Element] = []
+        # The re-resolved ref after raising its app over another app's window.
+        raised: list[Element] = []
 
         def execute() -> None:
+            nonlocal before
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
@@ -5088,7 +5091,24 @@ class Runtime:
             # point, so the hit-test runs right before them; an AXPress above
             # addressed the element itself and needs no such guard (#11).
             # A text ref uses the control's box, not the line-wide text box.
-            self._recheck_target(app, act)
+            try:
+                self._recheck_target(app, act)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.FOCUS_CHANGED or not isinstance(act, Element):
+                    raise
+                # Another app's window is over the ref. Re-observing does not
+                # move it, so "retry" could never land (#815). Raise the
+                # gated app, re-resolve the ref, and click once if it is clear.
+                act = self._raise_occluded_click_target(app, act, exc)
+                raised.append(act)
+                # The raise changed the active window. Judge the click
+                # against the tree after it, not the issued snapshot.
+                current = getattr(self, "_current", None)
+                probed = self._probe_snapshot(
+                    getattr(current, "scope", None) or Scope.WINDOW, app,
+                )
+                if probed is not None:
+                    before = self._freeze(probed)
             self._guard_user(app)
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
@@ -5099,6 +5119,8 @@ class Runtime:
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
+        if raised and not activated:
+            target = raised[0]
         if unbound:
             el = unbound[0]
             title = f" {el.title!r}" if el.title else ""
@@ -5185,6 +5207,52 @@ class Runtime:
         if canvas_fallback and result.outcome == "suspected_noop":
             raise _canvas_fallback_error(canvas_fallback[0], unconfirmed=True)
         return result
+
+    def _raise_occluded_click_target(
+        self, app: str, element: Element, exc: ComputerUseError,
+    ) -> Element:
+        """The live ref after raising ``app`` over the window covering it.
+
+        Linux only, for a ref whose point belongs to another app's window.
+        The gated app is focused, the ref is resolved again, and the point
+        is checked again. A ref that is still covered is refused as covered,
+        as ``type`` does, so the agent is not told to retry a click that
+        cannot land; that includes a raise that fails. Any other driver keeps
+        the original ``focus_changed``.
+        """
+        if getattr(self.driver, "name", None) != "linux" or self._resolves_apps():
+            raise exc
+        activate = getattr(self.driver, "activate_app", None)
+        if not callable(activate):
+            raise exc
+        cover = str(exc.detail.get("app_at_point") or "another window")
+        try:
+            activate(app)
+        except (ComputerUseError, OSError):
+            live = None  # still covered: refused below, not "retry"
+        else:
+            _snap, live = self._resolve(element.ref, "click")
+        if live is not None and live.bounds is not None:
+            try:
+                self._recheck_target(app, live)
+            except ComputerUseError as again:
+                if again.code is not ErrorCode.FOCUS_CHANGED:
+                    raise
+                cover = str(again.detail.get("app_at_point") or cover)
+            else:
+                return live
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} is covered by {cover}",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "covered",
+                "outcome": "refused",
+                "next": ["foreground", "ref"],
+                "evidence": f"the window is covered by {cover}",
+            },
+        )
 
     def _sheet_address_for_click(self, target: Target, x: int | None, y: int | None) -> str | None:
         """The Calc address this click is aimed at, or None.

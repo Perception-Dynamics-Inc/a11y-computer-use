@@ -262,3 +262,5 @@
 - 2026-10-17 (PR #803 repair): Chromium also clears SHOWING on scrolled-off rows and containers with painted descendants. Keep traversing containers and preserve native off-screen geometry handling before classifying CSS-clipped leaves, including NOT_VISIBLE for old scrolled-off refs. Run the live infobox-expand, find-bar-close, and off-screen-crop regressions together.
 
 - 2026-10-17 (#813): Calc click verification uses the active window root. Format Cells replaces that root with a dialog, so spreadsheet_open=False must not silently delegate to generic tree-change confirmation. Return an explicit partial verdict naming the dialog when the cell selection cannot be verified.
+
+- 2026-10-17 (PR #819 repair): A synthetic Linux pointer driver must keep resolves_apps=False to exercise native point guards. Stub the host _running_app lookup separately; otherwise macOS rejects the fake app during the initial snapshot before any occlusion assertion runs.
