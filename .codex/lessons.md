@@ -248,4 +248,5 @@
 - 2026-10-17 (#755): Agent step_log ordering and length control execution budgets and replay. Keep per-skipped-call records separate, and never use _commit for them: it captures screenshots and advances progress counters.
 - 2026-10-17 (PR #768 repair): Relocation freshness and multi-call screen-change guards are independent agent guarantees. Preserve both documentation blocks when merging them, and run the file-evidence and fingerprint regressions together.
 
+- 2026-10-17 (#775): Calc's driver already carries a one-use, app-bound typed read-back. Judge it before a full-window traversal; after targeted verification, the old whole-tree baseline must not be reused as current state. Preserve process-liveness evidence separately. A selected-cell address change can verify a key; unchanged or missing addresses still need the full-window fallback.
 - 2026-10-17 (PR #771 repair): Screen-change fingerprints and per-call statuses must reach the same executed record. Skipped trace rows are separate JSONL records with no fingerprint; assert both rows while retaining all fingerprint, no-extra-observation, and execution-budget checks.

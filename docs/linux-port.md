@@ -718,3 +718,12 @@ writes still require matching Value read-back. Qt viewport reads bypass
 `GetBoundedRanges`; for other or unidentified toolkits, a failed bounded-range
 request is remembered for that application instance, while character geometry
 is checked afresh on every fallback read.
+
+Calc action outcomes first use the driver's app-bound, one-use verified typed
+text, or a live change in the selected cell address for a key. Those cases avoid
+an additional full-window outcome snapshot. Missing or mismatched typed evidence,
+unchanged or missing cell addresses, and clicks retain the full-window fallback.
+After a targeted check, actions requiring a tree comparison refresh their
+baseline before input; the old tree is not treated as current. Process-exit
+checks remain active. This path has hermetic regression coverage; no live Calc
+latency measurement is claimed.

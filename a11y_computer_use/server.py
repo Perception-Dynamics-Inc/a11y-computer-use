@@ -2711,7 +2711,7 @@ class Runtime:
             observe.touch_epoch(epoch)
         return snapped
 
-    def _capture(self, app: str | None = None) -> dict | None:
+    def _capture(self, app: str | None = None, *, targeted: bool = False) -> dict | None:
         """The tree immediately before this action, and whether its pid is alive.
 
         When the caller has not snapshotted since the previous action, the
@@ -2730,7 +2730,13 @@ class Runtime:
             and baseline.get("token") == id(current)
             and (not target or not baseline.get("app") or baseline.get("app") == target)
         ):
-            return baseline.get("capture")
+            captured = baseline.get("capture")
+            if captured is not None or targeted:
+                return captured
+            # A targeted read has no fresh whole-tree baseline. Actions that
+            # need tree comparison must obtain one before delivering input.
+            probed = self._probe_snapshot(getattr(current, "scope", None) or Scope.WINDOW, target)
+            return self._freeze(probed) if probed is not None else None
         if current is None:
             if not target:
                 return None
@@ -2773,6 +2779,10 @@ class Runtime:
         return snap if isinstance(snap, Snapshot) else None
 
     def _process_died(self, before: dict | None) -> bool:
+        if before is None:
+            baseline = getattr(self, "_action_baseline", None)
+            if isinstance(baseline, dict) and baseline.get("token") == id(getattr(self, "_current", None)):
+                before = baseline.get("process")
         if not before or not before.get("pid_alive"):
             return False
         pid = before.get("pid")
@@ -2840,6 +2850,52 @@ class Runtime:
             return "unverifiable", "unverified"
         return None
 
+    def _calc_mutation_verdict(
+        self, app: str | None, requested: str | None, previous: str | None,
+        selection: tuple[int, int] | None, key_focus: bool, focus_before: tuple | None,
+    ) -> tuple[str, str] | None:
+        """Use actual Calc text/cell reads before paying for a window walk."""
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use.drivers import _atspi
+
+        settled = getattr(self.driver, "_sheet_type_readback", None)
+        if not _atspi.libreoffice_app(app or ""):
+            return None
+        verdict = None
+        if (
+            requested is not None and isinstance(settled, tuple) and len(settled) == 2
+            and settled[0] == app and isinstance(settled[1], str)
+            and _atspi._typed_visible(previous, settled[1], requested, selection=selection)
+        ):
+            verdict = outcome.judge(
+                changed=None, requested=requested, readback=settled[1],
+                before_value=previous, selection=selection,
+                expected=getattr(self.driver, "_type_expected", None),
+            )
+            if verdict[0] != "confirmed":
+                verdict = None
+        elif key_focus and isinstance(focus_before, tuple) and len(focus_before) == 5:
+            after = self._key_focus_probe(app)
+            # Both reads must still identify a sheet cell. Dialogs and focus
+            # leaving the sheet use the ordinary full-window verification.
+            if (
+                isinstance(after, tuple) and len(after) == 5
+                and focus_before[4] and after[4] and focus_before[4] != after[4]
+            ):
+                evidence = outcome.key_focus_evidence(focus_before, after, (), ())
+                if evidence:
+                    verdict = ("confirmed", evidence)
+        if verdict is not None:
+            self.driver._sheet_type_readback = None
+            self.driver._type_expected = None
+            current = getattr(self, "_current", None)
+            if current is not None:
+                # No full after-tree was read. Do not compare the next action
+                # with the obsolete pre-action tree or publish invented values.
+                self._action_baseline = {"token": id(current), "app": app, "capture": None}
+        return verdict
+
     def _judge_mutation(
         self,
         app: str | None,
@@ -2861,6 +2917,18 @@ class Runtime:
                 return "partial", "the target process exited after the action"
             return drawing
         died = self._process_died(before)
+        baseline = getattr(self, "_action_baseline", None)
+        process = before or (baseline.get("process") if isinstance(baseline, dict) else None)
+        calc = self._calc_mutation_verdict(
+            app, requested, previous, selection, key_focus, focus_before,
+        )
+        if calc is not None:
+            baseline = getattr(self, "_action_baseline", None)
+            if isinstance(baseline, dict):
+                baseline["process"] = process
+            if died:
+                return "partial", "the target process exited after the action"
+            return calc
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
         readable = after is not None and before is not None
@@ -5544,7 +5612,7 @@ class Runtime:
                 return typed
             return len(text)
 
-        before = self._capture(bundle)
+        before = self._capture(bundle, targeted=True)
         base = before["snap"] if before else None
         focused_field = self._focused_editable(base)
         previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
@@ -5572,7 +5640,7 @@ class Runtime:
             if not self._open_mnemonic_menu(target, chord):
                 self.driver.key_chord(chord)
 
-        before = self._capture(bundle)
+        before = self._capture(bundle, targeted=True)
         focus_before = self._key_focus_probe(bundle)
         self._run_gated(action, bundle, execute)
         note = " (focused its window first)" if focused else ""
@@ -5722,7 +5790,7 @@ class Runtime:
         action = TypeText(text=text)
         target = self._background_target(app)
         note: list[str] = []
-        before = self._capture()
+        before = self._capture(targeted=True)
         base = before["snap"] if before else self._current
         focused = self._focused_editable(base)
         previous = None if focused is None or focused.value is None else str(focused.value)
@@ -5803,7 +5871,7 @@ class Runtime:
         action = KeyChord(chord=chord)
         target = self._background_target(app)
         note: list[str] = []
-        before = self._capture()
+        before = self._capture(targeted=True)
         if target is not None:
             bundle, pid = target
             focus_before = self._key_focus_probe(bundle)
