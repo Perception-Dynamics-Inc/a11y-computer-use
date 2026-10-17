@@ -15474,14 +15474,19 @@ def geany_symbol_destination(acc) -> tuple[int, list] | None:
     return int(match.group(1)), statuses
 
 
-def geany_symbol_arrived(destination: tuple[int, list]) -> bool:
+def geany_symbol_arrived(destination: tuple[int, list], *, evidence: dict | None = None) -> bool:
     """Verify the native status or focused editor caret, never the row label."""
     line, statuses = destination
+    if evidence is not None:
+        evidence.clear()
+        evidence.update(expected_line=line, status_lines=[], caret_lines=[])
     for status in statuses:
         # Text is the live message; the accessible name may still contain
         # the previous caret line. Never let that older label win the match.
         message = _direct_text(status) or _node_name(status)
         match = re.search(r"\bline:\s*(\d+)\s*/", message)
+        if evidence is not None:
+            evidence["status_lines"].append(int(match.group(1)) if match is not None else None)
         if match is not None and int(match.group(1)) == line:
             return True
     # Geany refreshes its status label asynchronously. The focused editor's
@@ -15501,7 +15506,10 @@ def geany_symbol_arrived(destination: tuple[int, list]) -> bool:
                 continue
             prefix = _safe(lambda: _atspi().Text.get_text(node, 0, offset))
             if isinstance(prefix, str) and len(prefix) == offset:
-                return prefix.count("\n") + 1 == line
+                caret_line = prefix.count("\n") + 1
+                if evidence is not None:
+                    evidence["caret_lines"].append(caret_line)
+                return caret_line == line
         # Menus contain neither document carets nor caret status. Their
         # descendants can exhaust the budget before a deeply nested editor.
         if _role_name(node) not in {"menu bar", "menu", "menu item", "popup menu"}:

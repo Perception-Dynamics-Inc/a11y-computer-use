@@ -16856,3 +16856,14 @@ def test_chromium_hit_guard_does_not_change_explicit_coordinate_click(monkeypatc
     driver.click(Point(0, 162, 135), button=MouseButton.RIGHT, count=2, modifiers=("shift",))
     assert clicks == [((162, 135), {"button": "right", "count": 2})]
     assert modifiers == [("shift",)]
+
+
+@pytest.mark.parametrize("message,expected", [("line: 1 / 303", [1]), ("Loading", [None])])
+def test_geany_navigation_failure_evidence_contains_only_line_numbers(
+    fake_atspi, monkeypatch, message, expected,
+):
+    status = _Acc("status bar", name="private file name")
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: message)
+    evidence = {"old": "must be cleared"}
+    assert _atspi.geany_symbol_arrived((301, [status]), evidence=evidence) is False
+    assert evidence == {"expected_line": 301, "status_lines": expected, "caret_lines": []}

@@ -2912,16 +2912,19 @@ class LinuxDriver:
         if destination is not None:
             # XSync acknowledges delivery to X, not Geany's navigation. Wait
             # on the caller so the AT-SPI event thread can process the change.
+            evidence: dict = {}
             for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
-                if self._run(lambda: _atspi.geany_symbol_arrived(destination)):
+                if self._run(lambda: _atspi.geany_symbol_arrived(destination, evidence=evidence)):
                     break
                 if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
                     time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
             else:
                 raise ComputerUseError(
                     ErrorCode.FOCUS_LOST,
-                    "Geany did not confirm navigation to the double-clicked symbol",
-                    detail={"reason": "navigation_unconfirmed", "outcome": "unconfirmed"},
+                    "Geany did not confirm navigation to the double-clicked symbol: "
+                    f"{evidence}; requested point {(x, y)}, sent point {(px, py)}",
+                    detail={"reason": "navigation_unconfirmed", "outcome": "unconfirmed",
+                            "navigation": evidence},
                 )
         if gtk4_text and button is MouseButton.LEFT:
             # Wait for the pointer event to be processed; never replace a
