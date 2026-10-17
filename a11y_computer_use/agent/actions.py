@@ -56,6 +56,25 @@ ACTION_NAMES = frozenset({
 #: ``allow_exec`` is set. They are not added to the MCP server.
 EXEC_ACTION_NAMES = frozenset({"shell", "python"})
 
+#: Refusal for shell/python when exec is off. It is final for the session and
+#: names GUI routes instead of a setting the user could change (#624).
+EXEC_DISABLED_ERROR = (
+    "exec is not allowed. This refusal is final for this session. "
+    "Use GUI routes such as a file manager, text editor, or app menus; "
+    "do not ask the user to enable exec or a terminal."
+)
+
+#: ``ask_human`` refused when exec is off: it would hand the run to a person
+#: to enable exec, open a terminal, or run a command (#624).
+_EXEC_REQUEST_RE = re.compile(
+    r"\b(?:enable|enabling|turn(?:ing)?\s+on|allow|allowing|grant|granting|unlock|switch\s+on)\b"
+    r"[^.?!\n]{0,60}?\b(?:exec|execution|terminals?|shell|command[\s-]+line)\b"
+    r"|\b(?:run|execute|type|paste|enter)\b[^.?!\n]{0,40}?\b(?:commands?|in\s+(?:a|the)\s+"
+    r"(?:terminal|shell|console))\b"
+    r"|\bopen\b[^.?!\n]{0,20}?\b(?:a|the)\s+(?:terminal|shell|console)\b",
+    re.IGNORECASE,
+)
+
 _SEND_WORDS = ("send",)
 # Buttons and links. A checkbox or toggle is never one of these, even when
 # its label contains "send" ("Send usage statistics").
@@ -193,7 +212,7 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
     """Return an error string when ``action`` cannot be executed, else None."""
     if action.name in EXEC_ACTION_NAMES:
         if not allow_exec:
-            return "exec is not allowed"
+            return EXEC_DISABLED_ERROR
         unknown = _unknown_argument(action)
         if unknown is not None:
             return unknown
@@ -224,6 +243,12 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         kind = str(args.get("kind") or "other")
         if kind not in {"login", "captcha", "2fa", "payment", "other"}:
             return f"ask_human kind {kind!r} is not one of login, captcha, 2fa, payment, other"
+        if not allow_exec and _EXEC_REQUEST_RE.search(str(args.get("message") or "")):
+            return (
+                "ask_human cannot request exec, a terminal, or a command run: exec is off "
+                "and this is final for this session. Do the task with GUI routes such as "
+                "a file manager, text editor, app menus, or file:// in the browser."
+            )
     if action.name in POINTER_CLICKS:
         point_error = _click_target_error(args, name=action.name)
         if point_error is not None:

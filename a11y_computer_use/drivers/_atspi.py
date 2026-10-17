@@ -1406,6 +1406,34 @@ def _claws_list_surface(node) -> bool:
     return False
 
 
+def _scribus_embedded_properties(node) -> bool:
+    """Recognize the empty QTreeWidget item hosting Scribus palette widgets."""
+    if _child_count(node) != 0:
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "scribus":
+        return False
+    tree = _parent_of(node)
+    if tree is None or _role_name(tree) != "tree":
+        return False
+    frame = _parent_of(tree)
+    if (frame is None or _role_name(frame) not in {"frame", "window"}
+            or _node_name(frame).casefold() != "properties"):
+        return False
+    if _has_text_interface(node):
+        return False
+    # The content item immediately follows its expanded section header.
+    previous = None
+    for index in range(_child_count(tree)):
+        child = _child_at(tree, index)
+        if child == node:
+            return (previous is not None and _role_name(previous) == "table cell"
+                    and bool(_node_name(previous).strip())
+                    and _state_has(previous, "EXPANDED"))
+        previous = child
+    return False
+
+
 def _okular_page_surface(node) -> bool:
     """Recognize Okular's opaque document viewport from its tree context."""
     if _child_count(node) != 0 or not _parent_of(node):
@@ -4498,6 +4526,17 @@ class ATSPIAccessor:
         if qt_document and value is None:
             hint = (hint + "; " if hint else "") + (
                 "Visible document text unavailable; use in-document Find or line navigation"
+            )
+        if (
+            role_str == "table cell" and not str(name).strip()
+            and not str(description).strip() and value is None
+            and size is not None and size[0] > 0 and size[1] > 0
+            and _scribus_embedded_properties(node)
+        ):
+            hint = (hint + "; " if hint else "") + (
+                "Embedded widgets are not exposed to accessibility; "
+                "inspect a screenshot and use coordinate clicks or keyboard input. "
+                "This ref identifies the whole cell, not an individual control."
             )
         surface_name = ""
         content_note = (

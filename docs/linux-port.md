@@ -656,4 +656,12 @@ read-back can match the requested percentage while the image scale stays
 unchanged. Use the zoom UI and verify the displayed image scale; the backend
 does not send an activation key or substitute a zoom-button click.
 
+Scribus's Qt 5 Properties palette can expose its embedded item widgets as an
+unnamed, childless tree cell immediately after an expanded section. Such cells
+now carry a hint that the embedded widgets are not exposed to accessibility.
+The ref and native bounds still identify the whole cell; X-Pos and other hidden
+controls do not gain refs. Inspect a screenshot before choosing coordinate
+clicks or keyboard input. This hint has synthetic regression coverage; live
+Scribus verification is pending.
+
 Menu leaf presses also check for keyboard focus left on the menubar or its entries after the popup closes (for example, Qt menus in Okular). Cleanup sends Escape and verifies that both popup state and menubar keyboard tracking clear; a refusal reports retained tracking. If the first Escape closes the popup but leaves an active bar entry, a second Escape clears that entry within the existing cleanup polling bound. Qt Widgets can retain focus on the bar itself when no other widget takes focus; with no focused menu-item entry, that is idle widget focus, not an active menu. A showing dialog is left alone, and explicitly pressing a submenu still leaves it open. This cleanup is covered by synthetic menu regressions and the live Qt checkable-menu fixture; it has not been live-verified in Okular.

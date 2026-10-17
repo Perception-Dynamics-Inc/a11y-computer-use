@@ -14,7 +14,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from a11y_computer_use.agent import tool_schemas
+from a11y_computer_use.agent.actions import EXEC_DISABLED_ERROR, Action, validate_action
 from a11y_computer_use.agent.exec import EXEC_OUTPUT_CAP
 from a11y_computer_use.server import Runtime
 from tests.test_agent_core import FakeRuntime, done, el, run, turn, window
@@ -75,7 +78,8 @@ def test_exec_disabled_is_audited_and_does_not_run(tmp_path):
     assert not target.exists()
     assert runtime.calls == []
     assert result.step_log[0].action == "python"
-    assert result.step_log[0].error == "exec is not allowed"
+    assert result.step_log[0].error == EXEC_DISABLED_ERROR
+    assert result.step_log[0].error.startswith("exec is not allowed")
     assert result.step_log[0].turn_stop == "failure"
     assert "shell" not in {item["name"] for item in model.seen_tools[0]}
     assert "python" not in {item["name"] for item in model.seen_tools[0]}
@@ -330,3 +334,61 @@ def test_exec_off_planner_uses_gui_routes_only(tmp_path):
             assert "file manager, text editor, app menus" in prompt
         else:
             assert "shell and python are available" in prompt
+
+
+def test_exec_disabled_refusal_is_final_and_names_gui_routes():
+    """#624: the shell/python refusal is final and names no setting to flip."""
+    for name in ("shell", "python"):
+        problem = validate_action(Action(name, {"command": "ls", "code": "1"}))
+        assert problem == EXEC_DISABLED_ERROR
+    assert "final for this session" in EXEC_DISABLED_ERROR
+    assert "file manager" in EXEC_DISABLED_ERROR
+    assert "allow_exec" not in EXEC_DISABLED_ERROR
+
+
+@pytest.mark.parametrize("message", [
+    "Please enable exec so I can run the command.",
+    "Can you turn on the terminal for this session?",
+    "Allow shell access so I can count the lines.",
+    "Please grant terminal permission.",
+    "Could you run this command for me: wc -l ~/notes.txt",
+    "Please type `uname -r` in a terminal and tell me the result.",
+    "Open a terminal and paste the output here.",
+    "Enable the command-line tool so I can finish.",
+])
+def test_ask_human_for_exec_is_refused_when_exec_is_off(message):
+    problem = validate_action(Action("ask_human", {"kind": "other", "message": message}))
+    assert problem is not None
+    assert "final for this session" in problem
+    assert "GUI routes" in problem
+    assert validate_action(
+        Action("ask_human", {"kind": "other", "message": message}), allow_exec=True,
+    ) is None
+
+
+@pytest.mark.parametrize(("kind", "message"), [
+    ("login", "Please log in to the bank site."),
+    ("2fa", "Enter the 6-digit code sent to your phone."),
+    ("payment", "Confirm the card payment of $12."),
+    ("captcha", "Solve the captcha on the sign-up page."),
+    ("other", "Which account should I use for the Shell gas station order?"),
+    ("other", "Allow notifications pop-up appeared; should I accept it?"),
+])
+def test_ask_human_for_normal_help_still_passes_when_exec_is_off(kind, message):
+    assert validate_action(Action("ask_human", {"kind": kind, "message": message})) is None
+
+
+def test_ask_human_for_exec_fails_the_step_without_pausing(tmp_path):
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    model = ScriptedModel([
+        turn(ToolCall("ask_human", {"kind": "other", "message": "Please enable the terminal."}, id="a")),
+        turn(done("still closed", [{"element": {"role": "AXButton", "name": "Save"}}])),
+    ])
+    result, _events, runtime, _agent = run(
+        model, elements, trace_dir=tmp_path / "trace", allow_exec=False,
+    )
+    assert result.status == "success"
+    assert runtime.calls == []
+    assert result.step_log[0].action == "ask_human"
+    assert "final for this session" in (result.step_log[0].error or "")
+    assert result.step_log[0].turn_stop == "failure"

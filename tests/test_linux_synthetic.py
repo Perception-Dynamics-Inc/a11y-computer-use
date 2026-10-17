@@ -16144,6 +16144,52 @@ def test_entry_relation_labels_precede_tooltips(fake_atspi, monkeypatch, role, d
                 assert found[0].value is None
 
 
+@pytest.mark.parametrize("case", [
+    "embedded", "other_app", "other_window", "dialog", "not_tree", "collapsed",
+    "named", "described", "children", "text", "missing_bounds", "first_cell",
+])
+def test_scribus_embedded_properties_cell_explains_accessibility_gap(monkeypatch, case):
+    """#686: disclose missing item widgets without inventing controls or bounds."""
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_has_text_interface", lambda node: case == "text")
+    app = _Acc("application", name="other" if case == "other_app" else "scribus")
+    frame = _Acc("dialog" if case == "dialog" else "frame",
+                 name="Other" if case == "other_window" else "Properties",
+                 width=258, height=600)
+    tree = _Acc("panel" if case == "not_tree" else "tree", width=250, height=590)
+    header = _Acc("table cell", name="X, Y, &Z",
+                  states=() if case == "collapsed" else ("EXPANDED",),
+                  width=240, height=30)
+    cell = _Acc("table cell", name="Native" if case == "named" else "",
+                width=0 if case == "missing_bounds" else 240,
+                height=0 if case == "missing_bounds" else 387)
+    cell.get_description = lambda: "Native description" if case == "described" else ""
+    if case == "children":
+        _adopt(cell, _Acc("entry", name="X-Pos"))
+    _adopt(app, _adopt(frame, _adopt(tree, *([cell, header] if case == "first_cell" else [header, cell]))))
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(cell)
+    assert raw.role == "AXCell"
+    assert raw.title == cell.name
+    assert raw.size == (None if case == "missing_bounds" else (240, 387))
+    if case != "embedded":
+        assert "Embedded widgets" not in raw.hint
+        return
+    assert "Embedded widgets are not exposed to accessibility" in raw.hint
+    assert accessor.children(cell) == []
+    snap = build_snapshot(frame, accessor, scope=Scope.WINDOW,
+                          app="scribus", pid=1, geometry=_geometry())
+    matches = [el for el in snap.elements if "Embedded widgets" in el.hint]
+    assert len(matches) == 1
+    assert matches[0].role == "AXCell"
+    assert matches[0].bounds == Bounds(0, 0, 0, 240, 387)
+    assert not observe.find_elements(snap, text="X-Pos")
+    assert not any(el.parent == matches[0].ref for el in snap.elements)
+    assert 'hint="Embedded widgets' in observe.render_text(snap)
+
+
 @pytest.mark.parametrize("case", ["opaque", "other_app", "other_scroll", "children", "named", "text", "detailed"])
 def test_pcmanfm_empty_icon_view_reports_missing_file_accessibility(monkeypatch, case):
     """#670: label the limitation without fabricating named file targets."""
