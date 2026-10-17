@@ -2043,3 +2043,163 @@ def test_live_sheet_cell_requires_the_same_showing_grid_cell(monkeypatch, case):
         assert found is not None and found.position == (1.0, 2.0)
     else:
         assert found is None
+
+
+class _CoveredLinuxDriver(TreeDriver):
+    """A Linux pointer click whose point another app's window covers (#815).
+
+    ``activate_app`` raises the gated app. ``raise_clears`` decides whether
+    that uncovers the ref. ``moves`` gives the ref a new box after the raise,
+    and ``raise_churn`` changes an unrelated node when the window is raised.
+    """
+
+    name = "linux"
+    resolves_apps = False
+
+    def __init__(self, *, raise_clears: bool = True, moves: bool = False,
+                 raise_churn: bool = False, activate_fails: bool = False,
+                 click_lands: bool = True) -> None:
+        super().__init__()
+        self.covered = True
+        self.raise_clears = raise_clears
+        self.moves = moves
+        self.raise_churn = raise_churn
+        self.activate_fails = activate_fails
+        self.click_lands = click_lands
+
+    def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
+        del snap, live
+        return next(item for item in self.elements if item.ref == ref)
+
+    def press_element(self, element: Element) -> bool:
+        self.calls.append(("press", element.ref))
+        return False  # pointer path, where the hit-test runs
+
+    def activate_app(self, identifier):
+        self.calls.append(("activate", identifier))
+        if self.activate_fails:
+            raise ComputerUseError(ErrorCode.FOCUS_CHANGED, "focus did not land", detail={})
+        if self.raise_clears:
+            self.covered = False
+        if self.moves:
+            self._replace("e2", bounds=Bounds(0, 300, 200, 80, 24))
+        if self.raise_churn:
+            self._replace("e4", title="Window raised")
+        return identifier
+
+    def click(self, target, **kwargs) -> None:
+        del kwargs
+        box = target.bounds
+        self.calls.append(("click", target.ref, (box.x, box.y)))
+        if not self.covered and self.click_lands:
+            self._replace("e5", title="saved")
+
+
+def _covered_runtime(tmp_path, monkeypatch, driver: _CoveredLinuxDriver):
+    from a11y_computer_use.drivers import _linux_system
+
+    # This driver uses native point guards, but its app is synthetic on every
+    # host (including macOS, where app resolution consults NSWorkspace).
+    monkeypatch.setattr(server, "_running_app", lambda identifier: (None, APP))
+    monkeypatch.setattr(_linux_system, "pid_at_point",
+                        lambda x, y: 777 if driver.covered else driver.pid)
+    monkeypatch.setattr(server, "_app_at_point",
+                        lambda point: "mousepad" if driver.covered else APP)
+    return _runtime(tmp_path, driver)
+
+
+def _clicks(driver: TreeDriver) -> list[tuple]:
+    return [call for call in driver.calls if call[0] == "click"]
+
+
+def test_linux_click_raises_the_app_over_another_apps_window_and_clicks_once(
+    tmp_path, monkeypatch,
+) -> None:
+    """#815: a covered ref click raises the app, re-resolves, and lands once.
+
+    A plain retry got ``focus_changed`` every time. The click now raises the
+    gated app before the pointer, so one call lands.
+    """
+    driver = _CoveredLinuxDriver()
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+
+    result = runtime.click("e2")
+
+    assert result.startswith("clicked e2")
+    assert result.outcome == "confirmed"
+    assert _clicks(driver) == [("click", "e2", (10, 20))]
+    order = [call[0] for call in driver.calls if call[0] in {"activate", "click"}]
+    assert order == ["activate", "click"]
+
+
+def test_linux_covered_click_uses_the_box_resolved_after_the_raise(
+    tmp_path, monkeypatch,
+) -> None:
+    """A raise can move the window. The pointer goes to the fresh box."""
+    driver = _CoveredLinuxDriver(moves=True)
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+
+    runtime.click("e2")
+
+    assert _clicks(driver) == [("click", "e2", (300, 200))]
+
+
+def test_linux_click_still_covered_after_the_raise_is_refused_as_covered(
+    tmp_path, monkeypatch,
+) -> None:
+    """No pointer event, and no "re-observe and retry" that cannot land.
+
+    The refusal matches ``type`` on a covered control.
+    """
+    driver = _CoveredLinuxDriver(raise_clears=False)
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.click("e2")
+
+    err = caught.value
+    assert err.code is ErrorCode.UNSUPPORTED
+    assert err.message == "e2 is covered by mousepad"
+    assert err.detail["reason"] == "covered"
+    assert err.detail["outcome"] == "refused"
+    assert err.detail["next"] == ["foreground", "ref"]
+    assert err.detail["evidence"] == "the window is covered by mousepad"
+    assert "retry" not in err.message
+    assert _clicks(driver) == []
+    assert [call for call in driver.calls if call[0] == "activate"] == [("activate", APP)]
+
+
+def test_linux_covered_click_whose_raise_fails_is_refused_as_covered(
+    tmp_path, monkeypatch,
+) -> None:
+    driver = _CoveredLinuxDriver(activate_fails=True)
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.click("e2")
+
+    assert caught.value.detail["reason"] == "covered"
+    assert caught.value.code is not ErrorCode.FOCUS_CHANGED
+    assert _clicks(driver) == []
+
+
+def test_linux_window_raise_alone_does_not_confirm_a_click(tmp_path, monkeypatch) -> None:
+    """The tree change from raising the window is not evidence the click landed."""
+    driver = _CoveredLinuxDriver(raise_churn=True, click_lands=False)
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+
+    result = runtime.click("e2")
+
+    assert _clicks(driver) == [("click", "e2", (10, 20))]
+    assert result.outcome != "confirmed"
+
+
+def test_linux_uncovered_click_does_not_raise_the_app(tmp_path, monkeypatch) -> None:
+    driver = _CoveredLinuxDriver()
+    driver.covered = False
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+
+    runtime.click("e2")
+
+    assert not [call for call in driver.calls if call[0] == "activate"]
+    assert _clicks(driver) == [("click", "e2", (10, 20))]
