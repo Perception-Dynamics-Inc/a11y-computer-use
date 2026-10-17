@@ -7,11 +7,43 @@ character count includes what follows. No display, no bus, no Qt process.
 
 from __future__ import annotations
 
+import time as _real_time
+
 import pytest
 
 from a11y_computer_use.drivers import _atspi
 from a11y_computer_use.drivers._atspi import ATSPIAccessor
 from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+
+class _WaitClock:
+    """Deterministic stand-in for a driver module's ``time``.
+
+    ``sleep`` records the pause and advances the clock without waiting, so a
+    timing bound measures the waits the code asks for rather than how late
+    the host wakes it. Each clock read adds a microsecond, so a deadline loop
+    that never sleeps still ends. Everything else is the real module.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += max(float(seconds), 0.0)
+
+    def monotonic(self) -> float:
+        self.now += 1e-6
+        return self.now
+
+    perf_counter = monotonic
+
+    def monotonic_ns(self) -> int:
+        return int(self.monotonic() * 1e9)
+
+    def __getattr__(self, name):
+        return getattr(_real_time, name)
 
 
 class _States:
@@ -1371,12 +1403,18 @@ def test_qt_dialog_spin_write_raises_owning_dialog_and_verifies(
     monkeypatch, page_role, active_dialog, write_lands,
 ):
     """Scribus's unnamed tab-page window must not raise its blocked main window."""
-    import time
     from a11y_computer_use import observe
     from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers import linux as _linux
     from a11y_computer_use.drivers.linux import LinuxDriver
     from a11y_computer_use.schema import Element
 
+    # The bound is on the waits the driver asks for, not on how long the CI
+    # host takes to wake from them: macOS runners oversleep each 20 ms
+    # read-back pause enough to push three of them past 0.25 s (#797).
+    clock = _WaitClock()
+    for module in (_atspi, _linux, _linux_system):
+        monkeypatch.setattr(module, "time", clock)
     monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
     spin = _Node("spin button", "Number of Pages:", text="1", value=1.0,
                  minimum=1.0, maximum=999.0, toolkit="Qt")
@@ -1428,7 +1466,7 @@ def test_qt_dialog_spin_write_raises_owning_dialog_and_verifies(
 
     monkeypatch.setattr(driver, "raise_window", raise_window)
     element = Element("e1", "AXSpinButton", spin.name, "1", None, "snap")
-    start = time.perf_counter()
+    start = clock.now
     if write_lands:
         assert driver.set_value(element, "3") is True
         assert spin.value == 3.0 and spin.text == "3"
@@ -1437,7 +1475,9 @@ def test_qt_dialog_spin_write_raises_owning_dialog_and_verifies(
             driver.set_value(element, "3")
         assert exc.value.detail["reason"] == "text_mismatch"
         assert spin.value == 1.0
-    assert time.perf_counter() - start < 0.25
+    assert clock.now - start < 0.25
+    # Only the read-back poll pauses; no activation or focus wait runs.
+    assert clock.sleeps == [_atspi._TEXT_CONFIRM_PAUSE_S] * (0 if write_lands else 3)
     assert raised == ([] if active_dialog else [2])
     assert "bounded" not in calls
     assert calls.count("write") == 1
