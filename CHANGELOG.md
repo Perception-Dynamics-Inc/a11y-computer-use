@@ -7,6 +7,120 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.70] - 2026-10-17
+
+Two commits since v0.4.69, through #792.
+
+### Agent and vision
+
+- The screen-change check that stops queued calls ignores window-title changes that only add or remove an unsaved marker (leading or trailing `*`, `●`, `•`, or a trailing `(modified)`, `[modified]`, `- modified`). The first edit in Mousepad, gedit, or VS Code no longer drops the rest of a multi-step turn as `screen_change`; any other title change, including a real external dialog, still stops it. This fixes the 0.4.69 regression from #774. Fixes #787 (#792) (1b05a6d, 2026-10-17).
+
+### Performance
+
+- LibreOffice Calc `type` verifies the edited cell before walking the window, so it no longer re-reads the whole Calc tree (about 2.7 s) after each call; live `type` drops from about 3.3–4.0 s to 0.70–0.78 s. `key Return` and `click` still take about 3.3 s and are tracked in #775, which stays open. Partial #775 (#785) (8ce4c31, 2026-10-17).
+
+### Documentation
+
+- The changelog gains the missing 0.4.68 and 0.4.69 sections. Fixes #761.
+
+### Packaging
+
+- The package version is 0.4.70.
+
+## [0.4.69] - 2026-10-17
+
+Eleven commits since v0.4.68, through #771. The tagged commit 5b24cca includes #771, merged after the release PR. 0.4.69 contains the Mousepad dirty-marker regression #787 from #774; use 0.4.70.
+
+### Safety
+
+- Shell and Python requests made with execution turned off get a final refusal that steers the agent to GUI routes, and `ask_human` can no longer be used to obtain execution. Fixes #624 and #671 (#754) (2f3a8ac, 2026-10-17).
+
+### Agent and vision
+
+- Visible actions: an optional on-screen overlay highlights the target of Linux AT-SPI actions and announces Type by field name only, never the typed text. Pointer glide is bounded by `A11Y_VISIBLE_ACTIONS_GLIDE_MS` (default 80) and skipped on GTK 4 clicks; pointer mode is off by default, and `A11Y_VISIBLE_ACTIONS=0` disables the overlay. A refused Qt menu-button click shows no highlight. (#719) (8780e1a, 2026-10-17).
+- `menu` close succeeds without a path. Fixes #757 (#759) (91764b8, 2026-10-17).
+- Queued calls in a turn stop when the screen changes unexpectedly between calls, so later calls do not act on a different window state. Fixes #756 (#774) (d29ca87, 2026-10-17).
+- The done check accepts moved and renamed files by verifying their freshness without relying on modified time, which a rename keeps. Fixes #697 (#768) (815b004, 2026-10-17).
+- Each call in a turn reports its own action status: confirmed, unverifiable, or no effect. Fixes #755 (#771) (5b24cca, 2026-10-17).
+
+### Linux drivers
+
+- Opaque Scribus Properties widgets are disclosed in snapshots. Addresses #686, which was reopened after live retest and completed by #767 (#746) (f197200, 2026-10-17).
+- Scribus palette limitations are exposed even when the palette overhangs its cell, with the embedded-widgets hint. Fixes #686 (#767) (6208fac, 2026-10-17).
+- Activating a Qt spin box resolves to its dialog, so Scribus `set_value` takes about 2.2 s instead of about 7.2 s with correct read-back. The issue's 1 s target is not yet met. Addresses #687 (#766) (9f002cf, 2026-10-17).
+
+### Performance
+
+- Calc input skips a focus read-back whose result was discarded. Live retest showed no measurable change; the remaining cost is tracked in #775. Addresses #665 (#738) (f5deb22, 2026-10-17).
+
+### Tests
+
+- The overlay X11 test waits for Xvfb's `-displayfd` pipe instead of polling a file for 1 s, and reports Xvfb's exit if it dies. Assertions are unchanged. Fixes #762 (#763) (8ddd6d5, 2026-10-17).
+
+### Packaging
+
+- The package version is 0.4.69. (#777) (a0403d0, 2026-10-17).
+
+## [0.4.68] - 2026-10-17
+
+Forty-four commits since v0.4.67, through #748. Live retest on 0.4.68 reopened #594, #604, #621, #664, #670, #687 and #697; their entries say "Addresses".
+
+### Safety
+
+- Execution-off refusals are final and steer the agent to GUI routes instead of retrying. Fixes #671 (#674) (9bb777c, 2026-10-16).
+- Ref clicks and crops covered by an HTML popover are refused. Fixes #609 (#679) (ad62214, 2026-10-16).
+- HTML popover context is preserved in snapshots and stale-ref errors, with guidance for refs dismissed with the popover; partial snapshots tolerate omitted ancestors. Fixes #610 (#692) (9ecd198, 2026-10-16).
+- The native popover guard no longer takes extra snapshots. Fixes #717 (#720) (9477d7c, 2026-10-17).
+- Resolved popover evidence is reused before ref clicks instead of being recomputed. Fixes #737 (#742) (6faa316, 2026-10-17).
+- Sibling-window covers are annotated in discovery results. Fixes #622 (#708) (4955117, 2026-10-16).
+- Sibling-window cover evidence is computed once per snapshot and shared. Fixes #718 (#722) (508cb24, 2026-10-16).
+- Unverified PDF thumbnail ref clicks are refused. Fixes #599 (#669) (b1e1523, 2026-10-16).
+- Unverified eog zoom entry writes are refused. Fixes #651 (#714) (50a6d14, 2026-10-17).
+- Unverified Okular table-of-contents activation is refused. Fixes #652 (#727) (cecbcdf, 2026-10-17).
+- Unverified Qt menu-button presses are refused. Fixes #653 (#728) (2912d8d, 2026-10-17).
+
+### Agent and vision
+
+- File goal detection ignores URLs. Fixes #681 (#683) (1330912, 2026-10-16).
+- Folder creation is verified with directory evidence. Addresses #697 (#726) (644952f, 2026-10-17).
+- `find` marks and prioritizes explicit submit buttons. Fixes #672 (#676) (77d693d, 2026-10-16).
+- Line breaks in element names are escaped in observations. Fixes #640 (#705) (34b3474, 2026-10-16).
+
+### Linux drivers
+
+- XTEST wheel notches are paced so they do not coalesce. Fixes #595 (#660) (a61a706, 2026-10-16).
+- Clicks within one XTEST multi-click call are paced, fixing missed double-clicks such as in Engrampa. Fixes #710 (#721) (8a3cff7, 2026-10-17).
+- GTK 4 text-buffer visibility is verified in window coordinates and without range extents. Fixes #588 (#626) (1798ffd, 2026-10-16).
+- The AT-SPI IS_DEFAULT state marks a submit button. Fixes #672 (#689) (6a049c0, 2026-10-16).
+- Qt text is recovered after bounded-range timeouts. Fixes #684 (#688) (ae44788, 2026-10-16).
+- Qt text is recovered after failed range reads. Fixes #684 (#700) (a390100, 2026-10-16).
+- Qt editor text is recovered after an unanswered GetBoundedRanges. Fixes #684 (#706) (0dda35c, 2026-10-16).
+- Unanswered Qt bounded-range queries are bypassed. Addresses #687 (#748) (00fb792, 2026-10-17).
+- Qt Quick combobox selection waits for popup readiness. Addresses #594 (#694) (21c8194, 2026-10-16).
+- Menubar keyboard focus is cleared after menu presses, distinguishing Qt menu tracking from idle bar focus. Fixes #654 (#729) (1ef816d, 2026-10-17).
+- Top-level accessibility children are refreshed. Fixes #713 (#715) (13fca45, 2026-10-17).
+- Native GtkIconView icons are selected without activation. Fixes #533 (#693) (b83e472, 2026-10-16).
+- Unnamed GTK entries take names from sibling row labels. Fixes #605 (#677) (4a54722, 2026-10-16).
+- GTK numeric controls use stable labels. Fixes #639 (#701) (7b32969, 2026-10-16).
+- Explicit entry labels are preferred over tooltips. Fixes #657 (#734) (2fdafdb, 2026-10-17).
+- Claws Mail wizard page tabs are named. Addresses #604 (#675) (7fae0b7, 2026-10-16).
+- Opaque Claws Mail list panes are labelled. Fixes #603 (#673) (c1c025d, 2026-10-16).
+- Failed Thunar location navigation is reported instead of assumed. Fixes #690 (#691) (ea2294d, 2026-10-16).
+- The Thunar path model is updated through focused input. Fixes #682 (#685) (d5e0b94, 2026-10-16).
+- Thunar's destination is verified before an error icon causes rejection, removing the false "location not opened" message. Fixes #698 (#725) (3530d52, 2026-10-17).
+- Opaque PCManFM folder contents are reported. Addresses #670 (#739) (a60cb87, 2026-10-17).
+- PDF find matches are retained during asynchronous reveal. Fixes #598 (#667) (c0a1b55, 2026-10-16).
+- Kate text search uses native character visibility. Addresses #664 (#735) (442ee0b, 2026-10-17).
+- Final table cells stay inside snapshot bands. Addresses #621 (#707) (892f546, 2026-10-16).
+- Synthetic Calc viewport bands are labelled. Fixes #629 (#711) (491a463, 2026-10-17).
+- The snapshot route for header-bar menus is explained. Fixes #650 (#712) (76bb300, 2026-10-16).
+- Missing trees explain the GTK2 bridge prerequisites. (#695) (8150a34, 2026-10-16).
+- The VLC accessibility registration probe is bounded. Fixes #680 (#696) (19845ce, 2026-10-16).
+
+### Packaging
+
+- The package version is 0.4.68. (#747) (2863ef4, 2026-10-17).
+
 ## [0.4.67] - 2026-10-16
 
 Seventy-eight commits since v0.4.66, through #659.
