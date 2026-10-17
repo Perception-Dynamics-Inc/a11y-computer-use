@@ -729,8 +729,17 @@ text, or a live change in the selected cell address for a key. Those cases avoid
 an additional full-window outcome snapshot. When Calc's Selection interface is
 empty, key evidence uses the focused visible cell's native address, as click
 verification already does. A published Selection address takes precedence.
-Missing or mismatched typed evidence and unchanged or missing cell addresses
-retain the full-window fallback.
+Edit keys (`Delete`, `BackSpace`, `ctrl+v`, `ctrl+x`, `ctrl+z`, `ctrl+y`,
+`ctrl+d`) also compare live text on the original selected cell handles, including
+empty values. Selections of up to 256 cells are read completely; larger or
+unreadable selections retain the window fallback. A changed cell text confirms
+the effect; unchanged text is unverifiable without another window scan. Copy
+(`ctrl+c`, `ctrl+insert`) with a known grid cell returns unverifiable
+immediately because clipboard ownership is not checked. Missing handles or a
+changed window/focus retain the ordinary fallback. These edit-key paths have
+hermetic regression coverage; live latency and behavior have not been measured.
+Missing or mismatched typed evidence and unchanged or missing navigation cell
+addresses retain the full-window fallback.
 
 A ref click on a Calc cell resolves through one read of the issued cell's own
 handle instead of a full-window rematch (about 2.7 s on a default sheet). That
