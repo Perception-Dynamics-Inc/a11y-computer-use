@@ -268,3 +268,5 @@
 - 2026-10-17 (#813): Calc click verification uses the active window root. Format Cells replaces that root with a dialog, so spreadsheet_open=False must not silently delegate to generic tree-change confirmation. Return an explicit partial verdict naming the dialog when the cell selection cannot be verified.
 
 - 2026-10-17 (PR #819 repair): A synthetic Linux pointer driver must keep resolves_apps=False to exercise native point guards. Stub the host _running_app lookup separately; otherwise macOS rejects the fake app during the initial snapshot before any occlusion assertion runs.
+
+- 2026-10-18 (#800): Chromium timer-driven transform changes can retain both old extents and SHOWING, so #796's visibility guard alone cannot protect ref pointer clicks. Use document hit-test identity (including text descendants and fresh native proxies), refuse unavailable hits, and keep this separate from explicit coordinate input. Synthetic hits do not establish live Chromium hit-test freshness.

@@ -2048,6 +2048,22 @@ class LinuxDriver:
             return
         raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int) -> None:
+        """Refuse page ref clicks whose native hit test cannot confirm the target."""
+        from a11y_computer_use.drivers import _atspi
+
+        if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.role} {element.title!r}) could not be verified "
+                "at the click point by the Chromium document hit test; no click was sent",
+                detail={
+                    "ref": element.ref, "reason": "hit_test_unverified", "outcome": "refused",
+                    "hint": "Take a fresh snapshot or screenshot and locate the visible control. "
+                    "Chromium can retain stale bounds and SHOWING after a page transform.",
+                },
+            )
+
     def _raise_handle_window(self, handle) -> None:
         """Raise the X window that owns ``handle`` when that window is not active.
 
@@ -2316,10 +2332,10 @@ class LinuxDriver:
                 raise _wayland_input_error("click")
             from a11y_computer_use.drivers import _linux_input
 
-            _linux_input.click(
-                int(round(box[0] + box[2] / 2)),
-                int(round(box[1] + box[3] / 2)),
-            )
+            x = int(round(box[0] + box[2] / 2))
+            y = int(round(box[1] + box[3] / 2))
+            self._verify_chromium_pointer_target(element, handle, x, y)
+            _linux_input.click(x, y)
             return True
         # GtkCellRendererToggle's accessible toggle can return True without
         # emitting toggled. Selection is not evidence of a checkbox click.
@@ -2884,6 +2900,8 @@ class LinuxDriver:
         ):
             self._focused_editable = handle
             return None
+        if isinstance(target, Element):
+            self._verify_chromium_pointer_target(target, handle, x, y)
         px, py = self._pointer(x, y)
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
