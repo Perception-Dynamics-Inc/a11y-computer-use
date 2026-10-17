@@ -728,8 +728,17 @@ text, or a live change in the selected cell address for a key. Those cases avoid
 an additional full-window outcome snapshot. When Calc's Selection interface is
 empty, key evidence uses the focused visible cell's native address, as click
 verification already does. A published Selection address takes precedence.
-Missing or mismatched typed evidence, unchanged or missing cell addresses, and
-clicks retain the full-window fallback.
+Missing or mismatched typed evidence and unchanged or missing cell addresses
+retain the full-window fallback.
+
+A ref click on a Calc cell resolves through one read of the issued cell's own
+handle instead of a full-window rematch (about 2.7 s on a default sheet). That
+read must find the handle alive, SHOWING, still named the same address, a child
+of the Calc grid, owned by the same process, enabled as issued, and its live box,
+projected as a snapshot projects it, equal to the issued box. Calc's active cell
+address after the click, the Name Box, is the confirmation. A scrolled sheet, a
+renamed or defunct cell, a popover in the issued tree, or any failed read keeps
+the full-window resolution, so a scrolled-away cell is still `stale_ref`.
 After a targeted check, actions requiring a tree comparison refresh their
 baseline before input; the old tree is not treated as current. Process-exit
 checks remain active. This path has hermetic regression coverage; no live Calc

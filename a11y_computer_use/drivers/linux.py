@@ -1858,6 +1858,62 @@ class LinuxDriver:
                 self._raise_if_hidden_alive(snap, ref)
             raise
 
+    def resolve_sheet_cell(self, snap: Snapshot, ref: str) -> Element | None:
+        """The issued Calc cell itself when one targeted read vouches for it.
+
+        A full-window rematch of a Calc sheet reads every visible cell, about
+        2.7 s. A cell ref is kept only when its own handle is alive, SHOWING,
+        still named the same address, a child of the Calc grid, owned by the
+        same process, and its live box, projected the way a snapshot projects
+        it, equals the issued box. Anything else, a scroll or a sheet switch
+        included, is None and the caller falls back to ``resolve_ref``.
+        Calc's active cell address before and after the click is the
+        confirmation, through ``sheet_click_verdict``.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            anchor = snap.element(ref)
+        except KeyError:
+            return None
+        address = _atspi.sheet_address(anchor.title)
+        if anchor.role != "AXCell" or address is None or anchor.bounds is None or anchor.secure:
+            return None
+        if not _atspi.libreoffice_app(snap.app or ""):
+            return None
+        # An observed popover can cover a cell after issuance. The full read
+        # carries that cover evidence; keep it for those sheets.
+        if any(el.role == "AXPopover" for el in snap.elements):
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return None
+
+        def read():
+            raw = _atspi.live_sheet_cell(handle, address)
+            if raw is None:
+                return None
+            pid = _atspi.pid_of(handle)
+            return raw, pid, _atspi.primary_geometry()
+
+        try:
+            found = self._run(read)
+        except Exception:
+            return None
+        if found is None:
+            return None
+        raw, pid, geometry = found
+        if snap.pid is not None and pid != snap.pid:
+            return None
+        if bool(raw.enabled) != bool(anchor.enabled):
+            return None
+        live_box = observe._to_bounds(raw.position, raw.size, geometry)
+        if live_box != anchor.bounds:
+            return None
+        self._resolved_popover_cover = (anchor, None)
+        return anchor
+
     def _remember_popover_cover(self, snap: Snapshot, element: Element) -> None:
         """Retain cover evidence from the tree already required for resolution."""
         from a11y_computer_use import outcome
