@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 
@@ -15325,12 +15326,14 @@ def geany_symbol_destination(acc) -> tuple[int, list] | None:
     if match is None:
         return None
     frame = _frame_ancestor(acc)
-    pending = [frame] if frame is not None else []
+    # Visit shallow status/editor nodes before descending into populated
+    # menus and symbol trees, which can exhaust the bounded walk.
+    pending = deque([frame] if frame is not None else [])
     statuses = []
     for _ in range(512):
         if not pending:
             break
-        node = pending.pop()
+        node = pending.popleft()
         if _role_name(node) == "status bar":
             statuses.append(node)
         else:
@@ -15350,11 +15353,11 @@ def geany_symbol_arrived(destination: tuple[int, list]) -> bool:
     # native caret is independent evidence of the requested navigation; a
     # selected symbol row or an unfocused document is not that evidence.
     frames = [_frame_ancestor(status) for status in statuses]
-    pending = [frame for frame in frames if frame is not None]
+    pending = deque(frame for frame in frames if frame is not None)
     for _ in range(512):
         if not pending:
             break
-        node = pending.pop()
+        node = pending.popleft()
         if _gtk_multiline_document(node) and _state_has(node, "FOCUSED"):
             if is_secure(node):
                 continue

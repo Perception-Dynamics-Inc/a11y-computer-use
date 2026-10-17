@@ -315,3 +315,5 @@
 - 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.
 
 - 2026-10-17 (PR #768 repair): Relocation freshness and multi-call screen-change guards are independent agent guarantees. Preserve both documentation blocks when merging them, and run the file-evidence and fingerprint regressions together.
+
+- 2026-10-17 (PR #467 repair): Bounded Geany navigation evidence walks must visit shallow status/editor nodes before large menu subtrees. Depth-first traversal can exhaust the unchanged node budget without reaching either native status or caret evidence; use breadth-first traversal and retain the focused-editor and exact-line checks.

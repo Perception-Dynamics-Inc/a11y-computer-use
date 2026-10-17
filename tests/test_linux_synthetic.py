@@ -16393,3 +16393,31 @@ def test_scribus_real_palette_layout_and_find_context(monkeypatch, interfaces, c
     assert "no elements match" in missed
     assert ("Embedded widgets are not exposed" in missed) is (not interfaces)
     assert ("Embedded widgets are not exposed" in observe.render_matches(snap, [target])) is (not interfaces)
+
+
+@pytest.mark.parametrize("evidence", ["status", "caret"])
+def test_geany_navigation_finds_evidence_before_large_menu_subtrees(
+    fake_atspi, monkeypatch, evidence,
+):
+    """Menu descendants must not consume the bounded evidence walk first."""
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="line: 301 / 303" if evidence == "status" else "Status")
+    editor = _Acc("text", states=("MULTI_LINE", "FOCUSED"))
+    # Last child is visited first by a depth-first stack. Every level is
+    # below the per-node child cap, but the whole menu exceeds the budget.
+    menu = _Acc("menu bar")
+    _adopt(menu, *[_adopt(_Acc("menu"), *[_Acc("menu item") for _ in range(30)])
+                   for _ in range(30)])
+    _adopt(window, window.children[0], status, editor, menu)
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: "")
+    monkeypatch.setattr(_atspi, "_gtk_multiline_document", lambda node: node is editor)
+    prefix = "# pad\n" * 300
+    monkeypatch.setattr(fake_atspi.Text, "get_caret_offset", lambda node: len(prefix), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "get_text", lambda node, start, end: prefix, raising=False)
+    if evidence == "caret":
+        assert _atspi.geany_symbol_arrived((301, [status])) is True
+    destination = _atspi.geany_symbol_destination(symbol)
+    assert destination == (301, [status])
+    assert _atspi.geany_symbol_arrived(destination) is True
