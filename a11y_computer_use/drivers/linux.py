@@ -2884,10 +2884,27 @@ class LinuxDriver:
         ):
             self._focused_editable = handle
             return None
+        destination = None
+        if handle is not None and button is MouseButton.LEFT and count == 2 and not modifiers:
+            destination = self._run(lambda: _atspi.geany_symbol_destination(handle))
         px, py = self._pointer(x, y)
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         self._note_pointer(x, y)
+        if destination is not None:
+            # XSync acknowledges delivery to X, not Geany's navigation. Wait
+            # on the caller so the AT-SPI event thread can process the change.
+            for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
+                if self._run(lambda: _atspi.geany_symbol_arrived(destination)):
+                    break
+                if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
+                    time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
+            else:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_LOST,
+                    "Geany did not confirm navigation to the double-clicked symbol",
+                    detail={"reason": "navigation_unconfirmed", "outcome": "unconfirmed"},
+                )
         if gtk4_text and button is MouseButton.LEFT:
             # Wait for the pointer event to be processed; never replace a
             # missed click with grab_focus or a widget activation action.
@@ -3053,6 +3070,53 @@ class LinuxDriver:
             return _atspi.reveal_gtk_named_cell(root, text)
 
         return self._run(go)
+
+    def buffer_match_visibility(self, target: Element, text: str) -> str | None:
+        """Whether ``text`` is on screen inside a GTK multi-line document.
+
+        None when ``target`` is not such a document or extents cannot be
+        read. ``hidden`` is a match in the buffer whose characters miss the
+        widget. No rectangle is invented for that match.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if not isinstance(target, Element) or not text:
+            return None
+        try:
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        except Exception:
+            return None
+        if handle is None:
+            return None
+        try:
+            return self._run(lambda: _atspi.buffer_match_visibility(handle, text))
+        except Exception:
+            return None
+
+    def reveal_buffer_match(self, target: Element, text: str) -> str | None:
+        """Scroll a hidden document match into the widget.
+
+        ``scrolled`` only when character extents afterwards intersect the
+        widget. ``visible`` means they already did, and the caret is left
+        where it was. ``hidden`` means the buffer contains ``text`` and the
+        widget still does not show it.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if not isinstance(target, Element) or not text:
+            return None
+        try:
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        except Exception:
+            return None
+        if handle is None:
+            return None
+        try:
+            return self._run(lambda: _atspi.reveal_buffer_match(handle, text))
+        except Exception:
+            return None
 
     def scroll_viewport_page(self, target: Element, direction: int) -> bool:
         """Page a large GTK table by one painted viewport. False otherwise.

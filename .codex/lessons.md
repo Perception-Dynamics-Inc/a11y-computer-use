@@ -8,10 +8,20 @@
 - The first #503 attempt (dropping GTK 4 nodes with garbage sizes) broke the huge Calc and combo popup tests. Large-but-valid geometry is legitimate; only filter clearly uninitialized sizes.
 - 2026-10-13 (#480): Linux maps native AT-SPI terminals to AXTextArea; inspect native terminal ancestry, including remembered editable handles, rather than treating every multiline editor as a shell. Preserve cached-field ownership checks before terminal detection so stale focus still returns an audited focus_changed error. Execution permission is independent of per-app FULL grants and defaults off for MCP Runtime hosts as well as agents.
 - 2026-10-13 (#537): Repeated AT-SPI `get_application` calls are expensive in Calc snapshots. Cache successful owner lookups within the existing operation-scoped getter cache; preserve retries for missing owners and invalidate on mutations. A getter can return a fresh GI wrapper, so toolkit attributes attached to that wrapper alone do not prevent repeated owner lookups.
+
+- 2026-10-13 (#467): Geany live fixtures must launch with `--new-instance`; otherwise a launch can delegate to an existing editor, so terminating the returned process leaves windows behind and contaminates later symbol/caret assertions. Verify the Scintilla and symbol-click fixtures together under AT-SPI.
 - 2026-10-13 (#548): A mapped GTK4 window can precede AT-SPI registration. Before reporting a missing bridge, preserve the remaining existing process-startup grace for an unambiguous owner; older apps still fail fast. Keep registration tests hermetic and run them with gi imports disabled to check non-Linux dependency isolation.
+
+
+
+
+
 
 - 2026-10-13 (#202): When merging grant aliases with desktop launch resolution, preserve GenericName program selection and exact permission gates alongside grant-selected labels. Installed bundle resolution must keep the requested spelling even if a Linux executable with a case-folded name is on PATH.
 - 2026-10-13 (#488): xdg-desktop-portal backends share one process across requesting apps. Resolve the full backend name before matching it, inherit identity only from a managed `WM_TRANSIENT_FOR` parent, and bind observations to the active chooser frame. Never add a portal PID to a requesting app's `pids_matching` set, expand that frame into sibling dialogs, or treat a matching portal PID as sufficient for a pointer permission recheck: this would expose other apps under the requesting app's grant.
+
+
+
 - 2026-10-13 (PR #528): Show-desktop requests are asynchronous; verify foreground focus has settled before starting a short agent budget. Use a scripted monotonic clock in the setup regression so host scheduling cannot exhaust the wait, and check the hermetic tests with GI imports blocked.
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 - 2026-10-13 (#496): Okular's childless PDF filler has no AT-SPI Text interface. Keep document surface labels scoped to the unnamed layered/split document pane with a scrollbar sibling; exclude dialogs and named sidebar panes. Do not treat an in-app search invocation as a verified page-text match.
@@ -72,7 +82,6 @@
 
 - 2026-10-14 (PR #549 merge repair): A reachable AT-SPI bus can enable desktop live fixtures even without a display. Run those fixtures under Xvfb with a working window manager; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS. Verify the window manager starts before diagnosing app-activation failures as code regressions.
 - 2026-10-14 (PR #539 repair): A supplied worktree can lag the remote PR branch and have read-only shared Git metadata or protected `.codex` files. Fetch into a writable checkout and start from the current remote head before merging main; a plain push must retain that remote head as an ancestor.
-- 2026-10-14 (PR #564 merge repair): An inherited DISPLAY can name an inaccessible server in the command sandbox. Run display-dependent focused tests under a fresh Xvfb/D-Bus session; run the hermetic suite without a display so existing prerequisite guards reflect the actual environment.
 
 - 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
 
@@ -89,6 +98,18 @@
 - 2026-10-14 (PR #472 merge repair): Concurrent isolated D-Bus test sessions need distinct writable XDG_CACHE_HOME directories. AT-SPI bus launchers share the cache socket path; ending one session can remove another session's socket and abort MCP subprocess tests. Recheck bus failures in a fresh session with its own cache before treating them as code regressions.
 - 2026-10-14 (PR #549 repair): A supplied worktree can lag its tracking branch even when its files are clean. Fetch and preserve the current remote PR head before merging main, so a plain repair push retains prior repair commits.
 
+- 2026-10-14 (PR #467 repair): An unnamed GTK status bar can expose its caret/selection label only through Text. Preserve that native text when mapping it to AXStatusBar; keep numeric Value probes disabled and retain any explicit accessible name. Merge Scintilla visibility filtering with exact-target selection and opaque-search refusal independently.
+- 2026-10-14 (PR #467 repair): A document reveal takes a new snapshot; apply exact-target preference again after that refresh so incidental labels do not reappear as find targets. Preserve opaque-container refusals when combining visibility filters with scroll search.
+
+- 2026-10-14 (PR #467 repair): After revealing an off-screen document match, apply exact-target preference again to the refreshed snapshot. Merge the visibility filter with current search filtering so a refresh does not resurrect broad document or label matches that main excludes.
+
+- 2026-10-14 (PR #467 repair): After revealing a document match, apply exact-target preference again to the refreshed snapshot. Unnamed GTK status bars can expose their displayed message only through Text; retain the statusbar role and avoid a numeric Value fallback.
+
+
+- 2026-10-14 (#467 repair): GtkStatusbar may expose caret status only through its Text interface. Preserve that text as the unnamed bar's title while keeping numeric Value probes disabled; verify Geany symbol clicks alongside Scintilla search.
+- 2026-10-13 (#467): Refresh AT-SPI status-bar properties before reading geometry. GTK can cache the bar's unallocated startup rectangle; refreshing later in `_state_flags` leaves that snapshot with stale zero-size geometry and drops caret/status evidence. Cover the allocation transition hermetically and verify Geany symbol clicks and Scintilla find together live.
+
+- 2026-10-14 (PR #467 repair): Repair checkouts may fetch only main. Inspect remote.origin.fetch and explicitly fetch the PR branch before pushing so concurrent repairs are merged rather than overlooked.
 - 2026-10-14 (PR #562 repair): Qt viewport text filtering must coexist with application-specific visibility restrictions such as Kate, Evince page handling, and independent button labels. Preserve both sides of appended regression conflicts and compare the resolved patch against main.
 - 2026-10-14 (PR #562 repair): Trim clipped-character placeholders at the edges of Qt viewport text, while retaining internal separators. Leading placeholders otherwise trigger the shared appended-query guard when the visible viewport contains exactly the requested token.
 - 2026-10-14 (#492): Gnumeric's name-box `go-jump` image can crash the application through accessibility activation. Refuse before semantic activation and element pointer input; do not substitute keyboard navigation for an explicit click.
@@ -122,6 +143,18 @@
 - 2026-10-14 (#638): Exact-target ranking must retain ordinary substring label matches, including trailing-colon form labels. #446 also asserts that a prose label mentioning an indexed row identifier alone must not stop off-screen cell discovery; preserve that narrower guard and test both find and scroll_to_find.
 - 2026-10-14 (#642): Private GTK4 set_value verification must carry its boolean privacy marker through set_text caret restoration, LinuxDriver, and Runtime receipts; coercing it to bool loses redaction when preflight misses the entry. Empty-string snapshot values do not establish visibility.
 
+
+- 2026-10-14 (PR #467 merge validation): Validate Geany symbol navigation and Scintilla visibility in the same fresh desktop session; caret status is shared evidence for both paths. Preserve both independently appended regression blocks when merging main.
+
+- 2026-10-14 (PR #467 CI repair): A GTK status bar can have a generic accessible name such as Status and a distinct caret message in Text. Read that native message even for named bars, preserving the name and exposing the distinct message as its value without probing numeric Value.
+
+
+
+- 2026-10-14 (PR #467 repair): Set DISPLAY and a unique writable XDG_CACHE_HOME before starting dbus-run-session, not only inside its child script. D-Bus-activated AT-SPI services inherit the session daemon environment and otherwise can bind the wrong display or abort on a read-only home cache. Validate Geany symbol jumps and Scintilla search together with CI-sized Openbox geometry.
+
+- 2026-10-14 (PR #467 repair): A repository fetch refspec may omit cursor branches. Explicitly fetch the PR branch and compare its remote head before conflict repair so existing repair commits and regressions are retained.
+
+
 - 2026-10-14 (PR #626 CI repair): GTK 4.14 routes GtkAccessibleText through a bridge that implements neither range nor character extents, unlike newer GTK. Keep buffer read-back separate from verified visibility in the search index; label unverified contents and never allow them to satisfy find. Reproduce version-dependent failures with the runner’s GTK and app libraries.
 - 2026-10-14 (#618): GTK 4 tree-expander buttons expose namespaced listitem expansion actions. Prefer toggle-expand, otherwise choose expand/collapse from the live state, and verify EXPANDED changes before success. Do not fall back to pointer input after a failed native action.
 
@@ -134,6 +167,9 @@
 
 - 2026-10-14 (PR #644 repair): GTK4 secure-field refusal and unknown-visibility write redaction are complementary: preserve the early secure-ref refusal together with the private success marker reaching Runtime and audit. Keep both live regression blocks when merging these fixes.
 
+- 2026-10-14 (PR #467 conflict repair): Globally blocking GI imports is useful for hermetic driver checks but invalidates binding tests that inject a fake GI module and CLI subprocess tests that initialize Linux. Recheck those files with native GI in a fresh Xvfb/D-Bus session before diagnosing their failures as regressions.
+
+- 2026-10-14 (PR #467 validation): A supplied linked worktree can have read-only Git metadata and lesson files despite writable source files. Validate and commit in a writable temporary clone, explicitly fetch the PR branch, preserve its current remote history, and use a plain push; do not replace the mounted .git link or force-push.
 - 2026-10-14 (PR #630 conflict repair): Preserve Chromium heading control-label regressions alongside tree-expander tests when merging appended blocks. The failed Linux run contained only the tracked Calc timing flake; inspect the complete job summary before changing unrelated action code.
 - 2026-10-14 (#647): Suppressing Kate whole-buffer Text values exposes automatic scroll-anchor fallbacks: retain the editor view ahead of sibling breadcrumb lists. Container selection cannot establish text visibility; refuse unverifiable editor text searches before wheel/Find input and preserve explicit container refs. Live v0.4.66..main bisect identifies #563 (c226b7b) as the interaction trigger, not a reason to restore whole-buffer values.
 
@@ -141,6 +177,12 @@
 
 - 2026-10-14 (PR #649 repair): Kate viewport-probe avoidance preserves status traversal, while editor scroll-anchor selection independently preserves search refusal. Retain both documented behaviors when merging their adjacent backend notes.
 - 2026-10-16 (#595): XTEST wheel taps need both per-notch sync and real time between taps; sleeping while events remain queued still delivers a coalescible burst to Qt Quick. Wheel line units describe input notches, not verified pixels or rows.
+
+- 2026-10-14 (PR #467 status repair): Keep GTK status message reads independent of a positive Text character count. When the count is empty or unavailable, request the native Text endpoint (-1) and retain only actual returned text; do not infer a caret line from symbol names or document geometry. Validate the empty-count case hermetically and both Geany navigation paths live.
+
+- 2026-10-16 (#467 CI repair): Geany 2.0's startup welcome message masks caret statistics even after its symbol tree/editor is accessible. Statistics refresh on editor input, so initialize the fixture caret with Ctrl+Home and require the real initial line status within the existing startup deadline before testing navigation. Stop setup input once ready and preserve all final caret/visibility assertions; Text probes and geometry refreshes cannot reveal statistics the application is not displaying yet.
+
+
 
 - 2026-10-14 (PR #626 merge repair): Preserve GTK buffer search exclusion and Kate owner detection together when merging adjacent snapshot rules; they protect independent toolkit visibility paths.
 
@@ -153,9 +195,15 @@
 
 - 2026-10-16 (#672): HTML submit ownership must honor explicit `form` attributes before ancestry and keep backend ids isolated by CDP session/document. Native DEFAULT and DOM submit markers are discovery hints only; preserve lexical exact-target behavior for unrelated queries and never turn markers into action substitution.
 
+- 2026-10-16 (PR #467 merge validation): An inherited DISPLAY can opt the full suite into unrelated desktop fixtures and credential prompts. Run the hermetic suite with DISPLAY unset, then validate Geany symbol navigation and Scintilla search together in a fresh Xvfb/Openbox/D-Bus session; preserve both native-status readiness and meter Value-interface regressions when merging their adjacent test additions.
+
+
 - 2026-10-16 (#598 merge repair): Preserve asynchronous Chromium PDF reveal regressions alongside XTEST wheel-pacing regressions when both append to the Linux synthetic suite. A document-text hit has no table row index; retain its actual handle without click bounds while native extents settle.
 - 2026-10-16 (#671): Exec-off terminal refusals must be final and direct planners to GUI routes; permission wording alone can invite requests to enable exec. Keep this guidance conditional on exec being off and preserve the terminal gate and audit.
 
+
+
+- 2026-10-16 (PR #467/#626 merge repair): Scintilla match visibility and GTK 4 visible-buffer snapshot filtering are complementary. Preserve both helper blocks when their insertion points conflict, and verify Geany symbol navigation together with Scintilla search under the CI window manager before adding a workaround for an older failed run.
 - 2026-10-16 (PR #677 repair): Claws Mail wizard page titles and unnamed entry row labels are independent naming fallbacks. Preserve both regression blocks when merging their appended tests; entry labels must retain native handles and measured bounds.
 
 
@@ -163,7 +211,12 @@
 
 - 2026-10-16 (PR #679 repair): HTML popover mapping and Claws Mail wizard tab naming have independent appended regressions. Preserve both complete test blocks when merging main, including native unknown-geometry assertions for hidden wizard tabs.
 
+
+
 - 2026-10-16 (PR #676 repair): Optional AT-SPI observation hints must tolerate missing GI bindings as well as missing native state members. Exercise the fallback with an ImportError even on Linux so synthetic backend tests remain portable to macOS and Windows.
+
+- 2026-10-16 (PR #467 Geany verification): XSync confirms X server delivery, not completion of symbol navigation. After the requested double-click, poll Geany's native status line on separate AT-SPI operations; status may be exposed through Name or Text. Keep waits on the caller, preserve both pointer clicks, and return an unconfirmed error if the reported destination never appears.
+
 
 - 2026-10-16 (#682): Thunar toolbar path entries can echo EditableText while leaving the navigation model stale. Retype through confirmed focus even when the buffer already equals the requested path; keep Return separate and verify navigation from location/title.
 - 2026-10-16 (PR #667 repair): Preserve Chromium PDF asynchronous-reveal notes and native DEFAULT submit-discovery notes together when adjacent backend documentation conflicts; they describe independent behaviors. Inspect the direct Actions job log when the failed-log command returns no output.
@@ -188,6 +241,11 @@
 
 - 2026-10-16 (#690): Thunar location-entry error icons change the accessibility tree without opening a folder. Inspect the post-Return entry/window before accepting generic tree-change confirmation; unchanged titles alone must not be described as observed error icons. Keep this outcome check independent of #685's path replacement, and preserve KP_Enter's native keypad keysym.
 
+- 2026-10-16 (PR #467 repair): A Geany navigation or show-desktop CI failure can disappear in a clean desktop session. Reproduce both failed cases alongside Scintilla search under isolated D-Bus, Xvfb, and Openbox before changing pointer behavior or verification bounds.
+
+- 2026-10-16 (PR #467 conflict repair): Independently appended Geany navigation, GTK icon selection, and Qt viewport regressions must all survive conflict resolution. Reproduce older failed checks at the current merged head: Geany navigation and Scintilla visibility, and terminal-grant cleanup followed by the short-budget agent test, pass in fresh isolated desktop sessions.
+
+
 - 2026-10-16 (PR #685 merge): Thunar path replacement and failed-navigation verification are complementary. Preserve focused replacement with a separate Return, and check navigation errors before accepting a changed accessibility tree as success.
 - 2026-10-16 (PR #685 live verification): Thunar can expose dialog-error-symbolic before and after successful navigation. A persistent icon alone is not a new failure; retain unchanged-window refusal and newly appearing error detection, and verify successful navigation with the live location and title.
 - 2026-10-16 (PR #667 validation): Run the full suite through `python -m pytest`: invoking pytest from stdin breaks multiprocessing spawn because `<stdin>` is not an importable file. Limit forced missing-GI checks to hermetic backend tests; Linux CLI, menu, and live checks can require the installed native binding even without a display.
@@ -201,6 +259,11 @@
 
 - 2026-10-16 (#610 repair): Runtime click verification can pass a target-only snapshot to rematch_ref. Ancestor inspection must tolerate omitted parents while retaining containment checks for ancestors present in a full snapshot.
 
+- 2026-10-16 (PR #467 caret verification): Geany's status label is asynchronous. Verify symbol navigation through either the reported status line or the focused editor's native caret offset and exact text prefix; never use symbol selection, an unfocused buffer, or an incomplete text read as proof. Keep the pointer sequence and existing polling bounds unchanged.
+
+
+
+
 - 2026-10-16 (PR #685 CI repair): A failed short-budget agent test can stop in show-desktop setup before the agent runs. Reproduce both the test alone and after the preceding terminal-launch test under a real window manager before attributing that focus failure to unrelated text replacement code.
 - 2026-10-16 (#684): Qt text recovery must handle malformed QSpiTextRangeList replies and failures in the fallback Text read itself. Retry getText(0,-1) only for a native character count within the existing cap, then capped chunks; retain native character visibility checks and refuse incomplete reads.
 
@@ -210,6 +273,7 @@
 - 2026-10-16 (PR #696 repair): Keep VLC's bounded registration retry and VLC-specific Qt setup hint alongside the generic GTK2 bridge prerequisites when merging missing-tree diagnostics. Preserve both the VLC registration regressions and main's Qt text-recovery regressions.
 - 2026-10-16 (#640): Escape multiline accessible names only when rendering; retain native titles for find/ref matching. Shared `_render_line` serves full snapshots, interactive element lines, and find results.
 
+- 2026-10-16 (PR #467 validation): A worktree can have read-only shared Git metadata and protected contributor files even when ordinary source files are writable. Preserve the remote PR head in a writable temporary checkout before merging; do not leave a partially updated original worktree after a checkout fails on a protected file.
 - 2026-10-16 (PR #715 merge repair): Preserve stale top-level application-child cache regressions alongside table-band boundary regressions when both append to the Linux synthetic suite; window discovery and complete table-cell publication are independent behaviors.
 
 
@@ -219,6 +283,8 @@
 - 2026-10-16 (visible actions): Keep X11 rendering and expiry on a daemon-owned connection and reuse one empty-input-shaped window. Keep native AT-SPI reads on their owner thread, never put typed text in feedback labels, and hold captures until unmap. Disable cosmetic feedback globally in tests/CI so existing timing budgets remain unchanged.
 - 2026-10-17 (PR #719): Ref typing uses ``type_into``, not ``type_text``. Announce the Type overlay on both paths; never put typed text in the label.
 
+- 2026-10-17 (PR #467 repair): When a Geany symbol double-click is unconfirmed, preserve main’s XTEST inter-click flush and pacing fix (#721) before adding caret/status workarounds. Validate symbol navigation and Scintilla viewport search together under a fresh Xvfb/Openbox/D-Bus session; XSync delivery alone does not verify navigation.
+- 2026-10-17 (PR #467 merge regression): Patching linux.time.sleep also patches the shared time module used by XTEST. Geany navigation tests must require both main’s 30 ms inter-click gap and the existing navigation polling pauses, including the refusal path.
 - 2026-10-17 (PR #720 repair): Native popover-refresh gating and per-snapshot sibling-window cover caching address independent tree and window-scan costs. Preserve both complete regression blocks when merging their appended action-outcome tests.
 
 - 2026-10-17 (PR #720 Calc CI investigation): A live Calc failure in the initial LinuxDriver.snapshot loop occurs before Runtime creation, so Runtime popover-refresh gating cannot cause it. Check the failing phase before changing input code. The exact failed head 8eb1b60 passed test_linux_calc_range_formula_and_normalised_numbers_confirm alone in 164.23 s under private 1280x800 Xvfb, D-Bus, AT-SPI and Openbox; retain the unchanged startup assertions and limits.
@@ -226,15 +292,18 @@
 - 2026-10-17 (#652): Okular TOC QTreeView cells expose selection-only Toggle without CHECKABLE. Highlighting a row does not verify page navigation; refuse ref activation before mutation until navigation can be verified, and keep grid-cell and other tree-item handling separate.
 - 2026-10-17 (#697): Folder creation can trigger file-output classification through paths and moved filenames. Remove the folder-create phrase before detecting independent file writes; verify directories with dir_exists while retaining regular-file/content/freshness checks for actual file output.
 
+- 2026-10-17 (PR #467 diagnosis): A passing isolated Geany run does not explain a repeated CI navigation refusal. Measure the whole Runtime double-click under CI’s Xvfb/Openbox session, assert the five-second bound in the live regression, and retain the native navigation assertions. Keep each parallel D-Bus session’s XDG_CACHE_HOME unique; an extracted Openbox also needs its theme directory in XDG_DATA_DIRS.
 - 2026-10-17 (#665): Calc type read-back prefers the transient cell editor over focused text. Probe that editor first to avoid a discarded focus-tree traversal; preserve the focused-text fallback for empty/missing editors and keep every read live across input. Standalone native call counts are instrumentation evidence, not proof of the loaded five-second CI bound.
 
 - 2026-10-17 (PR #720 Chrome CI investigation): The large-table top-of-page wait uses LinuxDriver.snapshot before Runtime is created. A failure there cannot exercise Runtime popover-refresh gating; preserve the test and distinguish browser setup flakes from click-guard regressions.
 
+- 2026-10-17 (PR #467 main merge): Retain Scintilla visibility checks alongside main's native-click popover-refresh gate. The previously failing Geany symbol double-click and both document-visibility live regressions pass together after the merge under private Xvfb/Openbox/D-Bus; this local pass does not establish the cause of the earlier CI refusal.
 - 2026-10-17 (#670): PCManFM Icon View can expose no file children at all. Label only the childless folder panel under the native folder-content scroll pane; keep Detailed List View rows native and never infer icons from status counts.
 - 2026-10-17 (PR #735 repair): Preserve Kate character-viewport scroll-search regressions and GTK entry relation-label regressions together when merging appended tests; editor visibility and field naming are independent behaviors.
 
 - 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.
 
+- 2026-10-17 (PR #467 merge validation): Keep Scintilla buffer visibility filtering alongside Kate's native-character viewport search and target-bound popover evidence when merging main. The Geany symbol-click, Scintilla reveal, and GTK TextView reveal regressions passed together in five consecutive private Xvfb/Openbox/D-Bus runs; those passes do not establish the cause of the earlier CI navigation refusal.
 - 2026-10-17 (PR #738 repair): Preserve Calc editor-first read-back regressions alongside PCManFM opaque-view and Qt viewport regressions when appended tests conflict. The failed Linux job contained only the tracked Calc five-second timing flake; retain all action verification and timing bounds.
 
 
@@ -249,15 +318,23 @@
 - 2026-10-17 (#755): Agent step_log ordering and length control execution budgets and replay. Keep per-skipped-call records separate, and never use _commit for them: it captures screenshots and advances progress counters.
 - 2026-10-17 (PR #768 repair): Relocation freshness and multi-call screen-change guards are independent agent guarantees. Preserve both documentation blocks when merging them, and run the file-evidence and fingerprint regressions together.
 
+- 2026-10-17 (PR #467 repair): Bounded Geany navigation evidence walks must visit shallow status/editor nodes before large menu subtrees. Depth-first traversal can exhaust the unchanged node budget without reaching either native status or caret evidence; use breadth-first traversal and retain the focused-editor and exact-line checks.
 - 2026-10-17 (#775): Calc's driver already carries a one-use, app-bound typed read-back. Judge it before a full-window traversal; after targeted verification, the old whole-tree baseline must not be reused as current state. Preserve process-liveness evidence separately. A selected-cell address change can verify a key; unchanged or missing addresses still need the full-window fallback.
 - 2026-10-17 (PR #771 repair): Screen-change fingerprints and per-call statuses must reach the same executed record. Skipped trace rows are separate JSONL records with no fingerprint; assert both rows while retaining all fingerprint, no-extra-observation, and execution-budget checks.
 
+- 2026-10-17 (PR #467 repair): Geany status Text and its accessible name can disagree. Prefer the native Text message when present, falling back to the name only when Text is empty; concatenating them lets an older line number override live evidence and can cause either false refusal or false confirmation. Preserve focused-caret fallback and the explicit double-click.
+
 - 2026-10-17 (#594 reopened): Qt Quick ComboBox popups can appear as sibling AT-SPI dialogs, not menus. Bounded readiness polling must refresh the popup container itself, not only its parent, to observe cached SHOWING state and newly published rows. Retain event-thread-free waits and value-plus-popup-close verification.
+
+- 2026-10-17 (PR #467 repair): A restricted origin fetch refspec can leave a Cursor PR's tracking ref stale even after `git fetch origin`. Compare it with GitHub's headRefOid and fetch that branch explicitly before merging or interpreting CI logs. Geany symbol navigation and Scintilla search passed together after merging current main in a private 1280x800 Xvfb/D-Bus session with xfwm4; this does not establish the loaded Ubuntu CI result.
+- 2026-10-17 (#604): Claws Mail wizard page headers can start with filler → filler → icon, with the title in a later sibling. Recognize the native dialog as well as frame ancestry, and skip decorative icons along the leading layout path, but stop at controls so field captions cannot become page names; preserve hidden tabs without geometry or actions.
+
+- 2026-10-17 (PR #467 repair): Breadth-first traversal alone does not protect nested Geany caret/status evidence from large shallow menus. Exclude menu subtrees from navigation-only evidence walks while retaining the existing node budget, focused-caret checks, and explicit pointer double-click.
+
 
 - 2026-10-17 (#796): Chromium CSS overflow clipping can leave a VISIBLE child with on-screen bounds under a SHOWING region/document while the child lacks SHOWING. Filter the child itself and recheck old refs before both pointer and optional CDP activation; document visibility alone does not establish target visibility.
 
 
-- 2026-10-17 (#604): Claws Mail wizard page headers can start with filler → filler → icon, with the title in a later sibling. Recognize the native dialog as well as frame ancestry, and skip decorative icons along the leading layout path, but stop at controls so field captions cannot become page names; preserve hidden tabs without geometry or actions.
 
 - 2026-10-17 (PR #803 repair): Chromium also clears SHOWING on scrolled-off rows and containers with painted descendants. Keep traversing containers and preserve native off-screen geometry handling before classifying CSS-clipped leaves, including NOT_VISIBLE for old scrolled-off refs. Run the live infobox-expand, find-bar-close, and off-screen-crop regressions together.
 

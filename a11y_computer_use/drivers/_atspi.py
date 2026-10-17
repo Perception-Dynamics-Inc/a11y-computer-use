@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 
@@ -3446,6 +3447,263 @@ def _page_text(acc) -> str | None:
     return text or None
 
 
+def _gtk_multiline_document(acc) -> bool:
+    """A GTK multi-line text widget whose Text interface is the whole buffer.
+
+    Scintilla (Geany) and GtkTextView are this widget. A terminal already
+    separates the screen from the scrollback. A single-line entry is the
+    field, not a document. Chromium, Firefox, and Qt are not this path.
+    """
+    if acc is None or _role_name(acc) != "text":
+        return False
+    if _state_has(acc, "SINGLE_LINE") and not _state_has(acc, "MULTI_LINE"):
+        return False
+    toolkit = _toolkit_name(acc)
+    if "gtk" not in toolkit or _qt_app(acc):
+        return False
+    try:
+        if _chromium_app(acc) or _gecko_app(acc):
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _fold_span(text: str, needle: str) -> tuple[str, str, int]:
+    """Lowercased haystack and needle, and -1 when the casefold changes length.
+
+    Offsets have to land on the original characters. A casefold that changes
+    the length is not a place this can point at, so the caller does not guess.
+    """
+    folded = text.replace("\u00a0", " ").lower()
+    wanted = needle.replace("\u00a0", " ").lower()
+    if len(folded) != len(text) or len(wanted) != len(needle):
+        return folded, wanted, -1
+    return folded, wanted, 0
+
+
+def _buffer_offsets(text: str, needle: str) -> list[int] | None:
+    """Start offsets of ``needle`` in ``text``. None when the offset is not stable."""
+    folded, wanted, broken = _fold_span(text, needle)
+    if broken < 0 or not wanted:
+        return None
+    offsets: list[int] = []
+    start = 0
+    while True:
+        at = folded.find(wanted, start)
+        if at < 0:
+            return offsets
+        offsets.append(at)
+        start = at + max(1, len(wanted))
+
+
+def _char_place(acc, offset: int, box: tuple[float, float, float, float]) -> str | None:
+    """Where the character at ``offset`` sits relative to ``box``.
+
+    ``hit`` intersects the widget. ``above`` and ``below`` are a real rect
+    that misses it vertically. ``miss`` is a zero-size glyph. None means the
+    extent could not be read, and the caller does not invent a box.
+    """
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    rect = _safe(lambda index=offset: Atspi.Text.get_character_extents(acc, int(index), coord))
+    if rect is None:
+        return None
+    hit = _rect_hits_box(rect, box)
+    if hit is None:
+        return None
+    if hit:
+        return "hit"
+    try:
+        y = float(getattr(rect, "y"))
+        width = float(getattr(rect, "width"))
+        height = float(getattr(rect, "height"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if width <= 0 or height <= 0:
+        return "miss"
+    _left, top, _width, box_h = box
+    if y + height <= top:
+        return "above"
+    if y >= top + box_h:
+        return "below"
+    return "miss"
+
+
+def _visible_text_span(acc, count: int, box: tuple[float, float, float, float]) -> tuple[int, int] | None:
+    """Half-open span of characters that intersect ``box``.
+
+    None when an extent cannot be read. ``(0, 0)`` when the characters that
+    could be placed all miss the widget. The search assumes one visible
+    band, which is a text view scrolled through a document.
+    """
+    if count <= 0:
+        return (0, 0)
+
+    def place(offset: int) -> str | None:
+        flag = _char_place(acc, offset, box)
+        if flag != "miss":
+            return flag
+        # A zero-size glyph (often a newline) is not a band edge. A nearby
+        # character with a real rect is. Giving up here would hide a match
+        # that the widget is showing.
+        for step in range(1, 24):
+            for candidate in (offset + step, offset - step):
+                if 0 <= candidate < count:
+                    nearby = _char_place(acc, candidate, box)
+                    if nearby != "miss":
+                        return nearby
+        return None
+
+    def first_not_above() -> int | None:
+        lo, hi = 0, count - 1
+        found = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            flag = place(mid)
+            if flag is None or flag == "miss":
+                return None
+            if flag == "above":
+                lo = mid + 1
+            else:
+                found = mid
+                hi = mid - 1
+        return found
+
+    def last_not_below() -> int | None:
+        lo, hi = 0, count - 1
+        found = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            flag = place(mid)
+            if flag is None or flag == "miss":
+                return None
+            if flag == "below":
+                hi = mid - 1
+            else:
+                found = mid
+                lo = mid + 1
+        return found
+
+    first = place(0)
+    last = place(count - 1)
+    if first is None or last is None or first == "miss" or last == "miss":
+        return None
+    if first == "below" or last == "above":
+        return (0, 0)
+    start = 0 if first == "hit" else first_not_above()
+    if start is None:
+        return None
+    end_at = count - 1 if last == "hit" else last_not_below()
+    if end_at is None:
+        return None
+    if end_at < start:
+        return (0, 0)
+    # The edge itself has to hit. A neighbour that is only "below" is not
+    # a visible character, and this does not stretch the span to include it.
+    if place(start) != "hit" or place(end_at) != "hit":
+        return (0, 0)
+    return (start, end_at + 1)
+
+
+def _buffer_text(acc) -> str | None:
+    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
+    if not isinstance(got, str):
+        return None
+    return got
+
+
+def buffer_match_visibility(acc, needle: str) -> str | None:
+    """Where ``needle`` sits in a GTK multi-line document.
+
+    None when ``acc`` is not such a document, the needle is in the
+    accessible name, or character extents cannot be read. ``visible`` when
+    a character of a match intersects the widget. ``hidden`` when every
+    match that was placed misses the widget. ``absent`` when the buffer
+    does not contain the needle. No rectangle is invented for a match.
+    """
+    text_needle = needle.strip() if isinstance(needle, str) else ""
+    if not text_needle or not _gtk_multiline_document(acc):
+        return None
+    name = str(_call_first(acc, ("get_name",), default="") or "")
+    if text_needle.lower() in name.replace("\u00a0", " ").lower():
+        return None
+    full = _buffer_text(acc)
+    if full is None:
+        return None
+    offsets = _buffer_offsets(full, text_needle)
+    if offsets is None:
+        return None
+    if not offsets:
+        return "absent"
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    count = len(full)
+    span = _visible_text_span(acc, count, box)
+    if span is None:
+        return None
+    start, end = span
+    length = len(text_needle.replace("\u00a0", " "))
+    for at in offsets:
+        if at < end and at + length > start:
+            return "visible"
+    return "hidden"
+
+
+def _scroll_buffer_offset(acc, start: int, end: int) -> None:
+    """Ask the text interface to bring ``[start, end)`` into the widget.
+
+    ``scroll_substring_to`` is the AT-SPI scroll. ``set_caret_offset`` is
+    the Scintilla path: the editor scrolls the caret into view. Neither
+    call is success by itself. The caller reads character extents again.
+    """
+    Atspi = _atspi()
+    scroll_type = getattr(getattr(Atspi, "ScrollType", None), "ANYWHERE", None)
+    if scroll_type is not None:
+        _safe(lambda: Atspi.Text.scroll_substring_to(acc, int(start), int(end), scroll_type))
+    _safe(lambda: Atspi.Text.set_caret_offset(acc, int(start)))
+
+
+def reveal_buffer_match(acc, needle: str) -> str | None:
+    """Bring a hidden document match into the widget.
+
+    None when this node is not judged. ``visible`` when a match already
+    intersects the widget, and the caret is not moved. ``scrolled`` when
+    ``scroll_substring_to`` or ``set_caret_offset`` leaves a character of
+    the match inside the widget. ``hidden`` when the match is in the buffer
+    and still misses the widget afterwards. ``absent`` when it is not in
+    the buffer. Extents after the call are the only proof. No box is invented.
+    """
+    kind = buffer_match_visibility(acc, needle)
+    if kind != "hidden":
+        return kind
+    text_needle = needle.strip()
+    full = _buffer_text(acc)
+    if full is None:
+        return None
+    offsets = _buffer_offsets(full, text_needle)
+    if not offsets:
+        return "absent"
+    length = len(text_needle.replace("\u00a0", " "))
+    start = offsets[0]
+    _scroll_buffer_offset(acc, start, start + length)
+    # Gtk.TextView applies scroll_substring_to on a later iteration of the
+    # toolkit loop. The extents read in the same call are still the old
+    # ones. A later read is the proof. Scintilla's caret scroll is already
+    # visible on the first read, so this wait does not run.
+    deadline = time.monotonic() + 1.5
+    after = buffer_match_visibility(acc, needle)
+    while after == "hidden" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        after = buffer_match_visibility(acc, needle)
+    if after == "visible":
+        return "scrolled"
+    if after == "hidden":
+        return "hidden"
+    return after
+
+
 def _gtk4_visible_buffer(acc, text: str) -> str | None:
     """Read complete lines verified inside the widget in WINDOW coordinates.
 
@@ -4024,6 +4282,11 @@ class ATSPIAccessor:
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
+        if role_str == "status bar":
+            # GTK can register the bar before allocating it. Refresh before
+            # reading geometry: _state_flags refreshes later, after a cached
+            # zero-size rectangle would already have hidden the status text.
+            _drop_cached_properties(node)
         # GTK3 gives a single-line Gtk.Entry the same "text" role as a
         # Gtk.TextView. The entry carries SINGLE_LINE; the view carries
         # MULTI_LINE. A single-line entry is a text field, not a textarea.
@@ -4153,6 +4416,28 @@ class ATSPIAccessor:
             label = _image_text_label(node)
             if label:
                 name = label
+        # GtkStatusbar can expose its changing label only through Text.
+        # Keep the statusbar role and avoid probing its numeric Value interface.
+        status_text = None
+        if role_str == "status bar":
+            try:
+                Atspi = _atspi()
+                # An empty or unavailable count is not a status-message read.
+                # Ask Text for the actual message before suppressing it; never
+                # derive a caret message from the document or selected symbol.
+                count = _safe(lambda: Atspi.Text.get_character_count(node))
+                end = min(count, _IMAGE_LABEL_CHARS) if (
+                    isinstance(count, int) and not isinstance(count, bool) and count > 0
+                ) else -1
+                text = _safe(lambda: Atspi.Text.get_text(node, 0, end))
+                if isinstance(text, str) and text.strip():
+                    text = text.strip()[:_IMAGE_LABEL_CHARS]
+                    if not str(name).strip():
+                        name = text
+                    elif text != name:
+                        status_text = text
+            except ImportError:
+                pass
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
@@ -4201,6 +4486,8 @@ class ATSPIAccessor:
             value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
                 node, role, role_str,
             )
+        if status_text is not None:
+            value = status_text
         if (
             role_str == "section"
             and role in {"AXTextField", "AXTextArea"}
@@ -15088,6 +15375,68 @@ def _gtk_outline_parent(acc):
     except Exception:
         return None
     return None
+
+
+def geany_symbol_destination(acc) -> tuple[int, list] | None:
+    """Read a Geany symbol's reported line and the window's native status bars.
+
+    These are observation handles only. No selection, activation, or caret
+    movement is performed to make a pointer double-click succeed.
+    """
+    if _application_name(acc).casefold() != "geany" or not outline_double_click_note(acc):
+        return None
+    match = re.search(r"\[(\d+)\]$", _node_name(acc).strip())
+    if match is None:
+        return None
+    frame = _frame_ancestor(acc)
+    # Visit shallow status/editor nodes before descending into populated
+    # menus and symbol trees, which can exhaust the bounded walk.
+    pending = deque([frame] if frame is not None else [])
+    statuses = []
+    for _ in range(512):
+        if not pending:
+            break
+        node = pending.popleft()
+        if _role_name(node) == "status bar":
+            statuses.append(node)
+        elif _role_name(node) not in {"menu bar", "menu", "menu item", "popup menu"}:
+            pending.extend(_direct_children(node))
+    return int(match.group(1)), statuses
+
+
+def geany_symbol_arrived(destination: tuple[int, list]) -> bool:
+    """Verify the native status or focused editor caret, never the row label."""
+    line, statuses = destination
+    for status in statuses:
+        # Text is the live message; the accessible name may still contain
+        # the previous caret line. Never let that older label win the match.
+        message = _direct_text(status) or _node_name(status)
+        match = re.search(r"\bline:\s*(\d+)\s*/", message)
+        if match is not None and int(match.group(1)) == line:
+            return True
+    # Geany refreshes its status label asynchronously. The focused editor's
+    # native caret is independent evidence of the requested navigation; a
+    # selected symbol row or an unfocused document is not that evidence.
+    frames = [_frame_ancestor(status) for status in statuses]
+    pending = deque(frame for frame in frames if frame is not None)
+    for _ in range(512):
+        if not pending:
+            break
+        node = pending.popleft()
+        if _gtk_multiline_document(node) and _state_has(node, "FOCUSED"):
+            if is_secure(node):
+                continue
+            offset = _safe(lambda: _atspi().Text.get_caret_offset(node))
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                continue
+            prefix = _safe(lambda: _atspi().Text.get_text(node, 0, offset))
+            if isinstance(prefix, str) and len(prefix) == offset:
+                return prefix.count("\n") + 1 == line
+        # Menus contain neither document carets nor caret status. Their
+        # descendants can exhaust the budget before a deeply nested editor.
+        if _role_name(node) not in {"menu bar", "menu", "menu item", "popup menu"}:
+            pending.extend(_direct_children(node))
+    return False
 
 
 def outline_double_click_note(acc) -> str:
