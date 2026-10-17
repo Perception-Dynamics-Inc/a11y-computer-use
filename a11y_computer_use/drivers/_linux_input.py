@@ -255,9 +255,9 @@ class _TempKeymap:
     (CJK, emoji, symbols, accented letters on a US layout), so they can be
     typed through XTEST like any other key. The same trick xdotool uses.
 
-    Each distinct keysym gets its own keycode for the whole operation and the
-    map is restored once at the end. Remap-press-restore per character does
-    NOT work: toolkits translate keycodes lazily from a cached keymap, so a
+    Each distinct keysym gets its own keycode for each run and the
+    map is restored after the client has had time to translate that run.
+    Remap-press-restore per character does NOT work: toolkits translate keycodes lazily from a cached keymap, so a
     keycode rebound before the client processed the key comes out as whichever
     character it held at translation time (verified on a Budgie/Xorg desktop:
     'ü' arrived as the 'ï' typed two characters later)."""
@@ -268,8 +268,12 @@ class _TempKeymap:
         self._saved: dict[int, list[int]] = {}  # keycode -> original keysyms
         self._spare = _spare_keycodes(self._d)
 
+    @property
+    def capacity(self) -> int:
+        return len(self._spare)
+
     def bind_all(self, keysyms: list[int]) -> dict[int, int]:
-        """Reserve the complete text before typing, or fail without input."""
+        """Reserve a complete run before typing, or fail without input."""
         missing = list(dict.fromkeys(sym for sym in keysyms if sym not in self._bound))
         if len(missing) > len(self._spare):
             raise ValueError(
@@ -310,6 +314,7 @@ class _TempKeymap:
         for kc, syms in self._saved.items():
             self._d.change_keyboard_mapping(kc, [syms])
         self._d.sync()
+        self._spare.extend(self._saved)
         self._saved.clear()
         self._bound.clear()
 
@@ -320,8 +325,9 @@ class _TempKeymap:
 def type_string(text: str, *, delay: float | None = None) -> None:
     """Type with a stable keymap and paced keystrokes into the focused element.
 
-    Bind the complete text before sending input: midstream MappingNotify events
-    race client keymap refreshes. Pace mapped characters as well as Unicode;
+    Bind each capacity-limited run before input, then settle and restore its map
+    before the next run: midstream MappingNotify events race keymap refreshes.
+    Pace mapped characters as well as Unicode;
     asynchronous input methods can otherwise commit Unicode before preceding
     ASCII that they requeue for the application. Prefer AT-SPI for bulk text.
     ``delay`` is the pause after each character. The address bar needs a
@@ -336,25 +342,43 @@ def type_string(text: str, *, delay: float | None = None) -> None:
     keys = {sym: _keycode_and_shift(sym) for sym in dict.fromkeys(keysyms)}
     missing = [sym for sym, (kc, _shift) in keys.items() if kc is None]
     pool = _TempKeymap() if missing else None
+    # Plan before input so zero spare keycodes fails without an ASCII prefix.
+    runs: list[list[int]] = []
+    run: list[int] = []
+    unmapped: set[int] = set()
+    for sym in keysyms:
+        if keys[sym][0] is None:
+            assert pool is not None
+            if pool.capacity == 0:
+                pool.bind_all([sym])  # raises before any input or map mutation
+            if sym not in unmapped and len(unmapped) == pool.capacity:
+                runs.append(run)
+                run = []
+                unmapped = set()
+            unmapped.add(sym)
+        run.append(sym)
+    runs.append(run)
     caps, _num = _lock_mask()
-    try:
-        if pool is not None:
-            keys.update({sym: (kc, False) for sym, kc in pool.bind_all(missing).items()})
-        for sym in keysyms:
-            keycode, needs_shift = keys[sym]
-            assert keycode is not None  # all characters were resolved before input
-            # Letters are inverted by Caps Lock. The requested character is
-            # what is sent, and the lock is left as the user had it.
-            if _keypad_numlock(sym) is None:
-                needs_shift = _shift_for_lock(keycode, needs_shift, caps)
-            else:
-                needs_shift = False
-            _tap_keycode(keycode, needs_shift)
-            _flush()
-            time.sleep(0.012 if delay is None else delay)
-    finally:
-        if pool is not None:
-            pool.restore()
+    for run in runs:
+        try:
+            run_keys = keys.copy()
+            if pool is not None:
+                missing = [sym for sym in run if keys[sym][0] is None]
+                run_keys.update({sym: (kc, False) for sym, kc in pool.bind_all(missing).items()})
+            for sym in run:
+                keycode, needs_shift = run_keys[sym]
+                assert keycode is not None
+                # Preserve the user's lock state while sending the requested case.
+                if _keypad_numlock(sym) is None:
+                    needs_shift = _shift_for_lock(keycode, needs_shift, caps)
+                else:
+                    needs_shift = False
+                _tap_keycode(keycode, needs_shift)
+                _flush()
+                time.sleep(0.012 if delay is None else delay)
+        finally:
+            if pool is not None:
+                pool.restore()
 
 
 # --- key chords ------------------------------------------------------------
