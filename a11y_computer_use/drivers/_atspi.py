@@ -8887,6 +8887,21 @@ def _state_flag(acc, name: str, *, drop_cache: bool, states=_CACHE_MISS) -> bool
     return bool(_safe(lambda: sset.contains(member), False))
 
 
+def _utf16_length(text: str) -> int:
+    """Number of QString code units, including surrogate pairs."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _qt_python_offset(text: str, offset: int) -> int:
+    """Convert a native Qt offset, refusing positions inside a surrogate pair."""
+    try:
+        return len(text.encode("utf-16-le")[:offset * 2].decode("utf-16-le"))
+    except UnicodeDecodeError:
+        raise _text_mismatch(
+            "invalid_text_offset", "the Qt text offset splits a surrogate pair"
+        ) from None
+
+
 def _insert_length(method, text: str, acc=None) -> int:
     """The ``length`` argument EditableText.insert_text actually wants.
 
@@ -8896,7 +8911,7 @@ def _insert_length(method, text: str, acc=None) -> int:
     ``QString::resize(length)`` and inserts that string, so the same byte
     count reads past the text and appends uninitialized characters
     (``ünï`` becomes ``ünï`` plus a NUL and whatever followed it). Qt gets
-    the character count. The position is a character offset on both.
+    the UTF-16 code-unit count. Qt positions use UTF-16 units too.
 
     A Python double that slices characters has no ``gi.`` module and gets
     ``len(text)`` unless it sets ``_length_unit`` to ``bytes`` or ``chars``.
@@ -8908,7 +8923,7 @@ def _insert_length(method, text: str, acc=None) -> int:
     if unit == "chars":
         return len(text)
     if acc is not None and _qt_app(acc):
-        return len(text)
+        return _utf16_length(text)
     func = getattr(method, "__func__", method)
     module = str(getattr(method, "__module__", None) or getattr(func, "__module__", "") or "")
     if module.startswith("gi."):
@@ -8934,8 +8949,8 @@ def _selection_bounds(selection) -> tuple[int, int] | None:
 def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
     """(caret, selection start, selection end). An empty selection has start == end.
 
-    Offsets are characters, which is what AT-SPI uses. A missing caret is the
-    end of the field.
+    Offsets and nchars use native units (UTF-16 for Qt). A missing caret
+    is the end of the field.
     """
     Atspi = _atspi()
     caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
@@ -8980,9 +8995,9 @@ def insert_text(acc, text: str) -> int | None:
     instead of reporting success. A CRLF is one newline.
 
     The insert length is the UTF-8 byte count on the GTK GI/C binding and the
-    character count for Qt and for a binding that slices characters. The
-    position is a character offset. A Qt read-back also requires the
-    character count to equal that string: a D-Bus string stops at an
+    UTF-16 unit count for Qt and character count for a binding that slices
+    characters. Qt positions also use UTF-16 units. A Qt read-back also requires
+    the native count to equal the string’s UTF-16 length: a D-Bus string stops at an
     embedded NUL, so the text alone can look right while the widget holds
     extra characters.
     """
@@ -9012,12 +9027,18 @@ def insert_text(acc, text: str) -> int | None:
             "text_unreadable",
             "the field text could not be read, so type was not reported as success",
         )
-    caret, start, end = _caret_and_selection(acc, len(current))
+    qt = _qt_app(acc)
+    nchars = _utf16_length(current) if qt else len(current)
+    caret, start, end = _caret_and_selection(acc, nchars)
+    py_caret, py_start, py_end = (
+        tuple(_qt_python_offset(current, offset) for offset in (caret, start, end))
+        if qt else (caret, start, end)
+    )
     if "\n" in typed and _writer_document_type_target(acc) is not None:
         if end > start:
             _call_first(eti, ("delete_text",), start, end, default=False)
             cleared = _full_text(acc)
-            wanted = current[:start] + current[end:]
+            wanted = current[:py_start] + current[py_end:]
             if cleared != wanted:
                 raise _text_mismatch(
                     "selection_not_replaced",
@@ -9029,7 +9050,7 @@ def insert_text(acc, text: str) -> int | None:
     if end > start:
         _call_first(eti, ("delete_text",), start, end, default=False)
         cleared = _full_text(acc)
-        wanted = current[:start] + current[end:]
+        wanted = current[:py_start] + current[py_end:]
         if cleared != wanted:
             raise _text_mismatch(
                 "selection_not_replaced",
@@ -9038,10 +9059,10 @@ def insert_text(acc, text: str) -> int | None:
                 actual=_excerpt(cleared),
             )
         offset = start
-        expected = wanted[:start] + typed + wanted[start:]
+        expected = wanted[:py_start] + typed + wanted[py_start:]
     else:
         offset = caret
-        expected = current[:caret] + typed + current[caret:]
+        expected = current[:py_caret] + typed + current[py_caret:]
     insert = None
     for name in ("insert_text", "insertText"):
         insert = getattr(eti, name, None)
@@ -9618,7 +9639,7 @@ def _character_count(acc) -> int | None:
 
 
 def _qt_text_count_matches(acc, text: str) -> bool:
-    """True when a Qt field's character count equals ``text``.
+    """True when a Qt field's count equals the UTF-16 length of ``text``.
 
     GTK is not checked here. Qt's ``InsertText`` can append a NUL and more
     characters when the length was a byte count. ``GetText`` is a D-Bus
@@ -9627,7 +9648,7 @@ def _qt_text_count_matches(acc, text: str) -> bool:
     """
     if not _qt_app(acc):
         return True
-    return _character_count(acc) == len(text)
+    return _character_count(acc) == _utf16_length(text)
 
 
 def _content_is_blank(acc) -> bool:
