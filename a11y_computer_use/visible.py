@@ -76,7 +76,9 @@ class VisibleActions:
 
         Total wall time is at most ``A11Y_VISIBLE_ACTIONS_GLIDE_MS`` (default 80,
         max 120). A monotonic deadline ends intermediate steps early and jumps
-        to the target; no X flush/sync or AT-SPI work runs during the glide.
+        to the target. Each step is flushed (a non-blocking write) so the
+        server moves the pointer in real time, and the final move is synced so
+        the pointer is at the target when this returns. No AT-SPI work runs.
         Pointer mode stays off by default.
         """
         from a11y_computer_use.drivers import _linux_input
@@ -109,11 +111,13 @@ class VisibleActions:
                 round(start.root_x + (target_x - start.root_x) * eased),
                 round(start.root_y + (target_y - start.root_y) * eased),
             )
+            connection.flush()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             time.sleep(min(duration / 8000.0, remaining))
         _linux_input._move(target_x, target_y)
+        connection.sync()
 
     def _consume(self):
         backend = None

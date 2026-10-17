@@ -73,9 +73,10 @@ def test_glide_eight_steps_budget(feedback, monkeypatch):
     clock = [0.0]
     screen = SimpleNamespace(width_in_pixels=1000, height_in_pixels=1000,
                              root=SimpleNamespace(query_pointer=lambda: SimpleNamespace(root_x=0, root_y=0)))
+    flushed, synced = [], []
     monkeypatch.setattr(_linux_input, "_disp", lambda: SimpleNamespace(
-        screen=lambda: screen, has_extension=lambda ext: True, flush=lambda: (_ for _ in ()).throw(
-            AssertionError("glide must not flush/sync during motion"))))
+        screen=lambda: screen, has_extension=lambda ext: True,
+        flush=lambda: flushed.append(len(moves)), sync=lambda: synced.append(len(moves))))
     monkeypatch.setattr(_linux_input, "_move", lambda x, y: moves.append((x, y)))
     monkeypatch.setattr(visible.time, "monotonic", lambda: clock[0])
 
@@ -88,6 +89,10 @@ def test_glide_eight_steps_budget(feedback, monkeypatch):
     # Eight eased steps plus a final jump to the target centre.
     assert len(moves) == 9
     assert moves[-1] == (25, 40)
+    # Every intermediate step is flushed right after its move (no round trip),
+    # and only the final jump is synced.
+    assert flushed == list(range(1, 9))
+    assert synced == [9]
     assert abs(sum(sleeps) - 0.08) < 1e-9
     assert sum(sleeps) < 0.150
     assert clock[0] <= 0.08 + 1e-9
@@ -103,7 +108,7 @@ def test_glide_jumps_when_deadline_exceeded(feedback, monkeypatch):
     screen = SimpleNamespace(width_in_pixels=1000, height_in_pixels=1000,
                              root=SimpleNamespace(query_pointer=lambda: SimpleNamespace(root_x=0, root_y=0)))
     monkeypatch.setattr(_linux_input, "_disp", lambda: SimpleNamespace(
-        screen=lambda: screen, has_extension=lambda ext: True))
+        screen=lambda: screen, has_extension=lambda ext: True, flush=lambda: None, sync=lambda: None))
     monkeypatch.setattr(_linux_input, "_move", lambda x, y: moves.append((x, y)))
     monkeypatch.setattr(visible.time, "monotonic", lambda: clock[0])
     monkeypatch.setenv("A11Y_VISIBLE_ACTIONS_GLIDE_MS", "80")
@@ -327,3 +332,28 @@ def test_runtime_config(monkeypatch, tmp_path):
             store=safety.PermissionStore(tmp_path / "permissions.json"),
             audit=safety.AuditLog(tmp_path / "audit.jsonl"))
     assert driver.visible_actions is False
+
+
+def test_glide_pointer_at_target_when_call_returns(feedback, monkeypatch):
+    """PR #719 regression: queued XTEST motion must reach the server before
+    _glide returns, or the pointer only jumps during the next X call."""
+    from a11y_computer_use.drivers import _linux_input
+    queued, server = [], {"pointer": (0, 0), "seen": []}
+
+    def deliver():
+        for point in queued:
+            server["seen"].append(point)
+            server["pointer"] = point
+        queued.clear()
+
+    screen = SimpleNamespace(width_in_pixels=1000, height_in_pixels=1000,
+                             root=SimpleNamespace(query_pointer=lambda: SimpleNamespace(root_x=0, root_y=0)))
+    monkeypatch.setattr(_linux_input, "_disp", lambda: SimpleNamespace(
+        screen=lambda: screen, has_extension=lambda ext: True, flush=deliver, sync=deliver))
+    monkeypatch.setattr(_linux_input, "_move", lambda x, y: queued.append((x, y)))
+    monkeypatch.setattr(visible.time, "sleep", lambda seconds: None)
+    feedback._glide(Bounds(0, 100, 200, 30, 40))
+    assert queued == []
+    assert server["pointer"] == (115, 220)
+    # Intermediate steps reached the server too, so the glide was visible.
+    assert len(server["seen"]) == 9
