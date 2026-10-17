@@ -737,7 +737,11 @@ handle instead of a full-window rematch (about 2.7 s on a default sheet). That
 read must find the handle alive, SHOWING, still named the same address, a child
 of the Calc grid, owned by the same process, enabled as issued, and its live box,
 projected as a snapshot projects it, equal to the issued box. Calc's active cell
-address after the click, the Name Box, is the confirmation. A scrolled sheet, a
+address after the click, the Name Box, is the confirmation. When an active
+dialog such as Format Cells replaces the sheet window, the click outcome is
+`partial` with the dialog name because the selected cell cannot be verified;
+generic dialog/tree changes cannot confirm that click. This case has hermetic
+Runtime coverage; live verification is pending. A scrolled sheet, a
 renamed or defunct cell, a popover in the issued tree, or any failed read keeps
 the full-window resolution, so a scrolled-away cell is still `stale_ref`.
 After a targeted check, actions requiring a tree comparison refresh their
