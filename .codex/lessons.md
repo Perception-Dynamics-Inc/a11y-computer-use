@@ -253,3 +253,5 @@
 - 2026-10-17 (PR #771 repair): Screen-change fingerprints and per-call statuses must reach the same executed record. Skipped trace rows are separate JSONL records with no fingerprint; assert both rows while retaining all fingerprint, no-extra-observation, and execution-budget checks.
 
 - 2026-10-17 (#594 reopened): Qt Quick ComboBox popups can appear as sibling AT-SPI dialogs, not menus. Bounded readiness polling must refresh the popup container itself, not only its parent, to observe cached SHOWING state and newly published rows. Retain event-thread-free waits and value-plus-popup-close verification.
+
+- 2026-10-17 (#604): Claws Mail wizard page headers can start with filler → filler → icon, with the title in a later sibling. Recognize the native dialog as well as frame ancestry, and skip decorative icons along the leading layout path, but stop at controls so field captions cannot become page names; preserve hidden tabs without geometry or actions.

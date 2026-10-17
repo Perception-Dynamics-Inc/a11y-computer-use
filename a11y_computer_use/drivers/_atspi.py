@@ -1659,9 +1659,12 @@ def _claws_wizard_page_title(node) -> str:
     """Read the leading page label of Claws Mail's hidden wizard notebook."""
     if _application_name(node).casefold() not in {"claws-mail", "claws mail"}:
         return ""
-    if "setup wizard" not in _frame_accessible_name(node).casefold():
+    window = next((ancestor for ancestor in _ancestor_chain(node)
+                   if _role_name(ancestor) in {"frame", "window", "dialog"}), None)
+    if window is None or "setup wizard" not in _node_name(window).casefold():
         return ""
-    # Only descend through leading layout children. Later labels include
+    # Descend through leading layout children, skipping decorative icons in
+    # the title row. Stop at controls: later labels include
     # explanatory prose and field captions, not the page title. Never borrow
     # a label from another page or substitute the shared wizard window title.
     current = node
@@ -1669,7 +1672,9 @@ def _claws_wizard_page_title(node) -> str:
         kids = _direct_children(current)
         if not kids:
             return ""
-        current = kids[0]
+        current = next((kid for kid in kids if _role_name(kid) != "icon"), None)
+        if current is None:
+            return ""
         role = _role_name(current)
         if role == "label":
             return _plain_accessible_name(_node_name(current))
