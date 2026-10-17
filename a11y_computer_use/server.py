@@ -4622,6 +4622,7 @@ class Runtime:
             )
         cover = self._popover_cover(element, refresh=True) or self._cover_owner(
             element, self._current.app if self._current is not None else None,
+            popover_checked=True,
         )
         if cover == "off_screen":
             raise _not_visible(ref, "off_screen", bounds, "the ref is outside the visible viewport")
@@ -4676,6 +4677,13 @@ class Runtime:
         if snap is None:
             return None
         if refresh and self.driver.name == "linux" and callable(getattr(self.driver, "snapshot", None)):
+            # Linux ref resolution already read the live tree. Consume its
+            # target-bound evidence before considering another full snapshot.
+            take_cover = getattr(self.driver, "take_resolved_popover_cover", None)
+            if callable(take_cover):
+                available, cover = take_cover(element)
+                if available:
+                    return cover
             from a11y_computer_use.drivers.linux import _named_browser
 
             # Native GTK/Qt clicks need no extra tree walk. Web documents
@@ -4704,9 +4712,10 @@ class Runtime:
                 return "popover" + (f" {cover.title!r}" if cover.title else "")
         return None
 
-    def _cover_owner(self, element: Element, app: str | None) -> str | None:
+    def _cover_owner(self, element: Element, app: str | None, *,
+                     popover_checked: bool = False) -> str | None:
         """None when the element's center is this app. ``off_screen`` or a cover name otherwise."""
-        popover = self._popover_cover(element)
+        popover = None if popover_checked else self._popover_cover(element)
         if popover:
             return popover
         fn = getattr(self.driver, "occlusion", None)
