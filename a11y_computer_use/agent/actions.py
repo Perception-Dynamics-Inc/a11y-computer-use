@@ -214,8 +214,9 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         return "app requires action"
     if action.name == "window" and not args.get("action"):
         return "window requires action"
-    if action.name == "menu" and not (args.get("path") or args.get("action") == "list"):
-        return "menu requires path"
+    if action.name == "menu" and not (args.get("path") or args.get("action") in {"list", "close"}):
+        # list and close act on the menu bar or the open menu; only press needs a path.
+        return "menu press requires path"
     if action.name == "done":
         return _done_error(args)
     if action.name == "ask_human":
@@ -637,7 +638,8 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     ),
     (
         "menu",
-        "Press a menu item by path, for example File > Save As.",
+        "Press a menu item by path, for example File > Save As. "
+        "action close dismisses the open menu and needs no path.",
         {"app": _STR, "path": _STR, "action": {"type": "string", "enum": ["press", "list", "close"]}},
         [],
     ),

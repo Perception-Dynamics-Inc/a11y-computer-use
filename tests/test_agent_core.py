@@ -1906,6 +1906,33 @@ def test_a_failed_menu_is_not_focus_and_keeps_its_error(tmp_path):
     assert "not found" in tool_text
 
 
+def test_menu_close_needs_no_path():
+    from a11y_computer_use.agent.actions import Action, validate_action
+
+    assert validate_action(Action("menu", {"action": "close"})) is None
+    assert validate_action(Action("menu", {"action": "list"})) is None
+    assert validate_action(Action("menu", {"action": "press"})) == "menu press requires path"
+    assert validate_action(Action("menu", {})) == "menu press requires path"
+
+
+def test_menu_close_without_path_reaches_the_runtime(tmp_path):
+    elements = window(el("e2", "AXMenuItem", "Select All", parent="e1"))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("menu", {"action": "close"})),
+            turn(done("closed", [{"element": {"role": "AXMenuItem", "name": "Select All"}}])),
+        ]),
+        elements,
+        trace_dir=tmp_path,
+    )
+    menu_calls = [params for name, params in runtime.calls if name == "menu"]
+    assert len(menu_calls) == 1
+    assert menu_calls[0]["action"] == "close"
+    assert "path" not in menu_calls[0]
+    assert result.step_log[0].action == "menu"
+    assert result.step_log[0].error is None
+
+
 def test_coordinate_escalation_reports_the_original_miss(tmp_path):
     save = el(
         "e2", "AXButton", "Save", parent="e1", clickable=True, focused=False,
