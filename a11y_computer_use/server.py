@@ -86,6 +86,7 @@ from a11y_computer_use.schema import (
     ClipboardOp,
     ClipboardVerb,
     ComputerUseError,
+    canonical_chord,
     Drag,
     Element,
     ErrorCode,
@@ -5796,6 +5797,7 @@ class Runtime:
     @_serialized
     def key(self, chord: str, app: str | None = None) -> str:
         app = _optional_app_arg(app, "key")
+        chord = canonical_chord(chord)  # Page_Down, page_down, Prior, Control_L, ...
         self._validate_chord(chord)  # before the gate, so a bad chord is not audited
         addressed = self._linux_addressed_app(app)
         if addressed is not None:
@@ -6165,6 +6167,7 @@ class Runtime:
         A driver this process does not recognize validates inside ``key_chord``.
         An empty chord is invalid on every backend, so it is rejected here too.
         """
+        chord = canonical_chord(chord)
         if getattr(self, "driver", None) is not None:
             try:
                 self._validate_chord(chord)
@@ -9574,6 +9577,8 @@ def build_server(
     async def key(chord: str, app: str | None = None) -> CallToolResult:
         """Press one key chord, e.g. 'cmd+s', 'cmd+shift+t', 'escape':
         lowercase names joined by '+', modifiers first, one regular key last.
+        Names are case-insensitive, and X keysym spellings such as Page_Down,
+        page_up, Prior/Next, BackSpace, KP_Enter and Control_L are accepted.
         An unknown key is invalid_arguments and is rejected before any input.
         With app=<bundle id or name> on macOS the chord is addressed to that
         app's process without activating it (the user's screen stays put).

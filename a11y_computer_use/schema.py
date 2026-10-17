@@ -510,6 +510,42 @@ _BLOCKING_MODIFIERS: frozenset[str] = frozenset({
 })
 
 
+#: Other common spellings of chord keys -> the name every driver's chord
+#: table already accepts. X keysym names (``Page_Down``, ``Prior``, ``Next``,
+#: ``Control_L``), underscore and DOM spellings (``page_down``, ``ArrowUp``).
+#: Lookup is case-insensitive; names not listed here pass through unchanged,
+#: so existing chords keep their meaning.
+KEY_NAME_ALIASES: dict[str, str] = {
+    "page_down": "pagedown", "next": "pagedown", "pgdn": "pagedown",
+    "page_up": "pageup", "prior": "pageup", "pgup": "pageup",
+    "arrowup": "up", "arrowdown": "down", "arrowleft": "left", "arrowright": "right",
+    "spacebar": "space",
+    "caps_lock": "capslock", "num_lock": "numlock", "scroll_lock": "scrolllock",
+    "control_l": "ctrl", "control_r": "ctrl",
+    "shift_l": "shift", "shift_r": "shift",
+    "alt_l": "alt", "alt_r": "alt",
+    "super_l": "cmd", "super_r": "cmd", "meta_l": "cmd", "meta_r": "cmd",
+}
+
+
+def canonical_chord(chord: str) -> str:
+    """``chord`` with alias key names replaced by their canonical names.
+
+    ``Page_Down`` and ``page_down`` become ``pagedown``; ``Control_L+Next``
+    becomes ``ctrl+pagedown``. Parts without an alias are kept verbatim, and a
+    malformed chord (an empty part) is returned unchanged so the driver's own
+    validation error still names it.
+    """
+    if not isinstance(chord, str):
+        return chord
+    parts = chord.split("+")
+    if any(not part.strip() for part in parts):
+        return chord
+    if not any(part.strip().lower() in KEY_NAME_ALIASES for part in parts):
+        return chord
+    return "+".join(KEY_NAME_ALIASES.get(part.strip().lower(), part.strip()) for part in parts)
+
+
 def printable_chord(chord: str) -> bool:
     """Whether ``chord`` inserts one character into the focused field.
 
