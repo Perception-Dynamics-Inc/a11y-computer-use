@@ -16030,6 +16030,43 @@ def test_qt_viewport_skips_bounded_ranges_and_rechecks_visibility(
     assert _atspi._qt_viewport_text(editor) is None
 
 
+@pytest.mark.parametrize("sections", [6, 8, 14])
+@pytest.mark.parametrize("marked", [True, False])
+def test_chromium_table_depth_starts_at_document(sections, marked) -> None:
+    """Browser chrome must not consume the page's table/row/cell budget."""
+    link = _node("AXLink", "Tower-35", actions=("AXPress",))
+    cell = _node("AXCell", "Tower-35", children=[link])
+    city = _node("AXCell", "City-35")
+    table = _node("AXTable", "Tallest towers", children=[
+        _node("AXRow", children=[cell, city]),
+    ])
+    content = table
+    for level in range(sections):
+        content = _node("AXGroup", f"Level {level}", children=[
+            _node("AXHeading", f"Heading {level}"), content,
+        ])
+    page = _node("AXGroup", "Nested", children=[content],
+                 atspi_web="page" if marked else "")
+    chrome = page
+    for level in range(6):
+        chrome = _node("AXGroup", f"Browser {level}", children=[chrome])
+    tree = _node("AXWindow", "Chrome", children=[chrome])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    cells = observe.find_elements(snap, role="cell")
+    if not marked or sections == 14:
+        assert not cells
+        return
+    assert {el.title for el in cells} == {"Tower-35", "City-35"}
+    matches = observe.find_elements(snap, text="Tower-35")
+    assert {el.role for el in matches} == {"AXCell", "AXLink"}
+    assert {el.ref for el in cells} <= {el.ref for el in snap.elements}
+    found_cell = next(el for el in matches if el.role == "AXCell")
+    found_link = next(el for el in matches if el.role == "AXLink")
+    assert found_link.parent == found_cell.ref
+    assert found_cell.bounds == Bounds(0, 0, 0, 1200, 700)
+
+
 @pytest.mark.parametrize("interfaces", [[], ["Text"], ["EditableText"]])
 @pytest.mark.parametrize("covered", [False, True])
 def test_scribus_real_palette_layout_and_find_context(monkeypatch, interfaces, covered):
