@@ -66,7 +66,17 @@ def test_verified_mid_turn_screen_fault_skips_queued_key(tmp_path, fault, compon
     feedback = next(m.content for m in agent._messages if m.role == "tool")
     assert component + " changed" in feedback or component + "," in feedback
     assert "Did not run: key" in feedback
-    row = json.loads((tmp_path / "steps.jsonl").read_text())
+    rows = [json.loads(line) for line in (tmp_path / "steps.jsonl").read_text().splitlines()]
+    assert len(rows) == 2
+    row, skipped = rows
+    assert row["action"] == "set_value" and row["status"] == "confirmed"
+    assert skipped["kind"] == "skipped_step" and skipped["status"] == "skipped"
+    assert skipped["action"] == "key" and skipped["after_index"] == step.index
+    assert skipped["fingerprint"] is None
+    assert len(result.skipped_steps) == 1 and result.skipped_steps[0].status == "skipped"
+    assert [event.data["status"] for event in events if event.type == "step_finished"] == [
+        "confirmed", "skipped",
+    ]
     assert set(row["fingerprint"]) == {"app", "window", "url", "focus", "tree"}
     assert all(len(value) == 64 and set(value) <= set("0123456789abcdef") for value in row["fingerprint"].values())
 
