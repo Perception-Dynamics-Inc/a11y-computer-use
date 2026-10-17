@@ -477,8 +477,10 @@ For non-editable Qt Quick combos, `set_value` ignores disabled, non-focusable
 Text display children as write targets. It opens the combo with one click at
 its measured center, then polls native popup readiness within the existing
 menu deadline. Each probe runs on the AT-SPI thread while waits leave that
-thread free to process events. Options may belong to a newly shown menu in
-that native frame or to the combobox descendants. It selects the exact option
+thread free to process events. Options may belong to a newly shown menu or
+Qt Quick popup dialog in that native frame or to the combobox descendants. Each probe refreshes the
+popup container itself as well as its parent, so cached hidden state and empty
+children do not mask readiness. It selects the exact option
 only after rows appear. Success requires the display Text to match and the popup
 to close. Missing geometry, ambiguous popups, and uncommitted selections return
 errors. Editable Qt entries retain their text-write path. This behavior is

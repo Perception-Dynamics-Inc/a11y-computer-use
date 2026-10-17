@@ -1486,3 +1486,66 @@ def test_unanswered_bounded_ranges_are_remembered_per_app_instance(monkeypatch):
         assert _atspi._qt_viewport_text(node) == node.visible
     assert bounded_calls == [first.instance, restarted.instance]
     assert visible_reads == [first.instance, sibling.instance, restarted.instance]
+
+
+@pytest.mark.parametrize("role", ["dialog", "menu"])
+@pytest.mark.parametrize("placement", ["frame", "combo"])
+@pytest.mark.parametrize("delay", [0.0, 1.0])
+def test_qt_quick_combo_refreshes_delayed_popup_container(atspi, monkeypatch, role, placement, delay):
+    """A cached hidden popup must publish live state and rows before input."""
+    display = _Node("text", text="Apple", states={"EDITABLE", "SHOWING"}, toolkit="Qt")
+    combo = _Node("combo box", "Fruit", children=[display], actions=["SetFocus"], toolkit="Qt")
+    cherry = _Node("menu item", "Cherry", states={"SHOWING"}, toolkit="Qt")
+    popup = _Node(role, toolkit="Qt")
+    frame = _Node("frame", children=[combo], toolkit="Qt")
+    parent = frame if placement == "frame" else combo
+    parent.children.append(popup)
+    popup.parent = parent
+    clock = [0.0]
+    clicks = []
+    native = {"opened": False, "closed": False}
+    probing = [False]
+
+    def refresh():
+        if native["closed"]:
+            popup.states.discard("SHOWING")
+        elif native["opened"] and clock[0] >= delay:
+            popup.states.add("SHOWING")
+            popup.children = [cherry]
+            cherry.parent = popup
+
+    popup.clear_cache = refresh
+
+    def click(*args, **kwargs):
+        clicks.append(clock[0])
+        if len(clicks) == 1:
+            native["opened"] = True
+        else:
+            assert "SHOWING" in popup.states
+            assert popup.children == [cherry]
+            display.text = "Cherry"
+            native["closed"] = True
+            refresh()
+
+    def sleep(seconds):
+        assert not probing[0], "readiness wait must leave the event thread free"
+        clock[0] += seconds
+
+    def run(fn):
+        probing[0] = True
+        try:
+            return fn()
+        finally:
+            probing[0] = False
+
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    with _atspi.read_cache():
+        _atspi._set_qt_quick_combo(combo, display, "Cherry", run=run)
+    assert clicks[0] == 0.0
+    assert len(clicks) == 2
+    assert delay <= clicks[1] <= delay + 0.05
+    assert display.text == "Cherry"
+    assert "SHOWING" not in popup.states
+    assert combo.action_log == []
