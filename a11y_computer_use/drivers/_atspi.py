@@ -18020,6 +18020,48 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
     return hidden and not showing
 
 
+def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
+    """Verify a Chromium page ref against the document's native hit test.
+
+    None means this is not Chromium page content. False includes unavailable
+    hit tests: extents and SHOWING can both remain stale after CSS transforms.
+    Compare native identity, never names or overlapping rectangles. A text
+    descendant of the requested control is a valid hit.
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    document = None
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            document = node
+            break
+        if role in {"frame", "window", "application"}:
+            break
+    if document is None:
+        return None
+    target_key = _ancestor_key(acc)
+    node = document
+    seen: set[object] = set()
+    pinned = []
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            return False
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            return False
+        hit = _hit_at(comp, x, y)
+        if hit is None:
+            return False
+        if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
+            return True
+        node = hit
+    return False
+
+
 def chromium_clipped_target(acc) -> bool:
     """A VISIBLE Chromium page node whose native state says it is not painted.
 

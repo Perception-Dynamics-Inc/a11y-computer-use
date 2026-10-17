@@ -16318,3 +16318,99 @@ def test_calc_ref_click_with_active_dialog_cannot_confirm(monkeypatch, role) -> 
     assert result.evidence == (
         "active dialog 'Format Cells'; the selected cell C4 could not be verified"
     )
+
+
+@pytest.mark.parametrize("hit_kind", ["other", "same_name", "missing", "self", "error", "target", "text"])
+def test_chromium_transform_click_requires_native_hit(monkeypatch, hit_kind):
+    """SHOWING and unchanged bounds must not authorize a carousel misclick."""
+    from a11y_computer_use.drivers import linux
+
+    frame, panel, target, text = _chrome_collapsed_panel()
+    document = panel.parent
+    target.states.add("SHOWING")
+    text.parent = target
+    other = _GeckoNode("push button", "Item B", ("VISIBLE", "SHOWING"))
+    other.parent = panel
+    if hit_kind == "same_name":
+        other.name = target.name
+    hit = {"other": other, "same_name": other, "missing": None,
+           "self": document, "error": None, "target": target, "text": text}[hit_kind]
+    probes = []
+
+    def native_hit(x, y, coord):
+        probes.append((x, y, coord))
+        if hit_kind == "error":
+            raise RuntimeError("bridge unavailable")
+        return hit
+
+    document.get_component_iface = lambda: _NS(get_accessible_at_point=native_hit)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    element = Element("e1", "AXButton", target.name, None,
+                      Bounds(0, 22, 115, 280, 40), "carousel", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: target})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *a: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda *a: None)
+    clicks = []
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+    if hit_kind in {"target", "text"}:
+        driver.click(element)
+        assert clicks == [((162, 135), {"button": "left", "count": 1})]
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.click(element)
+        assert exc.value.code == ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == "hit_test_unverified"
+        assert exc.value.detail["outcome"] == "refused"
+        assert not clicks
+    assert probes == [(162, 135, 0)]
+    assert not target.pressed and not other.pressed
+
+
+def test_chromium_hit_test_descends_and_matches_native_identity(monkeypatch):
+    _frame, panel, target, _text = _chrome_collapsed_panel()
+    document = panel.parent
+    proxy = _GeckoNode("push button", target.name)
+    # The hit-test returns a fresh proxy for the same native accessible.
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key",
+                        lambda node: (":1.2", "/button") if node in (target, proxy) else None)
+    document.get_component_iface = lambda: _NS(get_accessible_at_point=lambda *a: panel)
+    panel.get_component_iface = lambda: _NS(get_accessible_at_point=lambda *a: proxy)
+    assert _atspi.chromium_pointer_target(target, 162, 135) is True
+    panel.get_component_iface = lambda: _NS(get_accessible_at_point=lambda *a: document)
+    assert _atspi.chromium_pointer_target(target, 162, 135) is False
+
+
+def test_chromium_hit_test_excludes_toolbar_and_native_apps():
+    frame, _panel, target, _text = _chrome_collapsed_panel()
+    target.parent = frame
+    assert _atspi.chromium_pointer_target(target, 162, 135) is None
+    frame, _panel, target, _text = _chrome_collapsed_panel()
+    target.application.toolkit = "GTK"
+    target.application.name = "Editor"
+    assert _atspi.chromium_pointer_target(target, 162, 135) is None
+
+
+def test_chromium_hit_guard_does_not_change_explicit_coordinate_click(monkeypatch):
+    from a11y_computer_use.drivers import linux
+    from a11y_computer_use.schema import MouseButton, Point
+    from contextlib import nullcontext
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda *a: None)
+    monkeypatch.setattr(_atspi, "chromium_pointer_target",
+                        lambda *a: pytest.fail("coordinate click was treated as a ref"))
+    clicks = []
+    modifiers = []
+    monkeypatch.setattr(_linux_input, "held", lambda mods: (modifiers.append(mods), nullcontext())[1])
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+    driver.click(Point(0, 162, 135), button=MouseButton.RIGHT, count=2, modifiers=("shift",))
+    assert clicks == [((162, 135), {"button": "right", "count": 2})]
+    assert modifiers == [("shift",)]

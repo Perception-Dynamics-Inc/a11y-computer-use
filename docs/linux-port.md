@@ -757,3 +757,12 @@ visible descendants survive scrolling; off-screen rows retain expand support.
 Previously issued refs are refused with `not_showing` before input; reveal the
 panel and find the control again. This uses native visibility state and does
 not establish general hit-test protection against overlapping page controls.
+
+Chromium page ref pointer clicks additionally hit-test the requested point
+through the document's AT-SPI Component interface. The hit must identify the
+requested accessible or its descendant by native identity, even when stale
+bounds and `SHOWING` still describe an old carousel slide. A different,
+missing, or unavailable hit returns `stale_ref` with `hit_test_unverified`
+before pointer input. Browser toolbar refs and explicit coordinate clicks are
+outside this check. This guard has synthetic regression coverage; it is not
+live verification of Chromium's hit-test freshness or general overlap safety.
