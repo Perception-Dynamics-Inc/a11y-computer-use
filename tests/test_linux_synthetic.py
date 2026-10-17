@@ -15181,7 +15181,8 @@ def test_claws_empty_list_surface_is_labelled_without_inventing_rows(monkeypatch
 
 
 @pytest.mark.parametrize("selected_index", [0, 1])
-def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index):
+@pytest.mark.parametrize("icon_header", [None, "direct", "nested"])
+def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selected_index, icon_header):
     titles = ["Welcome to Claws Mail", "About You", "Receiving mail"]
     tabs = []
     for title in titles:
@@ -15189,11 +15190,18 @@ def test_claws_wizard_hidden_tabs_use_their_own_page_titles(monkeypatch, selecte
             _PageNode("label", f"<b>{title}</b>"),
             _PageNode("label", "Explanatory text, not the title"),
         ])
+        if icon_header:
+            page = _PageNode("filler", children=[
+                _PageNode("filler", children=[
+                    _PageNode("icon", "Claws logo"),
+                    *(page.children if icon_header == "direct" else [page]),
+                ]),
+            ])
         tabs.append(_PageNode(
             "page tab", box=((-1.0, -1.0), (-1.0, -1.0)), children=[page],
         ))
     notebook = _PageNode("page tab list", children=tabs)
-    frame = _PageNode("frame", "Claws Mail Setup Wizard", children=[notebook])
+    frame = _PageNode("dialog" if icon_header else "frame", "Claws Mail Setup Wizard", children=[notebook])
     monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
     monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box or ((0., 0.), (500., 500.)))
     monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
@@ -16230,3 +16238,36 @@ def test_chromium_clipping_reads_native_stateset(monkeypatch):
     reported.add(tokens.SHOWING)
     assert not _atspi.chromium_clipped_target(claim)
     assert claim in _atspi.ATSPIAccessor().children(panel)
+
+
+def test_claws_wizard_icon_does_not_allow_borrowing_a_field_caption(monkeypatch):
+    page = _PageNode("filler", children=[
+        _PageNode("icon", "Claws logo"),
+        _PageNode("entry", ""),
+        _PageNode("label", "Later field caption"),
+    ])
+    tab = _PageNode("page tab", children=[page])
+    _PageNode("dialog", "Claws Mail Setup Wizard", children=[tab])
+    monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
+    assert _atspi._claws_wizard_page_title(tab) == ""
+
+
+
+def test_chromium_nonshowing_container_preserves_showing_descendants():
+    _frame, panel, claim, text = _chrome_collapsed_panel()
+    panel.states.remove("SHOWING")
+    claim.states.add("SHOWING")
+    accessor = _atspi.ATSPIAccessor()
+    assert panel in accessor.children(panel.parent)
+    assert claim in accessor.children(panel)
+    assert text not in accessor.children(panel)
+
+
+def test_chromium_scrolled_leaf_keeps_offscreen_diagnosis(monkeypatch):
+    _frame, panel, claim, _text = _chrome_collapsed_panel()
+    monkeypatch.setattr(_atspi, "_extents", lambda node: ((24.0, -100.0), (79.0, 21.0)))
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    assert not _atspi.chromium_clipped_target(claim)
+    assert claim in _atspi.ATSPIAccessor().children(panel)
+    assert not _atspi.hidden_web_target(claim)
+    assert _atspi.offscreen_extents(claim) == ((24.0, -100.0), (79.0, 21.0))

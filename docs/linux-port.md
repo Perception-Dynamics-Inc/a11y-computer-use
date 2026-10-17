@@ -7,7 +7,8 @@
 Xournal++ zoom sliders owned by `xournalpp` or `Xournal++` accept `150%`, `150 %`, and out-of-range bare numbers as percents when the current label and Value match the application's offset natural-log scale. Conversion uses `log(percent / 100 - 0.20753)` without step snapping. In-range bare numbers remain raw values. Percent writes require both the raw Value and the displayed percent to confirm; builds that change only the adjustment return `text_mismatch` without substituting clicks or keys. This path is covered by hermetic tests; live Xournal++ verification is pending.
 
 Claws Mail's Setup Wizard notebook pages with empty names can use their leading
-native page-title label as a tab name. The fallback is limited to that application's
+native page-title label as a tab name, including title rows preceded by a
+decorative icon. The fallback is limited to that application's
 Setup Wizard window and does not use later field captions. Tabs without a native
 allocation remain hidden, without bounds or click actions; use the wizard's
 Next/Previous buttons to change pages. This naming fallback is hermetic-tested;
@@ -725,16 +726,21 @@ is checked afresh on every fallback read.
 
 Calc action outcomes first use the driver's app-bound, one-use verified typed
 text, or a live change in the selected cell address for a key. Those cases avoid
-an additional full-window outcome snapshot. Missing or mismatched typed evidence,
-unchanged or missing cell addresses, and clicks retain the full-window fallback.
+an additional full-window outcome snapshot. When Calc's Selection interface is
+empty, key evidence uses the focused visible cell's native address, as click
+verification already does. A published Selection address takes precedence.
+Missing or mismatched typed evidence, unchanged or missing cell addresses, and
+clicks retain the full-window fallback.
 After a targeted check, actions requiring a tree comparison refresh their
 baseline before input; the old tree is not treated as current. Process-exit
 checks remain active. This path has hermetic regression coverage; no live Calc
 latency measurement is claimed.
 
 Chromium content clipped by CSS (for example a collapsed `max-height:0;
-overflow:hidden` panel) can retain on-screen AT-SPI bounds. Page children
-reporting `VISIBLE` without `SHOWING` are omitted from snapshots and find.
+overflow:hidden` panel) can retain on-screen AT-SPI bounds. Page leaves
+reporting `VISIBLE` without `SHOWING` are omitted from snapshots and find
+unless their native bounds are off-screen. Containers remain traversable so
+visible descendants survive scrolling; off-screen rows retain expand support.
 Previously issued refs are refused with `not_showing` before input; reveal the
 panel and find the control again. This uses native visibility state and does
 not establish general hit-test protection against overlapping page controls.
