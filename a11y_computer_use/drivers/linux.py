@@ -1858,6 +1858,62 @@ class LinuxDriver:
                 self._raise_if_hidden_alive(snap, ref)
             raise
 
+    def resolve_sheet_cell(self, snap: Snapshot, ref: str) -> Element | None:
+        """The issued Calc cell itself when one targeted read vouches for it.
+
+        A full-window rematch of a Calc sheet reads every visible cell, about
+        2.7 s. A cell ref is kept only when its own handle is alive, SHOWING,
+        still named the same address, a child of the Calc grid, owned by the
+        same process, and its live box, projected the way a snapshot projects
+        it, equals the issued box. Anything else, a scroll or a sheet switch
+        included, is None and the caller falls back to ``resolve_ref``.
+        Calc's active cell address before and after the click is the
+        confirmation, through ``sheet_click_verdict``.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            anchor = snap.element(ref)
+        except KeyError:
+            return None
+        address = _atspi.sheet_address(anchor.title)
+        if anchor.role != "AXCell" or address is None or anchor.bounds is None or anchor.secure:
+            return None
+        if not _atspi.libreoffice_app(snap.app or ""):
+            return None
+        # An observed popover can cover a cell after issuance. The full read
+        # carries that cover evidence; keep it for those sheets.
+        if any(el.role == "AXPopover" for el in snap.elements):
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return None
+
+        def read():
+            raw = _atspi.live_sheet_cell(handle, address)
+            if raw is None:
+                return None
+            pid = _atspi.pid_of(handle)
+            return raw, pid, _atspi.primary_geometry()
+
+        try:
+            found = self._run(read)
+        except Exception:
+            return None
+        if found is None:
+            return None
+        raw, pid, geometry = found
+        if snap.pid is not None and pid != snap.pid:
+            return None
+        if bool(raw.enabled) != bool(anchor.enabled):
+            return None
+        live_box = observe._to_bounds(raw.position, raw.size, geometry)
+        if live_box != anchor.bounds:
+            return None
+        self._resolved_popover_cover = (anchor, None)
+        return anchor
+
     def _remember_popover_cover(self, snap: Snapshot, element: Element) -> None:
         """Retain cover evidence from the tree already required for resolution."""
         from a11y_computer_use import outcome
@@ -1897,7 +1953,8 @@ class LinuxDriver:
                 "reason": "not_showing",
                 "outcome": "refused",
                 "next": ["foreground", "ref"],
-                "evidence": f"{ref} is still in the tree but its document is not showing",
+                "evidence": f"{ref} is still in the tree but it or its document is not showing",
+                "hint": "Reveal the target (expand its panel or foreground its tab), then find it again.",
             },
         )
 
@@ -1972,12 +2029,10 @@ class LinuxDriver:
         )
 
     def _refuse_hidden(self, element: Element, handle) -> None:
-        """Raise when ``handle`` is in a Firefox document that is not showing.
+        """Refuse hidden browser documents and clipped Chromium page targets.
 
-        A link in a background tab has on-screen bounds and its action
-        reports success. The click did not happen on screen. GTK and
-        Chromium handles are not this case. A destroyed accessible is not
-        this case either: that stays a stale ref from resolution.
+        Their bounds and action acknowledgments do not prove visibility.
+        Destroyed accessibles stay stale refs from resolution.
         """
         from a11y_computer_use.drivers import _atspi
 
@@ -2149,6 +2204,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_hidden(element, handle)
         self._refuse_gnumeric_go_jump(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
         pressed = _cdp_forms.press_checkable(
@@ -2164,7 +2220,6 @@ class LinuxDriver:
             return False
         if handle is None:
             return False
-        self._refuse_hidden(element, handle)
         if self._run(lambda: _atspi.qt_menu_button_without_press(handle)):
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
