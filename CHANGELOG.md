@@ -7,6 +7,40 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.71] - 2026-10-17
+
+Eight commits since v0.4.70, through #808.
+
+### Safety
+
+- CSS-clipped Chromium page controls are omitted from snapshots/find, and existing refs are refused before pointer or optional CDP activation. The guard uses the target's native visibility state; general overlay hit-testing remains outside this fix. Fixes #796 (#803) (a3a8c80, 2026-10-17).
+
+### Agent and input
+
+- The key tool and act/batch key steps accept alternate spellings such as `Page_Down`, `PgDn`, arrow names, and `Control_L`; `KP_Enter` is supported across all four backends. Unknown keys remain invalid before input. Fixes #793 (#794) (b9810d4, 2026-10-17).
+
+### Linux drivers
+
+- Claws Mail Setup Wizard pages recover native titles after decorative icons, including under dialog ancestors. Hidden pages retain their native geometry and action limitations; live Claws Mail verification remains pending. Fixes #604 (#791) (aed8f9a, 2026-10-17).
+
+### Performance
+
+- Calc key verification falls back to the focused visible cell when AT-SPI Selection is empty. A changed native address can confirm the key without a full-window outcome snapshot; unchanged or missing addresses retain the fallback. This PR was verified hermetically, without a live latency claim. Fixes #775 (#799) (5e67e59, 2026-10-17).
+- Calc cell clicks resolve from the issued cell's own live handle when identity, state, grid membership, process and geometry still match, then verify the active cell after input. Failed checks retain full-window ref resolution. Fixes #807 and #775 (#808) (9b5eb51, 2026-10-17).
+
+### Tests and tooling
+
+- The Qt dialog spin-write regression uses a deterministic clock to measure requested waits instead of host scheduling delays, retaining the existing bound and asserting the exact pauses. Fixes #797 (#798) (db226b1, 2026-10-17).
+- The Calc action profiler cleans up only processes and sessions it started, instead of killing every LibreOffice process by name. Fixes #805 (#806) (cb400bd, 2026-10-17).
+
+### Documentation
+
+- The 0.4.70 changelog gains the omitted Chrome depth and Qt Quick popup changes from #776 and #786 and corrects its commit count; published artifacts are unchanged. Refs #761 (#802) (3b8b8f7, 2026-10-17).
+
+### Packaging
+
+- The package version is 0.4.71.
+
 ## [0.4.70] - 2026-10-17
 
 Four commits since v0.4.69, through #792.
