@@ -234,3 +234,5 @@
 - 2026-10-17 (PR #729 repair): Qt menu cleanup can need one Escape to close the popup and another to clear the active menubar action. QMenuBar may retain widget FOCUSED after tracking ends; for Qt Widgets, inspect FOCUSED on its menu-item children (activeAction), while retaining the bar-focus check for other shapes/toolkits. Verify both phases and recheck showing dialogs before another Escape; the live checkable-menu fixture catches this distinction.
 
 - 2026-10-17 (PR #746 repair): Preserve Scribus embedded Properties-cell hints alongside PCManFM opaque-folder labels and Qt viewport regressions when merging appended tests; each describes a separate native accessibility limitation. Keep both the Scribus guidance and Qt menu-cleanup documentation.
+
+- 2026-10-17 (#697 reopened): Same-filesystem moves/renames preserve mtime. POSIX ctime can establish metadata freshness only for relocation-only goals; Windows ctime is creation time. Keep save/content checks on mtime and exclude the write-clock slack from relocation checks so a recently pre-existing untouched file cannot pass.

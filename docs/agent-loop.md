@@ -184,3 +184,10 @@ Folder-creation goals require a `done` condition `{"dir_exists": "~/Projects/202
 This checks the actual directory, including an empty folder, under the same home-path
 restriction as file conditions. `file_exists` still requires a regular file;
 a goal that also saves a file needs file evidence as well.
+For move/rename-only goals, file evidence must also be fresh: on POSIX, either
+modification time or inode-change time must be after task start. Same-filesystem
+moves preserve modification time, so inode-change time provides metadata freshness
+without claiming a content write. Save/edit goals retain the modification-time
+check. Windows creation time is not accepted as rename evidence; an unchanged
+modification time there still fails verification. Metadata freshness alone does
+not establish which operation changed a file.

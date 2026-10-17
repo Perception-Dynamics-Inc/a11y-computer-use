@@ -589,6 +589,8 @@ class Agent:
         # clock that can trail time.time(). A file written before the task
         # started still fails the check.
         self._task_started_wall = time.time() - 1.0
+        # Relocation metadata must not admit an untouched file from the slack window.
+        self._path_task_started_wall = self._task_started_wall + 1.0
         self._steps: list[StepRecord] = []
         self._conditions: list[dict] = []
         self._messages: list[Message] = []
@@ -1339,9 +1341,13 @@ class Agent:
         raw_conditions = list(action.args.get("conditions") or [])
         structural = file_evidence_error(self._goal, raw_conditions)
         started_wall = getattr(self, "_task_started_wall", None)
+        if _goal_relocates_files(self._goal):
+            started_wall = getattr(self, "_path_task_started_wall", started_wall)
         checked = check_conditions(
             raw_conditions, snap, self._goal,
-            written_after=started_wall if goal_writes_a_file(self._goal) else None,
+            written_after=started_wall if (
+                goal_writes_a_file(self._goal) or _goal_relocates_files(self._goal)
+            ) else None,
         )
         self._conditions = checked
         ok = structural is None and all(item["ok"] for item in checked)
@@ -3162,6 +3168,17 @@ def goal_writes_a_file(goal: str) -> bool:
     return bool(_FILE_NOUNS.search(text) or _FILE_PATH.search(text))
 
 
+def _goal_relocates_files(goal: str | None) -> bool:
+    """Allow metadata freshness only for relocation without content-writing verbs."""
+    text = _DIRECTORY_CREATE.sub("", goal or "")
+    return bool(
+        re.search(r"\b(?:move|moves|moved|moving|rename|renames|renamed|renaming)\b", text, re.I)
+        and not _FILE_VERBS.search(text)
+        and not re.search(r"\b(?:edit\w*|modif\w*|replac\w*|append\w*|remov\w*|delet\w*|typ\w*)\b",
+            text, re.I,)
+    )
+
+
 def _path_token(text: str) -> bool:
     token = text.strip()
     if not token or token.startswith("~") or "/" in token or "\\" in token:
@@ -3327,7 +3344,9 @@ def check_conditions(
     When ``goal`` saves a file and says to replace or remove text, a
     ``file_exists`` condition fails while that text is still in the file.
     ``written_after`` requires filesystem evidence of a write after task start,
-    regardless of whether a Save control was activated.
+    regardless of whether a Save control was activated. For move/rename-only
+    goals, POSIX inode-change time can also establish freshness; it does not
+    prove a content write. Windows creation time is not rename evidence.
     """
     absent = _file_text_expectations(goal)[1] if goal and goal_writes_a_file(goal) else []
     forbid_bom = _goal_forbids_bom(goal)
@@ -3335,6 +3354,7 @@ def check_conditions(
     for condition in conditions_arg:
         ok, detail = _one_condition(
             condition, snap, absent, forbid_bom=forbid_bom, written_after=written_after,
+            allow_metadata_change=_goal_relocates_files(goal),
         )
         checked.append({"condition": condition, "ok": ok, "detail": detail})
     return checked
@@ -3347,6 +3367,7 @@ def _one_condition(
     *,
     forbid_bom: bool = False,
     written_after: float | None = None,
+    allow_metadata_change: bool = False,
 ) -> tuple[bool, str]:
     if not isinstance(condition, dict) or not condition:
         return False, "a condition must be one object with one key"
@@ -3357,6 +3378,7 @@ def _one_condition(
             return False, "a condition must be one object with one key"
         return _file_condition(
             condition, absent or [], forbid_bom=forbid_bom, written_after=written_after,
+            allow_metadata_change=allow_metadata_change,
         )
     if len(condition) != 1:
         return False, "a condition must be one object with one key"
@@ -3415,6 +3437,7 @@ def _file_condition(
     *,
     forbid_bom: bool = False,
     written_after: float | None = None,
+    allow_metadata_change: bool = False,
 ) -> tuple[bool, str]:
     raw = condition["file_exists"]
     probe_condition = {"file_exists": raw}
@@ -3434,7 +3457,11 @@ def _file_condition(
         if not path:
             return False, "file exists but its path was not reported"
         try:
-            if Path(path).stat().st_mtime <= written_after:
+            stat = Path(path).stat()
+            fresh = stat.st_mtime > written_after
+            if allow_metadata_change and os.name == "posix":
+                fresh = fresh or stat.st_ctime > written_after
+            if not fresh:
                 return False, f"file {path} was not modified after task start"
         except OSError as exc:
             return False, f"file could not be checked: {exc}"
