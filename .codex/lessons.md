@@ -246,3 +246,5 @@
 - 2026-10-17 (#687): Scribus New Document contains an unnamed Qt `frame` under its real `dialog`. Treating that child as the native window makes overlap matching select the blocked main window and exhaust the five-second activation wait before an otherwise immediate Value write. Profile window preparation as well as text helpers; preserve the dialog's native identity, numeric read-back, and Qt viewport/masking checks.
 
 - 2026-10-17 (PR #768 repair): Relocation freshness and multi-call screen-change guards are independent agent guarantees. Preserve both documentation blocks when merging them, and run the file-evidence and fingerprint regressions together.
+
+- 2026-10-17 (#775): Calc's driver already carries a one-use, app-bound typed read-back. Judge it before a full-window traversal; after targeted verification, the old whole-tree baseline must not be reused as current state. Preserve process-liveness evidence separately. A selected-cell address change can verify a key; unchanged or missing addresses still need the full-window fallback.
