@@ -191,3 +191,19 @@ without claiming a content write. Save/edit goals retain the modification-time
 check. Windows creation time is not accepted as rename evidence; an unchanged
 modification time there still fails verification. Metadata freshness alone does
 not establish which operation changed a file.
+
+In a multi-call turn, a verified action also stops the remaining calls with
+`turn_stop="screen_change"` if its existing post-action snapshot shows an
+unexpected app/process, window, or page URL change. Text/value actions and
+local control clicks permit tree changes and focus within their target subtree;
+unscoped non-navigating chords permit in-window focus changes. Navigation,
+app/window operations, menu presses, scrolls, file selection, and button/link/tab
+or coordinate clicks declare screen changes. The final call never triggers this
+guard, so single-call turns keep their existing behavior. Skipped calls are
+reported to the planner for a fresh plan; the guard does not re-resolve their refs.
+
+Fingerprints reuse the existing snapshot digest and snapshot metadata. The
+browser URL comes from the frame-tree response already fetched for its snapshot;
+the guard adds no native accessibility or CDP requests. Step traces store only
+hashes of fingerprint components. This is a guard for existing multi-call turns,
+not a new batch tool.

@@ -58,6 +58,7 @@ from a11y_computer_use.agent.exec import (
     bound_timeout,
     run_command,
 )
+from a11y_computer_use.agent.fingerprint import ScreenFingerprint, unexpected_changes
 from a11y_computer_use.agent.events import Event
 from a11y_computer_use.agent.models.base import (
     Message,
@@ -1114,6 +1115,7 @@ class Agent:
                 return gate
         pre_snap = self._last_snap
         before = snapshot_digest(self._last_snap, self._last_observation)
+        before_screen = ScreenFingerprint.from_snapshot(pre_snap, before)
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
         first_error = error
@@ -1166,11 +1168,23 @@ class Agent:
             else:
                 self._stuck_token = None
         turn_stop = None if verified else "failure"
-        skipped = [] if verified else remaining
+        after_screen = ScreenFingerprint.from_snapshot(snap, after)
+        changes = set()
+        if verified and remaining:
+            target = _element_for(executed, pre_snap)
+            if target is None and executed.name == "type" and pre_snap is not None:
+                target = next((el for el in pre_snap.elements if el.focused), None)
+            changes = unexpected_changes(
+                before_screen, after_screen, executed, target, snap,
+            )
+            if changes:
+                turn_stop = "screen_change"
+        skipped = remaining if turn_stop else []
         self._commit(
             requested, executed, result, verified=verified, error=error,
             duration=time.perf_counter() - started_at, recovery=recovery,
             turn=turn, started_at=started_at, skipped=skipped, turn_stop=turn_stop,
+            fingerprint=after_screen.hashed(),
             target=target_view(executed, pre_snap),
             sensitive=target_human_kind(executed, pre_snap) is not None,
         )
@@ -1191,7 +1205,10 @@ class Agent:
             requested=self._trace_requested or requested,
         ))
         if turn_stop:
-            feedback = _with_stop_note(feedback, remaining, turn_stop)
+            reason = turn_stop
+            if changes:
+                reason += ": " + ", ".join(sorted(changes)) + " changed; observe before continuing"
+            feedback = _with_stop_note(feedback, remaining, reason)
         content: str | list[dict] = feedback
         if self._crop_block is not None and not error and executed.name == "crop":
             content = [{"type": "text", "text": feedback}, self._crop_block]
@@ -2710,6 +2727,7 @@ class Agent:
         turn_stop: str | None = None,
         target: dict | None = None,
         sensitive: bool | None = None,
+        fingerprint: dict[str, str] | None = None,
     ) -> None:
         del started_at
         result = self._with_resolution(result)
@@ -2730,6 +2748,7 @@ class Agent:
             duration_s=duration,
             skipped=list(skipped or []),
             turn_stop=turn_stop,
+            fingerprint=fingerprint,
         )
         self._steps.append(step)
         self._last_action_name = requested.name
@@ -2773,6 +2792,7 @@ class Agent:
             "conditions": conditions,
             "skipped": step.skipped,
             "turn_stop": turn_stop,
+            "fingerprint": fingerprint,
             "injection": bool(self._injection),
         }
         if self._turn_budget is not None:
