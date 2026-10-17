@@ -767,7 +767,7 @@ Previously issued refs are refused with `not_showing` before input; reveal the
 panel and find the control again. This uses native visibility state and does
 not establish general hit-test protection against overlapping page controls.
 
-Chromium page buttons use a node-bound AT-SPI `click` or `press` action for
+Chromium page push buttons (native `button` or `push button`) use a node-bound AT-SPI `click` or `press` action for
 plain left ref clicks through the Runtime/MCP tool. The result names the
 mechanism (`via AT-SPI doAction(press)` or `doAction(click)`), and normal
 post-action effect verification still decides the outcome; an action
@@ -776,7 +776,9 @@ falls back to pointer input. Right, multiple, modified, and forced-pointer
 (`A11Y_COMPUTER_USE_AX_CLICKS=0`) ref clicks on these buttons are refused with
 `chromium_button_action_unavailable`. Use a current screenshot and explicit
 coordinates for pointer-specific input. Native GTK buttons and browser toolbar
-buttons retain their existing routes.
+buttons retain their existing routes. Native `toggle button` controls also retain
+the existing click path, even though they map to `AXButton`; this route does not
+substitute their advertised `toggle` action for a click.
 
 Other Chromium page ref pointer paths retain the document AT-SPI hit-test
 identity check (`hit_test_unverified` on a missing/different hit). That check

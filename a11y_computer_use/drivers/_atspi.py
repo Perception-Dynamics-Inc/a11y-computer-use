@@ -18091,8 +18091,10 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
 
 
 def chromium_page_button(acc) -> bool:
-    """Whether this is a Chromium button inside a web document, not browser chrome."""
-    if acc is None or _ROLE.get(_role_name(acc)) != "AXButton" or not _chromium_app(acc):
+    """Whether this is a native Chromium push button inside a web document."""
+    # AXButton also represents native toggle buttons. Keep those on the
+    # existing click path; their advertised toggle is not a click/press action.
+    if acc is None or _role_name(acc) not in {"button", "push button"} or not _chromium_app(acc):
         return False
     for node in _ancestor_chain(acc):
         role = _role_name(node)

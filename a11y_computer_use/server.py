@@ -9650,7 +9650,7 @@ def build_server(
         invalid_arguments and sends no input. An unknown display_id is
         invalid_arguments and names the valid ids. button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
-        Linux Chromium page buttons use a node-bound AT-SPI click/press for
+        Linux Chromium page push buttons use a node-bound AT-SPI click/press for
         plain left clicks and name that mechanism in the result. Unsupported
         variants or unavailable actions are refused rather than using stale
         accessibility geometry; explicit coordinate clicks remain pointer input.

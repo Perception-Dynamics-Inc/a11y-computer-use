@@ -121,3 +121,18 @@ def test_runtime_reports_mechanism_but_still_checks_effect(button_case, monkeypa
     assert "via AT-SPI doAction(click)" in result
     assert result.outcome == verdict
     assert calls == ["click"]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {}, {"button": MouseButton.RIGHT}, {"count": 2},
+    {"modifiers": ("shift",)}, {"allow_action": False},
+])
+def test_native_toggle_keeps_existing_click_route(button_case, kwargs):
+    driver, element, node, frame, action, names, calls = button_case
+    node.role = "toggle button"
+    names[:] = ["toggle"]
+    assert _atspi._ROLE[node.role] == element.role == "AXButton"
+    params = dict(button=MouseButton.LEFT, count=1, modifiers=())
+    params.update(kwargs)
+    assert driver.click_button_action(element, **params) is None
+    assert calls == []  # Do not substitute the advertised toggle for a click.
