@@ -28,6 +28,14 @@ hermetic snapshot and find tests; live Calc verification is pending.
 
 ## Files in opaque file-manager views
 
+PCManFM's default Icon View can publish a childless panel under `View of
+folder contents`, even while the status bar counts files. The driver labels
+this opaque region `PCManFM folder contents` and reports that file icons are
+unavailable to `find`, ref-based file clicks, and `scroll_to_find`. The pane ref
+identifies the whole surface, never an individual file. Explicitly choose
+View > Folder View Mode > Detailed List View to expose named table cells;
+the driver does not switch views automatically or synthesize icon targets.
+
 Thunar 4.20 exposes named cells in List View, but its Icon and Compact views
 can expose only an unnamed `opaque_region`. The Linux `files` helper supports
 named file tasks without clicking that surface. Configure the MCP server's
@@ -289,24 +297,18 @@ page text supplied by the application remain unchanged.
 
 ## Kate document text search
 Kate/KTextEditor exposes the entire document through AT-SPI Text. Snapshots
-omit Kate textarea buffer values because the editor bounds do not establish
-character visibility. `find` and `scroll_to_find` cannot verify individual
-document text matches; even visible buffer text is excluded until character
-visibility can be established. The editor ref remains available, with a hint
-to use in-document navigation. Single-line search fields keep their values.
-Kate skips the generic Qt viewport-text probe: that discarded read disrupts
-subsequent accessibility traversal on Kate 25.04.3. Native status controls such
-as `1:1`, `INSERT`, and `UTF-8` remain available to snapshots and `find`.
-This preservation was checked with a real Kate 25.04.3 under Xvfb/D-Bus for #646.
-Automatic `scroll_to_find` selects this editor view ahead of sibling breadcrumb
-lists. Text search returns `unsupported` with reason
-`document_text_visibility_unavailable` before wheel or Find input because the
-accessibility tree cannot confirm a visible match. An explicit container `ref`
-still selects that container. Editor selection and refusal were checked against
-Kate 25.04.3 under an isolated Xvfb/D-Bus session for #647.
+publish only text verified inside the measured editor viewport by native
+point offsets and character rectangles. They bypass `GetBoundedRanges`, whose
+Qt reply can disrupt subsequent accessibility traversal. Unavailable character
+geometry keeps the document value excluded and search returns `unsupported`
+with reason `document_text_visibility_unavailable` before input.
 
-The buffer suppression is covered by synthetic tests; no live Kate run
-was performed for #477.
+Automatic `scroll_to_find` selects the editor ahead of sibling breadcrumb lists,
+scrolls that view, and checks fresh visible text before reporting a match. A
+miss returns not found within the requested scroll budget; an explicit container
+`ref` still selects that container. Single-line search fields keep their values.
+This path is covered by synthetic regressions; no live Kate run was performed
+for #664.
 
 GTK text views (`text` / `editable text`) require AT-SPI `EDITABLE` to be offered as editable fields. EditableText alone is insufficient: read-only GtkTextView widgets expose it too. Snapshot and `find editable=true` exclude those views from editable matches, and `set_value` checks the live state and refuses with `not_editable` before replacing text or sending keys. Explicit `type` remains a keystroke action.
 
@@ -362,11 +364,12 @@ entry/text roles outside GTK 3.
 Qt multiline editors (including FeatherPad) expose the entire document through
 AT-SPI Text. Native multiline states or attributes select this path; ordinary
 Qt line edits retain their text without requesting document viewport ranges.
-Snapshot values and text searches use `Text.get_bounded_ranges`
-inside the measured editor bounds, falling back to native point offsets and
-verified character rectangles when Qt omits bounded ranges. If that query
-fails, times out, or returns malformed ranges and point offsets are unavailable
-(as on Qt 5.15), a raw Text prefix capped at 4000 characters is read. Failed
+For applications identified by their Qt toolkit name, snapshot values and text
+searches bypass `Text.get_bounded_ranges`: Qt 5 and Qt 6 bridges can leave that
+request unanswered, stalling reads and marking the application hung in libatspi.
+Native point offsets and verified character rectangles establish visibility
+instead. If point offsets are unavailable (as on Qt 5.15), a raw Text prefix
+capped at 4000 characters is read. Failed
 explicit text reads retry `getText(0,-1)` only when the native character count
 fits that cap, then try 256-character chunks within the same cap. Each
 character's native rectangle is checked against the viewport. Unverified and
@@ -509,10 +512,15 @@ Ref clicks and crops refuse with `not_visible` / `covered` when another
 popover's measured bounds contain the ref's center. Controls inside their own
 popover remain eligible; dismiss the covering popover before retrying a covered
 ref. This check uses the accessibility tree because Chrome's accessible
-hit test can return the underlying control. A fresh cover snapshot is limited
-to recognized browsers, refs with a document URL, trees with `AXWebArea`,
-or trees that already contained an `AXPopover`; native trees without those
-signals avoid the extra snapshot.
+hit test can return the underlying control. Ref resolution retains the cover
+result from its already-required fresh tree, bound to that exact resolved
+element. The pre-input guard consumes this result once in constant time,
+without another AT-SPI page snapshot. This detects popovers opened since ref
+issuance as well as dismissed popovers. If no matching resolution evidence is
+available (for example, a different proxy target), the conservative refresh
+remains limited to recognized browsers, refs with a document URL, trees with
+`AXWebArea`, or trees that already contained an `AXPopover`. Native trees
+without those signals avoid the extra snapshot.
 
 
 Claws Mail's GTK folder and message lists can expose only childless panels
@@ -645,3 +653,5 @@ Do not dismiss Eye of GNOME's menu with Escape, which can quit the app.
 read-back can match the requested percentage while the image scale stays
 unchanged. Use the zoom UI and verify the displayed image scale; the backend
 does not send an activation key or substitute a zoom-button click.
+
+Menu leaf presses also check for keyboard focus left on the menubar or its entries after the popup closes (for example, Qt menus in Okular). Cleanup sends Escape and verifies that both popup state and menubar keyboard tracking clear; a refusal reports retained tracking. If the first Escape closes the popup but leaves an active bar entry, a second Escape clears that entry within the existing cleanup polling bound. Qt Widgets can retain focus on the bar itself when no other widget takes focus; with no focused menu-item entry, that is idle widget focus, not an active menu. A showing dialog is left alone, and explicitly pressing a submenu still leaves it open. This cleanup is covered by synthetic menu regressions and the live Qt checkable-menu fixture; it has not been live-verified in Okular.

@@ -1815,10 +1815,13 @@ class LinuxDriver:
         """
         from a11y_computer_use import observe
 
+        self._resolved_popover_cover = None
         if live is None:
             live = self.snapshot(snap.scope, snap.app)
         try:
-            return observe.rematch_ref(snap, ref, live)
+            resolved = observe.rematch_ref(snap, ref, live)
+            self._remember_popover_cover(live, resolved)
+            return resolved
         except ComputerUseError as exc:
             if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
                 anchor = snap.element(ref)
@@ -1853,6 +1856,34 @@ class LinuxDriver:
             }:
                 self._raise_if_hidden_alive(snap, ref)
             raise
+
+    def _remember_popover_cover(self, snap: Snapshot, element: Element) -> None:
+        """Retain cover evidence from the tree already required for resolution."""
+        from a11y_computer_use import outcome
+
+        covers = [el for el in snap.elements if el.role == "AXPopover"]
+        cover_name = None
+        if covers:
+            ancestors = outcome._ancestor_refs(snap, element)
+            center = outcome._center_of(element)
+            for cover in covers:
+                if (cover.ref != element.ref and cover.ref not in ancestors
+                        and outcome._contains_center(cover.bounds, center)):
+                    cover_name = "popover" + (f" {cover.title!r}" if cover.title else "")
+                    break
+        self._resolved_popover_cover = (element, cover_name)
+
+    def take_resolved_popover_cover(self, element: Element) -> tuple[bool, str | None]:
+        """Consume this resolution's cover result in constant time, once.
+
+        Identity binds evidence to the exact resolved target, not an old ref
+        with a reused spelling. A different target must use the refresh path.
+        """
+        evidence = getattr(self, "_resolved_popover_cover", None)
+        self._resolved_popover_cover = None
+        if evidence is not None and evidence[0] is element:
+            return True, evidence[1]
+        return False, None
 
     def _not_showing_error(self, ref: str, role: str, title: str) -> ComputerUseError:
         shown = f" {title!r}" if title else ""
