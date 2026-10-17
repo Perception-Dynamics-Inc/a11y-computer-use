@@ -24,6 +24,7 @@ import json
 import math
 import os
 import time
+from dataclasses import replace
 from collections import deque
 from collections.abc import Callable, Sequence
 from itertools import islice
@@ -340,10 +341,12 @@ class BrowserDriver:
         accessor = _cdp_ax.CDPAccessor(
             stitched, geometry, frozenset(secure), frozenset(empty), submits,
         )
-        return observe.build_snapshot(
+        snap = observe.build_snapshot(
             accessor.root(), accessor, scope=scope, app=self._target_id, pid=None,
             geometry=self._page_geometry(dom),
         )
+
+        return replace(snap, url=frames[0].get("url"))
 
     #: Cap on frames stitched into one snapshot — a backstop against pathological
     #: ad-heavy pages, not a real-page limit.
@@ -366,7 +369,8 @@ class BrowserDriver:
         main_nodes = sess.call("Accessibility.getFullAXTree").get("nodes", [])
         tree = sess.call("Page.getFrameTree").get("frameTree", {})
         main_id = tree.get("frame", {}).get("id")
-        frames = [{"id": main_id, "parent_id": None, "owner_backend": None, "nodes": main_nodes}]
+        frames = [{"id": main_id, "parent_id": None, "owner_backend": None, "nodes": main_nodes,
+                   "url": tree.get("frame", {}).get("url")}]
         queue = deque((c, main_id) for c in islice(tree.get("childFrames", []), self._MAX_FRAMES - 1))
         attempts = 1
         while queue and attempts < self._MAX_FRAMES:

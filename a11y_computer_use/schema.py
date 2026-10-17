@@ -341,6 +341,8 @@ class Snapshot:
     created_at: float
     displays: tuple[Display, ...]
     elements: tuple[Element, ...]
+    # Main-document URL supplied by CDP from its existing frame-tree read.
+    url: str | None = None
 
     def element(self, ref: str) -> Element:
         """Look up a ref within this snapshot.
