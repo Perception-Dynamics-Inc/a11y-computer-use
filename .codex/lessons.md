@@ -260,3 +260,5 @@
 - 2026-10-17 (#604): Claws Mail wizard page headers can start with filler → filler → icon, with the title in a later sibling. Recognize the native dialog as well as frame ancestry, and skip decorative icons along the leading layout path, but stop at controls so field captions cannot become page names; preserve hidden tabs without geometry or actions.
 
 - 2026-10-17 (PR #803 repair): Chromium also clears SHOWING on scrolled-off rows and containers with painted descendants. Keep traversing containers and preserve native off-screen geometry handling before classifying CSS-clipped leaves, including NOT_VISIBLE for old scrolled-off refs. Run the live infobox-expand, find-bar-close, and off-screen-crop regressions together.
+
+- 2026-10-17 (#813): Calc click verification uses the active window root. Format Cells replaces that root with a dialog, so spreadsheet_open=False must not silently delegate to generic tree-change confirmation. Return an explicit partial verdict naming the dialog when the cell selection cannot be verified.
