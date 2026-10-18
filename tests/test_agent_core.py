@@ -683,7 +683,10 @@ def test_scripted_hold_blocks_until_the_cancel_file_is_written(tmp_path):
     box: dict = {}
 
     def _second() -> None:
-        box["turn"] = model.complete([], [])
+        try:
+            box["turn"] = model.complete([], [])
+        except BaseException as exc:  # shown below instead of a bare KeyError
+            box["error"] = exc
 
     import threading
     worker = threading.Thread(target=_second)
@@ -693,7 +696,33 @@ def test_scripted_hold_blocks_until_the_cancel_file_is_written(tmp_path):
     record.write_text("1\n", encoding="utf-8")
     worker.join(2)
     assert not worker.is_alive()
+    assert "error" not in box, repr(box.get("error"))
     assert box["turn"].text == "two"
+
+
+def test_scripted_hold_reads_the_record_once_more_after_a_stall(tmp_path, monkeypatch):
+    """A record written before the thread wakes past the deadline still counts (#925)."""
+    from a11y_computer_use.agent.models import scripted
+
+    record = tmp_path / "cancel_signal"
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({
+        "hold_before_turn": 1,
+        "hold_file": str(record),
+        "hold_timeout_s": 2,
+        "turns": [{"text": "held", "calls": []}],
+    }), encoding="utf-8")
+    model = ScriptedModel(path=str(script))
+    clock = [100.0]
+
+    def stalled_sleep(_seconds: float) -> None:
+        # The cancel is recorded, then the thread is descheduled past the deadline.
+        record.write_text("1\n", encoding="utf-8")
+        clock[0] += 5.0
+
+    monkeypatch.setattr(scripted.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(scripted.time, "sleep", stalled_sleep)
+    assert model.complete([], []).text == "held"
 
 
 def test_scripted_hold_times_out_when_cancel_is_not_recorded(tmp_path):

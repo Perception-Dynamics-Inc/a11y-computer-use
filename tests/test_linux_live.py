@@ -6005,12 +6005,13 @@ def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
-    time.sleep(0.4)
     profile = tmp_path / "lo-grid"
     (profile / "user").mkdir(parents=True)
     (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
     env = os.environ.copy()
+    home = tmp_path / "home"
+    home.mkdir()
+    env["HOME"] = str(home)
     env["SAL_USE_VCLPLUGIN"] = "gtk3"
     env["GTK_MODULES"] = "gail:atk-bridge"
     env["NO_AT_BRIDGE"] = "0"
@@ -6107,7 +6108,6 @@ def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
                 assert kind == "match", (address, kind, actual, wanted)
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
 
 
 def _impress_subtitle_point(root) -> tuple[int, int] | None:
@@ -8920,6 +8920,65 @@ def test_linux_chrome_overflow_list_scroll_to_find_up_is_quick(tmp_path) -> None
         _stop_group(proc)
 
 
+def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
+    """Keep failure evidence in the assertion even with CI's --tb=line.
+
+    Run only after the existing deadline. Native reads stay on the AT-SPI
+    thread; sample ancestors and stop at tables rather than walking 5000 rows.
+    Diagnostic errors must not replace the original failed assertion.
+    """
+    import json
+    from a11y_computer_use.drivers import _atspi
+
+    evidence = {"phase": phase, "samples": samples, "launched_pid": proc.pid,
+                "exit_status": proc.poll(), "argv": proc.args}
+
+    def capture(name, fn):
+        try:
+            evidence[name] = fn()
+        except Exception as exc:
+            evidence[name] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    capture("version", lambda: subprocess.check_output(
+        [proc.args[0], "--version"], text=True, timeout=3).strip())
+    capture("load", lambda: os.getloadavg())  # absent on Windows; captured, not raised
+    capture("windows", driver.windows)
+    if shot is not None:
+        evidence["snapshot"] = {
+            "pid": shot.pid,
+            "elements": [(el.role, el.title, str(el.bounds)) for el in shot.elements],
+        }
+
+    def native():
+        root = _atspi.find_root("chrome", Scope.WINDOW)
+
+        def walk():
+            rows = []
+            pending = [(root, 0)]
+            while pending and len(rows) < 160:
+                node, depth = pending.pop()
+                role = _atspi._role_name(node)
+                count = _atspi._child_count(node)
+                rows.append((depth, role, _atspi._node_name(node),
+                             _atspi._atspi_wrapper_key(node), _atspi._extents(node),
+                             sorted(_atspi._state_names(node)), count))
+                if depth < 16 and role not in {"table", "tree table"}:
+                    for index in reversed(range(min(count, 12))):
+                        child = _atspi._child_at(node, index)
+                        if child is not None:
+                            pending.append((child, depth + 1))
+            return {"nodes": rows, "pending": bool(pending),
+                    "limits": {"nodes": 160, "depth": 16, "children_per_node": 12,
+                               "table_children_omitted": True}}
+
+        cached = walk()
+        fresh = _atspi._without_child_cache(root, walk, preserve_properties=True)
+        return {"cached": cached, "fresh_children": fresh}
+
+    capture("native", lambda: driver._run(native))
+    return json.dumps(evidence, default=str, ensure_ascii=True)
+
+
 def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_path) -> None:
     """Find row 300 of a long document table and click that row's button.
 
@@ -8970,9 +9029,12 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        def wait_at_top(timeout: float) -> None:
-            deadline = time.monotonic() + timeout
+        def wait_at_top(timeout: float, phase: str) -> None:
+            started = time.monotonic()
+            deadline = started + timeout
             shown: list[str] = []
+            shot = None
+            samples = []
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
                     raise AssertionError(
@@ -8990,16 +9052,24 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                         title.startswith("ROW-0300") for title in titles
                     ):
                         return
+                samples.append({"elapsed": round(time.monotonic() - started, 3),
+                                "pid": shot.pid if shot is not None else None,
+                                "rows": shown})
                 time.sleep(0.4)
-            raise AssertionError(f"Chrome did not show the top of the table without ROW-0300: {shown}")
+            evidence = _chrome_table_failure(
+                driver, proc, shot, phase=phase, samples=samples,
+            )
+            raise AssertionError(
+                f"Chrome did not show the top of the table without ROW-0300: {shown}; {evidence}"
+            )
 
-        wait_at_top(45)
+        wait_at_top(45, "initial launch")
         runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
         seen = 0
         for _pass in range(4):
             if _pass:
                 runtime.key("f5")
-                wait_at_top(30)
+                wait_at_top(30, f"reload {_pass}")
             found = runtime.scroll_to_find(
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
                 budget_s=90,

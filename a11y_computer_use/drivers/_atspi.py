@@ -12301,7 +12301,7 @@ def _cache_masks():
     return none, getattr(cache, "UNDEFINED", None)
 
 
-def _without_child_cache(node, fn):
+def _without_child_cache(node, fn, *, preserve_properties=False):
     """Run ``fn`` without trusting this application's child cache.
 
     ``clear_cache_single`` sets ``cached_properties`` to none and leaves the
@@ -12316,6 +12316,10 @@ def _without_child_cache(node, fn):
     The operation-scoped getter cache is invalidated around the walk too,
     since it can retain child counts and handles read before the edit. The
     mask change and walk share the event thread, including direct native calls.
+    Chromium snapshot walks set ``preserve_properties`` to retain native
+    caching of roles, names, states and interfaces. Only CHILDREN is bypassed
+    there; disabling every property adds D-Bus round trips across the page.
+    Calc callers retain the full cache bypass needed during editor mutations.
     A node without ``set_cache_mask`` is a test double and is walked as it is.
     """
     from a11y_computer_use.drivers import _atspi_events
@@ -12326,10 +12330,16 @@ def _without_child_cache(node, fn):
         setter = getattr(target, "set_cache_mask", None)
         if setter is None:
             return fn()
-        none, undefined = _cache_masks()
+        mask, undefined = _cache_masks()
+        if preserve_properties:
+            try:
+                cache = _atspi().Cache
+                mask = int(cache.DEFAULT) & ~int(cache.CHILDREN)
+            except (AttributeError, ImportError):
+                pass
         try:
             _drop_read_cache()
-            setter(none)
+            setter(mask)
         except Exception:
             return fn()
         try:

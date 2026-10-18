@@ -1592,7 +1592,7 @@ class LinuxDriver:
                 accessor._expand_page = self._expand_page
                 geometry = _atspi.primary_geometry()
 
-                def _walk(node: object) -> Snapshot:
+                def _walk_tree(node: object) -> Snapshot:
                     document_matches: list = []
                     if seek and _atspi._chromium_app(node):
                         _atspi.reveal_text_in_document(node, seek, offscreen=document_matches)
@@ -1613,6 +1613,19 @@ class LinuxDriver:
                         snap = observe.attach_offscreen_matches(snap, specs)
                     _atspi.note_browser_bar(node, snap.elements)
                     return snap
+
+                def _walk(node: object) -> Snapshot:
+                    if _atspi._chromium_app(node):
+                        # Startup and Reload can leave cached empty layout
+                        # children or an old document below the frame. Window
+                        # refresh and table-row refresh cannot reach through
+                        # that stale ancestor. Keep native child reads fresh
+                        # for the whole walk, including list discovery; the
+                        # operation-scoped getter cache still deduplicates reads.
+                        return _atspi._without_child_cache(
+                            node, lambda: _walk_tree(node), preserve_properties=True,
+                        )
+                    return _walk_tree(node)
 
                 page_snap = _walk(walked)
                 if not all_windows:
@@ -4442,6 +4455,7 @@ class LinuxDriver:
             )
             if isinstance(origin, str) and origin:
                 self._sheet_type_origin = origin
+        input_started = time.perf_counter() if self._sheet_type_origin else None
         if location is not None or bar_before is not None:
             _linux_input.type_string(text, delay=0.05)
         else:
@@ -4449,6 +4463,7 @@ class LinuxDriver:
         if location is not None:
             return self._location_read_back(location, before, text, app_id)
         if self._sheet_type_origin:
+            input_finished = time.perf_counter()
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
@@ -4470,7 +4485,9 @@ class LinuxDriver:
             address, wanted, actual = mismatch
             raise _atspi._text_mismatch(
                 "text_mismatch",
-                f"the text read back from {address} does not match {wanted!r}",
+                f"the text read back from {address} is {actual!r}, expected {wanted!r} "
+                f"(input={input_finished - input_started:.3f}s, "
+                f"verification={time.perf_counter() - input_finished:.3f}s)",
                 expected=wanted,
                 actual=actual,
                 cell=address,
