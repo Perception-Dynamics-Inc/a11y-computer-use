@@ -366,3 +366,5 @@
 - 2026-10-18 (PR #826 merge retry): When combining document reveal with text-range targets, refresh the snapshot after reveal, attach range targets to the surviving matches, and record issued refs from that final snapshot. Keep both visibility refusals and range-target regressions.
 
 - 2026-10-18 (PR #826 range integration): Keep observed widget geometry in the current snapshot when publishing native text-range matches. Render the measured range and retain its offsets for act-time revalidation; replacing widget bounds breaks document-visibility checks after reveal. The unchanged GTK TextView and both Geany live regressions passed together under Xvfb/Openbox/D-Bus.
+
+- 2026-10-18 (PR #826 clipped outline repair): GTK text-cell bounds can extend beyond the Symbols scroll pane into Geany’s editor. Identical requested/sent points do not establish that the point belongs to the row. A long-symbol live regression reproduced navigation to editor line 5; intersecting the reported cell, tree, and viewport rectangles made the unchanged double-click and line-301 verification pass. Preserve both pointer clicks and the native destination check.

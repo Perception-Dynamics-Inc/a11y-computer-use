@@ -16953,3 +16953,33 @@ def test_tab_preflight_preserves_native_text_and_chromium_plain_input(monkeypatc
         _atspi._type_into_target(field, text)
         assert calls[-1] == text
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize("cell_x,expected", [
+    (100, ((100.0, 100.0), (80.0, 21.0))),
+    (190, ((-1.0, -1.0), (-1.0, -1.0))),
+])
+def test_gtk_outline_label_bounds_stay_inside_native_viewport(fake_atspi, cell_x, expected):
+    symbol = _outline_cell("long_symbol_name [301]", ["activate"])
+    window = _outline_window(symbol)
+    tree = window.children[0]
+    viewport = _Acc("scroll pane", width=140, height=320)
+    _place_row(viewport, 40, 80, 140, 320)
+    _adopt(window, viewport)
+    _adopt(viewport, tree)
+    _place_row(symbol, cell_x, 100, 400, 21)
+
+    raw = _atspi.ATSPIAccessor().read(symbol)
+
+    assert (raw.position, raw.size) == expected
+    assert raw.note == "activates on double-click"
+    assert symbol.actions == ["activate"]
+
+
+def test_gtk_outline_label_bounds_clip_to_tree_without_scroll_pane(fake_atspi):
+    symbol = _outline_cell("long_symbol_name [301]", ["activate"])
+    _outline_window(symbol)
+    _place_row(symbol, 100, 100, 400, 21)
+    raw = _atspi.ATSPIAccessor().read(symbol)
+    assert raw.position == (100.0, 100.0)
+    assert raw.size == (160.0, 21.0)

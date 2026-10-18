@@ -4698,6 +4698,9 @@ class ATSPIAccessor:
             labels = [label for label in labels if label]
             if labels:
                 panel_note += "; opened by " + ", ".join(repr(label) for label in labels)
+        outline_note = outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else ""
+        if outline_note and position is not None and size is not None:
+            position, size = _outline_visible_bounds(node, position, size)
         return RawNode(
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
@@ -4735,7 +4738,7 @@ class ATSPIAccessor:
             content_note=content_note,
             hint=hint,
             shortcut=shortcut,
-            note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else panel_note,
+            note=outline_note if role_str in _ROW_ROLE_NAMES else panel_note,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -15513,6 +15516,28 @@ def _gtk_outline_parent(acc):
     except Exception:
         return None
     return None
+
+
+def _outline_visible_bounds(acc, position, size):
+    """Intersect a GTK outline cell with its measured tree and scroll pane.
+
+    GtkTextCellAccessible can report the full label width beyond the pane.
+    Its un-clipped centre then belongs to a sibling editor, not the row.
+    Only native rectangles contribute to the clickable intersection.
+    """
+    tree = _gtk_outline_parent(acc)
+    boxes = [_extents(tree)] if tree is not None else []
+    viewport = _viewport_box(acc)
+    if viewport is not None:
+        boxes.append(viewport)
+    for pos, extent in boxes:
+        if pos is None or extent is None:
+            continue
+        clipped = _intersect_box(position, size, pos, extent)
+        if clipped is None:
+            return (-1.0, -1.0), (-1.0, -1.0)
+        position, size = clipped
+    return position, size
 
 
 def geany_symbol_destination(acc) -> tuple[int, list] | None:

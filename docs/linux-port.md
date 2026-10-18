@@ -541,7 +541,7 @@ Submit queries (`submit` or `submit form`) also match these buttons, and button
 role searches rank them first. No default is inferred from labels or geometry;
 the marker does not change click behavior or safety checks.
 
-Geany Symbols rows marked `activates on double-click` retain single-click selection. An explicit double-click sends two pointer clicks at the measured row bounds and verifies the symbol's line through Geany's native status line or the focused editor's native caret offset and text. The caret read handles a status label that has not refreshed yet; an unfocused editor or unreadable caret is not confirmation. Unverified navigation returns an error without a replacement action.
+Geany Symbols rows marked `activates on double-click` retain single-click selection. GTK outline label bounds are intersected with the native tree and scroll-pane rectangles so a long label cannot target the adjacent editor. An explicit double-click sends two pointer clicks at the measured visible row bounds and verifies the symbol's line through Geany's native status line or the focused editor's native caret offset and text. The caret read handles a status label that has not refreshed yet; an unfocused editor or unreadable caret is not confirmation. Unverified navigation returns an error without a replacement action.
 
 Thunar toolbar location entries use confirmed focus, select-all and real typed
 input for `set_value`, with text read-back. This updates the path model that

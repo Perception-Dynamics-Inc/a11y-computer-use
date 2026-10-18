@@ -13497,7 +13497,8 @@ def _geany_initial_line(driver, snap) -> bool:
     return False
 
 
-def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> None:
+@pytest.mark.parametrize("symbol_suffix", ["", "_with_a_long_name_that_overflows_the_sidebar"])
+def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path, symbol_suffix) -> None:
     """Live Geany Symbols row. Not a synthetic tree.
 
     The row has an activate action that a single click does not run. The
@@ -13516,7 +13517,7 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
     # An adjacent symbol makes a one-row pointer offset observable; clicking
     # empty tree space can otherwise navigate using the previous selection.
     lines.extend([
-        "def target_fn_row150():", "    return 1", "",
+        f"def target_fn_row150{symbol_suffix}():", "    return 1", "",
         "def z_other_symbol():", "    return 2", "",
     ])
     document = tmp_path / "geany-sym.py"
