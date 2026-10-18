@@ -974,6 +974,83 @@ async def test_destructive_click_blocked_when_declined(
     assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"
 
 
+def _use_writer_table_menu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Writer's Table > Delete > Rows, re-resolved the way the live tree is.
+
+    A real ref click acts on the element read from a fresh tree: it carries
+    that tree's snapshot id and ref and no parent chain (#847).
+    """
+    base = build_synthetic_snapshot()
+
+    def el(ref, role, title, parent):
+        return Element(
+            ref=ref, role=role, title=title, value=None,
+            bounds=Bounds(1, 300, 100, 120, 27), snapshot_id=base.snapshot_id,
+            parent=parent, path=("AXWindow",), clickable=True,
+        )
+
+    menus = (
+        el("e6", "AXMenuBar", "", "e1"),
+        el("e7", "AXMenu", "Table", "e6"),
+        el("e8", "AXMenu", "Delete", "e7"),
+        el("e9", "AXMenuItem", "Rows", "e8"),
+    )
+    snap = dataclasses.replace(base, elements=base.elements + menus)
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snap)
+    monkeypatch.setattr(
+        observe, "resolve_ref",
+        lambda s, ref, *, live=None: dataclasses.replace(
+            s.element(ref), snapshot_id="snap-live", ref="e40", parent=None,
+        ),
+    )
+
+
+async def _snapshot_then_click(mcp_server, ref: str, elicitation_callback=None):
+    async with client_session(
+        mcp_server, elicitation_callback=elicitation_callback
+    ) as client:
+        await client.call_tool("desktop_snapshot", {"app": "TextEdit"})
+        return await client.call_tool("click", {"ref": ref})
+
+
+async def test_menu_item_under_a_destructive_submenu_needs_confirmation(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch
+) -> None:
+    """#847: menuitem "Rows" under Table > Delete deleted a row unprompted."""
+    _use_writer_table_menu(monkeypatch)
+    store.set_tier(APP, safety.Tier.FULL)
+    seen: list[str] = []
+
+    async def capture(_context, params):
+        seen.append(params.message)
+        return ElicitResult(action="decline")
+
+    result = await _snapshot_then_click(mcp_server, "e9", capture)
+    assert result.isError
+    assert "confirmation_declined" in result.content[0].text
+    assert seen and "Table > Delete > Rows" in seen[0]
+    assert mocked_driver["click"] == []
+    assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"
+
+
+async def test_submenu_opener_named_delete_is_not_gated(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    """#847: the Table > "Delete" opener only opens a submenu; it was refused 3/3."""
+    _use_writer_table_menu(monkeypatch)
+    store.set_tier(APP, safety.Tier.FULL)
+    asked: list[str] = []
+
+    async def capture(_context, params):
+        asked.append(params.message)
+        return ElicitResult(action="decline")
+
+    result = await _snapshot_then_click(mcp_server, "e8", capture)
+    assert not result.isError, result.content[0].text
+    assert asked == []
+    assert len(mocked_driver["click"]) == 1
+
+
 async def test_confirmation_elicitation_names_role_window_and_control(
     mcp_server, mocked_driver, store, monkeypatch
 ) -> None:

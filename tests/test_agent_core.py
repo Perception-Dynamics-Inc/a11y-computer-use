@@ -4934,3 +4934,80 @@ def test_relocation_ctime_boundary(tmp_path, monkeypatch, platform, ctime, expec
         [{"file_exists": str(path)}], None, "Rename old.txt to notes.txt", written_after=100,
     )
     assert checked[0]["ok"] is expected
+
+
+# --- #847: the harness gate judges the whole menu path, like the library gate ---
+
+
+def _office_menus() -> list[Element]:
+    """Writer's Table menu, Calc's Sheet menu and a Thunar context menu."""
+    return window(
+        el("e2", "AXMenuBar", "", parent="e1"),
+        el("e3", "AXMenu", "Table", parent="e2", clickable=True),
+        el("e4", "AXMenu", "Delete", parent="e3", clickable=True),
+        el("e5", "AXMenuItem", "Rows", parent="e4", clickable=True),
+        el("e6", "AXMenuItem", "Columns", parent="e4", clickable=True),
+        el("e7", "AXMenu", "Insert", parent="e3", clickable=True),
+        el("e8", "AXMenuItem", "Rows Above", parent="e7", clickable=True),
+        el("e9", "AXMenu", "Sheet", parent="e2", clickable=True),
+        el("e10", "AXMenuItem", "Delete Sheet…", parent="e9", clickable=True),
+        el("e11", "AXMenu", "", parent="e1"),
+        el("e12", "AXMenuItem", "Move to Trash", parent="e11", clickable=True),
+        el("e13", "AXButton", "Delete Rows", parent="e1", clickable=True),
+        title="doc.fodt — LibreOffice Writer",
+    )
+
+
+def _run_one_call(call: ToolCall, tmp_path):
+    asked: list = []
+
+    def approve(action):
+        asked.append(action)
+        return False
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel([turn(call), turn(done("stopped", [{"window_title_contains": "Writer"}]))]),
+        _office_menus(),
+        approve=approve,
+        trace_dir=tmp_path,
+    )
+    return result, runtime, asked
+
+
+@pytest.mark.parametrize(
+    ("call", "name"),
+    [
+        (ToolCall("click", {"ref": "e5"}), "Table > Delete > Rows"),
+        (ToolCall("click", {"ref": "e6"}), "Table > Delete > Columns"),
+        (ToolCall("menu", {"app": "demo", "path": "Table > Delete > Rows"}), "Table > Delete > Rows"),
+        (ToolCall("click", {"ref": "e13"}), "Delete Rows"),
+        (ToolCall("click", {"ref": "e10"}), "Sheet > Delete Sheet…"),
+        (ToolCall("menu", {"app": "demo", "path": "Sheet > Delete Sheet…"}), "Sheet > Delete Sheet…"),
+        (ToolCall("click", {"ref": "e12"}), "Move to Trash"),
+    ],
+    ids=["rows-item", "columns-item", "rows-menu-path", "toolbar", "calc-delete-sheet",
+         "calc-delete-sheet-path", "thunar-trash"],
+)
+def test_harness_asks_before_a_destructive_menu_command(call, name, tmp_path):
+    """#847 through the agent harness: a leaf under Table > Delete is a deletion."""
+    _result, runtime, asked = _run_one_call(call, tmp_path)
+    assert len(asked) == 1, asked
+    assert asked[0].target_name == name
+    assert asked[0].reason is not None and asked[0].reason.startswith("deleting")
+    assert [c for c in runtime.calls if c[0] in {"click", "menu"}] == []  # declined: nothing ran
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        ToolCall("click", {"ref": "e4"}),  # the Table > "Delete" submenu opener
+        ToolCall("click", {"ref": "e8"}),  # Table > Insert > Rows Above
+        ToolCall("menu", {"app": "demo", "path": "Table > Insert > Rows Above"}),
+    ],
+    ids=["delete-submenu-opener", "insert-rows-item", "insert-rows-path"],
+)
+def test_harness_does_not_ask_for_an_opener_or_a_safe_nested_item(call, tmp_path):
+    """Opening Table > Delete changes nothing; the harness refused it before #847."""
+    _result, runtime, asked = _run_one_call(call, tmp_path)
+    assert asked == []
+    assert [c[0] for c in runtime.calls if c[0] in {"click", "menu"}] == [call.name]

@@ -8,6 +8,7 @@ simulated AppKit-missing environment for the graceful-degradation path.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from datetime import datetime, timezone
@@ -37,10 +38,14 @@ from a11y_computer_use.schema import (
     Drag,
     Element,
     KeyChord,
+    MenuOp,
+    MenuVerb,
     ObserveOp,
     ObserveVerb,
     Point,
+    Scope,
     Scroll,
+    Snapshot,
     TypeText,
     WaitFor,
     WindowOp,
@@ -552,6 +557,118 @@ def test_confirmation_prompt_names_role_window_and_redacts() -> None:
     assert detail["window"] == "Checkout - Google Chrome"
     assert card not in detail["summary"]
     assert REDACTED in detail["summary"]
+
+
+# --- #847: the gate judges the whole menu path, not the clicked label -------
+
+
+def _menu_snapshot(snapshot_id: str = "snap-menu") -> Snapshot:
+    """LibreOffice Writer's Table menu as AT-SPI exposes it (gtk3 VCL).
+
+    Table and Delete are role ``menu`` (submenu openers, ``AXMenu``); Rows,
+    Columns and Rows Above are ``menu item`` leaves. Calc's Sheet > Delete
+    Sheet… and a Thunar context menu's Move to Trash sit in the same tree.
+    """
+    def el(ref, role, title, parent, path):
+        return Element(
+            ref=ref, role=role, title=title, value=None,
+            bounds=Bounds(0, 10, 10, 100, 27), snapshot_id=snapshot_id,
+            parent=parent, path=path, clickable=role != "AXWindow",
+        )
+
+    return Snapshot(
+        snapshot_id=snapshot_id, scope=Scope.WINDOW, app="soffice", pid=7,
+        created_at=0.0, displays=(),
+        elements=(
+            el("e1", "AXWindow", "doc.fodt — LibreOffice Writer", None, ("AXWindow",)),
+            el("e2", "AXMenuBar", "", "e1", ("AXWindow", "AXMenuBar")),
+            el("e3", "AXMenu", "Table", "e2", ("AXWindow", "AXMenuBar", "AXMenu")),
+            el("e4", "AXMenu", "Delete", "e3", ("AXWindow", "AXMenuBar", "AXMenu", "AXMenu")),
+            el("e5", "AXMenuItem", "Rows", "e4", ("AXWindow", "AXMenuBar", "AXMenu", "AXMenu", "AXMenuItem")),
+            el("e6", "AXMenuItem", "Columns", "e4", ("AXWindow", "AXMenuBar", "AXMenu", "AXMenu", "AXMenuItem")),
+            el("e7", "AXMenu", "Insert", "e3", ("AXWindow", "AXMenuBar", "AXMenu", "AXMenu")),
+            el("e8", "AXMenuItem", "Rows Above", "e7", ("AXWindow", "AXMenuBar", "AXMenu", "AXMenu", "AXMenuItem")),
+            el("e9", "AXMenu", "Sheet", "e2", ("AXWindow", "AXMenuBar", "AXMenu")),
+            el("e10", "AXMenuItem", "Delete Sheet…", "e9", ("AXWindow", "AXMenuBar", "AXMenu", "AXMenuItem")),
+            el("e11", "AXMenu", "", "e1", ("AXWindow", "AXMenu")),
+            el("e12", "AXMenuItem", "Move to Trash", "e11", ("AXWindow", "AXMenu", "AXMenuItem")),
+            el("e13", "AXButton", "Delete Rows", "e1", ("AXWindow", "AXButton")),
+        ),
+    )
+
+
+def _menu_click(ref: str) -> tuple[Click, tuple[str, ...]]:
+    from a11y_computer_use.safety import menu_path
+
+    snap = _menu_snapshot()
+    element = snap.element(ref)
+    return Click(target=element), menu_path(snap, element)
+
+
+def test_menu_path_reads_menu_ancestors_from_the_snapshot() -> None:
+    from a11y_computer_use.safety import menu_path
+
+    snap = _menu_snapshot()
+    assert menu_path(snap, snap.element("e5")) == ("Table", "Delete", "Rows")
+    assert menu_path(snap, snap.element("e10")) == ("Sheet", "Delete Sheet…")
+    assert menu_path(snap, snap.element("e12")) == ("Move to Trash",)  # unnamed popup
+    assert menu_path(snap, snap.element("e13")) == ("Delete Rows",)  # not a menu item
+
+
+def test_menu_path_ignores_a_parent_chain_from_another_snapshot() -> None:
+    from a11y_computer_use.safety import menu_path
+
+    other = _menu_snapshot("snap-other")
+    element = dataclasses.replace(other.element("e5"), snapshot_id="snap-live")
+    assert menu_path(other, element) == ("Rows",)
+
+
+def test_confirmation_prompt_does_not_gate_a_submenu_opener() -> None:
+    """Table > "Delete" only opens a submenu; #847 found it refused 3/3."""
+    action, path = _menu_click("e4")
+    assert confirmation_prompt(action, "soffice", menu_path=path) is None
+
+
+def test_confirmation_prompt_gates_a_leaf_under_a_destructive_submenu() -> None:
+    """Table > Delete > Rows deleted a row with no prompt 3/3 (#847)."""
+    for ref, leaf in (("e5", "Rows"), ("e6", "Columns")):
+        action, path = _menu_click(ref)
+        prompt = confirmation_prompt(action, "soffice", menu_path=path)
+        assert prompt is not None
+        assert prompt.target_name == f"Table > Delete > {leaf}"  # type: ignore[attr-defined]
+        assert "Table > Delete > " + leaf in prompt
+        assert "delete" in prompt.reason  # type: ignore[attr-defined]
+
+
+def test_confirmation_prompt_menu_path_leaf_is_the_clicked_element() -> None:
+    """Ancestors come from the issuing snapshot; the leaf is the live target."""
+    snap = _menu_snapshot()
+    live = dataclasses.replace(snap.element("e5"), snapshot_id="snap-live", ref="e40", parent=None)
+    prompt = confirmation_prompt(Click(target=live), "soffice", menu_path=("Table", "Delete", "Rows"))
+    assert prompt is not None and prompt.target_name == "Table > Delete > Rows"  # type: ignore[attr-defined]
+
+
+def test_confirmation_prompt_menu_op_judges_every_path_component() -> None:
+    prompt = confirmation_prompt(MenuOp(verb=MenuVerb.PRESS, app="soffice", path="Table > Delete > Rows"), "soffice")
+    assert prompt is not None
+    assert prompt.target_name == "Table > Delete > Rows"  # type: ignore[attr-defined]
+    assert confirmation_prompt(
+        MenuOp(verb=MenuVerb.PRESS, app="soffice", path="Sheet > Delete Sheet…"), "soffice"
+    ) is not None
+
+
+@pytest.mark.parametrize("ref", ["e10", "e12", "e13"])
+def test_confirmation_prompt_still_gates_delete_sheet_trash_and_toolbar(ref: str) -> None:
+    """Calc Delete Sheet, Thunar Move to Trash and the Delete Rows button."""
+    action, path = _menu_click(ref)
+    assert confirmation_prompt(action, "soffice", menu_path=path) is not None
+    assert confirmation_prompt(action, "soffice") is not None  # the leaf alone matches
+
+
+def test_confirmation_prompt_leaves_safe_nested_menu_items_alone() -> None:
+    action, path = _menu_click("e8")  # Table > Insert > Rows Above
+    assert confirmation_prompt(action, "soffice", menu_path=path) is None
+    assert confirmation_prompt(MenuOp(verb=MenuVerb.PRESS, app="soffice", path="Table > Insert > Rows Above"), "soffice") is None
 
 
 def test_granted_apps_lists_grants_the_deny_and_allow_lists_do_not_override(tmp_path) -> None:
