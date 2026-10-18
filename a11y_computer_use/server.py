@@ -3277,7 +3277,7 @@ class Runtime:
             after = self._writer_key_probe(app, chord, before)
         if after is None:
             if (chord or "").casefold() in {"return", "enter", "backspace", "delete"}:
-                return "unverifiable", "LibreOffice paragraph evidence is unavailable after the key"
+                return "unverifiable", "Writer/Impress/Draw paragraph evidence is unavailable after the key"
             return None
         if (chord or "").casefold() in {"ctrl+c", "ctrl+insert"}:
             return "unverifiable", "clipboard ownership was not verified"
@@ -3286,8 +3286,8 @@ class Runtime:
                 return "confirmed", "the drawing document focus or selection changed"
             return "unverifiable", "the drawing document focus and selection are unchanged"
         if after[2:] != before[2:]:
-            return "confirmed", "the focused LibreOffice paragraph, text, caret, or selection changed"
-        return "unverifiable", "the focused LibreOffice paragraph, text, caret, and selection are unchanged"
+            return "confirmed", "the focused Writer/Impress/Draw paragraph, text, caret, or selection changed"
+        return "unverifiable", "the focused Writer/Impress/Draw paragraph, text, caret, and selection are unchanged"
 
     def _sheet_key_probe(
         self, app: str | None, chord: str | None, previous: tuple | None = None,

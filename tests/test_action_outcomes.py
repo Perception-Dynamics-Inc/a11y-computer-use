@@ -2465,6 +2465,8 @@ def test_writer_key_scoped_outcome(monkeypatch, change, chord):
         "unverifiable" if chord == "ctrl+c" or change in {"unchanged", "missing"} else "confirmed"
     )
     assert result == expected
+    if result == "confirmed":
+        assert "Writer" in evidence
     assert len(scans) == (1 if change == "missing" else 0)
     assert len(reads) == (2 if change in {"unchanged", "settled"} else 1)
     if not scans:
