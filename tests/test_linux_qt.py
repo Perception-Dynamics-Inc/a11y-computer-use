@@ -1848,7 +1848,10 @@ def test_ref_type_caret_readback_outcome(
     field.selection = None
     monkeypatch.setattr(observe, "ax_handle_for", lambda *args: field)
     monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda acc: False)
-    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: pytest.fail(
+        "re-grabbing the focused field can reset the observed caret"
+    ))
     monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
     monkeypatch.setattr(_atspi, "peer_field_texts", lambda acc: {})
     native = LinuxDriver()
@@ -1878,9 +1881,108 @@ def test_ref_type_caret_readback_outcome(
     runtime = _runtime(tmp_path, driver)
     result = runtime.type_text(typed, ref="e3")
     assert result.outcome == ("partial" if readback_change else "confirmed")
-    if not readback_change:
-        assert result.next == ()
+    assert result.next == ()
+    assert f"at native offset {offset}" in result
     assert driver._type_expected is None
     # An empty follow-up cannot retain evidence from the earlier insertion.
     assert native.type_into(driver.elements[2], "") == 0
     assert native._type_expected is None
+
+
+@pytest.mark.parametrize("qt", [False, True], ids=["mousepad", "featherpad"])
+@pytest.mark.parametrize("trial", range(3))
+@pytest.mark.parametrize("fault", ["caret_moved", "at_end", "changed_before"])
+def test_ref_insert_rejects_observation_drift(utf16_atspi, monkeypatch, qt, trial, fault):
+    """The 18 reported negative cases must fail before sending any input."""
+    before = "0123456789abcdefghijklmnopqrstuvwxyz"
+    field = (_Utf16QtField(before, caret=20) if qt
+             else _ByteField(before, caret=20, toolkit="gtk"))
+    field.selection = None
+    if fault == "caret_moved":
+        field.caret = 23
+    elif fault == "at_end":
+        field.caret = len(before)
+    else:
+        field.text = "ZZ" + before
+    actual = field.text
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.insert_text(field, "TOKEN", expected_offset=20,
+                           expected_text_hash=_atspi._text_digest(before))
+    assert caught.value.code == ErrorCode.STALE_REF
+    assert caught.value.detail["reason"] == "type_state_changed"
+    assert caught.value.detail["offset"] is None
+    assert field.text == actual
+    assert field.lengths == []
+
+
+@pytest.mark.parametrize("qt", [False, True], ids=["mousepad", "featherpad"])
+@pytest.mark.parametrize("fault", ["dropped", "autocorrect", "changed_during"])
+def test_partial_insert_never_invites_retry(utf16_atspi, monkeypatch, qt, fault):
+    from a11y_computer_use import outcome
+
+    before = "0123456789"
+    field = (_Utf16QtField(before, caret=5) if qt
+             else _ByteField(before, caret=5, toolkit="gtk"))
+    field.selection = None
+    original = field.insert_text
+
+    def insert(pos, text, length):
+        result = original(pos, text, length)
+        if fault == "dropped":
+            field.text = field.text.replace("teh", "th")
+        elif fault == "autocorrect":
+            field.text = field.text.replace("teh", "the")
+        else:
+            field.text = "ZZ" + field.text
+        return result
+
+    field.insert_text = insert
+    # Concurrent edits must not pass through the expanded-contenteditable
+    # path merely because the complete token is still present somewhere.
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.insert_text(field, "teh", expected_offset=5,
+                           expected_text_hash=_atspi._text_digest(before))
+    detail = caught.value.detail
+    assert detail["unchanged"] is False
+    assert detail["offset"] == 5
+    assert detail["actual"] == field.text
+    result = outcome.refused_result(text=str(caught.value), code=caught.value.code.value,
+                                    message=str(caught.value), detail=detail)
+    assert result.outcome == "partial"
+    assert result.next == ()
+    assert field.text in result.evidence
+
+
+def test_snapshot_records_native_type_anchor_before_clipping(atspi):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Scope
+
+    text = "buffer " * 100
+    field = _Node("text", text=text, toolkit="gtk",
+                  states=("EDITABLE", "FOCUSED", "ENABLED", "VISIBLE", "SHOWING"))
+    field.caret = 20
+    # Use the real accessor and flattening path; the digest must cover the
+    # entire buffer even when the rendered Element.value is clipped.
+    raw = _atspi.ATSPIAccessor().read(field)
+    assert raw.type_offset == 20
+    assert raw.type_text_hash == _atspi._text_digest(text)
+    from a11y_computer_use.schema import Display
+    display = Display(0, 1280, 800, 1.0, True)
+    snap = observe.build_snapshot(
+        field, ATSPIAccessor(), scope=Scope.WINDOW, app="Editor", pid=None,
+        geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+    element = next(el for el in snap.elements if el.type_offset is not None)
+    assert element.type_offset == 20
+    assert element.type_text_hash == _atspi._text_digest(text)
+
+
+def test_expected_offset_requires_native_caret_evidence(atspi, monkeypatch):
+    field = _ByteField("text", caret=4, toolkit="gtk")
+    field.selection = None
+    monkeypatch.setattr(_Atspi.Text, "get_caret_offset", lambda acc: -1)
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.insert_text(field, "new", expected_offset=4)
+    assert caught.value.code == ErrorCode.STALE_REF
+    assert field.text == "text"
+    assert field.lengths == []

@@ -14310,7 +14310,9 @@ def _assert_ref_caret_outcomes(runtime, app, title, *, qt):
             assert api.Text.get_caret_offset(handle) == offset
 
         driver._run(place_caret)
-        result = runtime.type_text(typed, ref=field.ref)
+        # This test intentionally moved the caret after issuing the ref.
+        # Supply that newly verified intent instead of the snapshot offset.
+        result = runtime.type_text(typed, ref=field.ref, expected_offset=offset)
         assert result.outcome == "confirmed", result.evidence
         assert result.next == ()
         expected = before[:position] + typed + before[position:]

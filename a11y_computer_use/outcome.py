@@ -135,8 +135,12 @@ def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
     info = detail or {}
     if info.get("reason") == "fallback_target_unverified":
         return ()
+    if (info.get("unchanged") is False or info.get("reason") in {
+        "not_editable", "type_state_changed",
+    }):
+        return ()
     named = info.get("next")
-    if isinstance(named, (list, tuple)) and named:
+    if isinstance(named, (list, tuple)):
         return clean_next(named)
     reason = str(info.get("reason") or "")
     if code in _NO_RETRY or reason in _NO_RETRY:

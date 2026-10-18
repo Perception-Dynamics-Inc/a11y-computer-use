@@ -313,6 +313,10 @@ class Element:
     #: Native character offsets and exact text bound by a text search.
     text_range: tuple[int, int, str] | None = None
 
+    # Native caret and digest of the observed buffer; never populated for secrets.
+    type_offset: int | None = None
+    type_text_hash: str | None = None
+
     @property
     def actionable(self) -> bool:
         """Whether the element can meaningfully receive an action right now."""
