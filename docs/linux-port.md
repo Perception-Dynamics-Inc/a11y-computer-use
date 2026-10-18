@@ -945,3 +945,12 @@ Direct typing and key input refuse a known shaded or unmapped client with
 when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
 to restore the client before retrying. These checks do not change the window
 listing or snapshot visibility reporting tracked separately in #913.
+
+Qt child-widget `GrabFocus` does not activate an inactive window. When the
+existing target-focus wait needs to retry, the Linux backend also requests
+activation of the target's managed X11 window, restricted to the same PID.
+Top-level plain `QWidget` windows may have the AT-SPI role `filler`; only a
+Qt application's direct child qualifies for that window lookup. Recovery sends
+one activation request without restoring hidden/shaded windows or adding a
+second wait. Keyboard input still requires the target's native `FOCUSED` state;
+an acknowledged activation or `GrabFocus` alone does not confirm success.
