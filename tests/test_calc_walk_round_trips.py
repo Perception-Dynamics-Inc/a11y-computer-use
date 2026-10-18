@@ -120,7 +120,15 @@ def test_frame_outside_any_frame_is_none_for_the_walk_too() -> None:
     assert _atspi._frame_ancestor(loose) is None
 
 
-def test_frame_rectangle_is_read_once_per_walk() -> None:
+class _FakeAtspi:
+    class CoordType:
+        SCREEN = 0
+        WINDOW = 1
+
+
+def test_frame_rectangle_is_read_once_per_walk(monkeypatch) -> None:
+    # No PyGObject on macOS and Windows; the coord enum is all that is read.
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _FakeAtspi)
     calls, _app, frame, _pane, _table, _cells = _calc_tree()
     accessor = _atspi.ATSPIAccessor()
     calls.clear()
