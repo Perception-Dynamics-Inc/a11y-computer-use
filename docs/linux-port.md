@@ -804,3 +804,14 @@ checked. Missing text/offsets, changed windows, or focus leaving the document
 retain the ordinary window verification fallback. Key delivery and safety
 checks are unchanged. This path is hermetic-tested; native timing requires the
 Writer live regression.
+
+GTK text matches returned by `find(text=...)` carry native character offsets
+and SCREEN range bounds. Ref clicks, double-clicks, hover, and drag starts use
+that word rectangle. Resolution rechecks the exact text at those offsets and
+requires every character to remain inside the visible widget. Missing range
+or character extents, clipped text, and wrapped matches are refused with a
+hint to reveal the word and find again; widget-centre geometry is not a fallback.
+Other toolkits retain their existing find behavior. Linux text-ref double-clicks
+are confirmed only when a readable, nonempty text selection changes, not when
+only focus or the caret changes. Existing cross-app/cross-snapshot drag refusals
+remain in force.

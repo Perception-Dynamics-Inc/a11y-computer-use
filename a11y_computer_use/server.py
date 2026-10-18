@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 import re
 import time
 import os
@@ -4624,13 +4625,19 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
-            self._note_issued(snap)
             matches = observe.prefer_exact_targets(
                 observe.find_elements(
                     snap, text=text, role=role, editable=editable, clickable=clickable,
                 ),
                 text,
             )
+            range_target = getattr(self.driver, "text_match_target", None)
+            if text and callable(range_target):
+                matches = [range_target(el, text) for el in matches]
+                replacements = {el.ref: el for el in matches}
+                snap = replace(snap, elements=tuple(replacements.get(el.ref, el) for el in snap.elements))
+                self._current = snap
+            self._note_issued(snap)
             return observe.render_matches(snap, matches, text=text)
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
@@ -5167,6 +5174,12 @@ class Runtime:
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
         before = self._capture()
 
+        selection_reader = getattr(self.driver, "text_selection", None)
+        verify_selection = (count == 2 and isinstance(target, Element)
+                            and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
+                            and callable(selection_reader))
+        selection_before = None
+
         menu_note: list[str] = []
         button_mechanism: list[str] = []
         # A non-clickable text ref that stands for a button or link. The
@@ -5181,7 +5194,7 @@ class Runtime:
         raised: list[Element] = []
 
         def execute() -> None:
-            nonlocal before
+            nonlocal before, selection_before
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
@@ -5235,6 +5248,7 @@ class Runtime:
             plain = (
                 PREFER_AX_ACTIONS
                 and isinstance(act, Element)
+                and act.text_range is None
                 and parsed_button is MouseButton.LEFT
                 and count == 1
                 and not mods
@@ -5299,6 +5313,8 @@ class Runtime:
                 if mechanism is not None:
                     button_mechanism.append(mechanism)
                     return
+            if verify_selection:
+                selection_before = selection_reader(act)
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
@@ -5349,6 +5365,13 @@ class Runtime:
                 verdict = self._folder_navigation_verdict(target, nav_before)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
+        if verify_selection and not activated:
+            selection_after = selection_reader(target)
+            verdict = (
+                ("confirmed", "the text selection changed")
+                if selection_before is not None and selection_after and selection_after != selection_before
+                else ("suspected_noop", "the text selection did not change or could not be read")
+            )
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:
@@ -9678,8 +9701,10 @@ def build_server(
         text = case-insensitive substring of an element's title or its full value
         (text past the 200 characters kept on the element still matches). When
         a cell, row, or other control has that exact name, the match is that
-        control. A label counts only when its own title is the text. A
-        terminal's shown value is the on-screen text; a match only in the
+        control. A label counts only when its own title is the text.
+        Linux GTK text matches use verified native character-range bounds.
+        Missing or clipped screen ranges are refused. A terminal's shown value
+        is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
         'checkbox', 'link'); editable/clickable = keep only elements with that
@@ -9793,6 +9818,8 @@ def build_server(
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
+        Linux text ref double-clicks require a changed, nonempty native text
+        selection for confirmation; caret movement alone does not confirm.
         Valid x is 0..width-1 and valid y is 0..height-1 on that display. A
         point outside it, including the display's own width and height, is
         invalid_arguments and sends no input. An unknown display_id is

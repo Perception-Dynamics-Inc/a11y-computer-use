@@ -310,6 +310,9 @@ class Element:
     #: for every other element. A click is not rewritten into that double-click.
     note: str | None = None
 
+    #: Native character offsets and exact text bound by a text search.
+    text_range: tuple[int, int, str] | None = None
+
     @property
     def actionable(self) -> bool:
         """Whether the element can meaningfully receive an action right now."""
