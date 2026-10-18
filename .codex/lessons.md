@@ -392,6 +392,8 @@
 
 - 2026-10-18 (PR #876 validation): Concurrent private D-Bus sessions must use separate XDG_CACHE_HOME directories: their AT-SPI launchers otherwise share the same socket path. A full-suite remote-runtime subprocess lost that socket after the other session ended; all six remote tests passed with a separate cache.
 
+- 2026-10-18 (#878): Scintilla EditableText insertion can leave the caret at the insertion point even when exact buffer read-back succeeds. Advance only that stationary caret after verified insertion, using GTK code-point or Qt UTF-16 offsets, and verify the move. Preserve Draw/Impress's separate paragraph append behavior; a caret failure after insertion must not trigger duplicate keystrokes.
+
 - 2026-10-18 (PR #866 Math merge): Preserve Math focused-editable discovery and exact replacement read-back alongside Writer sibling-selection probes. The GTK icon-view CI failure was an interpreter-name permission refusal before click delivery, outside these paths; an initial local refusal followed by five unchanged PR passes and twelve main passes does not establish its intermittent identity-resolution cause. Keep the permission gate and live assertions intact.
 
 - 2026-10-18 (#886): Qt menu actions opening modal dialogs can return False after taking effect. Before coordinate fallback, re-resolve and require native identity, name/role, SHOWING and an exact hit; a generic tree change after a second input can otherwise falsely confirm a click on a different dialog control. Qt popup hits require the popup's Component: desktop/frame hit tests may return nothing or the underlying editor even for a valid visible menu item.
@@ -400,6 +402,7 @@
 
 - 2026-10-18 (PR #889 CI): A false native press result does not itself prove dispatch: Firefox checkboxes and GTK4 rows can have no eligible native press action. Record dispatch immediately before DoAction and bind a no-dispatch receipt to the exact target, consuming it once. Keep all stale-target checks after an actual attempted action; retain ordinary click guards when nothing was sent.
 
+- 2026-10-18 (PR #883 repair): Preserve both appended lessons when merging the Scintilla caret fix with Writer selection changes. An Impress failure while discovering its initial text frame occurs before typing and does not exercise the stationary-caret correction; do not classify that startup failure as a typing regression without further evidence. The unchanged Impress multiline test passed on both main and the merged PR under private Xvfb/Openbox/D-Bus; isolated passes do not establish the loaded-CI startup cause.
 - 2026-10-18 (#874): Scoped Chromium toggle verification must distinguish an unreadable StateSet from unchecked; general false-default state helpers can falsely confirm an uncheck after a bus failure. Keep pre/post reads on the same native handle, waits outside the AT-SPI thread, and invalidate the full-tree baseline after a verified transition. Only that transition bypasses process-exit grace; unchanged/unreadable toggles retain the full outcome path.
 
 - 2026-10-18 (PR #889 status): New-dialog dispatch receipts need an explicit dispatched mapping in agent step records and events; otherwise an unverified receipt falls through to no_op and invites retries. Preserve the dialog name and empty next hints across library, MCP, feedback, and trace surfaces.
