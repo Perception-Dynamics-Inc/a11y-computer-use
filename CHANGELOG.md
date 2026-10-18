@@ -7,6 +7,38 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.75] - 2026-10-19
+
+Twelve commits since v0.4.74, through #902.
+
+### Safety
+
+- After an uncertain native press, pointer fallback requires fresh target identity, visibility and an exact native hit; the agent stops same-step recovery on refusal. Complete native evidence of a newly opened dialog reports `dispatched`, preserving its name and empty retry hints without claiming verified effect. A target-bound no-dispatch receipt retains the ordinary guarded click path when no native action was sent. Refs #886 (#889) (eca4a98, 2026-10-18).
+- Browser permission grants and unsaved-change confirmations require approval for ref/coordinate clicks and supported activation keys, using live target-bound dialog context and rechecking after approval. English Allow, Leave and Reload prompts are covered; negative buttons and ordinary page namesakes remain ungated. Duplicate permission-prompt refs remain open in #899. Fixes #900, Fixes #901 (#905) (4ee0121, 2026-10-19).
+
+### Agent and input
+
+- Scripted held turns read the cancellation record once more before reporting a timeout, so a thread delayed across the deadline can still see a record already on disk; the timeout and record contract are unchanged. Fixes #925 (#926) (e1a877e, 2026-10-19).
+
+### Linux drivers
+
+- LibreOffice Math command paragraphs become editable text areas supporting verified ref insertion/replacement and focused no-ref typing. This initial recognizer requires an ASCII-hyphen frame title; #912 below completes recognition and caret handling for the reopened issue. Fixes #867 (#877) (d256317, 2026-10-18).
+- Math command recognition uses native metadata when available and accepts hyphen, en dash and em dash title fallbacks. Typing preserves confirmed focus and verifies the intended caret after insertion/replacement; failed caret checks return errors without retrying text. Native Math command editing was verified. Fixes #867 (#912) (d612286, 2026-10-18).
+- Verified text insertion advances a caret left at the original insertion point, using GTK code-point or Qt UTF-16 offsets, and verifies that movement. Automatic advancement and Impress/Draw paragraph behavior are preserved; failed correction does not retry already inserted text. Fixes #878 (#883) (23e1c0c, 2026-10-18).
+- Focus/raise removes shaded state and requires consecutive active, mapped, unshaded reads before success; direct and ref input refuse known shaded or unmapped clients. Window visibility reporting (#913) and broader minimized-ref behavior (#914) remain open and separate. Fixes #915 (#917) (ba6ce76, 2026-10-18).
+- Embedded unnamed file/color chooser widgets resolve through their enclosing native window, so Parole's Open Media Files dialog no longer treats its own rows as covered. Separate covering windows still block input, and effect verification is preserved. Fixes #918 (#922) (2326209, 2026-10-18).
+- Chromium snapshots bypass stale native child caches throughout traversal while retaining property caches and restoring the default mask. Large-table failures gain bounded native diagnostics without changing deadlines or assertions; although #898 is closed, the intermittent CI failure was not reproduced and its root cause is not established as fixed. Fixes #898 (#902) (f11f4f2, 2026-10-19).
+
+### Performance
+
+- Chromium page keys compare bounded native document, anchor, focus and window evidence before a full-window reread. Unchanged scoped evidence is unverifiable without retry advice; missing evidence retains fallback, clipboard-owner and process-exit checks remain, and live Chrome latency improvement was not measured. Fixes #881 (#885) (0408b9e, 2026-10-18).
+- Chromium toggle clicks compare fresh checked/pressed state on the same native handle, avoiding a whole-window outcome read and exit grace only after a verified transition. Missing, unreadable or unchanged evidence retains normal verification; live latency and CAPTCHA behavior were not measured. Fixes #874 (#894) (b31e3e6, 2026-10-18).
+- Coordinate toggle probes fall back from unavailable desktop hit-testing to the unique showing frame of the native point-owner PID, using reported bounds and Component hits. Missing or ambiguous owners retain full outcome verification; click delivery is unchanged. Fixes #874 (#903) (e89f901, 2026-10-18).
+
+### Packaging
+
+- The package version is 0.4.75.
+
 ## [0.4.74] - 2026-10-18
 
 Fifteen commits since v0.4.73, through #884.
