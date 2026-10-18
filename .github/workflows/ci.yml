@@ -242,6 +242,12 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends evince
           command -v evince
+      # Geany 2.0 is the Scintilla document the off-screen find test drives.
+      # A missing binary skips that test, so the install is what makes it run.
+      - name: install Geany
+        run: |
+          sudo apt-get install -y --no-install-recommends geany
+          command -v geany
       # OpenJDK 21 and the Java ATK Wrapper are the Swing JTable live test.
       # scroll_to_find must not type into a selected cell. A separate step,
       # so the shared apt line stays as it is.
