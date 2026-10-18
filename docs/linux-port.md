@@ -886,6 +886,18 @@ remains off screen (including Scintilla implementations without that scroll
 API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
 caret-based reveal fallback and verifies the resulting character extents.
 
+LibreOffice Math command paragraphs with native EDITABLE state and EditableText
+are exposed as editable text areas. Recognition requires an editable parent
+panel and a LibreOffice frame title ending in ` - LibreOffice Math`; other
+paragraphs keep their existing rules. An unnamed command paragraph uses its
+nearest named container (for example, `Commands`) as its label. Ref typing and
+replacement verify the command paragraph's Text value. When Math marks both
+the panel and one child paragraph focused, no-ref typing resolves that child
+and uses EditableText without entering the Calc settlement poller. Read-only
+paragraphs and ambiguous focused children are not accepted by this resolver.
+This path has synthetic regression coverage; native Math behavior and latency
+have not been measured by those tests.
+
 Chromium page keys use focused text/caret/selection plus a native document-child
 anchor and window name/child count before considering a full-window reread.
 When both scoped reads are available, a changed probe confirms an observed
