@@ -4671,6 +4671,70 @@ class Runtime:
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
+    def _buffer_match_kind(self, element: Element, text: str | None) -> str | None:
+        """``hidden`` when ``text`` is in a document buffer and off the widget.
+
+        None for every other element, and when extents cannot be read.
+        """
+        if not text or element.role != "AXTextArea" or element.subrole == "terminal":
+            return None
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        fn = getattr(self.driver, "buffer_match_visibility", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(element, text)
+        except Exception:
+            return None
+
+    def _reveal_buffer_element(self, element: Element, text: str) -> str | None:
+        fn = getattr(self.driver, "reveal_buffer_match", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(element, text)
+        except Exception:
+            return None
+
+    def _reveal_document_matches(
+        self,
+        snap: Snapshot,
+        matches: tuple,
+        text: str | None,
+        *,
+        role: str | None,
+        editable: bool | None,
+        clickable: bool | None,
+    ) -> tuple:
+        """Scroll off-screen document matches into the widget, then keep the visible ones.
+
+        ``(matches, hidden_left)``. ``hidden_left`` is true when the buffer
+        contains ``text`` and no reported match shows it. A match that stays
+        off screen is omitted. Character extents are the proof, and no box
+        is invented for the offset.
+        """
+        if not text or not matches:
+            return matches, False
+        hidden = [el for el in matches if self._buffer_match_kind(el, text) == "hidden"]
+        if not hidden:
+            return matches, False
+        scrolled = False
+        for el in hidden:
+            if self._reveal_buffer_element(el, text) == "scrolled":
+                scrolled = True
+        if scrolled and snap.app:
+            snap = self.driver.snapshot(snap.scope, snap.app)
+            self._current = snap
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
+            )
+        kept = tuple(el for el in matches if self._buffer_match_kind(el, text) != "hidden")
+        return kept, not kept
+
     @_serialized
     def find(
         self,
@@ -4691,7 +4755,12 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds. When a cell,
+        that stays off screen is reported with no bounds. A GTK multi-line
+        document, including a Scintilla buffer, is a match only when a
+        character of the text intersects the widget. An off-screen offset
+        is scrolled into view with the text interface, and it is reported
+        only when the extents then hit the widget. A match that stays off
+        screen is not returned, and no rectangle is invented for it. When a cell,
         row, or other control has the exact name, that control is the
         match. A label counts only when its own title is the text."""
         app = _required_app_arg(app, "find")
@@ -4728,14 +4797,29 @@ class Runtime:
                 ),
                 text,
             )
+            matches, hidden_buffer = self._reveal_document_matches(
+                snap, matches, text, role=role, editable=editable, clickable=clickable,
+            )
+            snap = self._current or snap
             range_target = getattr(self.driver, "text_match_target", None)
             if text and callable(range_target):
                 matches = [range_target(el, text) for el in matches]
                 replacements = {el.ref: el for el in matches}
-                snap = replace(snap, elements=tuple(replacements.get(el.ref, el) for el in snap.elements))
+                # Retain each observed widget's bounds in the snapshot. The
+                # returned matches carry native range bounds, and resolve_ref
+                # rechecks their text_range before targeting an action.
+                snap = replace(snap, elements=tuple(
+                    replace(replacements[el.ref], bounds=el.bounds)
+                    if el.ref in replacements else el for el in snap.elements
+                ))
                 self._current = snap
             self._note_issued(snap)
-            return observe.render_matches(snap, matches, text=text)
+            rendered = observe.render_matches(snap, matches, text=text)
+            if hidden_buffer and not matches:
+                rendered += (
+                    "\ntext is in the document buffer and not in the visible text"
+                )
+            return rendered
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
@@ -6900,6 +6984,13 @@ class Runtime:
         ``page_unchanged`` is used only when that container's scroll
         offset was read and did not move.
 
+        A GTK multi-line document is not a hit just because the widget is
+        on screen. The match has to be a character range whose extents
+        intersect that widget. When the text is only in the buffer, one
+        text-interface scroll or caret move brings it in, and that counts
+        as a scroll only if the extents then hit the widget. A match that
+        stays off screen is not found, and no rectangle is invented for it.
+
         A large GTK table is searched once through its Table interface
         before those steps. The matching cell is brought in with AT-SPI
         scroll_to or by setting the vertical bar from the row index. That
@@ -7045,7 +7136,7 @@ class Runtime:
         def visible_matches(snap: Snapshot) -> list[Element]:
             return [
                 el for el in search_matches(snap)
-                if on_screen(el, snap)
+                if on_screen(el, snap) and self._buffer_match_kind(el, text) != "hidden"
             ]
 
         def place_of(snap: Snapshot) -> str:
@@ -7056,7 +7147,10 @@ class Runtime:
             no match in this snapshot. A document table keeps rows that have
             already left the viewport, so a name in the tree is not a hit.
             """
-            found = search_matches(snap)
+            found = [
+                el for el in search_matches(snap)
+                if self._buffer_match_kind(el, text) != "hidden"
+            ]
             located = [el for el in found if el.bounds is not None]
             if not located:
                 return "missing"
@@ -7163,6 +7257,7 @@ class Runtime:
             document_ran_past = False
             find_tried = False
             table_jumped = False
+            buffer_tried = False
             frame_latched = False
             frame_waits = 0
             same_rows = 0
@@ -7755,6 +7850,34 @@ class Runtime:
                                 "ref": anchor_now.ref, "role": anchor_now.role},
                     )
                 matches = search_matches(snap)
+                if (
+                    matches
+                    and issued == 0
+                    and text
+                    and not buffer_tried
+                ):
+                    hidden_docs = [
+                        el for el in matches
+                        if self._buffer_match_kind(el, text) == "hidden"
+                    ]
+                    if hidden_docs:
+                        buffer_tried = True
+                        scrolled = False
+                        for el in hidden_docs:
+                            result = self._reveal_buffer_element(el, text)
+                            if result == "scrolled":
+                                scrolled = True
+                        if scrolled:
+                            issued += 1
+                            stalls = 0
+                            continue
+                        if all(
+                            self._buffer_match_kind(el, text) == "hidden" for el in matches
+                        ):
+                            return (
+                                f"not found after {issued} scroll(s): "
+                                f"{text!r} is in the document buffer and not in the visible text"
+                            )
                 if not matches and document_anchor(anchor_now):
                     refuse_opaque_find(anchor_now)
                 if not matches and container_not_readable(snap, anchor_now):

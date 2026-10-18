@@ -131,6 +131,10 @@ def test_find_publishes_range_in_current_and_issued_epoch(native, monkeypatch, t
         assert '[100x18 @0:70,20]' in found
         assert 'text range [6, 16)' in found
         assert rt._current.element('e1').text_range == (6, 16, 'DRAGWORDK5')
+        assert rt._current.element('e1').bounds == element().bounds
+        resolved = d.resolve_ref(rt._current, 'e1', live=snap)
+        assert resolved.bounds == Bounds(0, 70, 20, 100, 18)
+        assert resolved.text_range == (6, 16, 'DRAGWORDK5')
         assert rt._last_issued is rt._current
 
 
