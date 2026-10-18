@@ -880,6 +880,10 @@ def confirmation_prompt(
     is an :class:`ApprovalPrompt` (a ``str`` with those fields) when a prompt
     is warranted.
 
+    Leave/Reload buttons in the corresponding "Leave site?"/"Reload site?"
+    window also prompt because those browser dialogs discard unsaved changes.
+    Ordinary Leave/Reload controls remain outside this contextual rule.
+
     ``menu_path`` is the clicked element's menu path from the snapshot that
     issued its ref (see :func:`menu_path`). Every component is judged, so
     Table > Delete > Rows prompts although "Rows" alone would not, and the
@@ -889,7 +893,7 @@ def confirmation_prompt(
         A confirmation question to route to the host (e.g. via MCP
         elicitation), or None when the action needs no extra confirmation.
     """
-    described = _irreversible_target(action, menu_path)
+    described = _irreversible_target(action, menu_path, window=window)
     if described is None:
         return None
     verb, role, name, summary, match = described
@@ -1000,7 +1004,7 @@ def judge_command(
 
 
 def _irreversible_target(
-    action: Action, path: Sequence[str] | None = None,
+    action: Action, path: Sequence[str] | None = None, *, window: str | None = None,
 ) -> tuple[str, str | None, str, str, str] | None:
     """``(verb, role, name, summary, match)`` or None when no prompt is due.
 
@@ -1034,6 +1038,15 @@ def _irreversible_target(
     ancestors = [str(part).strip() for part in tuple(path or ())[:-1] if str(part).strip()]
     components = ancestors + ([title] if title else [])
     match = judge_command(components, role=action.target.role)
+    # Chrome's beforeunload dialogs use otherwise harmless labels to discard
+    # edits. Match the whole title, not page prose mentioning such a dialog.
+    if (
+        match is None
+        and action.target.role.casefold().removeprefix("ax") == "button"
+        and title.casefold() in {"leave", "reload"}
+        and (window or "").strip().casefold() == f"{title.casefold()} site?"
+    ):
+        match = "unsaved changes"
     if match is None:
         return None
     role = action.target.role or None

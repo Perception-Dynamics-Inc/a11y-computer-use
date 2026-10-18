@@ -5050,3 +5050,36 @@ def test_text_range_single_click_keeps_pointer_semantics(tmp_path, monkeypatch):
     rt.click(ref=el.ref)
     assert d.clicked == [el]
     assert d.clicked[0].bounds.center == Point(0, 120, 29)
+
+
+@pytest.mark.parametrize("label", ["Leave", "Reload"])
+@pytest.mark.parametrize("response", ["accept", "decline", "unavailable"])
+async def test_beforeunload_ref_click_confirmation(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch, label, response
+) -> None:
+    base = build_synthetic_snapshot()
+    button = base.element("e2")
+    dialog = dataclasses.replace(
+        button, ref="dialog", role="AXDialog", title=f"{label} site?",
+        parent=button.parent, clickable=False,
+    )
+    elements = tuple(
+        dataclasses.replace(el, title=label, parent=dialog.ref) if el.ref == "e2" else el
+        for el in base.elements
+    ) + (dialog,)
+    snap = dataclasses.replace(base, elements=elements)
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snap)
+    monkeypatch.setattr(observe, "resolve_ref", lambda s, ref, *, live=None: s.element(ref))
+    store.set_tier(APP, safety.Tier.FULL)
+    callback = {"accept": _accept_elicitation, "decline": _decline_elicitation,
+                "unavailable": None}[response]
+    result = await _snapshot_then_click_e2(mcp_server, callback)
+    if response == "accept":
+        assert not result.isError
+        assert len(mocked_driver["click"]) == 1
+    else:
+        assert result.isError
+        assert "confirmation_declined" in result.content[0].text
+        assert label in result.content[0].text
+        assert mocked_driver["click"] == []
+        assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"

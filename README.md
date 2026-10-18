@@ -95,7 +95,7 @@ Linux GTK2 limitation: HexChat 2.16.2 has been reported as listed and focusable 
 
 - Per-app grants (`read`, `click`, `full`) in `~/.a11y-computer-use/permissions.json`. No tool can grant itself access: `grant_app` records only what the user accepted in the host's own dialog, or the user runs `a11y-computer-use grant <app> <tier>`.
 - The macOS grants come to the user: a permission error opens the system dialog and the exact settings pane and names the host app ([docs/permissions.md](./docs/permissions.md)).
-- Clicks on destructive labels ask the host to confirm. No confirmation channel means the click is blocked.
+- Clicks on destructive labels ask the host to confirm, as do Leave/Reload buttons in the corresponding “Leave site?”/“Reload site?” browser dialogs. No confirmation channel means the click is blocked.
 - Password fields are never read, typed into, or clicked. Every action is checked against the frontmost window right before it fires.
 - Everything is logged to `~/.a11y-computer-use/audit/` as JSONL, with secrets redacted.
 
