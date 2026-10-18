@@ -8941,7 +8941,7 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
 
     capture("version", lambda: subprocess.check_output(
         [proc.args[0], "--version"], text=True, timeout=3).strip())
-    capture("load", os.getloadavg)
+    capture("load", lambda: os.getloadavg())  # absent on Windows; captured, not raised
     capture("windows", driver.windows)
     if shot is not None:
         evidence["snapshot"] = {
