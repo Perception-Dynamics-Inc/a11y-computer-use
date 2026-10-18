@@ -860,8 +860,12 @@ LibreOffice Math can retain accessibility focus on an Elements icon or its
 command panel after insertion. Typing read-back uses a unique showing, focused,
 editable paragraph in the active window and checks the selected range's exact
 replacement. Ambiguous or incomplete paragraph discovery is unverified, rather
-than a mismatch against the stale icon's empty text. This path has synthetic
-regression coverage; live Math validation is still required.
+than a mismatch against the stale icon's empty text. The verified command read
+is consumed once by the immediate type outcome, bound to the app and requested
+text, avoiding snapshot settlement against the stale icon. Hermetic regressions
+bound native reads and require no sleeps or outcome snapshots on successful
+Math typing. Placeholder replacement and subsequent typing were also checked
+with LibreOffice Math under Xvfb, xfwm4, and AT-SPI.
 
 Plain `find` on GTK multiline documents uses only the non-mutating AT-SPI
 text scroll API and leaves the caret and selection untouched. If the match
