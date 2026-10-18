@@ -14,7 +14,7 @@ structured content. The agent loop reads the attributes.
 - ``partial`` — something landed, but not the requested effect. A process that
   exits after a click is this case: the click was delivered and the app is gone,
   so the result is not ``confirmed``.
-- ``dispatched_new_dialog`` — a native press was attempted and a new visible
+- ``dispatched`` — a native press was attempted and a new visible
   dialog was observed; the requested effect is not yet verified.
 - ``refused`` — the action was not performed (permission, a hidden target, a
   disabled or secure control, a failed confirmation).
@@ -38,7 +38,7 @@ OUTCOMES = frozenset({
     "suspected_noop",
     "unverifiable",
     "partial",
-    "dispatched_new_dialog",
+    "dispatched",
     "refused",
 })
 
@@ -110,11 +110,12 @@ def suggest_next(
 ) -> tuple[str, ...]:
     """Strategies to try after ``outcome``, most specific first.
 
-    A confirmed action has nothing to escalate. A dead process is not retried
+    Confirmed actions and dialog dispatches have nothing to escalate.
+    A dead process is not retried
     at the same coordinates. A refusal that already names its own ``next``
     (a hidden document wants the tab in front) is supplied by the caller.
     """
-    if outcome == "confirmed":
+    if outcome in {"confirmed", "dispatched"}:
         return ()
     if process_died:
         return ("ref", "foreground")

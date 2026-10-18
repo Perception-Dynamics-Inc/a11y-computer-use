@@ -401,3 +401,5 @@
 - 2026-10-18 (PR #889 CI): A false native press result does not itself prove dispatch: Firefox checkboxes and GTK4 rows can have no eligible native press action. Record dispatch immediately before DoAction and bind a no-dispatch receipt to the exact target, consuming it once. Keep all stale-target checks after an actual attempted action; retain ordinary click guards when nothing was sent.
 
 - 2026-10-18 (#874): Scoped Chromium toggle verification must distinguish an unreadable StateSet from unchecked; general false-default state helpers can falsely confirm an uncheck after a bus failure. Keep pre/post reads on the same native handle, waits outside the AT-SPI thread, and invalidate the full-tree baseline after a verified transition. Only that transition bypasses process-exit grace; unchanged/unreadable toggles retain the full outcome path.
+
+- 2026-10-18 (PR #889 status): New-dialog dispatch receipts need an explicit dispatched mapping in agent step records and events; otherwise an unverified receipt falls through to no_op and invites retries. Preserve the dialog name and empty next hints across library, MCP, feedback, and trace surfaces.

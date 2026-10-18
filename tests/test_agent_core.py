@@ -5137,12 +5137,12 @@ def test_new_dialog_receipt_is_not_verified_or_retried(tmp_path):
         def call_tool(self, name, params, confirm=None):
             self.calls.append((name, params))
             self.elements = window(title="Preferences")
-            return ActionResult("native press dispatched; new dialog: Preferences",
-                                outcome="dispatched_new_dialog", next=())
+            return ActionResult('dispatched: opened dialog "Preferences"',
+                                outcome="dispatched", next=())
 
     elements = window(el("e2", "AXMenuItem", "Preferences", parent="e1"))
     runtime = DialogRuntime(elements)
-    result, _, runtime, agent = run(
+    result, events, runtime, agent = run(
         ScriptedModel([
             turn(ToolCall("click", {"ref": "e2"})),
             turn(done("observed", [{"element": {"role": "AXWindow", "name": "Preferences"}}])),
@@ -5150,8 +5150,20 @@ def test_new_dialog_receipt_is_not_verified_or_retried(tmp_path):
     )
     assert runtime.calls == [("click", {"ref": "e2"})]
     assert result.step_log[0].verified is False
-    assert any("Preferences" in str(m.content) and "dispatched_new_dialog" in str(m.content)
+    assert any("Preferences" in str(m.content) and "dispatched" in str(m.content)
                for m in agent._messages if m.role == "tool")
+    assert result.step_log[0].status == "dispatched"
+    assert 'opened dialog "Preferences"' in result.step_log[0].result
+    step = next(event for event in events if event.type == "step_finished")
+    assert step.data["status"] == "dispatched"
+    assert 'opened dialog "Preferences"' in step.data["result"]
+    rows = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    row = next(row for row in rows if "recovery" in row)
+    assert row["status"] == "dispatched"
+    assert 'opened dialog "Preferences"' in row["result"]
+    assert row["recovery"] == []
+    feedback = [str(m.content) for m in agent._messages if m.role == "tool" and m.name == "click"]
+    assert feedback and all("next:" not in text for text in feedback)
 
 
 def test_declined_press_during_recovery_stops_remaining_strategies(monkeypatch):

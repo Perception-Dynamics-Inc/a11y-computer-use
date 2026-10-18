@@ -5117,8 +5117,9 @@ async def test_declined_press_new_dialog_receipt(
     assert mocked_driver["click"] == []
     assert result.isError is (not new)
     if new:
-        assert "Preferences" in result.content[0].text
-        assert "dispatched_new_dialog" in str(result.structuredContent)
+        assert 'dispatched: opened dialog "Preferences"' in result.content[0].text
+        assert result.structuredContent["outcome"] == "dispatched"
+        assert result.structuredContent["next"] == []
         assert "not verified" in result.content[0].text
     else:
         assert "fallback_target_unverified" in result.content[0].text

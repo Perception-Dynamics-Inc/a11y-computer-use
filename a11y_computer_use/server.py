@@ -5594,12 +5594,12 @@ class Runtime:
             nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
         if new_dialogs:
-            names = ", ".join(repr(name) for name in new_dialogs)
+            names = ", ".join(json.dumps(name, ensure_ascii=False) for name in new_dialogs)
             return outcome.ActionResult(
-                f"native press dispatched; new dialog observed: {names}. "
+                f"dispatched: opened dialog {names}. "
                 "Take a fresh snapshot and inspect the dialog before continuing; "
                 "the requested effect is not verified. No fallback click was sent.",
-                outcome="dispatched_new_dialog", next=(),
+                outcome="dispatched", next=(),
                 evidence=f"new visible native dialog: {names}",
             )
         if raised and not activated:
@@ -10169,7 +10169,7 @@ def build_server(
         On Linux a declined accessibility press permits pointer fallback only
         after fresh ref, visibility, and exact target hit checks; otherwise it
         returns fallback_target_unverified with no fallback click sent. A newly
-        visible native dialog is named in a dispatched_new_dialog receipt; this
+        visible native dialog is named in a dispatched receipt; this
         is not verified effect. Inspect a fresh snapshot before continuing.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.

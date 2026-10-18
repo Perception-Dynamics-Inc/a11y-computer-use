@@ -894,8 +894,10 @@ The agent treats this refusal (including its `stale_ref` error) as final for the
 step: it surfaces the error to the model without a coordinate, vision, or other
 click retry, and does not mark the step verified. If complete native reads before
 and after the declined press show a newly visible dialog, Runtime instead returns
-`dispatched_new_dialog`, naming the dialog. This is dispatch evidence, not a
-verified outcome; inspect the fresh observation before choosing the next action.
+`dispatched`, naming the dialog, with no retry hints in `next`. The agent's
+step status is also `dispatched`, and its result retains the dialog name. This
+is dispatch evidence, not a verified outcome; inspect the fresh observation
+before choosing the next action.
 
 A false press result with an exact, single-use receipt proving no native action
 was dispatched retains the ordinary click path and its existing geometry guards.

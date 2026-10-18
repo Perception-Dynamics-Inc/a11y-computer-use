@@ -1458,7 +1458,7 @@ class Agent:
             result, error, marker = self._invoke(action)
             notes.append(label)
             if _final_click_error(error) or (
-                marker is not None and marker.outcome == "dispatched_new_dialog"
+                marker is not None and marker.outcome == "dispatched"
             ):
                 return (action, result, error, marker), notes
             if error is None and (marker is None or marker.outcome == "confirmed"):

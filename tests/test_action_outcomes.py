@@ -386,6 +386,7 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     died = outcome.judge(changed=True, process_died=True)
     assert died == ("partial", "the target process exited after the action")
     assert outcome.suggest_next("click", "confirmed") == ()
+    assert outcome.suggest_next("click", "dispatched", had_ref=True) == ()
     assert outcome.suggest_next("click", "partial", process_died=True) == ("ref", "foreground")
     assert outcome.suggest_next("set_value", "suspected_noop")[0] == "ref"
     assert "cdp" in outcome.suggest_next("select", "partial", browser=True)
