@@ -942,6 +942,35 @@ def _raw_rect(acc, coord_name: str):
     )
 
 
+def _share_parent_application(parent, kids) -> None:
+    """Give each child its parent's application for the rest of this read.
+
+    ``get_application`` climbs every ancestor, and on LibreOffice each of
+    those climbs is a bus round trip. A Calc sheet walk asked it of every
+    cell and widget, once from each toolkit check. A child whose own
+    parent is ``parent`` has the same application, which the walk already
+    knows. A child that names another parent climbs as before. Nothing is
+    stored outside a ``read_cache`` block.
+    """
+    if parent is None or not kids or not _read_cache_stack():
+        return
+    if _role_name(parent) in {"application", "desktop frame"}:
+        app = parent if _role_name(parent) == "application" else None
+    else:
+        app = _call_first(parent, ("get_application",))
+    if app is None:
+        return
+    key = _cache_key("get_application", ())
+    for kid in kids:
+        if kid is None or not hasattr(kid, "get_application"):
+            continue
+        if _lookup_read_cache(kid, key) is not _CACHE_MISS:
+            continue
+        if _call_first(kid, ("get_parent",)) is not parent:
+            continue
+        _store_read_cache(kid, key, app)
+
+
 def _frame_ancestor(acc):
     """The top-level frame that contains ``acc``, or ``acc`` when it is one."""
     node = acc
@@ -3948,6 +3977,12 @@ class ATSPIAccessor:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
+        # Whether this walk's application is Chromium. One walk reads one
+        # application, so this is asked once instead of for every child.
+        self._chromium: bool | None = None
+        # id(node) -> (node, its frame or None) for LibreOffice placement.
+        self._frames: dict[int, tuple[object, object]] = {}
+        self._frame_screens: dict[int, tuple[object, tuple]] = {}
         # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
         # snapshot, so listing the window does not scroll the tree.
         self._table_seek: str | None = None
@@ -4538,7 +4573,7 @@ class ATSPIAccessor:
         page = self._expand_page
         if page is not None and _frame_cache_key(node) == page[0]:
             return self._expanded_child_page(node, int(page[1]), int(page[2]))
-        if _role_name(node) in _LIST_ROLES and _chromium_app(node):
+        if _role_name(node) in _LIST_ROLES and self._tree_is_chromium(node):
             seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
             role = _role_name(node)
             if seek and role in {"table", "tree table"}:
@@ -4591,7 +4626,9 @@ class ATSPIAccessor:
         # box. Those are banded: a flat list would keep the first 96 and
         # drop the rows below that, which is most of a 1280×800 sheet.
         if count > _MAX_CHILDREN_FETCH and _spreadsheet_table(node):
-            return _publish_sheet_cells(_sheet_window_cells(node))
+            cells = _sheet_window_cells(node)
+            _share_parent_application(node, cells)
+            return _publish_sheet_cells(cells)
         count = min(count, _MAX_CHILDREN_FETCH)
         kids = []
         for i in range(count):
@@ -4607,8 +4644,11 @@ class ATSPIAccessor:
         ]
         # A scrolled Chromium container may lack SHOWING while its children
         # are painted. Keep traversing it; apply clipping to leaf targets.
-        kids = [child for child in kids
-                if not chromium_clipped_target(child) or _child_count(child) > 0]
+        # Only a Chromium tree has these. Asking each child walked its
+        # parents to the application on every node of a Calc sheet.
+        if self._tree_is_chromium(node):
+            kids = [child for child in kids
+                    if not chromium_clipped_target(child) or _child_count(child) > 0]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
@@ -4622,6 +4662,7 @@ class ATSPIAccessor:
         if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
             return []
         kids = _with_table_body(node, kids)
+        _share_parent_application(node, kids)
         if role == "page tab list":
             return _hoist_hidden_page_tabs(kids)
         return kids
@@ -4632,7 +4673,7 @@ class ATSPIAccessor:
         The client origin is None when no managed window sits on the frame's
         SCREEN rectangle. The flag is the root-pane check against that origin.
         """
-        screen = _raw_rect(frame, "SCREEN")
+        screen = self._frame_screen(frame)
         if screen is None or screen[2] <= 0 or screen[3] <= 0:
             return None, True
         key = (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
@@ -4666,7 +4707,7 @@ class ATSPIAccessor:
             return None
         if _role_name(node) == "frame":
             return None
-        frame = _frame_ancestor(node)
+        frame = self._frame_ancestor_of(node)
         if frame is None:
             return None
         client, screen_is_absolute = self._lo_placement(frame)
@@ -4675,12 +4716,63 @@ class ATSPIAccessor:
         window = _raw_rect(node, "WINDOW")
         if not _usable_window_rect(window):
             return None
-        frame_screen = _raw_rect(frame, "SCREEN")
+        frame_screen = self._frame_screen(frame)
         if frame_screen is None:
             return None
         return _libreoffice_content_origin(
             position, window, frame_screen, client, screen_is_absolute=screen_is_absolute,
         )
+
+    def _frame_screen(self, frame: object):
+        """The frame's SCREEN rectangle, read once for this walk.
+
+        Each content node placed against its frame read that rectangle
+        twice, which on a Calc sheet was about 1500 extents round trips
+        for one window. A failed read is not kept, so the next node asks.
+        """
+        known = self._frame_screens.get(id(frame))
+        if known is not None and known[0] is frame:
+            return known[1]
+        rect = _raw_rect(frame, "SCREEN")
+        if rect is not None:
+            self._frame_screens[id(frame)] = (frame, rect)
+        return rect
+
+    def _frame_ancestor_of(self, node: object):
+        """``_frame_ancestor`` for this walk, sharing each parent's answer.
+
+        Every LibreOffice content node asked for its frame by climbing to
+        it, so a Calc sheet climbed about five parents per node. The walk
+        reaches a node through its parent, so the climb stops at the first
+        ancestor this walk already placed. Entries hold the node itself,
+        so a freed wrapper cannot reuse an id.
+        """
+        chain: list = []
+        frame = None
+        current = node
+        for _ in range(32):
+            if current is None:
+                break
+            known = self._frames.get(id(current))
+            if known is not None and known[0] is current:
+                frame = known[1]
+                break
+            chain.append(current)
+            role = _role_name(current)
+            if role == "frame":
+                frame = current
+                break
+            if role == "application":
+                break
+            current = _call_first(current, ("get_parent", "getParent"))
+        for item in chain:
+            self._frames[id(item)] = (item, frame)
+        return frame
+
+    def _tree_is_chromium(self, node: object) -> bool:
+        if self._chromium is None:
+            self._chromium = _chromium_app(node)
+        return self._chromium
 
     def _tree_is_gecko(self, node: object) -> bool:
         if self._gecko is None:
