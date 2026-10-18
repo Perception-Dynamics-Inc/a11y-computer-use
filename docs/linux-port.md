@@ -794,3 +794,13 @@ inserting text or clearing the existing value, with `unsupported` and
 which could otherwise leave a partial prefix or type into another field. Paste
 through the clipboard or use the CDP browser backend and verify the full field
 value. This preflight does not change native GTK text insertion or Calc grid input.
+
+Writer navigation and edit keys (arrows, Home/End/PageUp/PageDown with Ctrl/Shift,
+selection, delete/backspace, paste/cut/undo/redo, and Return) use a scoped native
+read of the focused text object, caret and selection. Same-length text edits
+are detected. One short settlement reread precedes an unverifiable result for
+unchanged state; copy remains unverifiable because clipboard ownership is not
+checked. Missing text/offsets, changed windows, or focus leaving the document
+retain the ordinary window verification fallback. Key delivery and safety
+checks are unchanged. This path is hermetic-tested; native timing requires the
+Writer live regression.
