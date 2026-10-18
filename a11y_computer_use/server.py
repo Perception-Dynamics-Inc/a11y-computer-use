@@ -2541,7 +2541,10 @@ class Runtime:
     def _reject_terminal(self, action, app: str, *, audit: bool = True, input_target=None) -> None:
         """Audit and refuse terminal actions when execution is disabled."""
         launch = isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH
-        if self.allow_exec or not (launch or isinstance(action, (TypeText, KeyChord))):
+        if self.allow_exec or not (
+            launch or isinstance(action, (TypeText, KeyChord, Click))
+            or (isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS)
+        ):
             return
         check = getattr(self.driver, "terminal_target", None)
         if check is None:
@@ -10241,6 +10244,9 @@ def build_server(
         invalid_arguments and sends no input. An unknown display_id is
         invalid_arguments and names the valid ids. button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
+        Linux terminals and command launchers require explicit execution
+        permission for clicks, including Paste and Launch/Run; refusals are
+        audited as exec_disabled even with a full app grant.
         Linux Chromium page push buttons use a node-bound AT-SPI click/press for
         plain left clicks and name that mechanism in the result. Unsupported
         variants or unavailable actions are refused rather than using stale

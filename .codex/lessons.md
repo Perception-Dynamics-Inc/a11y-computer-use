@@ -437,3 +437,5 @@
 - 2026-10-18 (PR #905 main merge): Browser dialog gating and shaded-window input refusal protect different dispatch conditions. Preserve the approved dialog probe unchanged when importing the window visibility guard, and run both gate and Linux synthetic regressions.
 
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
+
+- 2026-10-19 (#934): Shell-capable GUI surfaces need commit/paste gates as well as typing gates. Clipboard write plus context-menu Paste and Launch can execute without TypeText or KeyChord. Gate clicks/menu presses before dispatch and after rechecks; identify panel run dialogs by native metadata and app identity, and cover detached popup items conservatively. Live validation should independently prepopulate the command to prove Launch itself is refused, then verify marker absence and audited violations. Preserve the focused-terminal fallback even when an addressed ref is not a terminal.

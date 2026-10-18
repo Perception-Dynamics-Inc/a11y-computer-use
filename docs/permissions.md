@@ -52,12 +52,20 @@ own dialog returned as accepted, and the file stays the user's to edit.
 
 ## Linux terminal execution
 
-Launching known terminal emulators and sending text or key chords to terminal
-windows requires an explicit execution grant, even when the app has a `full`
+Launching known terminal emulators and sending text, key chords, clicks, or menu
+presses to terminal windows requires an explicit execution grant, even when the app has a `full`
 grant. The agent supplies this with `--allow-exec`; embedded Runtime hosts must
 explicitly set `Runtime(allow_exec=True)`. The default is off, including for MCP
 hosts. Native AT-SPI terminal ancestry also protects terminals embedded in other
-apps. Read-only terminal observations remain available under the app's tier.
+apps. The same gate protects command launchers (including xfce4-appfinder and
+KRunner) and identified panel run dialogs. All clicks on these surfaces are
+blocked, including context-menu Paste, middle-click paste, and Launch/Run;
+Ctrl+V, Return, typing, and `set_value` also require execution permission.
+Panel dialogs are identified using application identity plus native window
+class/role or dialog ancestry, not a title alone. While a panel-owned run
+window is mapped, input to that panel host is conservatively blocked too.
+Clipboard writes remain available; pasting into the launcher is gated.
+Read-only terminal observations remain available under the app's tier.
 
 Blocked attempts return `exec_disabled` and write an audit row with
 `metrics.security_violation = "exec_disabled"` for benchmark consumers.

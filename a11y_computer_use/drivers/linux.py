@@ -5602,16 +5602,26 @@ class LinuxDriver:
                         if known(part) or (executable and known(str(Path(executable).resolve()))):
                             return True
             return False
-        if known(_resolved_app(app)):
+        resolved = _resolved_app(app)
+        if known(resolved):
             return True
+        from a11y_computer_use.drivers import _linux_system
+
+        if _linux_system.command_launcher_open(resolved):
+            return True
+
+        def shell_surface(handle):
+            return (_atspi.terminal_ancestor(handle)
+                    or _atspi.command_launcher_ancestor(handle, resolved))
+
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
         else:
             handle = self._focused_editable
-        if handle is not None and self._run(lambda: _atspi.terminal_ancestor(handle)):
+        if handle is not None and self._run(lambda: shell_surface(handle)):
             return True
         focused, _truncated = self._run(lambda: _atspi._focused_node(app))
-        return self._run(lambda: _atspi.terminal_ancestor(focused))
+        return self._run(lambda: shell_surface(focused))
 
     def launch_app(self, identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
         from a11y_computer_use.drivers import _linux_system

@@ -18446,6 +18446,28 @@ def terminal_ancestor(acc) -> bool:
     return False
 
 
+def command_launcher_ancestor(acc, app: str) -> bool:
+    """Identify desktop-shell run prompts, including GNOME's Alt+F2 dialog."""
+    from a11y_computer_use.drivers import _linux_system
+
+    if app.casefold() not in _linux_system._COMMAND_DIALOG_HOSTS:
+        return False
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) in {"dialog", "frame", "window"}:
+            attrs = _get_attributes(acc)
+            identities = {str(attrs.get(key, "")).casefold()
+                          for key in ("id", "class", "window-role", "xml-roles")}
+            if (identities & _linux_system._COMMAND_DIALOG_IDS
+                    or _node_name(acc).casefold() in _linux_system._COMMAND_DIALOG_TITLES):
+                return True
+        acc = _parent_of(acc)
+    return False
+
+
 def _parent_of(acc):
     _drop_cached_properties(acc)
     return _call_first(acc, ("get_parent", "getParent"))
