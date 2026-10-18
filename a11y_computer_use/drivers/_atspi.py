@@ -15565,8 +15565,31 @@ def _replace_editable_text(acc, text: str) -> bool:
     return _shown_is(acc, text)
 
 
+def _refuse_drawing_multiline_value(acc, text: str) -> None:
+    """Reject paragraph-splitting replacements before any mutation."""
+    if ("\n" in text or "\r" in text) and drawing_text_editable(acc):
+        # LibreOffice splits the paragraph but can leave the frame's child
+        # list stale. The old paragraph cannot verify the complete write.
+        # Refuse before even capturing/restoring caret or selection state.
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "Multiline replacement of an Impress or Draw paragraph is unsupported; "
+            "no text was changed",
+            detail={
+                "platform": "linux",
+                "reason": "multiline_value_for_paragraph",
+                "outcome": "refused",
+                "next": ["keyboard"],
+                "hint": "Use keyboard editing for paragraph breaks, then verify "
+                        "all paragraphs in the text frame.",
+            },
+        )
+
+
 def _replace_drawing_paragraph(acc, text: str) -> bool:
     """Replace an Impress or Draw paragraph. No selection and no keys.
+
+    ``set_text`` preflights paragraph breaks before calling this writer.
 
     One ``set_text_contents``. Success is ``Text.get_text(0, -1)`` equaling
     ``text``, the same read a snapshot uses, polled the way other
@@ -15728,6 +15751,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     no keys. Success leaves the caret where the write put it.
     """
     _refuse_chromium_tab_text(acc, text)
+    _refuse_drawing_multiline_value(acc, text)
     saved = _capture_text_points(acc)
     try:
         ok = _set_text_body(acc, text, force=force)
