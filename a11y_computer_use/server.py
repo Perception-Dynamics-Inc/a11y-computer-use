@@ -7091,14 +7091,24 @@ class Runtime:
         }:
             text += (
                 "; text read-back does not verify activation or navigation. "
-                "set_value does not guarantee keyboard focus. For GTK path entries "
-                "such as FileZilla, focus the field, select all, type the path, "
-                "then Return; verify the folder title/file list in a fresh snapshot. "
-                "Thunar location entries use focused keyboard replacement; send Return "
-                "separately to navigate. "
-                "If the path does not exist, create the missing folder from the nearest "
-                "existing parent, or check the path."
+                "set_value does not guarantee keyboard focus."
             )
+            # Path advice is irrelevant to ordinary editors and spin buttons.
+            path_entry = (
+                value.startswith("~") or "/" in value
+                or re.search(r"\b(?:path|location|local site|remote site)\b",
+                             f"{live.title} {live.placeholder}", re.IGNORECASE)
+            )
+            if path_entry:
+                text += (
+                    " For GTK path entries such as FileZilla, focus the field, "
+                    "select all, type the path, then Return; verify the folder "
+                    "title/file list in a fresh snapshot. "
+                    "Thunar location entries use focused keyboard replacement; send Return "
+                    "separately to navigate. "
+                    "If the path does not exist, create the missing folder from the nearest "
+                    "existing parent, or check the path."
+                )
         return self._conclude(
             text,
             tool="select" if choice else "set_value",
@@ -10592,7 +10602,9 @@ def build_server(
         An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success.
         Text read-back does not verify activation or navigation, and an API
-        write does not guarantee keyboard focus. Thunar's location bar uses
+        write does not guarantee keyboard focus. Results include path-entry
+        guidance only for path-like input or path/location-labelled fields.
+        Thunar's location bar uses
         focused keyboard replacement and leaves Return to the caller.
         Missing paths must be created from the nearest existing parent or corrected.
         Other GTK path entries such as FileZilla's Local site field may display
