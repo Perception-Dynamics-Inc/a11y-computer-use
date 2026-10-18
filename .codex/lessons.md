@@ -386,3 +386,5 @@
 - 2026-10-18 (PR #876 repair): The cuamenudlg missing-tree CI failure occurred during startup before either menu action. The unchanged test passed with its neighboring dialog test and in ten repeated private Xvfb/Openbox/D-Bus runs. Isolated passes do not establish the loaded-CI cause; preserve the live assertions and distinguish registration failures from Math typing verification.
 
 - 2026-10-18 (PR #876 validation): Concurrent private D-Bus sessions must use separate XDG_CACHE_HOME directories: their AT-SPI launchers otherwise share the same socket path. A full-suite remote-runtime subprocess lost that socket after the other session ended; all six remote tests passed with a separate cache.
+
+- 2026-10-18 (#878): Scintilla EditableText insertion can leave the caret at the insertion point even when exact buffer read-back succeeds. Advance only that stationary caret after verified insertion, using GTK code-point or Qt UTF-16 offsets, and verify the move. Preserve Draw/Impress's separate paragraph append behavior; a caret failure after insertion must not trigger duplicate keystrokes.
