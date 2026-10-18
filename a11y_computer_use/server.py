@@ -4686,11 +4686,15 @@ class Runtime:
         except Exception:
             return None
 
-    def _reveal_buffer_element(self, element: Element, text: str) -> str | None:
+    def _reveal_buffer_element(
+        self, element: Element, text: str, *, move_caret: bool = False,
+    ) -> str | None:
         fn = getattr(self.driver, "reveal_buffer_match", None)
         if not callable(fn):
             return None
         try:
+            if move_caret:
+                return fn(element, text, move_caret=True)
             return fn(element, text)
         except Exception:
             return None
@@ -4756,7 +4760,8 @@ class Runtime:
         that stays off screen is reported with no bounds. A GTK multi-line
         document, including a Scintilla buffer, is a match only when a
         character of the text intersects the widget. An off-screen offset
-        is scrolled into view with the text interface, and it is reported
+        may be scrolled into view with the non-mutating text scroll interface;
+        the caret and selection are left untouched. It is reported
         only when the extents then hit the widget. A match that stays off
         screen is not returned, and no rectangle is invented for it. When a cell,
         row, or other control has the exact name, that control is the
@@ -7874,7 +7879,7 @@ class Runtime:
                         buffer_tried = True
                         scrolled = False
                         for el in hidden_docs:
-                            result = self._reveal_buffer_element(el, text)
+                            result = self._reveal_buffer_element(el, text, move_caret=True)
                             if result == "scrolled":
                                 scrolled = True
                         if scrolled:

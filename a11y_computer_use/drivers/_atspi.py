@@ -3680,21 +3680,26 @@ def buffer_match_visibility(acc, needle: str) -> str | None:
     return "hidden"
 
 
-def _scroll_buffer_offset(acc, start: int, end: int) -> None:
+def _scroll_buffer_offset(acc, start: int, end: int, *, move_caret: bool = False) -> bool:
     """Ask the text interface to bring ``[start, end)`` into the widget.
 
     ``scroll_substring_to`` is the AT-SPI scroll. ``set_caret_offset`` is
-    the Scintilla path: the editor scrolls the caret into view. Neither
+    the Scintilla fallback, enabled only for explicit scroll-search. Neither
     call is success by itself. The caller reads character extents again.
     """
     Atspi = _atspi()
     scroll_type = getattr(getattr(Atspi, "ScrollType", None), "ANYWHERE", None)
+    scrolled = False
     if scroll_type is not None:
-        _safe(lambda: Atspi.Text.scroll_substring_to(acc, int(start), int(end), scroll_type))
-    _safe(lambda: Atspi.Text.set_caret_offset(acc, int(start)))
+        scrolled = bool(_safe(
+            lambda: Atspi.Text.scroll_substring_to(acc, int(start), int(end), scroll_type)
+        ))
+    if move_caret:
+        scrolled = bool(_safe(lambda: Atspi.Text.set_caret_offset(acc, int(start)))) or scrolled
+    return scrolled
 
 
-def reveal_buffer_match(acc, needle: str) -> str | None:
+def reveal_buffer_match(acc, needle: str, *, move_caret: bool = False) -> str | None:
     """Bring a hidden document match into the widget.
 
     None when this node is not judged. ``visible`` when a match already
@@ -3702,7 +3707,8 @@ def reveal_buffer_match(acc, needle: str) -> str | None:
     ``scroll_substring_to`` or ``set_caret_offset`` leaves a character of
     the match inside the widget. ``hidden`` when the match is in the buffer
     and still misses the widget afterwards. ``absent`` when it is not in
-    the buffer. Extents after the call are the only proof. No box is invented.
+    the buffer. Only explicit scroll-search may enable ``move_caret``.
+    Extents after the call are the only proof. No box is invented.
     """
     kind = buffer_match_visibility(acc, needle)
     if kind != "hidden":
@@ -3716,7 +3722,8 @@ def reveal_buffer_match(acc, needle: str) -> str | None:
         return "absent"
     length = len(text_needle.replace("\u00a0", " "))
     start = offsets[0]
-    _scroll_buffer_offset(acc, start, start + length)
+    if not _scroll_buffer_offset(acc, start, start + length, move_caret=move_caret):
+        return buffer_match_visibility(acc, needle)
     # Gtk.TextView applies scroll_substring_to on a later iteration of the
     # toolkit loop. The extents read in the same call are still the old
     # ones. A later read is the proof. Scintilla's caret scroll is already
