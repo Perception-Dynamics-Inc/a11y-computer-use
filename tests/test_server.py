@@ -4928,3 +4928,48 @@ def test_drag_refs_run_after_the_source_app_is_re_observed(tmp_path, monkeypatch
 
     assert len(calls) == 1
     assert calls[0][0].title == "dnd-file-Q9.txt" and calls[0][1].title == "notes"
+
+
+@pytest.mark.parametrize('before_selection,after_selection,expected', [
+    (None, None, 'suspected_noop'),
+    ((6, 16), (6, 16), 'suspected_noop'),
+    (None, ((6, 16),), 'suspected_noop'),
+    ((), ((6, 16),), 'confirmed'),
+])
+def test_text_double_click_requires_changed_selection(
+    tmp_path, monkeypatch, before_selection, after_selection, expected,
+):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = iter([before_selection, after_selection])
+    d.text_selection = lambda el: next(states)
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextArea', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == expected
+    assert 'selection' in result.evidence
+    assert len(d.clicked) == 1
+
+
+def test_text_range_single_click_keeps_pointer_semantics(tmp_path, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    def unexpected_press(target):
+        pytest.fail('a range click must not activate or focus the whole widget')
+    d.press_element = unexpected_press
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextArea', editable=True,
+                 bounds=Bounds(0, 70, 20, 100, 18), text_range=(6, 16, 'DRAGWORDK5'))
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    rt.click(ref=el.ref)
+    assert d.clicked == [el]
+    assert d.clicked[0].bounds.center == Point(0, 120, 29)

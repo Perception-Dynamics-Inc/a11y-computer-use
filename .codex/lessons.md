@@ -359,3 +359,10 @@
 - 2026-10-18 (PR #835 repair): AXButton includes Chromium native toggle buttons, whose advertised action need not be click/press. Scope the node-bound push-button route by native button/push button roles and retain the existing click path for toggles; never substitute toggle for an explicit click. Cover the distinction with synthetic routing tests and the unchanged live form-state test.
 
 - 2026-10-18 (PR #826 main merge): Preserve both Chromium node-bound button routing and Scintilla visibility filtering when merging #835/#837. The failed Geany CI run already included the owning-app pointer fix and reported identical requested/sent coordinates; do not attribute that refusal to the older Office coordinate bug. Geany navigation passed on main and the merged PR in private desktops, including the PR checks with the Ubuntu Geany build; these passes do not establish the loaded-CI failure cause.
+
+
+- 2026-10-18 (PR #834 repair): Chromium tab-write preflight and node-bound button clicks protect independent input paths. Preserve the tab refusal before any insertion or replacement mutation alongside main’s updated click mechanism and freshness limitations when merging backend documentation.
+
+- 2026-10-18 (PR #826 merge retry): When combining document reveal with text-range targets, refresh the snapshot after reveal, attach range targets to the surviving matches, and record issued refs from that final snapshot. Keep both visibility refusals and range-target regressions.
+
+- 2026-10-18 (PR #826 range integration): Keep observed widget geometry in the current snapshot when publishing native text-range matches. Render the measured range and retain its offsets for act-time revalidation; replacing widget bounds breaks document-visibility checks after reveal. The unchanged GTK TextView and both Geany live regressions passed together under Xvfb/Openbox/D-Bus.

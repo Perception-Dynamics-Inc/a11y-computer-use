@@ -13100,7 +13100,7 @@ def _scintilla_document(fake_atspi, monkeypatch, *, scroll: bool):
     body = "\n".join(lines)
     width = len(lines[0]) + 1
     view = {"line": 0}
-    editor = _Acc("text", name="Document", states=("MULTI_LINE", "EDITABLE"), width=400, height=400)
+    editor = _Acc("text", name="Document", states=("MULTI_LINE", "EDITABLE", "SHOWING"), width=400, height=400)
     editor.text = body
     _bind_gtk_app(editor)
     _place_row(editor, 40, 100, 400, 400)
@@ -13117,6 +13117,13 @@ def _scintilla_document(fake_atspi, monkeypatch, *, scroll: bool):
             view["line"] = max(0, int(offset) // width - 1)
         return True
 
+    # Find now publishes native range targets as well as revealing the line.
+    # This synthetic widget reports the same line rectangle for its range.
+    monkeypatch.setattr(
+        fake_atspi.Text, "get_range_extents",
+        staticmethod(lambda acc, start, end, coord: extents(acc, start, coord)),
+        raising=False,
+    )
     monkeypatch.setattr(fake_atspi.Text, "get_character_extents", staticmethod(extents), raising=False)
     monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", staticmethod(set_caret))
     window = _Acc("frame", name="Geany", width=640, height=560)
@@ -16902,3 +16909,47 @@ def test_native_ref_click_does_not_borrow_background_office_geometry(
     assert clicks == [(x, y + (21 if shifted else 0), {"button": "left", "count": count})]
     assert corrections == ([(x, y)] if shifted else [])
     assert notes == ([(x, y)] if shifted else [])
+
+
+@pytest.mark.parametrize("operation", ["insert_text", "set_text", "_type_into_target"])
+@pytest.mark.parametrize("role,tag", [("entry", "textarea"), ("section", "div")])
+@pytest.mark.parametrize("text", ["Item\tQty\nTea\t2", "\tItem", "Item\t"])
+def test_chromium_tab_write_refuses_before_any_mutation(
+    fake_atspi, monkeypatch, operation, role, tag, text,
+) -> None:
+    app = _Acc("application", name="chrome")
+    field = _Acc(role, name="Notes", states={"EDITABLE", "MULTI_LINE"})
+    field.text = "Original"
+    field.get_application = lambda: app
+    field.get_attributes = lambda: [f"tag:{tag}"]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("tab preflight must precede focus, selection, deletion and typing")
+
+    field.get_editable_text_iface = forbidden
+    for name in ("_type_string", "grab_focus", "_capture_text_points",
+                 "_x11_select_all_and_delete", "_clear_contenteditable"):
+        monkeypatch.setattr(_atspi, name, forbidden)
+    with pytest.raises(ComputerUseError) as caught:
+        getattr(_atspi, operation)(field, text)
+    assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "tab_moves_focus"
+    assert caught.value.detail["outcome"] == "refused"
+    assert caught.value.detail["next"] == ["clipboard", "cdp"]
+    assert "verify" in caught.value.detail["hint"]
+    assert field.text == "Original"
+
+
+def test_tab_preflight_preserves_native_text_and_chromium_plain_input(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_atspi, "_type_string", calls.append)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: None)
+    for app, text in (("gtk", "Item\tQty\nTea\t2"),
+                      ("soffice", "Item\tQty\nTea\t2"),
+                      ("chrome", "Item Qty\nTea 2")):
+        field = _Acc("text")
+        field.get_application = lambda: _Acc("application", name=app)
+        _atspi._type_into_target(field, text)
+        assert calls[-1] == text
+    assert len(calls) == 3

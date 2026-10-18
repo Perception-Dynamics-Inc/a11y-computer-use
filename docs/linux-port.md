@@ -789,3 +789,21 @@ hit-test answers after a timer-driven CSS transform. The node-bound button
 route avoids that geometry; it does not establish freshness for other roles
 or for direct low-level `LinuxDriver.click` pointer calls. Explicit coordinate
 clicks continue to send the requested pointer input.
+
+Chromium field writes containing TAB (`type` and `set_value`) are refused before
+inserting text or clearing the existing value, with `unsupported` and
+`reason: tab_moves_focus`. The AT-SPI key fallback sends Tab as focus navigation,
+which could otherwise leave a partial prefix or type into another field. Paste
+through the clipboard or use the CDP browser backend and verify the full field
+value. This preflight does not change native GTK text insertion or Calc grid input.
+
+GTK text matches returned by `find(text=...)` carry native character offsets
+and SCREEN range bounds. Ref clicks, double-clicks, hover, and drag starts use
+that word rectangle. Resolution rechecks the exact text at those offsets and
+requires every character to remain inside the visible widget. Missing range
+or character extents, clipped text, and wrapped matches are refused with a
+hint to reveal the word and find again; widget-centre geometry is not a fallback.
+Other toolkits retain their existing find behavior. Linux text-ref double-clicks
+are confirmed only when a readable, nonempty text selection changes, not when
+only focus or the caret changes. Existing cross-app/cross-snapshot drag refusals
+remain in force.

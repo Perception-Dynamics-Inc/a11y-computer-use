@@ -1800,6 +1800,98 @@ class LinuxDriver:
         except Exception:  # noqa: BLE001 - an unreadable bar is not a destination
             return None
 
+    def text_match_target(self, element: Element, text: str) -> Element:
+        """Bind a GTK text match to verified native screen range extents."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if (element.secure or element.subrole == "terminal"
+                or element.role not in {"AXTextArea", "AXTextField"}):
+            return element
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None or not self._run(lambda: "gtk" in _atspi._toolkit_name(handle)):
+            return element
+        raw = self._run(lambda: _atspi._full_text(handle))
+        matches = list(re.finditer(re.escape(text), raw, re.IGNORECASE)) if raw else []
+        if not matches:
+            if element.value and text.casefold() in element.value.casefold():
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED, "The matched text's native offsets cannot be read",
+                    detail={"ref": element.ref, "reason": "text_range_unavailable",
+                            "hint": "Find again after the text interface becomes readable."},
+                )
+            return element  # a title-only match still addresses the widget
+        failure = None
+        for match in matches:
+            try:
+                return self._text_range_target(element, (match.start(), match.end(), match.group()))
+            except ComputerUseError as exc:
+                failure = exc
+        raise failure
+
+    def _text_range_target(self, element: Element, span: tuple[int, int, str]) -> Element:
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        box = self._run(lambda: _atspi.text_range_rect(handle, *span))
+        if box is None or element.bounds is None:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "The matched text has no verified visible screen range; no pointer target is available",
+                detail={"ref": element.ref, "reason": "text_range_unavailable",
+                        "hint": "Scroll the word fully into view and find again. The toolkit must expose SCREEN range and character extents."},
+            )
+        x, y, width, height = box
+        widget = element.bounds
+        if not (widget.x <= x and widget.y <= y
+                and x + width <= widget.x + widget.width
+                and y + height <= widget.y + widget.height):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED, "The matched range is outside the visible widget",
+                detail={"ref": element.ref, "reason": "text_range_unavailable",
+                        "hint": "Scroll the word fully into view and find again."},
+            )
+        displays = self.displays()
+        if not any(display.display_id == widget.display_id
+                   and 0 <= x and 0 <= y
+                   and x + width <= display.width and y + height <= display.height
+                   for display in displays):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED, "The matched range is outside the visible display",
+                detail={"ref": element.ref, "reason": "text_range_unavailable",
+                        "hint": "Move the window and word fully on screen and find again."},
+            )
+        bounds = replace(element.bounds, x=x, y=y, width=width, height=height)
+        return replace(element, bounds=bounds, text_range=span,
+                       note=f"text range [{span[0]}, {span[1]})")
+
+    def text_selection(self, element: Element) -> tuple[tuple[int, int], ...] | None:
+        """Read selection offsets; a caret or unavailable read is not selection."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None or element.secure:
+            return None
+        def read():
+            try:
+                api = _atspi._atspi().Text
+                count = api.get_n_selections(handle)
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    return None
+                ranges = []
+                for index in range(count):
+                    span = _atspi._selection_bounds(api.get_selection(handle, index))
+                    if span is None or span[0] < 0 or span[1] < span[0]:
+                        return None
+                    if span[1] > span[0]:
+                        ranges.append(span)
+                return tuple(ranges)
+            except Exception:
+                return None
+        return self._run(read)
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
@@ -1815,6 +1907,15 @@ class LinuxDriver:
         reports ``not_visible`` instead. Click keeps this ``stale_ref``.
         """
         from a11y_computer_use import observe
+
+        anchor = snap.element(ref)
+        if anchor.text_range is not None:
+            # Preserve process/document/epoch checks, then re-read the exact
+            # offsets and geometry on the live native node.
+            plain = replace(anchor, text_range=None)
+            base = replace(snap, elements=tuple(plain if el.ref == ref else el for el in snap.elements))
+            resolved = self.resolve_ref(base, ref, live=live)
+            return self._text_range_target(resolved, anchor.text_range)
 
         self._resolved_popover_cover = None
         if live is None:
