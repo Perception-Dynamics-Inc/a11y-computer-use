@@ -20701,15 +20701,40 @@ def scroll_by_pixels(acc, *, dx: int = 0, dy: int = 0) -> bool:
 
 
 def _accessible_at_point(x: int, y: int):
-    """Deepest accessible under screen point ``(x, y)``, or None."""
+    """Hit-test the desktop, falling back to the native owner's showing frame.
+
+    The registry desktop and application roots need not expose Component.
+    Do not walk arbitrary background apps or guess between overlapping frames.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
     Atspi = _atspi()
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return None
     found = _deepest_at_point(desktop, int(x), int(y), 0, set())
-    if found is None or found is desktop:
+    if found is not None and found is not desktop:
+        return found
+    pid = _linux_system.pid_at_point(x, y)
+    if pid is None:
         return None
-    return found
+    frames = []
+    for index in range(_child_count(desktop)):
+        app = _child_at(desktop, index)
+        if pid_of(app) != pid:
+            continue
+        for frame in _fresh_application_children(app):
+            if not _state_has(frame, "SHOWING"):
+                continue
+            rect = _raw_rect(frame, "SCREEN")
+            if rect is None:
+                continue
+            left, top, width, height = rect
+            if left <= x < left + width and top <= y < top + height:
+                frames.append(frame)
+    if len(frames) != 1:
+        return None
+    return _deepest_at_point(frames[0], int(x), int(y), 0, set())
 
 
 def _deepest_at_point(acc, x: int, y: int, depth: int, seen: set[int]):

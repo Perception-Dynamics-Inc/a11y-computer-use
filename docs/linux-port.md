@@ -128,8 +128,11 @@ For Chrome/Electron processes that advertise a DevTools port, the Linux form ove
 
 Chromium page checkbox, radio, and toggle-button clicks compare fresh native
 `CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
-clicks use the accessible hit at the requested point, including a toggle's text
-descendant and nested web documents. A state change confirms the effect without
+clicks resolve the native window-owner PID and hit-test its showing AT-SPI frame
+at the requested point, including a toggle's text descendant and nested web
+documents. Missing owners or ambiguous overlapping frames retain normal
+verification. The registry desktop does not need a Component interface.
+A state change confirms the effect without
 another full-window snapshot or the process-exit grace wait; process liveness is
 still checked immediately. Unchanged, defunct, or unreadable targets retain the
 normal outcome check. This does not change the requested click or establish a
