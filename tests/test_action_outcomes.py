@@ -2428,3 +2428,148 @@ def test_linux_covered_click_raises_again_after_the_app_is_re_observed(
 
     assert result.startswith("clicked e2")
     assert _clicks(driver) == [("click", "e2", (10, 20))]
+
+
+@pytest.mark.parametrize("change", ["caret", "selection", "text", "paragraph", "unchanged", "missing", "settled", "died"])
+@pytest.mark.parametrize("chord", ["End", "shift+End", "ctrl+v", "ctrl+c"])
+def test_writer_key_scoped_outcome(monkeypatch, change, chord):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    before = ("window", "doc", "paragraph", 3, 0, (), "abc")
+    after = list(before)
+    if change in {"caret", "settled", "died"}:
+        after[4] = 3
+    elif change == "selection":
+        after[5] = ((0, 3),)
+    elif change == "text":
+        after[6] = "xyz"  # Same length replacements still count.
+    elif change == "paragraph":
+        after[2] = "other paragraph"
+    after = None if change == "missing" else tuple(after)
+    reads, scans = [], []
+
+    def probe(*args):
+        reads.append(args)
+        return before if change == "settled" and len(reads) == 1 else after
+
+    monkeypatch.setattr(runtime, "_writer_key_probe", probe)
+    monkeypatch.setattr(runtime, "_process_died", lambda _: change == "died")
+    monkeypatch.setattr(runtime, "_reread", lambda *args: scans.append(args))
+    result, evidence = runtime._judge_mutation(
+        "soffice.bin", None, None, None, key_focus=True,
+        key_chord=chord, writer_before=before,
+    )
+    expected = "partial" if change == "died" else (
+        "unverifiable" if chord == "ctrl+c" or change in {"unchanged", "missing"} else "confirmed"
+    )
+    assert result == expected
+    assert len(scans) == (1 if change == "missing" else 0)
+    assert len(reads) == (2 if change in {"unchanged", "settled"} else 1)
+    if not scans:
+        assert runtime._action_baseline["capture"] is None
+
+
+def test_writer_native_reads_are_scoped_and_reject_missing_evidence(monkeypatch):
+    from collections import Counter
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    calls = Counter()
+    paragraph, document, window = object(), object(), object()
+    state = dict(caret=0, text="abc", selections=[], focused=True, secure=False)
+
+    def read(name, value):
+        calls[name] += 1
+        return value
+
+    text = SimpleNamespace(
+        get_character_count=lambda acc: read("count", len(state["text"])),
+        get_caret_offset=lambda acc: read("caret", state["caret"]),
+        get_n_selections=lambda acc: read("nselections", len(state["selections"])),
+        get_selection=lambda acc, i: read("selection", state["selections"][i]),
+    )
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=text))
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: window)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: read("discovery", (paragraph, False)))
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, flag: state["focused"])
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: document)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: state["secure"])
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: read("text", state["text"]))
+    monkeypatch.setattr(_atspi, "_child_count", lambda *args: pytest.fail("subtree traversal"))
+    before = _atspi.writer_key_state("soffice")
+    assert before == (window, document, paragraph, 3, 0, (), "abc")
+    state.update(caret=3, selections=[(0, 3)])
+    after = _atspi.writer_key_state("soffice", before)
+    assert after[4:6] == (3, ((0, 3),))
+    assert calls == dict(discovery=1, count=2, caret=2, nselections=2, text=2, selection=1)
+    state.update(text="", caret=0, selections=[])
+    assert _atspi.writer_key_state("soffice", before)[6] == ""
+    state["caret"] = None
+    assert _atspi.writer_key_state("soffice", before) is None
+    state["caret"] = 0
+    state["secure"] = True
+    reads = calls["text"]
+    assert _atspi.writer_key_state("soffice", before) is None
+    assert calls["text"] == reads
+    state["secure"] = False
+    state["focused"] = False
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: None)
+    assert _atspi.writer_key_state("soffice", before) is None
+    assert calls["text"] == reads
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: document)
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: object())
+    assert _atspi.writer_key_state("soffice", before) is None
+    assert calls["text"] == reads
+
+
+@pytest.mark.parametrize("chord", ["End", "ctrl+v", "ctrl+c"])
+def test_writer_key_carries_scoped_evidence_without_calc_or_window_reads(tmp_path, monkeypatch, chord):
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    driver.name = "linux"
+    state = [0]
+    monkeypatch.setattr(runtime, "_linux_keyboard_window", lambda app: (APP, {}, []))
+    monkeypatch.setattr(runtime, "_ensure_linux_window", lambda *args: False)
+    monkeypatch.setattr(runtime, "_guard_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "_open_menu_app", lambda app: None)
+    monkeypatch.setattr(runtime, "_open_mnemonic_menu", lambda *args: False)
+    monkeypatch.setattr(_atspi, "writer_key_state", lambda app, previous: ("window", "doc", "para", 3, state[0], (), "abc"))
+    monkeypatch.setattr(runtime, "_key_focus_probe", lambda *args: pytest.fail("generic focus scan"))
+    monkeypatch.setattr(runtime, "_sheet_key_probe", lambda *args: pytest.fail("Calc scan"))
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("window scan"))
+    driver.key_effect = lambda key: state.__setitem__(0, 3)
+    result = runtime.key(chord, app=APP)
+    assert result.outcome == ("unverifiable" if chord == "ctrl+c" else "confirmed")
+    assert driver.calls == [("key", chord)]
+
+
+def test_writer_probe_runs_on_owner_thread_and_falls_back(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    running = []
+
+    def run(read):
+        running.append(True)
+        try:
+            return read()
+        finally:
+            running.pop()
+
+    def probe(app, previous):
+        assert running
+        raise RuntimeError("stale native object")
+
+    runtime.driver._run = run
+    monkeypatch.setattr(_atspi, "writer_key_state", probe)
+    assert runtime._writer_key_probe("soffice", "End") is None
+    monkeypatch.setattr(_atspi, "writer_key_state", lambda *args: pytest.fail("unsupported chord probe"))
+    assert runtime._writer_key_probe("soffice", "ctrl+s") is None
+    runtime.driver.name = "windows"
+    assert runtime._writer_key_probe("soffice", "End") is None

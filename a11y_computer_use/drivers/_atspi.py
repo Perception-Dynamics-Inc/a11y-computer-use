@@ -12423,6 +12423,50 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
+def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
+    """Read only the focused Writer text object, never its document subtree.
+
+    Reuse the native handle while it remains focused in the same window.
+    Missing native offsets are unknown, not fabricated caret positions.
+    """
+    if not libreoffice_app(app):
+        return None
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None or (previous is not None and root != previous[0]):
+        return None
+    acc = previous[2] if previous is not None else None
+    if acc is not None:
+        _call_first(acc, ("clear_cache", "clearCache"))
+    if acc is None or not _state_has(acc, "FOCUSED"):
+        acc, truncated = _focused_node(app)
+        if truncated or acc is None:
+            return None
+    document = writer_document_for(acc)
+    if document is None or (previous is not None and document != previous[1]) or is_secure(acc):
+        return None
+    _call_first(acc, ("clear_cache", "clearCache"))
+    Text = _atspi().Text
+    count = _safe(lambda: Text.get_character_count(acc))
+    caret = _safe(lambda: Text.get_caret_offset(acc))
+    nselections = _safe(lambda: Text.get_n_selections(acc))
+    if any(type(value) is not int or value < 0 for value in (count, caret, nselections)):
+        return None
+    if caret > count or nselections > 256:
+        return None
+    selections = []
+    for index in range(nselections):
+        span = _selection_bounds(_safe(lambda: Text.get_selection(acc, index)))
+        if span is None or not 0 <= span[0] <= span[1] <= count:
+            return None
+        selections.append(span)
+    text = _full_text(acc)
+    if text is None:
+        return None
+    return (root, document, acc, count, caret, tuple(selections), text)
+
+
 def sheet_key_state(app: str, previous: tuple | None = None) -> tuple | None:
     """Read a bounded Calc selection, then reread those exact native cells.
 
