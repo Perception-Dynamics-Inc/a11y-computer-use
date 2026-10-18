@@ -380,3 +380,9 @@
 - 2026-10-18 (#873): Scintilla caret movement is an input mutation even when used to reveal text. Plain find may use Text.scroll_substring_to but must never fall back to set_caret_offset; reserve that fallback for explicit scroll_to_find and verify native extents afterwards.
 
 - 2026-10-18 (PR #870 repair): Extending a scoped Writer key probe to Impress/Draw must preserve the Writer identity in its evidence text. The live timing test checks confirmed outcomes and then that identity separately; its string-list assertion does not imply input or confirmation failed. Cover the evidence contract in hermetic outcome tests too.
+
+- 2026-10-18 (#868): LibreOffice Math can leave FOCUSED on an Elements icon and command panel while keys reach the focused editable paragraph. Read-back must disambiguate within the active window and capture the paragraph selection before input: replacing `<?>` shortens the formula, so insertion/length checks alone still report a false mismatch. Keep exact replacement verification and return unverified for ambiguous or incomplete discovery.
+
+- 2026-10-18 (PR #876 repair): The cuamenudlg missing-tree CI failure occurred during startup before either menu action. The unchanged test passed with its neighboring dialog test and in ten repeated private Xvfb/Openbox/D-Bus runs. Isolated passes do not establish the loaded-CI cause; preserve the live assertions and distinguish registration failures from Math typing verification.
+
+- 2026-10-18 (PR #876 validation): Concurrent private D-Bus sessions must use separate XDG_CACHE_HOME directories: their AT-SPI launchers otherwise share the same socket path. A full-suite remote-runtime subprocess lost that socket after the other session ended; all six remote tests passed with a separate cache.

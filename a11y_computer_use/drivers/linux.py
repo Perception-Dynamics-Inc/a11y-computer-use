@@ -4205,6 +4205,20 @@ class LinuxDriver:
         selection = None
         editor_before = None
         editor_selection = None
+        # Math's command paragraph can replace a selected placeholder while
+        # the Elements icon still claims focus. Preserve that native range.
+        if app_id and _atspi.libreoffice_app(app_id) and before is not None:
+            def _office_span():
+                try:
+                    acc, truncated = _atspi._focused_node(app_id)
+                    if truncated or acc is None or _atspi._role_name(acc) not in {"icon", "panel"}:
+                        return None
+                    paragraph = _atspi._focused_office_paragraph(app_id, max_nodes=400)
+                    return _atspi._selection_span(paragraph, before) if paragraph is not None else None
+                except Exception:
+                    return None
+
+            selection = self._run(_office_span)
         if location is None and bar_before is None and app_id and not _atspi.libreoffice_app(app_id):
             def _spans():
                 # No AT-SPI binding (macOS and Windows hermetic runs) is not a
@@ -4309,6 +4323,23 @@ class LinuxDriver:
                     actual=shown,
                 )
         after = self._typed_readback(app_id)
+        # A placeholder replacement can shorten the formula. Require its
+        # exact result before the generic Office insertion/settlement path.
+        if selection is not None and app_id and _atspi.libreoffice_app(app_id):
+            if not _atspi._typed_visible(before, after, text, selection=selection):
+                after = _atspi._poll_typed_text(
+                    lambda: self._typed_readback(app_id), before, text, selection=selection,
+                )
+            if _atspi._typed_visible(before, after, text, selection=selection):
+                self._type_expected = _atspi._matched_replacement(before, after, text, selection)
+                return len(text)
+            if after is None:
+                self._type_unverified = True
+                return len(text)
+            raise _atspi._text_mismatch(
+                "text_mismatch", "the selected text was not replaced as requested",
+                expected=text, actual=after,
+            )
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)
         if (
