@@ -1,132 +1,89 @@
-<p align="center">
-  <img src="docs/assets/banner.png" alt="a11y-computer-use" width="100%">
-</p>
+<h1 align="center"><img src="docs/assets/logo-transparent.png" alt="" width="88"><br>a11y-computer-use</h1>
+
+<p align="center">Computer use for AI agents. Clicks real UI elements, not guessed pixels.</p>
 
 <p align="center">
-  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/actions/workflows/ci.yml"><img src="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/v/a11y-computer-use?label=PyPI" alt="PyPI"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
-  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.4.4"><img src="https://img.shields.io/badge/release-v0.4.4-2A8CFF" alt="Release v0.4.4"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/actions/workflows/ci.yml"><img src="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/pyversions/a11y-computer-use" alt="Python"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/Perception-Dynamics-Inc/a11y-computer-use" alt="License"></a>
 </p>
 
-Computer use for AI agents that clicks real UI elements instead of guessed pixels. The model reads a pruned accessibility tree and says `click e14`. Works on macOS, Windows, Linux, and Chromium, through one MCP server.
+<p align="center">
+  <img src="docs/assets/demo-calc.gif" alt="An agent fills a LibreOffice Calc sheet through accessibility refs, with the visible-actions overlay on" width="640">
+  <br><sub>Real time, Linux, LibreOffice Calc, overlay on. <a href="docs/assets/demo-calc.mp4">MP4</a></sub>
+</p>
 
-> 0.4.3 captures 100x faster on macOS 26 (screencapture, per-window OCR that ignores covering apps). 0.4.2 closes the first three agent-filed issues (file dialogs by address, no whole-display OCR under an app's grant), refuses to fight the user for an app (`user_active`), and asks permission through a real macOS alert. 0.4.0: the user keeps working while the agent works ([docs/coexist.md](./docs/coexist.md)).
+The model reads the app's accessibility tree and says `click e87`.
 
-![Driving TextEdit through accessibility refs](docs/hero-demo.gif)
+The click goes through the accessibility API, so it lands on that cell.
+
+One MCP server for macOS, Linux, Windows and Chrome.
 
 ## Install
 
 ```bash
-uvx a11y-computer-use doctor            # try it, no install
-pip install a11y-computer-use           # extras: [browser] [windows] [linux] [ocr] [holo]
+pip install a11y-computer-use      # Linux needs python3-gi: docs/install.md
 ```
 
-### Linux
-
-An isolated venv cannot build the `[agent,linux]` extras. PyGObject is sdist-only and pycairo has no Linux wheel, so pip compiles both, and that compile needs `pkg-config` plus the cairo and girepository headers. Use the distro packages and a venv that can see them:
-
-```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-atspi-2.0
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install 'a11y-computer-use[agent,linux]'
-```
-
-The other path is to install those build dependencies and then pip-install into an isolated venv. The package list is in [docs/linux-port.md](./docs/linux-port.md).
-
-Add it to Claude Code, Claude Desktop, Cursor, or any MCP host:
-
-```bash
-claude mcp add a11y-computer-use -- uvx a11y-computer-use mcp
-```
+Add it to any MCP host (Claude Code: `claude mcp add a11y-computer-use -- uvx a11y-computer-use mcp`):
 
 ```json
 { "mcpServers": { "a11y-computer-use": { "command": "uvx", "args": ["a11y-computer-use", "mcp"] } } }
 ```
 
-For a browser tab instead of the desktop, start Chrome with `--remote-debugging-port=9222` and set `A11Y_COMPUTER_USE_DRIVER=browser`.
-
-## What the model sees
-
-```text
-[snap-7] com.apple.TextEdit (window)
-  e1 window "Untitled"
-    e2 textarea ="Hello" (edit,focus)
-    e3 button "Save" (click)
-```
-
-Then it acts: `click(ref="e3")`, `type("hello")`, `set_value(ref="e2", value="...")`. Ref clicks go through the accessibility API and leave your pointer alone; typing addressed to an app (`type(text, app=...)`) leaves your screen alone too. A stale ref comes back as `stale_ref` with the nearest live candidates. Re-observing as a diff costs about 10 tokens. Apps with no accessibility tree (Telegram, canvases) get OCR refs `o1..oN` from on-device text recognition, and `click(ref="o7")` works the same way ([docs/ocr-refs.md](./docs/ocr-refs.md)).
-
-26 tools: `desktop_snapshot`, `find`, `screen_text`, `screenshot`, `zoom`, `crop` (PNG of one ref's on-screen bounds; no OCR), `click`, `hover` (Linux: move the pointer and deliver a hover with no click; elsewhere `unsupported`), `type`, `key`, `scroll`, `drag` (with waypoint paths for strokes), `wait_for`, `wait_until`, `act`, `set_value`, `scroll_to_find`, `notes`, `menu`, `file_dialog`, `app`, `window`, `clipboard`, `request_permission`, `grant_app`, `report_issue` (agents file the tool's own defects and slow calls as issues here, [docs/reporting.md](./docs/reporting.md)), plus `console`, `network`, and `webmcp` (tools a page registers through `navigator.modelContext`, listed as `w1..wN`, [docs/webmcp.md](./docs/webmcp.md)) on the browser. Menus and file dialogs stay reachable even in custom-drawn apps ([docs/macos-primitives.md](./docs/macos-primitives.md)). Details: [docs/agent-loop.md](./docs/agent-loop.md) and the tool docstrings.
-
-## Why not the alternatives
-
-<p align="center"><img src="docs/assets/alternatives.png" alt="Comparison with other computer-use approaches" width="92%"></p>
-
-| | Approach | Native desktop | Any model | Embeddable |
-|---|---|---|---|---|
-| Claude Desktop built-in | pixel loop | ✅ | ❌ | ❌ |
-| browser-use, Playwright MCP | a11y tree | ❌ browser only | ✅ | ✅ |
-| UI-TARS-desktop | pixel / vision | ✅ | partial | app |
-| Windows-MCP, Terminator | a11y (UIA) | Windows only | ✅ | ✅ |
-| **a11y-computer-use** | a11y tree + vision fallback | ✅ macOS, Linux, Windows*, Chromium | ✅ local too | ✅ MCP, CLI, Python |
-
-Same planner, 13 browser tasks, one round: refs finished 13/13 with 0 misclicks for $7.04; screenshot coordinates finished 7/13 with 27 misclicks for $11.74 ([full results](./docs/benchmarks/h2h-2026-09-02.md)). Run it yourself with `a11y-computer-use bench h2h`.
-
-## Platforms
-
-<p align="center"><img src="docs/assets/backends.png" alt="Four drivers under one core" width="92%"></p>
-
-| | Observe | Ref actions | Type, keys | Coordinates, screenshot | Verified |
-|---|---|---|---|---|---|
-| macOS (AX) | ✅ | ✅ | ✅ | ✅ | live on a granted Mac |
-| Linux (AT-SPI2) | ✅ | ✅ | ✅ | ✅ X11, ❌ Wayland | CI + real desktop VM |
-| Browser (CDP) | ✅ | ✅ | ✅ | ✅ | CI, headless Chrome |
-| Windows (UIA)* | ✅ | ◐ press only | ✅ | ❌ | CI, Notepad |
-
-\*Windows is partial: ref re-resolution, capture, and coordinate input are not implemented yet. Exact gates per platform: [docs/ci.md](./docs/ci.md), [docs/windows-port.md](./docs/windows-port.md), [docs/linux-port.md](./docs/linux-port.md).
-
-Linux GTK2 limitation: HexChat 2.16.2 has been reported as listed and focusable without an AT-SPI tree. Snapshot, find, and menus then return `no_accessibility_bridge`. See the [GTK2 bridge prerequisites and known limitation](./docs/linux-port.md#gtk2-hexchat-bridge-limitation).
-
-## Safety
-
-<p align="center"><img src="docs/assets/safety-gate.png" alt="Permission tier, confirmation gate, same-window recheck, execute, audit log" width="92%"></p>
-
-- Per-app grants (`read`, `click`, `full`) in `~/.a11y-computer-use/permissions.json`. No tool can grant itself access: `grant_app` records only what the user accepted in the host's own dialog, or the user runs `a11y-computer-use grant <app> <tier>`.
-- The macOS grants come to the user: a permission error opens the system dialog and the exact settings pane and names the host app ([docs/permissions.md](./docs/permissions.md)).
-- Clicks on destructive labels ask the host to confirm. No confirmation channel means the click is blocked.
-- Password fields are never read, typed into, or clicked. Every action is checked against the frontmost window right before it fires.
-- Everything is logged to `~/.a11y-computer-use/audit/` as JSONL, with secrets redacted.
-
-Report security issues privately: [SECURITY.md](./SECURITY.md).
-
-## Embed it
+Or drive it from Python:
 
 ```python
 from a11y_computer_use import safety, server
-
-store = safety.PermissionStore()
-store.set_tier("com.apple.TextEdit", safety.Tier.FULL)
+store = safety.PermissionStore(); store.set_tier("soffice", safety.Tier.FULL)
 rt = server.Runtime(store=store)
-print(rt.desktop_snapshot("com.apple.TextEdit", mode="interactive"))
-rt.click(ref="e3", verify=True)
+print(rt.find("soffice", text="B5"))   # -> e87 cell "B5" [82x17 @0:115,260]
+rt.click(ref="e87"); rt.type_text("=SUM(B2:B4)\n")
 ```
 
-Existing Anthropic or OpenAI computer-use loops can run through it unchanged via `a11y_computer_use.adapters` ([docs/provider-adapters.md](./docs/provider-adapters.md)). A reference agent loop ships as `a11y-computer-use agent --task "..."` and works with Anthropic, OpenAI-compatible endpoints (Ollama included), or the Claude Code CLI. `a11y-agent` runs one goal from an accessibility snapshot; the loop, the scripted model, and the exit codes are in [docs/agent.md](./docs/agent.md).
+## Why
 
-Spoken commands skip the planner: `a11y-computer-use voice` matches each utterance to one fixed skill and runs it through the same safety gate, with a per-command timeline ([docs/voice.md](./docs/voice.md)). `agent --mcp-command "ssh vm a11y-computer-use mcp"` keeps the planner local and runs every action on a remote machine under its own grants.
+- **The accessibility tree, not screenshots.** The model gets a short text tree with refs. A stale ref is an error, not a wrong click.
+- **Faster, with fewer errors.** No vision round trip per step. Several actions can go in one `act` call.
+- **A safety layer.** You grant each app. Destructive clicks need confirmation. Password fields are never read or typed. Every action is logged.
 
-Long jobs across several apps run as missions: phases with their own app grants, step budgets, runner-side checks (a file exists, a URL answers, text is on screen), retries, and a wall-clock timeline for video cuts.
+## What the model sees
 
-```bash
-a11y-computer-use mission run examples/missions/agency-demo.toml --provider claude-cli
-```
+<p align="center"><img src="docs/assets/tree-snapshot.png" alt="Snapshot of the Calc sheet as element refs" width="600"></p>
 
-Format and checks: [docs/missions.md](./docs/missions.md). The example mission is the design-agency reel described in [docs/missions/agency-demo.md](./docs/missions/agency-demo.md).
+<p align="center"><img src="docs/assets/overlay-highlight.png" alt="The visible-actions overlay labels the cell being clicked" width="520"><br><sub>The overlay shows what the agent touches (Linux X11, <a href="docs/linux-port.md#visible-actions-x11-prototype">settings</a>).</sub></p>
+
+## Platforms
+
+| Platform | Backend | Status | Tested in CI |
+|---|---|---|---|
+| Linux | AT-SPI2 | Full on X11. Wayland: observe and press only | Live, Xvfb + openbox |
+| macOS | AX | Full | Hermetic suite; live on a granted Mac |
+| Windows | UIA | Partial: snapshot, press, set_value, type, keys | Live, Notepad |
+| Browser | Chrome DevTools Protocol | Full | Live, headless Chromium |
+
+## How it compares
+
+From each project's public README and docs, October 2026. No speed claims until a head-to-head has run.
+
+| | a11y-computer-use | Hermes + cua-driver | OpenComputerUse |
+|---|---|---|---|
+| Sees the app as | Accessibility tree, OCR fallback | Tree, numbered screenshot, or vision | Screenshot per action, tree on request |
+| Batched actions | `act` | `run_steps`, `run_script` | `run_recipe` with a decision model |
+| Runs in the background | Ref actions leave the pointer alone | Yes | Yes, per-app sessions |
+| Watch it work | Overlay, Linux X11 | Overlay cursor, off on Linux X11 | Halo and gliding cursor, macOS |
+| Permission layer | Per-app grants, confirm, audit log | Approval gate on input actions | OS permissions; keys for HTTP access |
+| License | Apache-2.0 | MIT | MIT |
+
+What we don't do yet:
+- Coordinate input on Wayland.
+- Most of Windows: ref re-resolution, capture, coordinate input.
+- Private per-app displays, and phones.
+- Apps with no accessibility tree get OCR refs, not real elements.
 
 ## Docs
 
-[Agent loop](./docs/agent-loop.md) · [a11y-agent](./docs/agent.md) · [Missions](./docs/missions.md) · [Permissions](./docs/permissions.md) · [Coexist](./docs/coexist.md) · [Reporting](./docs/reporting.md) · [Voice](./docs/voice.md) · [WebMCP](./docs/webmcp.md) · [OCR refs](./docs/ocr-refs.md) · [macOS menus and dialogs](./docs/macos-primitives.md) · [Adapters](./docs/provider-adapters.md) · [Observation cost](./docs/observation-cost.md) · [Benchmark](./docs/benchmark.md) · [Browser backend](./docs/browser-backend.md) · [Linux](./docs/linux-port.md) · [Windows](./docs/windows-port.md) · [Real-desktop test bed](./docs/box-testbed.md) · [CI](./docs/ci.md) · [Decision records](./docs/decisions/) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
+[Install](docs/install.md) · [Tools](docs/tools.md) · [Platforms](docs/platforms.md) · [Comparison](docs/comparison.md) · [Safety](docs/safety.md) · [Embed it](docs/embedding.md) · [Linux](docs/linux-port.md) · [Windows](docs/windows-port.md) · [Browser](docs/browser-backend.md) · [Benchmarks](docs/benchmark.md) · [All docs](docs/README.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 Apache-2.0. Copyright 2026 Perception Dynamics, Inc.

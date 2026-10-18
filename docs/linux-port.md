@@ -167,7 +167,7 @@ and e0d48e3): snapshot, a11y press, `EditableText` typing, and a `grim`
 screenshot worked, and `key_chord` returned `unsupported`. No test or CI step in
 this repo reproduces that run (the Linux CI job is Xvfb-only,
 `.github/workflows/ci.yml`), so treat the matrix below as implemented-by-code
-with a single manual check behind it, matching the ◐ rows in README.md.
+with a single manual check behind it, matching the ◐ rows in [platforms.md](./platforms.md).
 
 | Capability | Wayland | how |
 |---|---|---|
