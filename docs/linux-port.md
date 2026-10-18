@@ -945,3 +945,11 @@ Direct typing and key input refuse a known shaded or unmapped client with
 when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
 to restore the client before retrying. These checks do not change the window
 listing or snapshot visibility reporting tracked separately in #913.
+
+For native EditableText `type(ref=...)`, an exact insertion at the pre-type
+caret (or replacement of the active selection) carries its verified expected
+buffer into the outcome check. GTK uses code-point offsets and Qt uses UTF-16
+offsets. A matching fresh read-back confirms start and middle insertions as
+well as appends, with no retry hints. A differing read-back retains the existing
+partial/no-op handling. This has hermetic GTK/Qt coverage; the live GTK and Qt
+regressions are left to CI.

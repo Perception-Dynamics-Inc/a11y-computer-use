@@ -1825,3 +1825,62 @@ def test_named_gtk_chooser_keeps_own_window(atspi):
     chooser = _Node("file chooser", "Open File", toolkit="gtk")
     _Node("frame", "Editor", children=[chooser], toolkit="gtk")
     assert _atspi.toplevel_raise_target(chooser)[1] == "Open File"
+
+
+@pytest.mark.parametrize("qt", [False, True], ids=["gtk", "qt"])
+@pytest.mark.parametrize("position", [0, 1, 5])
+@pytest.mark.parametrize("readback_change", [False, True])
+def test_ref_type_caret_readback_outcome(
+    utf16_atspi, monkeypatch, tmp_path, qt, position, readback_change,
+):
+    """Real insert/driver/outcome code over GTK and Qt synthetic transports."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from tests.test_type_ref import _Driver, _replace, _runtime
+
+    before = "😀tail"
+    typed = "中👩‍💻"
+    offset = _atspi._utf16_length(before[:position]) if qt else position
+    if not qt:
+        monkeypatch.setattr(_Atspi.Text, "get_character_count", lambda acc: len(acc.text))
+    field = (_Utf16QtField(before, caret=offset) if qt
+             else _ByteField(before, caret=offset, toolkit="gtk"))
+    field.selection = None
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: field)
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda acc: False)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda acc: {})
+    native = LinuxDriver()
+    monkeypatch.setattr(native, "_run", lambda fn: fn())
+    monkeypatch.setattr(native, "_raise_handle_window", lambda acc: None)
+    monkeypatch.setattr(native, "_refuse_hidden", lambda *args: None)
+    monkeypatch.setattr(native, "_visible_action", lambda *args: None)
+    driver = _Driver()
+    driver.name = "linux"
+    driver.elements = [_replace(el, value=before) if el.ref == "e3" else el
+                       for el in driver.elements]
+
+    def type_into(element, text):
+        count = native.type_into(element, text)
+        expected = before[:position] + typed + before[position:]
+        assert field.text == expected
+        assert native._type_expected == expected
+        driver._type_expected = native._type_expected
+        # A subsequent inconsistent read must remain partial, even though
+        # the native insertion previously matched exactly.
+        readback = "damaged buffer" if readback_change else field.text
+        driver.elements = [_replace(el, value=readback) if el.ref == "e3" else el
+                           for el in driver.elements]
+        return count
+
+    driver.type_into = type_into
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.type_text(typed, ref="e3")
+    assert result.outcome == ("partial" if readback_change else "confirmed")
+    if not readback_change:
+        assert result.next == ()
+    assert driver._type_expected is None
+    # An empty follow-up cannot retain evidence from the earlier insertion.
+    assert native.type_into(driver.elements[2], "") == 0
+    assert native._type_expected is None

@@ -3995,6 +3995,7 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
+        self._type_expected = None
         self._focused_editable = None
         if element.secure:
             raise _secure_focus_error("the requested ref is a password field")
@@ -4045,6 +4046,11 @@ class LinuxDriver:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
         self._raise_if_peers_changed(handle, peers, element)
+        if isinstance(count, _atspi._VerifiedInsertCount):
+            # Reuse the native pre-insert caret/selection and exact buffer
+            # verification, including Qt's UTF-16 offset conversion. Publish
+            # only after peer checks; Runtime still compares a fresh read-back.
+            self._type_expected = count.expected
         return count
 
     def _focus_lost_on(self, element: Element) -> ComputerUseError:

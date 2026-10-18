@@ -6747,6 +6747,15 @@ class _PrivateTextCount(int):
     private_text_verified = True
 
 
+class _VerifiedInsertCount(int):
+    """Character count carrying the exact buffer verified after insertion."""
+
+    def __new__(cls, count: int, expected: str):
+        result = super().__new__(cls, count)
+        result.expected = expected
+        return result
+
+
 def _write_unknown_entry(acc, text: str, *, insert: bool) -> bool:
     """Write an empty unknown entry once; expose only a verified boolean.
 
@@ -9349,7 +9358,7 @@ def insert_text(acc, text: str) -> int | None:
                     inserted_chars=len(typed),
                     unchanged=False,
                 )
-        return len(typed)
+        return _VerifiedInsertCount(len(typed), expected)
     # The raw string can still be U+FFFC, or spaces can come back as NBSP.
     # Compare the expanded read so a successful insert is not a mismatch.
     # Qt still has to report the character count of the string that was

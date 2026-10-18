@@ -839,6 +839,8 @@ def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
 
         for sample in ("Привет", "中文字", "ok 😀", "ab ✓ ok"):
             assert click_then_type(sample) == sample
+
+        _assert_ref_caret_outcomes(rt, _TYPE_APP, "single", qt=False)
     finally:
         proc.terminate()
         try:
@@ -5196,6 +5198,7 @@ def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
         assert held in {"7", "7.0"}, _read_qt_state(state)
         shot = current()
         assert float(find(shot, "Quantity").value) == 7.0
+        _assert_ref_caret_outcomes(runtime, _QT_APP, "Qt name", qt=True)
     finally:
         _stop(proc)
         log.close()
@@ -14282,3 +14285,33 @@ def test_linux_writer_key_scoped_timing(tmp_path) -> None:
     finally:
         _stop_group(proc)
         _kill_libreoffice()
+
+
+def _assert_ref_caret_outcomes(runtime, app, title, *, qt):
+    """Exact start/middle/end inserts confirm without inviting a second input."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = runtime.driver
+    before = "😀left right"
+    typed = "中👩‍💻"
+    for position in (0, 5, len(before)):
+        runtime.desktop_snapshot(app)
+        field = next(el for el in runtime._current.elements if el.title == title)
+        runtime.set_value(field.ref, before)
+        runtime.desktop_snapshot(app)
+        field = next(el for el in runtime._current.elements if el.title == title)
+        handle = observe.ax_handle_for(field.snapshot_id, field.ref)
+        offset = _atspi._utf16_length(before[:position]) if qt else position
+
+        def place_caret():
+            api = _atspi._atspi()
+            assert api.Text.set_caret_offset(handle, offset)
+            assert api.Text.get_caret_offset(handle) == offset
+
+        driver._run(place_caret)
+        result = runtime.type_text(typed, ref=field.ref)
+        assert result.outcome == "confirmed", result.evidence
+        assert result.next == ()
+        expected = before[:position] + typed + before[position:]
+        assert driver._run(lambda: _atspi._full_text(handle)) == expected
