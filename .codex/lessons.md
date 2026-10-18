@@ -435,3 +435,5 @@
 - 2026-10-18 (PR #905 speed repair): A bounded Chrome toolbar walk still adds hundreds of milliseconds when no dialog is open. Query native dialog/window roles first, retain the bounded fallback on query failure, and share each button StateSet within the probe. Reuse the decision only within the immediate action; human approval still requires a fresh read. Alt access keys require reported bindings or mnemonics, never the first letter of a label. Pin probe and node-read counts in regressions.
 
 - 2026-10-18 (PR #905 main merge): Browser dialog gating and shaded-window input refusal protect different dispatch conditions. Preserve the approved dialog probe unchanged when importing the window visibility guard, and run both gate and Linux synthetic regressions.
+
+- 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.

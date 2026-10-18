@@ -1686,6 +1686,60 @@ def test_linux_set_value_path_readback_does_not_claim_navigation(app) -> None:
     assert "verify the folder title/file list in a fresh snapshot" in result
 
 
+@pytest.mark.parametrize("role,title,placeholder,value,path_guidance", [
+    ("AXTextField", "Seconds", "", "30", False),
+    ("AXTextField", "Name", "", "Alice", False),
+    ("AXTextArea", "Commands", "", "x^2", False),
+    ("AXTextArea", "Notes", "", "ordinary text", False),
+    ("AXTextField", "Host", "", "example.org", False),
+    ("AXTextField", "Location:", "", "Documents", True),
+    ("AXTextArea", "", "Enter path", "Documents", True),
+    ("AXTextField", "Local site:", "", "Documents", True),
+    ("AXTextField", "Remote site:", "", "Documents", True),
+    ("AXTextField", "", "", "/tmp/new", True),
+    ("AXTextField", "", "", "~/Documents", True),
+    ("AXTextField", "", "", "parent/child", True),
+    ("AXTextField", "Allocation", "", "30", False),
+])
+def test_linux_set_value_scopes_path_guidance(
+    role, title, placeholder, value, path_guidance,
+) -> None:
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Element
+
+    rt = server.Runtime.__new__(server.Runtime)
+    field = Element(ref="e1", role=role, title=title, placeholder=placeholder,
+                    value="old", bounds=None, snapshot_id="s")
+    snap = type("S", (), {"app": "filezilla"})()
+    rt._anchor = lambda ref: (snap, field)
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    calls = []
+
+    class Driver:
+        name = "linux"
+
+        def resolve_ref(self, snapshot, ref):
+            return field
+
+        def set_value(self, element, requested):
+            calls.append((element.ref, requested))
+            return True
+
+    rt.driver = Driver()
+    result = rt.set_value("e1", value)
+    assert calls == [("e1", value)]
+    assert result.startswith(f"set e1 = {value!r}")
+    assert "text read-back does not verify activation or navigation" in result
+    assert "does not guarantee keyboard focus" in result
+    for guidance in ("GTK path entries", "FileZilla", "Thunar", "missing folder"):
+        assert (guidance in result) is path_guidance
+    if not path_guidance:
+        assert result == (
+            f"set e1 = {value!r}; text read-back does not verify activation or navigation. "
+            "set_value does not guarantee keyboard focus."
+        )
+
+
 def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     from a11y_computer_use import server
     from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
