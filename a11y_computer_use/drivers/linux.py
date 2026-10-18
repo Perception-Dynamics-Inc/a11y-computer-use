@@ -2875,6 +2875,7 @@ class LinuxDriver:
         # the call, including on the document, and that restore sends no keys.
         points = []
         if handle is not None:
+            self._run(lambda: _atspi._refuse_drawing_multiline_value(handle, value))
             points = self._run(lambda: _atspi._capture_text_points(handle)) or []
 
         def restore() -> None:
