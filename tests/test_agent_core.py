@@ -1718,6 +1718,63 @@ def test_repeated_screen_becomes_stuck():
     assert all(name == "click" for name, _params in runtime.calls)
 
 
+@pytest.mark.parametrize("gesture,button,count", [
+    ("right_click", "right", 1),
+    ("double_click", "left", 2),
+])
+def test_pointer_gesture_coordinate_fallback_preserves_button_and_count(
+    tmp_path, gesture, button, count,
+):
+    """An unverified ref gesture retries at its measured center without substitution."""
+    elements = window(el(
+        "e2", "AXButton", "Open", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    ))
+    result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall(gesture, {"ref": "e2"}))),
+        elements, max_steps=2, trace_dir=tmp_path, look_again=False,
+    )
+    assert runtime.calls[0] == ("click", {"ref": "e2", "button": button, "count": count})
+    assert runtime.calls[1] == ("click", {
+        "x": 60, "y": 42, "display_id": 0, "button": button, "count": count,
+    })
+    assert all(
+        name == "click" and args.get("button") == button and args.get("count") == count
+        for name, args in runtime.calls
+    )
+    assert all(step.verified is False for step in result.step_log)
+    assert result.step_log[-1].error and "not verified" in result.step_log[-1].error
+
+
+@pytest.mark.parametrize("button,count", [("right", 1), ("left", 2)])
+def test_click_intent_rejects_changed_gesture(button, count):
+    """Matching refs or names cannot authorize a different button or click count."""
+    elements = window(
+        el("e2", "AXButton", "Open", parent="e1", clickable=True, focused=True),
+        el("e3", "AXButton", "Open", parent="e1", clickable=True),
+    )
+    snap = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), tuple(elements))
+    requested = Action("click", {"ref": "e2", "button": button, "count": count})
+    for target in ({"_source_ref": "e2", "x": 60, "y": 42}, {"ref": "e3"}):
+        assert _same_intent(requested, Action("click", {
+            **target, "button": button, "count": count,
+        }), snap)
+        for changed in ({}, {"button": "left", "count": 1},
+                        {"button": "middle", "count": count},
+                        {"button": button, "count": count + 1}):
+            assert not _same_intent(requested, Action("click", {**target, **changed}), snap)
+    assert not _same_intent(requested, Action("key", {
+        "chord": "Return", "_source_ref": "e2",
+    }), snap)
+    # Without measured geometry, no gesture-preserving retry is available.
+    no_bounds = dataclasses.replace(snap, elements=tuple(
+        dataclasses.replace(item, bounds=None) for item in elements[:2]
+    ))
+    forced, label = forced_method(requested, 4, no_bounds)
+    assert forced == requested
+    assert label is None
+
+
 def test_escalation_keeps_the_requested_intent():
     """Every ladder step is the same action or the same target and payload.
 
@@ -5011,3 +5068,30 @@ def test_harness_does_not_ask_for_an_opener_or_a_safe_nested_item(call, tmp_path
     _result, runtime, asked = _run_one_call(call, tmp_path)
     assert asked == []
     assert [c[0] for c in runtime.calls if c[0] in {"click", "menu"}] == [call.name]
+
+
+@pytest.mark.parametrize("gesture,button,count", [
+    ("right_click", "right", 1),
+    ("double_click", "left", 2),
+])
+def test_pointer_gesture_without_geometry_reports_failure(tmp_path, gesture, button, count):
+    """No available coordinate retry must not turn a focused gesture into Return."""
+    elements = window(el(
+        "e2", "AXButton", "Open", parent="e1", clickable=True, focused=True, bounds=None,
+    ))
+    runtime = FakeRuntime(elements)
+    runtime.fail["e2"] = ComputerUseError(ErrorCode.UNSUPPORTED, "not verified")
+    result, _events, runtime, agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall(gesture, {"ref": "e2"}))),
+        elements, runtime=runtime, max_steps=2, max_retries=0, trace_dir=tmp_path,
+    )
+    assert runtime.calls == [
+        ("click", {"ref": "e2", "button": button, "count": count}),
+        ("click", {"ref": "e2", "button": button, "count": count}),
+    ]
+    assert all(not step.verified for step in result.step_log)
+    assert result.step_log[-1].error and "not verified" in result.step_log[-1].error
+    assert any(
+        message.role == "tool" and "not verified" in str(message.content)
+        for message in agent._messages
+    )

@@ -3797,7 +3797,8 @@ def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, st
     """A click at the same element's center. Not a substitute for type or menu.
 
     An explicit ``x``/``y`` click is already on its point. Escalation does
-    not move it to the center of the element under that point.
+    not move it to the center of the element under that point. The original
+    mouse button and click count are preserved.
     """
     if action.name != "click" or _is_coordinate_click(action):
         return None
@@ -3815,6 +3816,9 @@ def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, st
         "display_id": int(bounds.display_id),
         "_source_ref": element.ref,
     }
+    for key in ("button", "count"):
+        if key in action.args:
+            args[key] = action.args[key]
     return Action("click", args, action.id), f"coordinate_click:{x},{y}"
 
 
@@ -3855,7 +3859,8 @@ def _same_intent(requested: Action, executed: Action, snap: Snapshot | None) -> 
     """True when ``executed`` is ``requested`` or the same target and payload.
 
     A click may move to another ref with the same role and name, to that
-    element's center, or to Return when that element is focused. Typing may
+    element's center with the same button and count, or to Return for a single
+    left click when that element is focused. Typing may
     be retyped or set on the same ref. A key keeps its chord. A menu keeps
     its path. Focus, a different key, and a bare click are not the same intent.
     """
@@ -3888,6 +3893,11 @@ def _payload_text(action: Action) -> str:
 
 
 def _same_click_target(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    if (
+        requested.args.get("button", "left") != executed.args.get("button", "left")
+        or requested.args.get("count", 1) != executed.args.get("count", 1)
+    ):
+        return False
     wanted = str(requested.args.get("ref") or requested.args.get("_source_ref") or "")
     source = str(executed.args.get("_source_ref") or executed.args.get("ref") or "")
     if wanted and source and wanted == source:
@@ -3940,6 +3950,8 @@ def _return_matches_focused_click(
 ) -> bool:
     """True when Return activates the click target and that target is focused."""
     if requested.name != "click" or executed.name != "key":
+        return False
+    if requested.args.get("button", "left") != "left" or requested.args.get("count", 1) != 1:
         return False
     if str(executed.args.get("chord") or "") != "Return":
         return False
