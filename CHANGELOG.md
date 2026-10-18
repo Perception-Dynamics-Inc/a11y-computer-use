@@ -7,6 +7,44 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.74] - 2026-10-18
+
+Fifteen commits since v0.4.73, through #884.
+
+### Safety
+
+- Library and agent approval gates judge the whole menu path, including issuing-snapshot ancestors for ref clicks, so destructive leaves such as Table > Delete > Rows require confirmation while submenu openers do not. Refs #847 (#852) (4632bf8, 2026-10-18).
+
+### Agent and input
+
+- Coordinate retries preserve the original click button and count, and intent checks reject gesture changes; Return is not accepted as a replacement for right-click or double-click. Fixes #871 (#872) (1b5e9ff, 2026-10-18).
+
+### Linux drivers
+
+- Writer cell replacement rebuilds and verifies the complete paragraph list, including blank paragraphs, and passes exact verification to the immediate outcome once. Structural failures may leave partial edits and return a mismatch rather than claiming rollback or success. Fixes #839 (#846) (c2645f7, 2026-10-18).
+- Writer paragraph-edit keys refresh focus and compare native paragraph position/count; copy checks X11 clipboard owner and advertised targets without reading contents. Unchanged or missing evidence remains unverifiable, and copy and unverifiable key results carry no retry hints. Fixes #849 and #832 (#858) (050ae77, 2026-10-18).
+- Writer selection keys from an empty paragraph compare native sibling selection ranges within the same document; incomplete, invalid or oversized evidence retains the ordinary verification fallback. Fixes #864 (#866) (423cb37, 2026-10-18).
+- Impress/Draw paragraph replacements containing LF or CR are refused before text or caret mutation, preventing partial multiline writes and duplicate retries. Multiline replacement remains unsupported; single-line replacement keeps its verified path. Fixes #842 (#851) (fc62ef9, 2026-10-18).
+- Math typing resolves a unique focused editable command paragraph when accessibility focus remains on an Elements icon or panel, and verifies exact replacement of the native selection. Ambiguous or incomplete discovery remains unverified. Fixes #868 (#876) (3d9d3c7, 2026-10-18).
+- Scintilla matches are reported only when native text geometry lies inside the editor. Geany symbol double-click navigation is verified through native status/caret evidence, and outline click bounds are intersected with the measured tree and viewport to keep clicks on the visible row. Fixes #465 (#826) (00bdacb, 2026-10-18).
+- Plain find uses native substring scrolling without moving the editor caret or selection; matches that cannot be revealed are omitted with the hidden-buffer note. Explicit scroll_to_find retains its caret-based reveal fallback and native geometry checks. Fixes #873 (#875) (a843cde, 2026-10-18).
+
+### Performance
+
+- Writer key outcomes read scoped native text, caret, selection and identity instead of scanning the whole window, retaining fallback for missing evidence or changed focus/window and leaving unchanged evidence unverifiable. Fixes #833 (#840) (0e5a959, 2026-10-18).
+- Impress/Draw key outcomes use scoped paragraph or shape-selection evidence, and verified paragraph/frame click outcomes avoid a redundant snapshot. Unchanged evidence remains unverifiable; end-to-end Impress/Draw latency targets were not verified by this PR. Fixes #843 (#870) (0d07b0b, 2026-10-18).
+- Math type outcomes consume actual app/request-bound command text and selection evidence once, avoiding repeated whole-window settlement scans against the stale Elements icon. Exact edit checks and process-exit handling remain; native Math reproduction verified single delivery and correct text. Refs #868 (#884) (6700cb5, 2026-10-18).
+- LibreOffice snapshot walks reuse operation-scoped application, ancestor and frame geometry evidence instead of repeating native queries per node; live Calc output was unchanged, and existing timing bounds remain intact. Refs #775 (#859) (2554579, 2026-10-18).
+- Chromium ref clicks reuse the live resolution snapshot and can confirm a node-bound click from a fresh target-bound button-name change; missing or unchanged evidence keeps full-window verification. A native Collection query avoids menu discovery walks when it proves no menu bar exists, while preserving fallback and process-exit checks. Fixes #850 (#865) (800f395, 2026-10-18).
+
+### Tests and tooling
+
+- The Linux grants test cleans up only the Files and Terminal processes it launched on its display, even when app quit returns without exiting, preventing a leftover terminal from contaminating the next test. Product app quit behavior is unchanged and still reports a running xfce4-terminal honestly. Fixes #856 (#857) (82dfe63, 2026-10-18).
+
+### Packaging
+
+- The package version is 0.4.74.
+
 ## [0.4.73] - 2026-10-18
 
 Four commits since v0.4.72, through #841.
