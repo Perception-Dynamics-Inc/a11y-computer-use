@@ -405,3 +405,5 @@
 
 - 2026-10-18 (#900): Chrome beforeunload uses harmless Leave/Reload labels for discarding edits. Pair the exact button label with its enclosing Leave site?/Reload site? title; keep ordinary page controls and Cancel ungated. Cover declined and unavailable confirmation channels through MCP and assert no click plus an audit refusal.
 - 2026-10-18 (PR #877 main merge): Math command editing and Scintilla stationary-caret correction share insert_text but retain separate eligibility checks. Preserve both when merging; the unchanged Impress frame multiline regression passed under private Xvfb/Openbox/D-Bus after this merge.
+
+- 2026-10-18 (#900/#901 repair): Browser permission and beforeunload decisions need the dispatch-time tree, including coordinate targets and focused/default Enter buttons. Share the dialog predicate between Runtime and the agent; recheck after human approval, preserve the original input, and keep Block/Never allow/Cancel/Escape/page Allow controls ungated. Synthetic bench cases must avoid the separate duplicate-prompt stale-ref bug (#899).

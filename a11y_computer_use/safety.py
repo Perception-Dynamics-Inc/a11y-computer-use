@@ -859,6 +859,58 @@ def _confirmation_text(
     return " ".join(parts) + f"? (matched \u201c{match}\u201d)"
 
 
+def browser_dialog_prompt(action: Action, snap: object, app: str) -> str | None:
+    """Judge browser dialog activation using a dispatch-time tree.
+
+    This describes risk only; it never changes the requested input or derives
+    a click point. Coordinate matching uses only reported bounds. Ref targets
+    must already have been resolved into this tree by the caller.
+    """
+    from a11y_computer_use.outcome import element_at_point
+
+    elements = tuple(getattr(snap, "elements", ()) or ())
+    by_ref = {el.ref: el for el in elements}
+    if isinstance(action, Click):
+        target = action.target
+        if not isinstance(target, Element):
+            target = element_at_point(snap, target)
+        candidates = [target] if isinstance(target, Element) else []
+    elif isinstance(action, KeyChord) and action.chord.casefold() in {
+        "return", "enter", "kp_enter",
+    }:
+        focused = [el for el in elements if el.focused and _role_key(el.role) == "button"]
+        candidates = focused or [el for el in elements if el.default]
+    else:
+        return None
+    for target in candidates:
+        seen = set()
+        current = target
+        button = None
+        while current is not None and current.ref not in seen:
+            seen.add(current.ref)
+            if _role_key(current.role) == "button" and button is None:
+                button = current
+            title = current.title.strip()
+            role = _role_key(current.role)
+            if button is not None and role in {"dialog", "alert", "alertdialog", "window"}:
+                label = button.title.strip().casefold()
+                reason = None
+                if label in {"leave", "reload"} and title.casefold() == f"{label} site?":
+                    reason = "unsaved changes"
+                elif label in {"allow", "allow this time", "allow while visiting the site"} and "wants to:" in title.casefold():
+                    reason = "browser permission"
+                if reason:
+                    summary = (_click_summary(action) if isinstance(action, Click)
+                               else _summary_json({"chord": action.chord}))
+                    text = _confirmation_text(verb="activate", role=button.role,
+                                              name=button.title, window=title, app=app,
+                                              summary=summary, match=reason)
+                    return ApprovalPrompt(text, role=button.role, target_name=button.title,
+                                          window=title, summary=summary, reason=reason)
+            current = by_ref.get(current.parent)
+    return None
+
+
 def confirmation_prompt(
     action: Action, target_app: str, *, window: str | None = None,
     menu_path: Sequence[str] | None = None,
