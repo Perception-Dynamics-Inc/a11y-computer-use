@@ -421,6 +421,21 @@ def approval_target(action: Action) -> dict[str, str]:
     return target
 
 
+def _deletes(action: Action, text: str, role: str | None) -> bool:
+    """The shared full-path judgement (`safety.judge_command`) with the harness words.
+
+    ``text`` is the casefolded label, a whole menu path such as
+    "table > delete > rows" for menu items. A click or expand on a submenu
+    opener (role ``menu``) only opens it, so the leaf under it is judged
+    instead (#847). A ``menu`` call names a leaf path and carries no role.
+    """
+    from a11y_computer_use.safety import judge_command
+
+    components = tuple(part for part in text.split(" > ") if part)
+    opener_role = None if action.name == "menu" else role
+    return judge_command(components, role=opener_role, words=_DELETE_WORDS) is not None
+
+
 def risk_reason(
     action: Action,
     label: str | None,
@@ -454,7 +469,7 @@ def risk_reason(
             return f"paying {label or 'payment'}"
     if action.name in {"click", "menu", "expand"} and not is_toggle_control(role) and any(word in text for word in _SEND_WORDS):
         return f"sending {label}"
-    if action.name in {"click", "menu", "expand"} and any(word in text for word in _DELETE_WORDS):
+    if action.name in {"click", "menu", "expand"} and _deletes(action, text, role):
         return f"deleting {label}"
     if action.name == "menu" and any(word in text for word in ("quit", "exit", "close window", "log out", "sign out")):
         return f"menu {label}"

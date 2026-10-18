@@ -964,11 +964,36 @@ def menu_path(snap: object, element: Element) -> tuple[str, ...]:
     return tuple(reversed(names)) + (own,)
 
 
-def _destructive_match(components: Sequence[str]) -> str | None:
-    """The first destructive keyword found in any path component, or None."""
+def menu_op_path(path: str) -> tuple[str, ...]:
+    """The components of a ``menu(path=...)`` string, e.g. Table > Delete > Rows."""
+    return tuple(part.strip() for part in str(path or "").split(">") if part.strip())
+
+
+def is_submenu_opener(role: object) -> bool:
+    """True for a submenu opener (role ``menu`` / ``AXMenu``); clicking it changes nothing."""
+    return _role_key(role) in _SUBMENU_OPENER_ROLES
+
+
+def judge_command(
+    components: Sequence[str],
+    *,
+    role: object = None,
+    words: Sequence[str] = _DESTRUCTIVE_LABEL_SUBSTRINGS,
+) -> str | None:
+    """The one full-path irreversibility judgement both gates use (#847).
+
+    ``components`` is the whole command: a menu path (Table > Delete > Rows)
+    or a lone label. The first of ``words`` found in any component is
+    returned. A click on a submenu opener (``role`` ``menu`` / ``AXMenu``)
+    is never judged irreversible; the leaf under it is. The library gate
+    (`confirmation_prompt`) and the agent harness gate
+    (`agent.actions.risk_reason`) both call this, each with its own words.
+    """
+    if role is not None and is_submenu_opener(role):
+        return None
     for component in components:
-        lowered = component.lower()
-        match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
+        lowered = str(component).lower()
+        match = next((kw for kw in words if kw in lowered), None)
         if match is not None:
             return match
     return None
@@ -985,8 +1010,8 @@ def _irreversible_target(
     under it is.
     """
     if isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS:
-        components = [part.strip() for part in action.path.split(">") if part.strip()]
-        match = _destructive_match(components)
+        components = list(menu_op_path(action.path))
+        match = judge_command(components)
         if match is None:
             return None
         summary = _summary_json({"verb": "press"})
@@ -1003,14 +1028,12 @@ def _irreversible_target(
         return ("call the WebMCP tool", "webmcp tool", name, summary, match)
     if not isinstance(action, Click) or not isinstance(action.target, Element):
         return None
-    if _role_key(action.target.role) in _SUBMENU_OPENER_ROLES:
-        return None
     title = action.target.title.strip()
     # The ancestors come from the issuing snapshot; the leaf is always the
     # element actually being clicked.
     ancestors = [str(part).strip() for part in tuple(path or ())[:-1] if str(part).strip()]
     components = ancestors + ([title] if title else [])
-    match = _destructive_match(components)
+    match = judge_command(components, role=action.target.role)
     if match is None:
         return None
     role = action.target.role or None
