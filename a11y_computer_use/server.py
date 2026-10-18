@@ -5396,6 +5396,8 @@ class Runtime:
                             and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
                             and callable(selection_reader))
         selection_before = None
+        toggle_probe = None
+        probe_toggle = getattr(self.driver, "toggle_click_probe", None)
 
         menu_note: list[str] = []
         button_mechanism: list[str] = []
@@ -5411,7 +5413,7 @@ class Runtime:
         raised: list[Element] = []
 
         def execute() -> None:
-            nonlocal before, selection_before
+            nonlocal before, selection_before, toggle_probe
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
@@ -5471,8 +5473,12 @@ class Runtime:
                 and not mods
                 and not _linux_button_uses_pointer(self.driver, act)
             )
-            if plain and self.driver.press_element(act):
-                return  # activated via AX — the user's cursor never moved
+            if plain:
+                if callable(probe_toggle):
+                    toggle_probe = probe_toggle(act)
+                if self.driver.press_element(act):
+                    return  # activated via AX — the user's cursor never moved
+                toggle_probe = None
             if activated and isinstance(act, Element) and not _positive_box(act):
                 control = activated[0]
                 raise ComputerUseError(
@@ -5532,6 +5538,8 @@ class Runtime:
                     return
             if verify_selection:
                 selection_before = selection_reader(act)
+            if callable(probe_toggle):
+                toggle_probe = probe_toggle(act)
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
@@ -5605,6 +5613,22 @@ class Runtime:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:
             verdict = ("partial", "the row was selected and activates on double-click")
+        toggle_evidence = getattr(self.driver, "toggle_click_evidence", None)
+        if verdict is None and toggle_probe is not None and callable(toggle_evidence):
+            evidence = toggle_evidence(toggle_probe)
+            if evidence is not None:
+                baseline = getattr(self, "_action_baseline", None)
+                process = before or (baseline.get("process") if isinstance(baseline, dict) else None)
+                self._action_baseline = {
+                    "token": id(getattr(self, "_current", None)), "app": app,
+                    "capture": None, "process": process,
+                }
+                # A live state transition already proves the click's effect.
+                # Check liveness now without waiting for a possible future exit.
+                died = bool(process and process.get("pid_alive")
+                            and not outcome.pid_alive(process["pid"]))
+                verdict = (("partial", "the target process exited after the action")
+                           if died else ("confirmed", evidence))
         result = self._conclude(
             text, tool="click", app=app, before=before,
             element=judged_element,
