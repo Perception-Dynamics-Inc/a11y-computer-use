@@ -17326,6 +17326,121 @@ def test_scroll_to_find_scintilla_retains_caret_fallback(fake_atspi, monkeypatch
     assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
 
 
+def _math_command(text=""):
+    panel, paragraph = _shape_paragraph(
+        text, states={"EDITABLE", "FOCUSED", "SHOWING", "ENABLED"},
+        role="frame", doc_name="Untitled 1 - LibreOffice Math",
+    )
+    frame = panel.parent
+    app = frame.parent
+    paragraph.get_application = lambda: app
+    panel.get_application = lambda: app
+    paragraph.get_description = lambda: "Paragraph: 0 " + paragraph.text
+    panel.name = ""
+    panel.states.update({"EDITABLE", "FOCUSED"})
+    commands = _Acc("panel", name="Commands")
+    scroll = _Acc("scroll pane")
+    _adopt(frame, _adopt(commands, _adopt(scroll, panel)))
+    paragraph.component = _Grab(paragraph)
+    paragraph.caret = len(text)
+    return panel, paragraph
+
+
+def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch):
+    panel, paragraph = _math_command("a")
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: getattr(acc, "text", None))
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    raw = accessor.read(paragraph)
+    assert (raw.role, raw.title, raw.editable) == ("AXTextArea", "Commands", True)
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="soffice.bin", pid=1, geometry=_geometry())
+    assert "edit" in observe.render_text(snap)
+    element = snap.elements[0]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+    assert driver.type_into(element, " over b") == 7
+    assert paragraph.text == "a over b"
+    assert driver.set_value(element, "x^2") is True
+    assert paragraph.text == "x^2"
+    paragraph.set_text_contents = lambda text: True
+    assert _atspi.set_text(paragraph, "not written") is False
+    assert paragraph.text == "x^2"
+    paragraph.states.add("READ_ONLY")
+    assert accessor.read(paragraph).editable is False
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, "no")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert paragraph.text == "x^2"
+
+
+def test_math_focused_panel_uses_child_without_sheet_poll(fake_atspi, monkeypatch):
+    panel, paragraph = _math_command()
+    monkeypatch.setattr(_atspi, "find_root", lambda *a, **kw: panel.parent.parent.parent)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *args, **kwargs: (panel, False))
+    assert _atspi.focused_editable("soffice.bin") is paragraph
+    assert _atspi.focused_text("soffice.bin") == ""
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("soffice.bin", 1))
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "drawing_focus_text", lambda app: ("skip", None))
+    monkeypatch.setattr(_atspi, "poll_sheet_type", lambda *a, **kw: pytest.fail("Math must not poll Calc"))
+    monkeypatch.setattr(_linux_input, "type_string", lambda *a, **kw: pytest.fail("EditableText expected"))
+    assert driver.type_text("a over b") == 8
+    assert paragraph.text == "a over b"
+    assert _atspi.focused_text("soffice.bin") == "a over b"
+
+
+@pytest.mark.parametrize("case", ["browser", "writer", "dialog", "readonly", "no_interface", "unfocused", "ambiguous"])
+def test_math_command_recognition_is_scoped(fake_atspi, monkeypatch, case):
+    panel, paragraph = _math_command("old")
+    frame = panel.parent.parent.parent
+    if case == "browser":
+        frame.parent.name = "Firefox"
+    elif case == "writer":
+        frame.name = "Untitled 1 - LibreOffice Writer"
+    elif case == "dialog":
+        frame.role = "dialog"
+    elif case == "readonly":
+        paragraph.states.add("READ_ONLY")
+    elif case == "no_interface":
+        paragraph.get_editable_text_iface = lambda: None
+    elif case == "unfocused":
+        paragraph.states.remove("FOCUSED")
+    else:
+        _, second = _math_command("other")
+        _adopt(panel, paragraph, second)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (panel, False))
+    assert _atspi._focused_math_command(panel) is None
+    if case not in {"unfocused", "ambiguous"}:
+        assert not _atspi.editable_entry(paragraph)
+        assert _atspi._blocks_text_replace(paragraph)
+
+
+@pytest.mark.parametrize("focused_role", ["icon", "panel"])
+def test_math_command_readback_keeps_active_window_ambiguity_guard(
+    fake_atspi, monkeypatch, focused_role,
+):
+    panel, paragraph = _math_command("a over b")
+    frame = panel.parent.parent.parent
+    icon = _Acc("icon", states={"FOCUSED"})
+    icon.get_application = paragraph.get_application
+    _adopt(frame, *frame.children, icon)
+    focused = icon if focused_role == "icon" else panel
+    monkeypatch.setattr(_atspi, "find_root", lambda *a, **kw: frame)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (focused, False))
+    assert _atspi.focused_text("soffice.bin") == "a over b"
+    _, other = _math_command("other")
+    _adopt(frame, *frame.children, other)
+    assert _atspi.focused_text("soffice.bin") is None
+    assert _atspi.focused_text("soffice.bin", max_nodes=2) is None
+
+
 @pytest.mark.parametrize("selected", [True, False])
 def test_math_type_outcome_reuses_verified_command_without_snapshot_polling(
     fake_atspi, monkeypatch, selected,

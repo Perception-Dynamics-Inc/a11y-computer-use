@@ -4727,6 +4727,16 @@ class ATSPIAccessor:
             node, role_str=role_str, attrs=attrs, state_editable=state_editable,
             drawing=self._drawing_paragraph(node, role_str, state_editable),
         )
+        if entry and role_str == "paragraph" and math_command_editable(node):
+            role = "AXTextArea"
+            if not str(name).strip():
+                for ancestor in _ancestor_nodes(_parent_of(node)):
+                    if _role_name(ancestor) in {"frame", "dialog", "application"}:
+                        break
+                    label = _node_name(ancestor).strip()
+                    if label:
+                        name, description = label, ""
+                        break
         if role_str == "push button" and _gtk4_menu_button_wrapper(node):
             # GtkMenuButton's Action belongs to its inner toggle. Make the
             # duplicate outer node a collapsible layout wrapper, preserving
@@ -7361,6 +7371,41 @@ def focused_chromium_entry(app: str, *, max_nodes: int = 400):
         return None
 
 
+def math_command_editable(acc) -> bool:
+    """An editable command paragraph in a LibreOffice Math window."""
+    if (
+        acc is None or _role_name(acc) != "paragraph"
+        or not _state_has(acc, "EDITABLE") or _state_has(acc, "READ_ONLY")
+        or _editable_iface(acc) is None or not _libreoffice_accessible(acc)
+    ):
+        return False
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) != "panel" or not _state_has(parent, "EDITABLE"):
+        return False
+    for node in _ancestor_nodes(parent):
+        role = _role_name(node)
+        if role in {"frame", "dialog"}:
+            return role == "frame" and _node_name(node).endswith(" - LibreOffice Math")
+    return False
+
+
+def _focused_math_command(acc, *, max_nodes: int = 400):
+    """Resolve a focused Math panel to its unambiguous focused paragraph."""
+    if math_command_editable(acc):
+        return acc
+    if acc is None or _role_name(acc) != "panel" or not _state_has(acc, "EDITABLE"):
+        return None
+    count = _child_count(acc)
+    if count > max_nodes:
+        return None
+    matches = []
+    for index in range(count):
+        child = _call_first(acc, ("get_child_at_index",), index)
+        if child is not None and _state_has(child, "FOCUSED") and math_command_editable(child):
+            matches.append(child)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _focused_office_paragraph(app: str, *, max_nodes: int):
     """Unique focused editable paragraph in the active window, or None.
 
@@ -7915,7 +7960,8 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     or Draw frame is the exception: the focused container has no
     EditableText, and the focused or caret paragraph inside it is returned.
     The same node `insert_text` accepts, so a coordinate click and a ref
-    click share that helper.
+    click share that helper. Math command panels similarly resolve their
+    single focused editable command paragraph before testing the interface.
     """
     try:
         acc, truncated = _focused_node(app, max_nodes=max_nodes)
@@ -7925,6 +7971,9 @@ def focused_editable(app: str, *, max_nodes: int = 400):
         return None
     if is_secure(acc):
         return acc
+    command = _focused_math_command(acc, max_nodes=max_nodes)
+    if command is not None:
+        return command
     if _editable_iface(acc) is None:
         # Impress and Draw focus the presentation or the text frame. The
         # paragraph being edited is below that container and is the node
@@ -8906,13 +8955,14 @@ def editable_entry(
     contenteditable is the same section and does not need the interface
     either. A paragraph is not that section.
     An Impress or Draw paragraph with STATE_EDITABLE and EditableText
-    is also an entry when drawing is true. Browser paragraphs stay refused.
+    is also an entry when drawing is true. Math command paragraphs require
+    their native editable panel and Math window. Browser paragraphs stay refused.
     """
     if acc is None:
         return False
     role = role_str if role_str is not None else _role_name(acc)
     if role in {"paragraph", "heading"}:
-        return bool(drawing)
+        return bool(drawing) or math_command_editable(acc)
     if role in {"combo box", "combo-box"}:
         # Chromium ARIA autocomplete and datalist inputs own their text; their popup
         # options are not children and do not constrain the input value.
@@ -8968,6 +9018,8 @@ def _blocks_text_replace(acc) -> bool:
     if is_writer_document(acc):
         return False
     if _chrome_date_segment(acc):
+        return False
+    if math_command_editable(acc):
         return False
     if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
         return False
@@ -16514,6 +16566,8 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     """
     if is_secure(acc):
         return False
+    if math_command_editable(acc):
+        return _replace_editable_text(acc, text)
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
