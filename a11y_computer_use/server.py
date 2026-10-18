@@ -2985,6 +2985,19 @@ class Runtime:
             if died:
                 return "partial", "the target process exited after the action"
             return "confirmed", f"Writer cell paragraphs match the requested value {requested!r}"
+        button_evidence = getattr(self.driver, "button_click_evidence", None)
+        if cover_click and element is not None and callable(button_evidence):
+            evidence = button_evidence(element)
+            if evidence is not None:
+                # A scoped native read is real effect evidence, but is not a
+                # new full-tree baseline for the next action.
+                self._action_baseline = {
+                    "token": id(getattr(self, "_current", None)), "app": app,
+                    "capture": None, "process": process,
+                }
+                if died:
+                    return "partial", "the target process exited after the action"
+                return "confirmed", evidence
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
         readable = after is not None and before is not None
@@ -5220,7 +5233,11 @@ class Runtime:
         self._reject_coordinate(ref, x, y, display_id)
         target, app = self._target(ref, x, y, display_id, kind="click")
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
-        before = self._capture()
+        resolved_tree = None
+        take_tree = getattr(self.driver, "take_click_snapshot", None)
+        if isinstance(target, Element) and callable(take_tree):
+            resolved_tree = take_tree(target)
+        before = self._freeze(resolved_tree) if isinstance(resolved_tree, Snapshot) else self._capture()
 
         selection_reader = getattr(self.driver, "text_selection", None)
         verify_selection = (count == 2 and isinstance(target, Element)
