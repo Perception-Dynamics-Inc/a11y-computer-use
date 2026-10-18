@@ -12911,8 +12911,9 @@ def focused_type_selection(app: str) -> tuple:
 
 def writer_key_state(
     app: str, previous: tuple | None = None, *, structure: bool = False,
+    selection: bool = False,
 ) -> tuple | None:
-    """Read focused Writer or Impress/Draw text without a document traversal.
+    """Read Writer or Impress/Draw evidence, optionally Writer sibling selections.
 
     Reuse the native handle while it remains focused in the same window.
     Missing native offsets are unknown, not fabricated caret positions.
@@ -12982,6 +12983,40 @@ def writer_key_state(
     if text is None:
         return None
     state = (root, document, acc, count, caret, tuple(selections), text)
+    if selection and writer_document_for(acc) == document and (
+        count == 0 or previous is not None and len(previous) == 8
+    ):
+        # Empty paragraphs cannot expose a selection. Read complete sibling
+        # ranges; missing or oversized sibling lists are not evidence.
+        parent = _parent_of(acc)
+        if parent is None:
+            return None
+        _call_first(parent, ("clear_cache", "clearCache"))
+        children = _call_first(parent, ("get_child_count", "getChildCount"))
+        if type(children) is not int or not 0 <= children <= 256:
+            return None
+        ranges = []
+        for index in range(children):
+            child = _call_first(parent, ("get_child_at_index", "getChildAtIndex"), index)
+            if child is None:
+                return None
+            if _role_name(child) != "paragraph":
+                continue
+            if is_secure(child) or writer_document_for(child) != document:
+                return None
+            _call_first(child, ("clear_cache", "clearCache"))
+            size = _safe(lambda: Text.get_character_count(child))
+            number = _safe(lambda: Text.get_n_selections(child))
+            if type(size) is not int or size < 0 or type(number) is not int or not 0 <= number <= 256:
+                return None
+            spans = []
+            for selected in range(number):
+                span = _selection_bounds(_safe(lambda: Text.get_selection(child, selected)))
+                if span is None or not 0 <= span[0] <= span[1] <= size:
+                    return None
+                spans.append(span)
+            ranges.append((child, tuple(spans)))
+        return state + (tuple(ranges),)
     if not structure:
         return state
     # Paragraph splitting can preserve text/caret and even reuse the handle.

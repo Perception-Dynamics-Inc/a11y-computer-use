@@ -3258,9 +3258,15 @@ class Runtime:
 
         runner = getattr(self.driver, "_run", None)
         try:
-            read = lambda: _atspi.writer_key_state(app, previous, structure=True) if (
-                (chord or "").casefold() in {"return", "enter", "backspace", "delete"}
-            ) else _atspi.writer_key_state(app, previous)
+            def read():
+                if (chord or "").casefold() in {"return", "enter", "backspace", "delete"}:
+                    return _atspi.writer_key_state(app, previous, structure=True)
+                state = _atspi.writer_key_state(app, previous)
+                if state is not None and (
+                    parts == ["ctrl", "a"] or "shift" in parts[:-1] and parts[-1] in navigation
+                ) and (state[3] == 0 or previous is not None and len(previous) == 8):
+                    return _atspi.writer_key_state(app, previous, selection=True)
+                return state
             return runner(read) if callable(runner) else read()
         except Exception:
             return None
@@ -3286,7 +3292,7 @@ class Runtime:
                 return "confirmed", "the drawing document focus or selection changed"
             return "unverifiable", "the drawing document focus and selection are unchanged"
         if after[2:] != before[2:]:
-            return "confirmed", "the focused Writer/Impress/Draw paragraph, text, caret, or selection changed"
+            return "confirmed", "the Writer/Impress/Draw paragraph, text, caret, or selection changed"
         return "unverifiable", "the focused Writer/Impress/Draw paragraph, text, caret, and selection are unchanged"
 
     def _sheet_key_probe(
@@ -10230,7 +10236,8 @@ def build_server(
         selection, or focused cell changes, including when the rest of the
         page fingerprint does not. Linux Calc edit keys also compare selected
         cell text. Linux Writer navigation/edit keys compare the focused text
-        object, caret and selection without scanning the window; unchanged
+        object, caret and selection, including sibling selection ranges when the
+        focused paragraph is empty; unchanged
         scoped state and copy remain unverifiable without further evidence, with
         no retry hints. Linux X11 copy checks clipboard owner/target metadata.
         Thunar location-entry Return/KP_Enter reports
