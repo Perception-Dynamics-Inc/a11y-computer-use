@@ -851,3 +851,10 @@ focus; failures return `text_mismatch` with the observed paragraph count.
 Successful writes use the targeted cell read-back without a post-write window
 snapshot. This route is covered by hermetic regressions; live verification is
 still required.
+
+LibreOffice Math can retain accessibility focus on an Elements icon or its
+command panel after insertion. Typing read-back uses a unique showing, focused,
+editable paragraph in the active window and checks the selected range's exact
+replacement. Ambiguous or incomplete paragraph discovery is unverified, rather
+than a mismatch against the stale icon's empty text. This path has synthetic
+regression coverage; live Math validation is still required.

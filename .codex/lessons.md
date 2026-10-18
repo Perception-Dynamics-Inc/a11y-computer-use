@@ -378,3 +378,5 @@
 - 2026-10-18 (PR #826 safety/performance merge): Retain issuing-snapshot menu ancestry and exact-target click evidence alongside Geany navigation verification when merging shared Runtime click changes; validate the menu gate, Chromium button, and Scintilla regressions together.
 
 - 2026-10-18 (PR #870 repair): Extending a scoped Writer key probe to Impress/Draw must preserve the Writer identity in its evidence text. The live timing test checks confirmed outcomes and then that identity separately; its string-list assertion does not imply input or confirmation failed. Cover the evidence contract in hermetic outcome tests too.
+
+- 2026-10-18 (#868): LibreOffice Math can leave FOCUSED on an Elements icon and command panel while keys reach the focused editable paragraph. Read-back must disambiguate within the active window and capture the paragraph selection before input: replacing `<?>` shortens the formula, so insertion/length checks alone still report a false mismatch. Keep exact replacement verification and return unverified for ambiguous or incomplete discovery.
