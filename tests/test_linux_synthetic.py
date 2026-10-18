@@ -13137,6 +13137,121 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     assert LinuxDriver().terminal_target("console-alias", launch=True)
 
 
+def _scintilla_document(fake_atspi, monkeypatch, *, scroll: bool):
+    """GTK multi-line text whose buffer is longer than the widget.
+
+    Twenty lines fit in the box. ``ROW-150`` is below that. Character
+    extents are the line's real screen rect, including when it misses the
+    widget. ``scroll`` makes ``set_caret_offset`` move the view the way
+    Scintilla does. Not a live window.
+    """
+    lines = [f"ROW-{index:03d}" for index in range(304)]
+    body = "\n".join(lines)
+    width = len(lines[0]) + 1
+    view = {"line": 0}
+    editor = _Acc("text", name="Document", states=("MULTI_LINE", "EDITABLE", "SHOWING"), width=400, height=400)
+    editor.text = body
+    _bind_gtk_app(editor)
+    _place_row(editor, 40, 100, 400, 400)
+
+    def extents(acc, offset, _coord):
+        if acc is not editor:
+            return None
+        line = int(offset) // width
+        return _Rect(80, 16, 48, 100 + (line - view["line"]) * 20)
+
+    def set_caret(acc, offset):
+        acc.caret = int(offset)
+        if scroll:
+            view["line"] = max(0, int(offset) // width - 1)
+        return True
+
+    # Find now publishes native range targets as well as revealing the line.
+    # This synthetic widget reports the same line rectangle for its range.
+    monkeypatch.setattr(
+        fake_atspi.Text, "get_range_extents",
+        staticmethod(lambda acc, start, end, coord: extents(acc, start, coord)),
+        raising=False,
+    )
+    monkeypatch.setattr(fake_atspi.Text, "get_character_extents", staticmethod(extents), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", staticmethod(set_caret))
+    window = _Acc("frame", name="Geany", width=640, height=560)
+    _place_row(window, 20, 40, 640, 560)
+    _bind_gtk_app(window)
+    app = editor.get_application()
+    window.get_application = lambda: app
+    _adopt(window, editor)
+    return window, editor, view
+
+
+def test_scroll_to_find_does_not_call_an_offscreen_scintilla_line_found(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic Scintilla buffer. Not a live Geany window.
+
+    ``ROW-150`` is in the text interface and below the widget. Reporting it
+    as found after 0 scrolls is the bug. The caret scroll brings that line
+    into the widget, and the report counts that scroll. Extents that do not
+    move leave the match not found. No extra rectangle is attached.
+    """
+    from a11y_computer_use import server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    opening = driver.snapshot(Scope.WINDOW, "geany")
+    area = next(el for el in opening.elements if el.role == "AXTextArea")
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "hidden"
+    assert _atspi.buffer_match_visibility(editor, "ROW-001") == "visible"
+    assert view["line"] == 0
+    visible = runtime.scroll_to_find("geany", text="ROW-001", max_scrolls=4)
+    assert visible.startswith("found after 0 scroll")
+    assert view["line"] == 0
+    found = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=4)
+    assert found.startswith("found after 1 scroll"), found
+    assert "found after 0" not in found
+    assert view["line"] > 0
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
+    shown = next(el for el in runtime._current.elements if el.role == "AXTextArea")
+    assert shown.bounds == area.bounds
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    runtime = _bare_runtime(driver)
+    missed = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=4)
+    assert missed.startswith("not found after 0 scroll"), missed
+    assert not missed.startswith("found after")
+    assert "not in the visible text" in missed
+    assert view["line"] == 0
+    plain = runtime.find("geany", text="ROW-150")
+    assert "no elements match" in plain
+    assert "not in the visible text" in plain
+    assert not plain.startswith("found after")
+
+
+def test_find_scrolls_a_scintilla_match_into_the_widget(fake_atspi, monkeypatch) -> None:
+    """Synthetic Scintilla buffer. ``find`` scrolls, then reports the widget.
+
+    The match is omitted when the extents stay outside the widget. A line
+    that is already on screen does not move the view.
+    """
+    from a11y_computer_use import server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    top = runtime.find("geany", text="ROW-001")
+    assert "ROW-001" in top
+    assert "no elements match" not in top
+    assert view["line"] == 0
+    found = runtime.find("geany", text="ROW-150")
+    assert "textarea" in found
+    assert "no elements match" not in found
+    assert "not in the visible text" not in found
+    assert view["line"] > 0
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
 @pytest.mark.parametrize("available,use_offsets", [(True, False), (True, True), (False, False)])
 def test_qt_document_find_uses_only_viewport_ranges(monkeypatch, available, use_offsets):
     """FeatherPad's whole buffer must not become an off-screen find hit."""
@@ -13534,6 +13649,7 @@ def test_xournal_zoom_preserves_raw_value_input(fake_atspi):
     slider.get_application = lambda: _Acc("application", name="xournalpp")
     assert _atspi.set_numeric_value(slider, "0.25") is True
     assert slider.value == 0.25
+
 
 
 @pytest.mark.parametrize("owner_name,role,contents,omitted", [
@@ -14106,6 +14222,74 @@ def test_textarea_ref_survives_transient_wrapper_with_native_identity(monkeypatc
     with pytest.raises(ComputerUseError) as exc:
         driver.resolve_ref(old, anchor.ref, live=replace(live, elements=(current, duplicate)))
     assert exc.value.code is ErrorCode.STALE_REF
+
+
+def test_revealed_document_matches_preserve_exact_target_preference(fake_atspi, monkeypatch):
+    from dataclasses import replace
+
+    window, _editor, _view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    runtime = _bare_runtime(driver)
+    opening = driver.snapshot(Scope.WINDOW, "geany")
+    area = next(el for el in opening.elements if el.role == "AXTextArea")
+    label = replace(area, ref="label", role="AXStaticText", title="Document", value="ROW-150")
+    target = replace(area, ref="target", role="AXCell", title="ROW-150", value=None)
+    refreshed = replace(opening, elements=opening.elements + (label, target))
+    monkeypatch.setattr(driver, "snapshot", lambda *_args: refreshed)
+    monkeypatch.setattr(runtime, "_buffer_match_kind", lambda el, text: "hidden" if el is area else None)
+    monkeypatch.setattr(runtime, "_reveal_buffer_element", lambda *_args: "scrolled")
+    matches, hidden = runtime._reveal_document_matches(
+        opening, (area,), "ROW-150", role=None, editable=None, clickable=None,
+    )
+    assert matches == (target,)
+    assert not hidden
+
+def test_scintilla_reveal_refresh_preserves_exact_target_preference(fake_atspi, monkeypatch):
+    """A refreshed document search still prefers an exactly named control."""
+    from dataclasses import replace
+    from a11y_computer_use import observe, server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    original = observe.find_elements
+
+    def matches(snap, **filters):
+        found = original(snap, **filters)
+        if view["line"] > 0:
+            area = next(el for el in found if el.role == "AXTextArea")
+            return (*found, replace(area, ref="exact-target", role="AXButton", title="ROW-150", value=None))
+        return found
+
+    monkeypatch.setattr(observe, "find_elements", matches)
+    found = runtime.find("geany", text="ROW-150")
+    assert view["line"] > 0
+    assert "exact-target" in found
+    assert "textarea" not in found
+
+def test_find_keeps_exact_targets_after_scintilla_reveal(fake_atspi, monkeypatch) -> None:
+    """A refreshed document search still prefers the exact named control."""
+    from a11y_computer_use import server
+
+    window, editor, _view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    reveal = driver.reveal_buffer_match
+    button = _Acc("push button", name="ROW-150", width=80, height=24)
+    _place_row(button, 100, 80, 80, 24)
+    button.get_application = editor.get_application
+
+    def reveal_and_publish(element, text):
+        result = reveal(element, text)
+        _adopt(window, editor, button)
+        return result
+
+    monkeypatch.setattr(driver, "reveal_buffer_match", reveal_and_publish)
+    result = runtime.find("geany", text="ROW-150")
+    assert "button" in result
+    assert "textarea" not in result
 
 
 @pytest.mark.parametrize("remembered", [False, True])
@@ -14797,6 +14981,30 @@ def test_gtk4_password_entry_boundary_classified_before_text_reads(monkeypatch, 
     assert _atspi.is_secure(acc) is (side != "ordinary")
 
 
+def test_geany_fixture_initializes_caret_until_native_status_is_ready() -> None:
+    """Welcome text is not caret evidence; setup stops before tested actions."""
+    from types import SimpleNamespace
+    from tests.test_linux_live import _geany_initial_line
+
+    calls = []
+    driver = SimpleNamespace(
+        activate_app=lambda app: calls.append(("activate", app)),
+        key_chord=lambda chord: calls.append(("key", chord)),
+    )
+    bar = SimpleNamespace(role="AXStatusBar", title="This is Geany 2.0.", value=None)
+    snap = SimpleNamespace(elements=(bar,))
+    assert not _geany_initial_line(driver, snap)
+    assert calls == [("activate", "geany"), ("key", "ctrl+Home")]
+    # An editor buffer containing the phrase cannot establish readiness.
+    bar.role = "AXTextArea"
+    bar.title = "line: 1 / 303"
+    assert not _geany_initial_line(driver, snap)
+    bar.role = "AXStatusBar"
+    calls.clear()
+    assert _geany_initial_line(driver, snap)
+    assert calls == []
+
+
 @pytest.mark.parametrize("role_name", ["slider", "spin button", "progress bar", "level bar"])
 @pytest.mark.parametrize("garbage", [0.0, 6.9e-310, 40.0])
 def test_range_observation_never_reads_a_missing_value_interface(
@@ -15293,6 +15501,84 @@ def test_claws_wizard_page_title_does_not_borrow_unrelated_labels(monkeypatch, a
     assert _atspi._claws_wizard_page_title(tab) == ""
 
 
+def test_geany_symbol_destination_uses_native_status_text(fake_atspi, monkeypatch) -> None:
+    symbol = _outline_cell("target_fn [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="Status")
+    _adopt(window, window.children[0], status)
+    destination = _atspi.geany_symbol_destination(symbol)
+    assert destination == (301, [status])
+    for message, arrived in [
+        ("", False), ("target_fn [301]", False),
+        ("line: 1 / 303", False), ("line: 301 / 303\t col: 0", True),
+    ]:
+        monkeypatch.setattr(_atspi, "_direct_text", lambda node: message if node is status else "")
+        assert _atspi.geany_symbol_arrived(destination) is arrived
+    status.name = "line: 301 / 303"
+    monkeypatch.setattr(_atspi, "_direct_text", lambda _node: "")
+    assert _atspi.geany_symbol_arrived(destination) is True
+    window.get_application().name = "other-editor"
+    assert _atspi.geany_symbol_destination(symbol) is None
+
+
+@pytest.mark.parametrize("arrives", [True, False])
+def test_geany_double_click_waits_for_navigation_without_substituting_input(
+    fake_atspi, monkeypatch, xtest_recorder, arrives,
+) -> None:
+    from a11y_computer_use import observe
+
+    symbol = _outline_cell("target_fn [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="Status")
+    _adopt(window, window.children[0], status)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    shot = driver.snapshot(Scope.WINDOW, "geany")
+    cell = next(el for el in shot.elements if "target_fn" in el.title)
+    assert observe.ax_handle_for(cell.snapshot_id, cell.ref) is symbol
+    polls = []
+    sleeps = []
+    in_native_call = False
+    real_run = driver._run
+
+    def run(fn):
+        nonlocal in_native_call
+        in_native_call = True
+        try:
+            return real_run(fn)
+        finally:
+            in_native_call = False
+
+    def read(node):
+        assert in_native_call
+        assert node is status
+        polls.append(node)
+        return "line: 301 / 303" if arrives and len(polls) > 1 else "line: 1 / 303"
+
+    def pause(seconds):
+        assert not in_native_call
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(driver, "_run", run)
+    monkeypatch.setattr(_atspi, "_direct_text", read)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", pause)
+    monkeypatch.setattr(_atspi, "do_named_action", lambda *_args: pytest.fail("substituted activation"))
+    events, _display = xtest_recorder
+    events.clear()
+    if arrives:
+        driver.click(cell, count=2)
+        assert len(polls) == 2
+        assert sleeps == [0.03, _atspi._FOCUS_CONFIRM_PAUSE_S]
+    else:
+        with pytest.raises(ComputerUseError, match="did not confirm navigation") as error:
+            driver.click(cell, count=2)
+        assert error.value.detail["outcome"] == "unconfirmed"
+        assert len(polls) == _atspi._FOCUS_CONFIRM_POLLS
+        assert sleeps == [0.03] + [_atspi._FOCUS_CONFIRM_PAUSE_S] * (len(polls) - 1)
+    assert len([event for event in events if event[0] == _X_BPRESS]) == 2
+
+
 @pytest.mark.parametrize('readback', [True, False])
 def test_thunar_path_replace_uses_real_input_and_readback(monkeypatch, readback):
     node = object()
@@ -15397,6 +15683,30 @@ def test_qt_nonanswering_bounded_ranges_reads_capped_verified_text(monkeypatch, 
         snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
                               app="scribus", pid=1, geometry=_geometry())
         assert observe.find_elements(snap, text="QTDOC_1135")
+
+
+@pytest.mark.parametrize("focused,caret_line,readable,arrived", [
+    (True, 301, True, True),
+    (True, 1, True, False),
+    (False, 301, True, False),
+    (True, 301, False, False),
+])
+def test_geany_navigation_verifies_native_caret_when_status_lags(
+    fake_atspi, monkeypatch, focused, caret_line, readable, arrived,
+):
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="line: 1 / 303")
+    editor = _Acc("text", states=("MULTI_LINE", "FOCUSED") if focused else ("MULTI_LINE",))
+    _adopt(window, window.children[0], status, editor)
+    monkeypatch.setattr(_atspi, "_gtk_multiline_document", lambda node: node is editor)
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: "")
+    prefix = "# pad\n" * (caret_line - 1)
+    monkeypatch.setattr(fake_atspi.Text, "get_caret_offset", lambda node: len(prefix), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "get_text",
+                        lambda node, start, end: prefix if readable else None, raising=False)
+    assert _atspi.geany_symbol_arrived((301, [status])) is arrived
 
 
 @pytest.mark.parametrize("role", ["slider", "spin button"])
@@ -16186,6 +16496,45 @@ def test_scribus_real_palette_layout_and_find_context(monkeypatch, interfaces, c
     assert ("Embedded widgets are not exposed" in observe.render_matches(snap, [target])) is (not interfaces)
 
 
+@pytest.mark.parametrize("evidence", ["status", "caret"])
+def test_geany_navigation_finds_evidence_before_large_menu_subtrees(
+    fake_atspi, monkeypatch, evidence,
+):
+    """Menu descendants must not consume the bounded evidence walk first."""
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="line: 301 / 303" if evidence == "status" else "Status")
+    editor = _Acc("text", states=("MULTI_LINE", "FOCUSED"))
+    # Last child is visited first by a depth-first stack. Every level is
+    # below the per-node child cap, but the whole menu exceeds the budget.
+    menu = _Acc("menu bar")
+    _adopt(menu, *[_adopt(_Acc("menu"), *[_Acc("menu item") for _ in range(30)])
+                   for _ in range(30)])
+    _adopt(window, window.children[0], status, editor, menu)
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: "")
+    monkeypatch.setattr(_atspi, "_gtk_multiline_document", lambda node: node is editor)
+    prefix = "# pad\n" * 300
+    monkeypatch.setattr(fake_atspi.Text, "get_caret_offset", lambda node: len(prefix), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "get_text", lambda node, start, end: prefix, raising=False)
+    if evidence == "caret":
+        assert _atspi.geany_symbol_arrived((301, [status])) is True
+    destination = _atspi.geany_symbol_destination(symbol)
+    assert destination == (301, [status])
+    assert _atspi.geany_symbol_arrived(destination) is True
+
+
+@pytest.mark.parametrize("label_line,text_line,arrived", [
+    (1, 301, True), (301, 1, False),
+])
+def test_geany_navigation_prefers_live_status_text_over_old_name(
+    fake_atspi, monkeypatch, label_line, text_line, arrived,
+):
+    status = _Acc("status bar", name=f"line: {label_line} / 303")
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: f"line: {text_line} / 303")
+    assert _atspi.geany_symbol_arrived((301, [status])) is arrived
+
+
 def _chrome_collapsed_panel():
     app = _GeckoNode("application", "Google Chrome")
     app.toolkit = "Chromium"
@@ -16299,6 +16648,34 @@ def test_claws_wizard_icon_does_not_allow_borrowing_a_field_caption(monkeypatch)
     _PageNode("dialog", "Claws Mail Setup Wizard", children=[tab])
     monkeypatch.setattr(_atspi, "_application_name", lambda node: "Claws Mail")
     assert _atspi._claws_wizard_page_title(tab) == ""
+
+
+@pytest.mark.parametrize("evidence", ["status", "caret"])
+def test_geany_navigation_ignores_menus_before_nested_evidence(
+    fake_atspi, monkeypatch, evidence,
+):
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = "geany"
+    status = _Acc("status bar", name="line: 301 / 303" if evidence == "status" else "Status")
+    editor = _Acc("text", states=("MULTI_LINE", "FOCUSED"))
+    menu = _adopt(_Acc("menu bar"), *[
+        _adopt(_Acc("menu"), *[_Acc("menu item") for _ in range(30)])
+        for _ in range(30)
+    ])
+    nested = _adopt(_Acc("panel"), status, editor)
+    for _ in range(6):
+        nested = _adopt(_Acc("panel"), nested)
+    _adopt(window, window.children[0], menu, nested)
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: "")
+    monkeypatch.setattr(_atspi, "_gtk_multiline_document", lambda node: node is editor)
+    prefix = "# pad\n" * 300
+    monkeypatch.setattr(fake_atspi.Text, "get_caret_offset", lambda node: len(prefix), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "get_text", lambda node, start, end: prefix, raising=False)
+    assert _atspi.geany_symbol_arrived((301, [status])) is True
+    destination = _atspi.geany_symbol_destination(symbol)
+    assert destination == (301, [status])
+    assert _atspi.geany_symbol_arrived(destination) is True
 
 
 @pytest.mark.parametrize("text,capacity", [
@@ -16537,6 +16914,52 @@ def test_chromium_hit_guard_does_not_change_explicit_coordinate_click(monkeypatc
     assert modifiers == [("shift",)]
 
 
+@pytest.mark.parametrize("message,expected", [("line: 1 / 303", [1]), ("Loading", [None])])
+def test_geany_navigation_failure_evidence_contains_only_line_numbers(
+    fake_atspi, monkeypatch, message, expected,
+):
+    status = _Acc("status bar", name="private file name")
+    monkeypatch.setattr(_atspi, "_direct_text", lambda node: message)
+    evidence = {"old": "must be cleared"}
+    assert _atspi.geany_symbol_arrived((301, [status]), evidence=evidence) is False
+    assert evidence == {"expected_line": 301, "status_lines": expected, "caret_lines": []}
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("app,shifted", [("geany", False), ("mousepad", False), ("soffice", True)])
+def test_native_ref_click_does_not_borrow_background_office_geometry(
+    fake_atspi, monkeypatch, app, shifted, count,
+):
+    from a11y_computer_use.drivers import _linux_input
+
+    symbol = _outline_cell("target_fn [301]", ["activate"])
+    window = _outline_window(symbol)
+    window.get_application().name = app
+    status = _Acc("status bar", name="line: 301 / 303")
+    _adopt(window, window.children[0], status)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    shot = driver.snapshot(Scope.WINDOW, app)
+    cell = next(el for el in shot.elements if "target_fn" in el.title)
+    assert cell.bounds is not None
+    x = int(cell.bounds.x + cell.bounds.width / 2)
+    y = int(cell.bounds.y + cell.bounds.height / 2)
+    corrections = []
+    notes = []
+    clicks = []
+
+    def background_office_shift(px, py):
+        corrections.append((px, py))
+        return 0, 21
+
+    monkeypatch.setattr(_atspi, "libreoffice_pointer_shift", background_office_shift)
+    monkeypatch.setattr(_atspi, "note_libreoffice_pointer", lambda px, py: notes.append((px, py)))
+    monkeypatch.setattr(_linux_input, "click", lambda px, py, **kw: clicks.append((px, py, kw)))
+    driver.click(cell, count=count)
+    assert clicks == [(x, y + (21 if shifted else 0), {"button": "left", "count": count})]
+    assert corrections == ([(x, y)] if shifted else [])
+    assert notes == ([(x, y)] if shifted else [])
+
+
 @pytest.mark.parametrize("operation", ["insert_text", "set_text", "_type_into_target"])
 @pytest.mark.parametrize("role,tag", [("entry", "textarea"), ("section", "div")])
 @pytest.mark.parametrize("text", ["Item\tQty\nTea\t2", "\tItem", "Item\t"])
@@ -16579,6 +17002,36 @@ def test_tab_preflight_preserves_native_text_and_chromium_plain_input(monkeypatc
         _atspi._type_into_target(field, text)
         assert calls[-1] == text
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize("cell_x,expected", [
+    (100, ((100.0, 100.0), (80.0, 21.0))),
+    (190, ((-1.0, -1.0), (-1.0, -1.0))),
+])
+def test_gtk_outline_label_bounds_stay_inside_native_viewport(fake_atspi, cell_x, expected):
+    symbol = _outline_cell("long_symbol_name [301]", ["activate"])
+    window = _outline_window(symbol)
+    tree = window.children[0]
+    viewport = _Acc("scroll pane", width=140, height=320)
+    _place_row(viewport, 40, 80, 140, 320)
+    _adopt(window, viewport)
+    _adopt(viewport, tree)
+    _place_row(symbol, cell_x, 100, 400, 21)
+
+    raw = _atspi.ATSPIAccessor().read(symbol)
+
+    assert (raw.position, raw.size) == expected
+    assert raw.note == "activates on double-click"
+    assert symbol.actions == ["activate"]
+
+
+def test_gtk_outline_label_bounds_clip_to_tree_without_scroll_pane(fake_atspi):
+    symbol = _outline_cell("long_symbol_name [301]", ["activate"])
+    _outline_window(symbol)
+    _place_row(symbol, 100, 100, 400, 21)
+    raw = _atspi.ATSPIAccessor().read(symbol)
+    assert raw.position == (100.0, 100.0)
+    assert raw.size == (160.0, 21.0)
 
 
 @pytest.mark.parametrize("initial,value", [

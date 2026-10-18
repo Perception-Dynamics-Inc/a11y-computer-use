@@ -13380,6 +13380,46 @@ _SWING_HEADER_APP = textwrap.dedent(
 )
 
 
+_DOC_FIND_APP = "cuadocfind"
+
+_GTK_DOC_FIND = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuadocfind")
+    lines = ["ROW-%03d" % index for index in range(304)]
+    buf = Gtk.TextBuffer()
+    buf.set_text("\\n".join(lines))
+    win = Gtk.Window(title="cuadocfind")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    probe = Gtk.Label(label="scroll=0")
+    probe.get_accessible().set_name("scroll=0")
+    view = Gtk.TextView(buffer=buf)
+    view.set_monospace(True)
+    view.get_accessible().set_name("Document")
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.add(view)
+    box.pack_start(probe, False, False, 0)
+    box.pack_start(scrolled, True, True, 0)
+    win.add(box)
+    win.set_default_size(420, 220)
+    adj = scrolled.get_vadjustment()
+    def on_value(*_args):
+        text = "scroll=%d" % int(adj.get_value())
+        probe.set_text(text)
+        probe.get_accessible().set_name(text)
+    adj.connect("value-changed", on_value)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    view.grab_focus()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
 def test_linux_swing_column_headers_keep_their_own_names(tmp_path) -> None:
     """Live Swing JTable, when the Java ATK wrapper is installed.
 
@@ -13440,7 +13480,25 @@ def test_linux_swing_column_headers_keep_their_own_names(tmp_path) -> None:
         _stop(proc)
 
 
-def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> None:
+def _geany_initial_line(driver, snap) -> bool:
+    """Initialize the fixture caret and wait for Geany's real line statistics.
+
+    The welcome message masks statistics briefly. Geany refreshes them on
+    editor input, so polling snapshots alone cannot establish readiness.
+    This setup runs before the clicks or searches under test.
+    """
+    if any(
+        el.role == "AXStatusBar" and "line: 1 " in f"{el.title or ''} {el.value or ''}"
+        for el in snap.elements
+    ):
+        return True
+    driver.activate_app("geany")
+    driver.key_chord("ctrl+Home")
+    return False
+
+
+@pytest.mark.parametrize("symbol_suffix", ["", "_with_a_long_name_that_overflows_the_sidebar"])
+def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path, symbol_suffix) -> None:
     """Live Geany Symbols row. Not a synthetic tree.
 
     The row has an activate action that a single click does not run. The
@@ -13456,7 +13514,12 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
     if not binary:
         pytest.skip("geany is not installed")
     lines = ["# pad"] * 300
-    lines.extend(["def target_fn_row150():", "    return 1", ""])
+    # An adjacent symbol makes a one-row pointer offset observable; clicking
+    # empty tree space can otherwise navigate using the previous selection.
+    lines.extend([
+        f"def target_fn_row150{symbol_suffix}():", "    return 1", "",
+        "def z_other_symbol():", "    return 2", "",
+    ])
     document = tmp_path / "geany-sym.py"
     document.write_text("\n".join(lines))
     home = tmp_path / "geany-home"
@@ -13472,7 +13535,7 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
             env["XAUTHORITY"] = candidate
     runtime = _runtime_for(tmp_path, driver, "geany")
     proc = subprocess.Popen(
-        [binary, "--no-plugins", str(document)],
+        [binary, "--new-instance", "--no-plugins", str(document)],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -13482,10 +13545,17 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
         shot = _wait_named_tree(
             driver,
             "geany",
-            lambda snap: any("target_fn_row150" in (el.title or "") for el in snap.elements),
+            # Geany's startup message temporarily masks the caret status.
+            # Wait for the actual initial line before testing navigation;
+            # an available symbol tree alone does not mean status is ready.
+            lambda snap: (
+                any("target_fn_row150" in (el.title or "") for el in snap.elements)
+                and _geany_initial_line(driver, snap)
+            ),
             timeout_s=20,
         )
         assert shot is not None and proc.poll() is None, "geany never listed the symbol"
+        assert "line: 1 " in _element_blob(shot), "Geany initial caret status never became ready"
         listed = runtime.desktop_snapshot("geany")
         assert "(activates on double-click)" in listed
         shot = runtime._current
@@ -13504,7 +13574,9 @@ def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> No
         assert "line: 301" not in status, status
         runtime._current = after_single
         cell = next(el for el in after_single.elements if "target_fn_row150" in (el.title or ""))
+        started = time.monotonic()
         double = runtime.click(cell.ref, count=2)
+        assert time.monotonic() - started < 5.0, "Geany symbol double-click exceeded five seconds"
         assert "clicked" in double
         assert "(activates on double-click)" not in str(double)
         assert double.outcome != "partial"
@@ -13782,6 +13854,210 @@ def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> Non
         assert "row=ROW-" not in shown
     finally:
         _stop(proc)
+
+
+def _element_blob(shot) -> str:
+    return "\n".join(
+        f"{el.role} {el.title or ''} {el.value or ''}" for el in shot.elements
+    )
+
+
+def _document_area(shot, needle: str):
+    from a11y_computer_use import observe
+
+    full = observe._FULL_VALUES.get(shot.snapshot_id, {})
+    for el in shot.elements:
+        if el.role != "AXTextArea":
+            continue
+        text = str(full.get(el.ref, el.value or ""))
+        if needle in text and "ROW-000" in text:
+            return el
+    return None
+
+
+def _wait_doc(driver, app: str, pred, timeout_s: float = 20.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, app)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            if last is not None and last.elements and pred(last):
+                return last
+        time.sleep(0.3)
+    return last
+
+
+def _scroll_probe(shot) -> int | None:
+    for el in shot.elements:
+        for part in (el.title, el.value):
+            text = part or ""
+            if text.startswith("scroll="):
+                try:
+                    return int(text.split("=", 1)[1].split()[0])
+                except ValueError:
+                    return None
+    return None
+
+
+def _launch_doc_find(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "cuadocfind.py"
+    script.write_text(_GTK_DOC_FIND)
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    return subprocess.Popen(
+        [sys.executable, str(script)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def test_linux_gtk_text_view_offscreen_line_is_scrolled_into_the_widget(tmp_path) -> None:
+    """Live Gtk.TextView, 304 lines. Not a synthetic buffer and not Geany.
+
+    The widget is on screen, so its center is inside the window, and
+    ROW-150 is only in the buffer. ``find`` and ``scroll_to_find`` report
+    it after a text-interface scroll that moves the adjustment. A line
+    already in the widget does not move that adjustment. The textarea
+    keeps the widget's box.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _DOC_FIND_APP, os.path.basename(sys.executable))
+    proc = _launch_doc_find(tmp_path)
+    try:
+        shot = _wait_doc(
+            driver,
+            _DOC_FIND_APP,
+            lambda snap: _document_area(snap, "ROW-150") is not None and _scroll_probe(snap) == 0,
+        )
+        assert shot is not None, _element_blob(shot) if shot is not None else "text view never appeared"
+        area = _document_area(shot, "ROW-150")
+        assert area is not None and area.bounds is not None
+        assert area.bounds.width > 80 and area.bounds.height > 40
+        box = (area.bounds.x, area.bounds.y, area.bounds.width, area.bounds.height)
+        top = runtime.find(_DOC_FIND_APP, text="ROW-001")
+        assert "textarea" in top
+        assert "no elements match" not in top
+        assert _scroll_probe(runtime._current) == 0
+        found = runtime.find(_DOC_FIND_APP, text="ROW-150")
+        assert "textarea" in found, found
+        assert "no elements match" not in found
+        assert "not in the visible text" not in found
+        assert (_scroll_probe(runtime._current) or 0) > 0
+        shown = _document_area(runtime._current, "ROW-150")
+        assert shown is not None and shown.bounds is not None
+        assert (shown.bounds.x, shown.bounds.y, shown.bounds.width, shown.bounds.height) == box
+        assert driver.buffer_match_visibility(shown, "ROW-150") == "visible"
+    finally:
+        _stop(proc)
+
+    proc = _launch_doc_find(tmp_path)
+    try:
+        shot = _wait_doc(
+            driver,
+            _DOC_FIND_APP,
+            lambda snap: _document_area(snap, "ROW-150") is not None and _scroll_probe(snap) == 0,
+        )
+        assert shot is not None, "the second text view never appeared"
+        area = _document_area(shot, "ROW-150")
+        box = (area.bounds.x, area.bounds.y, area.bounds.width, area.bounds.height)
+        visible = runtime.scroll_to_find(_DOC_FIND_APP, text="ROW-001", max_scrolls=2)
+        assert visible.startswith("found after 0 scroll"), visible
+        assert _scroll_probe(runtime._current) == 0
+        landed = runtime.scroll_to_find(_DOC_FIND_APP, text="ROW-150", max_scrolls=2)
+        assert landed.startswith("found after "), landed
+        assert not landed.startswith("found after 0"), landed
+        assert "not in the visible text" not in landed
+        assert (_scroll_probe(runtime._current) or 0) > 0
+        shown = _document_area(runtime._current, "ROW-150")
+        assert shown is not None and shown.bounds is not None
+        assert (shown.bounds.x, shown.bounds.y, shown.bounds.width, shown.bounds.height) == box
+        assert driver.buffer_match_visibility(shown, "ROW-150") == "visible"
+    finally:
+        _stop(proc)
+
+
+def test_linux_geany_scintilla_offscreen_line_is_scrolled_into_the_widget(tmp_path) -> None:
+    """Live Geany 2.0 Scintilla document. Not a synthetic buffer.
+
+    ``ROW-150`` is in the text interface and below the widget. Reporting
+    it as found after 0 scrolls leaves the caret on line 1. A caret scroll
+    that brings the line into the widget reports that scroll, and the
+    status line becomes line 151. The textarea bounds stay the widget.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("geany")
+    if not binary:
+        pytest.skip("geany is not installed")
+    lines = [f"ROW-{index:03d}" for index in range(304)]
+    document = tmp_path / "geany-rows.txt"
+    document.write_text("\n".join(lines) + "\n")
+    home = tmp_path / "geany-home"
+    home.mkdir()
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    auth = os.environ.get("XAUTHORITY")
+    if not auth:
+        candidate = os.path.expanduser("~/.Xauthority")
+        if os.path.exists(candidate):
+            env["XAUTHORITY"] = candidate
+    runtime = _runtime_for(tmp_path, driver, "geany")
+    proc = subprocess.Popen(
+        [binary, "--new-instance", "--no-plugins", str(document)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        shot = _wait_doc(
+            driver,
+            "geany",
+            # The welcome message can mask line statistics even after the
+            # document is accessible. Require initial caret evidence too.
+            lambda snap: (
+                _document_area(snap, "ROW-150") is not None
+                and _geany_initial_line(driver, snap)
+            ),
+        )
+        assert shot is not None and proc.poll() is None, "geany never exposed the document"
+        assert "line: 1 " in _element_blob(shot), "Geany initial caret status never became ready"
+        blob = _element_blob(shot)
+        assert "line: 151" not in blob, blob
+        area = _document_area(shot, "ROW-150")
+        assert area is not None and area.bounds is not None
+        assert area.bounds.width > 80 and area.bounds.height > 40, area.bounds
+        box = (area.bounds.width, area.bounds.height)
+        visible = runtime.scroll_to_find("geany", text="ROW-001", max_scrolls=2)
+        assert visible.startswith("found after 0 scroll"), visible
+        stayed = _element_blob(runtime._current)
+        assert "line: 151" not in stayed, stayed
+        landed = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=2)
+        assert landed.startswith("found after "), landed
+        assert not landed.startswith("found after 0"), landed
+        assert "not in the visible text" not in landed
+        shown = _document_area(runtime._current, "ROW-150")
+        assert shown is not None and shown.bounds is not None
+        assert (shown.bounds.width, shown.bounds.height) == box
+        assert driver.buffer_match_visibility(shown, "ROW-150") == "visible"
+        status = _element_blob(driver.snapshot(Scope.WINDOW, "geany"))
+        assert "line: 151" in status, status
+    finally:
+        _stop_group(proc)
 
 
 def test_linux_gtk_icon_view_ref_click_selects_without_activation(tmp_path) -> None:
