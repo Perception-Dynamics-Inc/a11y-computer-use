@@ -24,6 +24,9 @@ class _FakeXWin:
     def __init__(self, wid: int, x: int, y: int, w: int, h: int, pid: int):
         self.id, self.x, self.y, self.w, self.h, self.pid = wid, x, y, w, h, pid
 
+    def get_attributes(self):
+        return _NS(map_state=2)  # ordinary mapped client
+
     def get_geometry(self):
         return _NS(x=0, y=0, width=self.w, height=self.h)  # relative to the WM frame
 
@@ -1523,3 +1526,107 @@ def test_cover_rows_omit_unavailable_window_evidence(fake_ewmh, monkeypatch, mis
         monkeypatch.setattr(_linux_system, "_display", unavailable)
     rows = _linux_system.window_cover_rows()
     assert [row["window_id"] for row in rows] == ([] if missing == "display" else [0x10])
+
+
+@pytest.mark.parametrize("verb", ["focus_window", "raise_window", "activate_app"])
+@pytest.mark.parametrize("wm_restores", [True, False])
+def test_shaded_activation_requires_mapped_unshaded_client(monkeypatch, verb, wm_restores):
+    """An active Xfce title bar is not evidence that the client accepts input."""
+    target = _FakeXWin(7, 0, 0, 100, 100, pid=2)
+    _active_display(monkeypatch, [target], 7)
+    state = {"shaded": True, "mapped": False, "time": 0.0}
+    original = target.get_full_property
+    target.get_full_property = lambda atom, kind: (
+        _NS(value=["_NET_WM_STATE_SHADED"] if state["shaded"] else [])
+        if atom == "_NET_WM_STATE" else original(atom, kind)
+    )
+    target.get_attributes = lambda: _NS(map_state=2 if state["mapped"] else 0)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "editor")
+    monkeypatch.setattr(_linux_system, "_send_active_window", lambda *args: None)
+    sent = []
+
+    def message(d, win, atom, data):
+        sent.append((atom, data))
+        if wm_restores and data == [0, "_NET_WM_STATE_SHADED", 0, 1, 0]:
+            state["shaded"] = False
+
+    def sleep(seconds):
+        state["time"] += seconds
+        # Mapping can lag behind removal of the shade property.
+        if wm_restores and not state["shaded"]:
+            state["mapped"] = True
+
+    monkeypatch.setattr(_linux_system, "_client_message", message)
+    monkeypatch.setattr(_linux_system.time, "monotonic", lambda: state["time"])
+    monkeypatch.setattr(_linux_system.time, "sleep", sleep)
+    call = lambda: getattr(_linux_system, verb)("editor" if verb == "activate_app" else 7)
+    if wm_restores:
+        assert call()
+        assert state["mapped"] and not state["shaded"]
+        assert state["time"] >= 2 * _linux_system._ACTIVATE_POLL_S
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            call()
+        assert exc.value.detail["reason"] == "window_shaded"
+    assert ("_NET_WM_STATE", [0, "_NET_WM_STATE_SHADED", 0, 1, 0]) in sent
+
+
+@pytest.mark.parametrize("state,reason", [("shaded", "window_shaded"), ("unmapped", "window_unmapped")])
+@pytest.mark.parametrize("method", ["type_text", "key_chord"])
+def test_input_to_active_hidden_client_is_refused(monkeypatch, state, reason, method):
+    from a11y_computer_use.drivers import linux, _linux_input, _atspi
+
+    target = _FakeXWin(7, 0, 0, 100, 100, pid=2)
+    _active_display(monkeypatch, [target], 7)
+    original = target.get_full_property
+    target.get_full_property = lambda atom, kind: (
+        _NS(value=["_NET_WM_STATE_SHADED"] if state == "shaded" else [])
+        if atom == "_NET_WM_STATE" else original(atom, kind)
+    )
+    target.get_attributes = lambda: _NS(map_state=0)
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    def unexpected(*args, **kwargs):
+        pytest.fail("hidden client must not receive text or keys")
+    monkeypatch.setattr(_linux_input, "type_string", unexpected)
+    monkeypatch.setattr(_linux_input, "press_chord", unexpected)
+    monkeypatch.setattr(_atspi, "insert_text", unexpected)
+    with pytest.raises(ComputerUseError) as exc:
+        getattr(linux.LinuxDriver(), method)("x")
+    assert exc.value.detail["reason"] == reason
+    assert exc.value.detail["window_id"] == 7
+
+
+def test_active_atspi_ref_does_not_bypass_shaded_guard(monkeypatch):
+    from a11y_computer_use.drivers import linux, _atspi
+
+    driver = linux.LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (True, "editor", 2, None))
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kwargs: 7)
+    def refuse(window_id):
+        assert window_id == 7
+        raise _linux_system._activation_error(_NS(id=7), "window_shaded")
+    monkeypatch.setattr(_linux_system, "refuse_unviewable_input", refuse)
+    with pytest.raises(ComputerUseError, match="window_shaded"):
+        driver._raise_handle_window(object())
+
+
+@pytest.mark.parametrize("visibility", ["unmapped", "unreadable"])
+def test_focus_cannot_confirm_when_shade_clears_without_visible_client(monkeypatch, visibility):
+    target = _FakeXWin(7, 0, 0, 100, 100, pid=2)
+    _active_display(monkeypatch, [target], 7)
+    def attributes():
+        if visibility == "unreadable":
+            raise RuntimeError("client disappeared")
+        return _NS(map_state=0)
+    target.get_attributes = attributes
+    clock = [0.0]
+    monkeypatch.setattr(_linux_system, "_send_active_window", lambda *args: None)
+    monkeypatch.setattr(_linux_system.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_linux_system.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.focus_window(7)
+    assert exc.value.detail["reason"] == (
+        "window_unmapped" if visibility == "unmapped" else "window_visibility_unverified"
+    )
