@@ -4455,6 +4455,7 @@ class LinuxDriver:
             )
             if isinstance(origin, str) and origin:
                 self._sheet_type_origin = origin
+        input_started = time.perf_counter() if self._sheet_type_origin else None
         if location is not None or bar_before is not None:
             _linux_input.type_string(text, delay=0.05)
         else:
@@ -4462,6 +4463,7 @@ class LinuxDriver:
         if location is not None:
             return self._location_read_back(location, before, text, app_id)
         if self._sheet_type_origin:
+            input_finished = time.perf_counter()
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
@@ -4483,7 +4485,9 @@ class LinuxDriver:
             address, wanted, actual = mismatch
             raise _atspi._text_mismatch(
                 "text_mismatch",
-                f"the text read back from {address} does not match {wanted!r}",
+                f"the text read back from {address} is {actual!r}, expected {wanted!r} "
+                f"(input={input_finished - input_started:.3f}s, "
+                f"verification={time.perf_counter() - input_finished:.3f}s)",
                 expected=wanted,
                 actual=actual,
                 cell=address,
