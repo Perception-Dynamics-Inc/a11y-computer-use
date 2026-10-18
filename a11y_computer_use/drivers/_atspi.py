@@ -4730,11 +4730,12 @@ class ATSPIAccessor:
         if entry and role_str == "paragraph" and math_command_editable(node):
             role = "AXTextArea"
             if not str(name).strip():
+                name, description = "Formula commands", ""
                 for ancestor in _ancestor_nodes(_parent_of(node)):
                     if _role_name(ancestor) in {"frame", "dialog", "application"}:
                         break
                     label = _node_name(ancestor).strip()
-                    if label:
+                    if label and not re.search(r" [—–-] LibreOffice Math$", label):
                         name, description = label, ""
                         break
         if role_str == "push button" and _gtk4_menu_button_wrapper(node):
@@ -6581,7 +6582,9 @@ def deduplicate_dialog_exposures(snapshot: Snapshot) -> Snapshot:
     prove identity: every node must have the same AT-SPI bus/object pair,
     measured bounds, state, and relative hierarchy. Unknown identity or
     geometry keeps both exposures, preserving the matcher's refusal.
-    Handles and refs for the retained exposure are unchanged.
+    Window-derived document ids may be absent on the application exposure;
+    only conflicting nonempty ids distinguish otherwise identical trees.
+    Handles and refs belong to this fresh snapshot, never an earlier exposure.
     """
     from dataclasses import replace
     from a11y_computer_use import observe
@@ -6609,10 +6612,20 @@ def deduplicate_dialog_exposures(snapshot: Snapshot) -> Snapshot:
             signature.append((
                 identity,
                 relative_refs.get(item.parent),
-                replace(item, ref="", snapshot_id="", parent=None, path=()),
+                replace(item, ref="", snapshot_id="", parent=None, path=(),
+                        document_id=None),
+                item.document_id,
             ))
         else:
-            if signature in seen:
+            if any(
+                len(signature) == len(previous)
+                and all(
+                    current[:3] == prior[:3]
+                    and (not current[3] or not prior[3] or current[3] == prior[3])
+                    for current, prior in zip(signature, previous)
+                )
+                for previous in seen
+            ):
                 removed.update(refs)
             else:
                 seen.append(signature)
@@ -6652,19 +6665,24 @@ def toplevel_raise_target(node):
     STATE_ACTIVE on that window. ``extents`` is ``(x, y, width, height)`` in
     screen pixels, or None when the window has no box. The caller raises the
     matching X window before it acts, and leaves an already active window
-    alone.
+    alone. Embedded unnamed chooser widgets use their enclosing window, so
+    occlusion checks cannot mistake that window for a separate covering one.
     """
     top = _toplevel_of(node)
     if top is None:
         return None
-    if _role_name(top) in {"frame", "window"} and not _node_name(top) and _qt_app(top):
-        # Qt exposes stacked/tab pages as unnamed windows inside QDialog.
+    if not _node_name(top) and (
+        _role_name(top) in {"file chooser", "color chooser"}
+        or (_role_name(top) in {"frame", "window"} and _qt_app(top))
+    ):
+        # GTK exposes embedded chooser widgets with top-level roles; Qt
+        # exposes stacked/tab pages as unnamed windows inside QDialog.
         # Their box overlaps both the dialog and the blocked main window;
         # choosing by overlap can spend the whole activation wait on the
         # main window. Use the enclosing native dialog's title and bounds.
         enclosing = _toplevel_of(_parent_of(top))
         if enclosing is not None and _role_name(enclosing) in {
-            "dialog", "alert", "file chooser", "color chooser",
+            "frame", "window", "dialog", "alert", "file chooser", "color chooser",
         }:
             top = enclosing
     title = str(_call_first(top, ("get_name", "getName"), default="") or "")
@@ -7432,11 +7450,26 @@ def math_command_editable(acc) -> bool:
     parent = _parent_of(acc)
     if parent is None or _role_name(parent) != "panel" or not _state_has(parent, "EDITABLE"):
         return False
+    math_identity = False
+    frame = None
     for node in _ancestor_nodes(parent):
         role = _role_name(node)
-        if role in {"frame", "dialog"}:
-            return role == "frame" and _node_name(node).endswith(" - LibreOffice Math")
-    return False
+        if role == "dialog":
+            return False
+        attrs = _get_attributes(node)
+        services = str(attrs.get("service-name") or attrs.get("service") or "").split()
+        math_identity |= (
+            role in {"math", "document math"}
+            or "com.sun.star.formula.FormulaProperties" in services
+            or (role == "application" and _node_name(node).casefold() == "libreoffice math")
+        )
+        if role == "frame":
+            frame = node
+        if role == "application":
+            break
+    if frame is None:
+        return False
+    return math_identity or bool(re.search(r" [—–-] LibreOffice Math$", _node_name(frame)))
 
 
 def _focused_math_command(acc, *, max_nodes: int = 400):
@@ -8142,8 +8175,12 @@ def qt_menu_button_without_press(acc) -> bool:
     return qt_menu_button(acc) and not (_MAIN_BUTTON_ACTIONS & set(_raw_action_names(acc)))
 
 
-def do_press(acc) -> bool:
-    """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
+def do_press(acc, *, on_dispatch=None) -> bool:
+    """Perform an activating AT-SPI action (True on success).
+
+    ``on_dispatch`` runs immediately before each native action attempt, even
+    when its reply fails. No callback means no action was sent.
+    """
     action = _action_iface(acc)
     if action is None:
         return False
@@ -8152,6 +8189,8 @@ def do_press(acc) -> bool:
     for i in range(int(n)):
         raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
         if raw in allowed:
+            if on_dispatch is not None:
+                on_dispatch()
             if _call_first(action, ("do_action", "doAction"), i, default=False):
                 return True
     return False
@@ -9351,12 +9390,17 @@ def insert_text(acc, text: str) -> int | None:
     if _confirm_text(acc, expected):
         # Scintilla inserts the buffer text without advancing the caret. Only
         # correct a caret still at the verified insertion point; other native
-        # caret movement belongs to the widget. Positions are not UTF-8 bytes.
+        # caret movement belongs to the widget. Math can also retain the old
+        # selection endpoint after replacement; place its caret after the
+        # verified insertion. Positions are not UTF-8 bytes.
         Atspi = _atspi()
         after_caret = _safe(lambda: Atspi.Text.get_caret_offset(acc)) if typed else None
         if (
-            typed and type(after_caret) is int and after_caret == offset
-            and not drawing_text_editable(acc)
+            typed and (
+                math_command_editable(acc)
+                or (type(after_caret) is int and after_caret == offset
+                    and not drawing_text_editable(acc))
+            )
         ):
             target = offset + (_utf16_length(typed) if qt else len(typed))
             _move_caret(Atspi, acc, target)
@@ -16617,7 +16661,17 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     if is_secure(acc):
         return False
     if math_command_editable(acc):
-        return _replace_editable_text(acc, text)
+        if not _replace_editable_text(acc, text):
+            return False
+        target = _utf16_length(text) if _qt_app(acc) else len(text)
+        Atspi = _atspi()
+        _move_caret(Atspi, acc, target)
+        if _safe(lambda: Atspi.Text.get_caret_offset(acc)) != target:
+            raise _text_mismatch(
+                "caret_not_advanced", "the text was replaced but the caret could not be advanced",
+                unchanged=False,
+            )
+        return True
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
@@ -19025,6 +19079,39 @@ def chromium_button_click_action(acc):
     return None
 
 
+def fallback_pointer_target(acc, x: int, y: int) -> bool:
+    """Hit-test a ref from its owning popup/window, never from the target itself.
+
+    Qt popups are not hit-testable through the desktop or their owner's frame.
+    Require the popup itself to remain showing, and descend only native hits.
+    Missing hits and cycles are refusals, not evidence from overlapping bounds.
+    """
+    root = next((node for node in _ancestor_chain(acc)
+                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog"}), None)
+    if root is None or root is acc or not _state_has(root, "SHOWING"):
+        return False
+    target_key = _ancestor_key(acc)
+    node = root
+    seen: set[object] = set()
+    pinned = []
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            return False
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            return False
+        hit = _hit_at(comp, x, y)
+        if hit is None:
+            return False
+        if _ancestor_key(hit) == target_key:
+            return True
+        node = hit
+    return False
+
+
 def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     """Verify a Chromium page ref against the document's native hit test.
 
@@ -20805,15 +20892,40 @@ def scroll_by_pixels(acc, *, dx: int = 0, dy: int = 0) -> bool:
 
 
 def _accessible_at_point(x: int, y: int):
-    """Deepest accessible under screen point ``(x, y)``, or None."""
+    """Hit-test the desktop, falling back to the native owner's showing frame.
+
+    The registry desktop and application roots need not expose Component.
+    Do not walk arbitrary background apps or guess between overlapping frames.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
     Atspi = _atspi()
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return None
     found = _deepest_at_point(desktop, int(x), int(y), 0, set())
-    if found is None or found is desktop:
+    if found is not None and found is not desktop:
+        return found
+    pid = _linux_system.pid_at_point(x, y)
+    if pid is None:
         return None
-    return found
+    frames = []
+    for index in range(_child_count(desktop)):
+        app = _child_at(desktop, index)
+        if pid_of(app) != pid:
+            continue
+        for frame in _fresh_application_children(app):
+            if not _state_has(frame, "SHOWING"):
+                continue
+            rect = _raw_rect(frame, "SCREEN")
+            if rect is None:
+                continue
+            left, top, width, height = rect
+            if left <= x < left + width and top <= y < top + height:
+                frames.append(frame)
+    if len(frames) != 1:
+        return None
+    return _deepest_at_point(frames[0], int(x), int(y), 0, set())
 
 
 def _deepest_at_point(acc, x: int, y: int, depth: int, seen: set[int]):

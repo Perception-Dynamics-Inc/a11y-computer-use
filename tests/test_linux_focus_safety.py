@@ -30,7 +30,7 @@ def focus_driver(monkeypatch):
     monkeypatch.setattr(_atspi, "pid_of", lambda acc: 42)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "editor")
     monkeypatch.setattr(_atspi, "grab_focus", lambda acc: False)
-    monkeypatch.setattr(_atspi, "do_press", lambda acc: False)
+    monkeypatch.setattr(_atspi, "do_press", lambda acc, **kwargs: False)
     monkeypatch.setattr(_atspi, "set_text", lambda acc, text: True)
     monkeypatch.setattr(_atspi, "insert_text", lambda acc, text: inserted.append((acc, text)) or True)
     monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)

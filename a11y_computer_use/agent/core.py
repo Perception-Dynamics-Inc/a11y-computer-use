@@ -1141,7 +1141,8 @@ class Agent:
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
         first_error = error
-        if error and self.max_retries > 0 and requested.name != "crop" and not self._stop_requested():
+        if (error and not _final_click_error(error) and self.max_retries > 0
+                and requested.name != "crop" and not self._stop_requested()):
             hint = None if marker is None else marker.next
             retried, retry_notes = self._recover(requested, executed, hint)
             recovery.extend(retry_notes)
@@ -1456,6 +1457,10 @@ class Agent:
             attempts += 1
             result, error, marker = self._invoke(action)
             notes.append(label)
+            if _final_click_error(error) or (
+                marker is not None and marker.outcome == "dispatched"
+            ):
+                return (action, result, error, marker), notes
             if error is None and (marker is None or marker.outcome == "confirmed"):
                 return (action, result, error, marker), notes
         return None, notes
@@ -2065,6 +2070,27 @@ class Agent:
             window=window,
             payment_form=form,
         )
+        # Runtime rechecks this again at dispatch, including after approval.
+        # Use its shared safety check here too, rather than judging browser
+        # permission/unsaved-change buttons from the model's old observation.
+        from a11y_computer_use.schema import Click, KeyChord, Point
+        from a11y_computer_use.server import Runtime
+
+        if isinstance(self.runtime, Runtime) and action.name in {"click", "key"}:
+            judged = None
+            if action.name == "key":
+                judged = KeyChord(chord=str(action.args.get("chord", "")))
+            elif "x" in action.args and "y" in action.args:
+                judged = Click(target=Point(action.args.get("display_id", 0),
+                                            action.args["x"], action.args["y"]))
+            elif element is not None:
+                judged = Click(target=element)
+            if judged is not None:
+                app = action.args.get("app") or getattr(snap, "app", None) or self.runtime._frontmost() or "unknown"
+                prompt = self.runtime._dialog_confirmation(judged, app)
+                if prompt is not None:
+                    role, target_name, window = prompt.role, prompt.target_name, prompt.window
+                    reason = prompt.reason
         return (
             _clip(role, 64),
             _clip(target_name, 80),
@@ -5254,6 +5280,14 @@ def _action_label(action: Action, snap: Snapshot | None) -> str | None:
         return element.title
     name = action.args.get("name")
     return str(name) if name else None
+
+
+def _final_click_error(error: str | None) -> bool:
+    """A declined press may have acted; never retry its stale target this step."""
+    return bool(error and (
+        "fallback_target_unverified" in error
+        or ("stale_ref" in error and "after the accessibility press" in error)
+    ))
 
 
 def _verified(

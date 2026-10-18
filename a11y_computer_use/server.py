@@ -2581,6 +2581,48 @@ class Runtime:
             raise ActionRefused(decision)
         return decision
 
+    def _dialog_confirmation(self, action, app: str):
+        """Read the current dialog, never the tree that issued the ref."""
+        if not isinstance(action, Click) and not (
+            isinstance(action, KeyChord)
+            and safety.browser_dialog_key(action.chord)
+        ):
+            return None
+        if isinstance(action, Click) and isinstance(action.target, Element):
+            if action.target.title.strip().casefold() not in {
+                "allow", "allow this time", "allow while visiting the site", "leave", "reload",
+            }:
+                return None
+        from dataclasses import replace
+
+        # A raw pointer action in an unobserved ordinary app has no browser
+        # context. Keep that path free of tree reads (adapter pointer contract).
+        # Known browser apps still get a fresh check even without any snapshot.
+        if (getattr(self, "_current", None) is None
+                and not isinstance(getattr(action, "target", None), Element)
+                and self.driver.name != "browser"
+                and not any(name in app.casefold() for name in (
+                    "chrome", "chromium", "browser", "firefox", "safari", "brave",
+                    "msedge", "microsoft.edge", "opera", "vivaldi", "arc",
+                ))):
+            return None
+        scoped = getattr(self.driver, "browser_dialog_confirmation", None)
+        if callable(scoped):
+            result = scoped(action, app)
+            if result is not NotImplemented:
+                return result
+        snapshot = getattr(self.driver, "snapshot", None)
+        if not callable(snapshot):
+            return None  # Legacy injected drivers without tree observation.
+        fresh = snapshot(Scope.WINDOW, app)
+        judged = action
+        if isinstance(action, Click) and isinstance(action.target, Element):
+            anchor = replace(fresh, snapshot_id=action.target.snapshot_id,
+                             elements=(action.target,))
+            live = self.driver.resolve_ref(anchor, action.target.ref, live=fresh)
+            judged = replace(action, target=live)
+        return safety.browser_dialog_prompt(judged, fresh, app)
+
     def _confirmation_window(self, action: object) -> str | None:
         """Window title for a confirmation prompt, from the current snapshot."""
         snap = getattr(self, "_current", None)
@@ -2638,8 +2680,11 @@ class Runtime:
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
-                prompt = safety.confirmation_prompt(
-                    action, app, window=self._confirmation_window(action),
+                prompt = self._dialog_confirmation(action, app) or safety.confirmation_prompt(
+                    action, app, window=(self._confirmation_window(action)
+                        if not isinstance(action, Click) or not isinstance(action.target, Element)
+                        or action.target.title.strip().casefold() not in {"leave", "reload"}
+                        else None),
                     menu_path=self._confirmation_menu_path(action),
                 )
                 if prompt is not None and not (confirm is not None and confirm(prompt)):
@@ -2662,6 +2707,14 @@ class Runtime:
                     decision = self._require_permission(action, app, secure=secure)
             if recheck is not None:
                 recheck(app)
+            if CONFIRMATION_GATE:
+                # Without a human callback there has been no suspension or
+                # input since this action's probe. Reuse it; approval waits
+                # must still re-read the live dialog before injection.
+                latest = self._dialog_confirmation(action, app) if prompt is not None else None
+                if latest is not None and latest != prompt:
+                    raise ComputerUseError(ErrorCode.CONFIRMATION_DECLINED,
+                                           "The dialog changed before dispatch; " + latest)
             self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
@@ -5425,6 +5478,7 @@ class Runtime:
 
         menu_note: list[str] = []
         button_mechanism: list[str] = []
+        new_dialogs: list[str] = []
         # A non-clickable text ref that stands for a button or link. The
         # click lands on that control. Empty when the ref is the control.
         activated: list[Element] = []
@@ -5497,12 +5551,23 @@ class Runtime:
                 and not mods
                 and not _linux_button_uses_pointer(self.driver, act)
             )
+            dialog_reader = getattr(self.driver, "click_dialog_state", None)
+            dialogs_before = dialog_reader(act) if plain and callable(dialog_reader) else None
             if plain:
                 if callable(probe_toggle):
                     toggle_probe = probe_toggle(act)
                 if self.driver.press_element(act):
                     return  # activated via AX — the user's cursor never moved
                 toggle_probe = None
+            if plain and dialogs_before is not None:
+                dialogs_after = dialog_reader(act)
+                if dialogs_after is not None:
+                    new_dialogs.extend(
+                        name for identity, name in dialogs_after.items()
+                        if identity not in dialogs_before
+                    )
+                    if new_dialogs:
+                        return
             if activated and isinstance(act, Element) and not _positive_box(act):
                 control = activated[0]
                 raise ComputerUseError(
@@ -5560,6 +5625,14 @@ class Runtime:
                 if mechanism is not None:
                     button_mechanism.append(mechanism)
                     return
+            # A declined native press may already have opened a modal dialog.
+            # The old point can now belong to a completely different control.
+            fallback_check = getattr(self.driver, "verify_click_fallback", None)
+            if plain and isinstance(act, Element) and callable(fallback_check):
+                act = fallback_check(act, app)
+                self._refuse_disabled(act, verb="click")
+                self._refuse_secure(act)
+                self._recheck_target(app, act)
             if verify_selection:
                 selection_before = selection_reader(act)
             if callable(probe_toggle):
@@ -5573,6 +5646,15 @@ class Runtime:
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
+        if new_dialogs:
+            names = ", ".join(json.dumps(name, ensure_ascii=False) for name in new_dialogs)
+            return outcome.ActionResult(
+                f"dispatched: opened dialog {names}. "
+                "Take a fresh snapshot and inspect the dialog before continuing; "
+                "the requested effect is not verified. No fallback click was sent.",
+                outcome="dispatched", next=(),
+                evidence=f"new visible native dialog: {names}",
+            )
         if raised and not activated:
             target = raised[0]
         if unbound:
@@ -6199,7 +6281,7 @@ class Runtime:
             selection=selection,
         )
 
-    def _linux_key(self, chord: str, identifier: str) -> str:
+    def _linux_key(self, chord: str, identifier: str, *, confirm: Confirmer | None = None) -> str:
         bundle, chosen, candidates = self._linux_keyboard_window(identifier)
         action = KeyChord(chord=chord)
         focused: list[bool] = []
@@ -6217,7 +6299,7 @@ class Runtime:
         writer_before = self._writer_key_probe(bundle, chord)
         focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
         sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
-        self._run_gated(action, bundle, execute)
+        self._run_gated(action, bundle, execute, confirm=confirm)
         note = " (focused its window first)" if focused else ""
         return self._conclude(
             f"pressed {chord} in {bundle}{note}",
@@ -6438,13 +6520,13 @@ class Runtime:
             parse_chord(chord)
 
     @_serialized
-    def key(self, chord: str, app: str | None = None) -> str:
+    def key(self, chord: str, app: str | None = None, *, confirm: Confirmer | None = None) -> str:
         app = _optional_app_arg(app, "key")
         chord = canonical_chord(chord)  # Page_Down, page_down, Prior, Control_L, ...
         self._validate_chord(chord)  # before the gate, so a bad chord is not audited
         addressed = self._linux_addressed_app(app)
         if addressed is not None:
-            return self._linux_key(chord, addressed)
+            return self._linux_key(chord, addressed, confirm=confirm)
         action = KeyChord(chord=chord)
         target = self._background_target(app)
         note: list[str] = []
@@ -6460,7 +6542,7 @@ class Runtime:
                 self._guard_user(bundle, addressed=True)
                 self.driver.key_chord(chord, pid=self._input_pid(pid))
 
-            self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
+            self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid), confirm=confirm)
             return self._conclude(
                 f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
                 tool="key", app=bundle, before=before,
@@ -6489,7 +6571,7 @@ class Runtime:
             if not self._open_mnemonic_menu(target, chord):
                 self.driver.key_chord(chord)
 
-        self._run_gated(action, target, execute, recheck=self._recheck_key_target)
+        self._run_gated(action, target, execute, recheck=self._recheck_key_target, confirm=confirm)
         return self._conclude(
             f"pressed {chord}{''.join(note)}",
             tool="key", app=target, before=before,
@@ -6853,7 +6935,7 @@ class Runtime:
                 return self.type_text(step["text"], ref=step["ref"])
             return self.type_text(step["text"])
         if do == "key":
-            return self.key(_folded_key_chord(step))
+            return self.key(_folded_key_chord(step), **({"confirm": confirm} if confirm is not None else {}))
         if do == "scroll":
             return self.scroll(step.get("ref"), step.get("x"), step.get("y"), step.get("display_id"),
                                step.get("dx", 0), step.get("dy", 0), step.get("unit", "lines"),
@@ -9518,7 +9600,7 @@ class Runtime:
             "click": partial(self.click, confirm=confirm),
             "hover": self.hover,
             "type": self.type_text,
-            "key": self.key,
+            "key": partial(self.key, confirm=confirm),
             "scroll": self.scroll,
             "drag": self.drag,
             "wait_for": self.wait_for,
@@ -10137,6 +10219,11 @@ def build_server(
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
+        On Linux a declined accessibility press permits pointer fallback only
+        after fresh ref, visibility, and exact target hit checks; otherwise it
+        returns fallback_target_unverified with no fallback click sent. A newly
+        visible native dialog is named in a dispatched receipt; this
+        is not verified effect. Inspect a fresh snapshot before continuing.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
         Valid x is 0..width-1 and valid y is 0..height-1 on that display. A
@@ -10311,10 +10398,14 @@ def build_server(
         focused paragraph is empty; unchanged
         scoped state and copy remain unverifiable without further evidence, with
         no retry hints. Linux X11 copy checks clipboard owner/target metadata.
+        Return/KP_Enter, Space, and Alt access keys on browser permission or
+        unsaved-change dialog buttons require confirmation, using the dialog
+        present at dispatch.
         Thunar location-entry Return/KP_Enter reports
         suspected_noop when an error icon appears or the window title stays unchanged;
         check the path or create missing folders from the nearest existing parent."""
-        return _publish(await run(runtime.key, chord, app, _outcome=True, _tool="key"))
+        return _publish(await run(runtime.key, chord, app, confirm=_confirmer_for(server.get_context()),
+                                  _outcome=True, _tool="key"))
 
     @server.tool(name="scroll")
     async def scroll(

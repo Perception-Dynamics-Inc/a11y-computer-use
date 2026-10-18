@@ -108,3 +108,42 @@ def test_driver_publishes_deduplicated_snapshot(monkeypatch):
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     result = driver._snapshot_root("chrome", root, Scope.APP)
     assert len(observe.find_elements(result, text="Allow this time", role="button")) == 1
+
+
+@pytest.mark.parametrize("retained_copy", [0, 1])
+def test_window_document_id_and_absent_application_id_resolve_live_copy(monkeypatch, retained_copy):
+    before = _snapshot(monkeypatch, merged=True)
+    dialog_refs = [e.ref for e in before.elements if e.role == "AXDialog"]
+    first_refs = {dialog_refs[0]}
+    for item in before.elements:
+        if item.parent in first_refs:
+            first_refs.add(item.ref)
+    before = replace(before, elements=tuple(
+        replace(item, document_id=(
+            "title:PERM G:asking - Permission requested, press F6 to respond - Google Chrome"
+            if item.ref in first_refs else None
+        )) for item in before.elements
+    ))
+    published = _atspi.deduplicate_dialog_exposures(before)
+    assert len([e for e in published.elements if e.role == "AXDialog"]) == 1
+    # Dispatch must use fresh handles even if only the other exposure survives.
+    fresh = _snapshot(monkeypatch, merged=True)
+    fresh = replace(fresh, elements=tuple(
+        replace(item, document_id=before.element(item.ref).document_id)
+        for item in fresh.elements
+        if (item.ref in first_refs) == (retained_copy == 0)
+    ))
+    for title in ("Allow this time", "Never allow"):
+        anchor = observe.find_elements(published, text=title, role="button")[0]
+        resolved = observe.rematch_ref(published, anchor.ref, fresh)
+        assert resolved in fresh.elements
+        assert observe.ax_handle_for(fresh.snapshot_id, resolved.ref) is not None
+        assert observe.ax_handle_for(fresh.snapshot_id, resolved.ref) is not observe.ax_handle_for(published.snapshot_id, anchor.ref)
+
+
+def test_conflicting_nonempty_document_ids_keep_both_dialogs(monkeypatch):
+    before = _snapshot(monkeypatch, merged=True)
+    before = replace(before, elements=tuple(
+        replace(item, document_id=f"document:{item.ref}") for item in before.elements
+    ))
+    assert _atspi.deduplicate_dialog_exposures(before) is before

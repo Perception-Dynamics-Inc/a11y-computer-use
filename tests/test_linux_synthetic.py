@@ -2110,7 +2110,7 @@ def test_chromium_zero_height_section_keeps_the_login_form(monkeypatch) -> None:
     assert not any(el.role == "AXSecureTextField" for el in bare.elements)
 
     pressed: list[object] = []
-    monkeypatch.setattr(_atspi, "do_press", lambda handle: pressed.append(handle) or True)
+    monkeypatch.setattr(_atspi, "do_press", lambda handle, **kwargs: pressed.append(handle) or True)
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     for el in snap.elements:
@@ -2490,7 +2490,7 @@ def test_nested_iframe_checkbox_survives_depth_and_presses_via_do_action(monkeyp
     assert box.ref in {el.ref for el in observe.find_elements(snap, role="checkbox")}
 
     pressed: list[object] = []
-    monkeypatch.setattr(_atspi, "do_press", lambda acc: pressed.append(acc) or True)
+    monkeypatch.setattr(_atspi, "do_press", lambda acc, **kwargs: pressed.append(acc) or True)
     monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
     assert LinuxDriver().press_element(box) is True
     assert pressed == [checkbox]
@@ -17346,8 +17346,17 @@ def _math_command(text=""):
     return panel, paragraph
 
 
-def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch):
+@pytest.mark.parametrize("separator", ["-", "—", "–"])
+def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch, separator):
     panel, paragraph = _math_command("a")
+    panel.parent.parent.parent.name = f"Untitled 1 {separator} LibreOffice Math"
+    panel.name = panel.parent.parent.parent.name
+
+    def reset_focus():
+        paragraph.caret = 0
+        return True
+
+    paragraph.component.grab_focus = reset_focus
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
     monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
     monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: getattr(acc, "text", None))
@@ -17365,8 +17374,14 @@ def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch):
     monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
     assert driver.type_into(element, " over b") == 7
     assert paragraph.text == "a over b"
+    assert paragraph.caret == 8
     assert driver.set_value(element, "x^2") is True
     assert paragraph.text == "x^2"
+    assert paragraph.caret == 3
+    assert driver.type_into(element, "+y") == 2
+    assert paragraph.text == "x^2+y"
+    assert paragraph.caret == 5
+    assert driver.set_value(element, "x^2") is True
     paragraph.set_text_contents = lambda text: True
     assert _atspi.set_text(paragraph, "not written") is False
     assert paragraph.text == "x^2"
@@ -17529,3 +17544,212 @@ def test_math_type_outcome_reuses_verified_command_without_snapshot_polling(
         driver.type_text("q")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert driver._math_type_readback is None
+
+
+@pytest.mark.parametrize("case", [
+    "valid", "checkbox", "namesake", "hidden", "missing_hit", "hit_error",
+    "gone", "renamed", "role_changed", "replacement", "moved", "covered",
+    "popup_hidden", "no_root", "no_component", "cycle", "proxy",
+])
+def test_ref_click_fallback_requires_fresh_identity_and_hit(monkeypatch, case):
+    """A declined modal press must never click the checkbox at its old point."""
+    from dataclasses import replace
+
+    tree = _node("AXWindow", "Editor", children=[
+        _node("AXMenuItem", "Preferences", actions=("AXPress",),
+              pos=(652, 471), size=(276, 25), stable_id="preferences"),
+    ])
+    issued = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                            app="featherpad", pid=42, geometry=_geometry())
+    element = next(el for el in issued.elements if el.title == "Preferences")
+    fresh = replace(element, snapshot_id="fallback-live", ref="e20")
+    original, other = object(), object()
+    if case == "renamed":
+        fresh = replace(fresh, title="Do not show toolbar")
+    elif case == "role_changed":
+        fresh = replace(fresh, role="AXCheckBox")
+    elif case == "moved":
+        fresh = replace(fresh, bounds=Bounds(0, 500, 400, 200, 20))
+    live = replace(issued, snapshot_id="fallback-live",
+                   elements=() if case == "gone" else (fresh,))
+    observe._register_epoch(issued.snapshot_id, {}, {element.ref: original})
+    handle = other if case == "replacement" else original
+    observe._register_epoch(live.snapshot_id, {}, {fresh.ref: handle})
+    driver = LinuxDriver()
+    snapshots, hits = [], []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *args: "Preferences" if case == "covered" else None)
+    monkeypatch.setattr(driver, "snapshot", lambda scope, app: snapshots.append((scope, app)) or live)
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", lambda node: None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: case != "hidden")
+
+    def hit(x, y):
+        hits.append((x, y))
+        if case == "hit_error":
+            raise RuntimeError("D-Bus unavailable")
+        if case == "missing_hit":
+            return None
+        if case == "cycle":
+            return popup
+        return other if case in {"checkbox", "namesake", "proxy"} else original
+
+    popup = object()
+    if case == "proxy":
+        monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: (":1.2", "/preferences") if node in (original, other) else None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: case != "hidden" and not (case == "popup_hidden" and node is popup))
+    monkeypatch.setattr(_atspi, "_ancestor_chain", lambda node: iter((node,) if case == "no_root" else (node, popup)))
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: "popup menu" if node is popup else "menu item")
+    monkeypatch.setattr(_atspi, "_component", lambda node: None if case == "no_component" else node)
+    monkeypatch.setattr(_atspi, "_hit_at", lambda comp, x, y: hit(x, y))
+    if case in {"valid", "moved", "proxy"}:
+        assert driver.verify_click_fallback(element, "featherpad") is fresh
+        assert hits == ([(600, 410)] if case == "moved" else [(790, 483)])
+    else:
+        with pytest.raises(ComputerUseError) as caught:
+            driver.verify_click_fallback(element, "featherpad")
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["outcome"] == "refused"
+        assert caught.value.detail["reason"] == "fallback_target_unverified"
+        assert "no fallback pointer click was sent" in str(caught.value)
+    assert snapshots == [(Scope.WINDOW, "featherpad")]
+
+
+@pytest.mark.parametrize("case", ["dialog", "hidden", "window", "missing", "error", "unanswered", "no_identity"])
+def test_click_dialog_state_requires_complete_visible_native_evidence(monkeypatch, case):
+    from types import SimpleNamespace
+
+    driver = LinuxDriver()
+    element = SimpleNamespace(snapshot_id="issued", ref="e2")
+    app = object()
+    child = SimpleNamespace(get_name=lambda: "Preferences")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: object())
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_application_of", lambda handle: app)
+    uncached = []
+    def without_cache(owner, fn):
+        uncached.append(owner)
+        return fn()
+    monkeypatch.setattr(_atspi, "_without_child_cache", without_cache)
+    monkeypatch.setattr(_atspi, "_raw_child_count", lambda node: 1)
+    monkeypatch.setattr(_atspi, "_child_at", lambda *args: None if case == "missing" else child)
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", lambda node: None)
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: "frame" if case == "window" else "dialog")
+    monkeypatch.setattr(_atspi, "_state_has", lambda *args: case != "hidden")
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key",
+                        lambda node: None if case == "no_identity" else "native-dialog-id")
+    monkeypatch.setattr(_atspi, "call_went_unanswered", lambda: case == "unanswered")
+    if case == "error":
+        def fail():
+            raise RuntimeError("D-Bus unavailable")
+        child.get_name = fail
+    result = driver.click_dialog_state(element)
+    assert uncached == [app]
+    if case == "dialog":
+        assert result == {"native-dialog-id": "Preferences"}
+    elif case in {"hidden", "window"}:
+        assert result == {}
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize("names,dispatched", [([], False), (["check"], False), (["click"], True)])
+def test_declined_press_receipt_distinguishes_no_action_from_failed_dispatch(monkeypatch, names, dispatched):
+    from types import SimpleNamespace
+
+    calls = []
+    action = SimpleNamespace(
+        get_n_actions=lambda: len(names),
+        get_action_name=lambda index: names[index],
+        do_action=lambda index: calls.append(index) or False,
+    )
+    monkeypatch.setattr(_atspi, "_action_iface", lambda acc: action)
+    monkeypatch.setattr(_atspi, "qt_menu_button", lambda acc: False)
+    attempts = []
+    assert _atspi.do_press(object(), on_dispatch=lambda: attempts.append(True)) is False
+    assert bool(attempts) is dispatched
+    assert bool(calls) is dispatched
+
+
+def test_no_press_receipt_is_bound_to_exact_target_and_consumed_once(monkeypatch):
+    from types import SimpleNamespace
+
+    element = SimpleNamespace(ref="e2", role="AXRow", title="Folder", snapshot_id="snap")
+    driver = LinuxDriver()
+    driver._click_without_press = element
+    assert driver.click_dialog_state(element) is None
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    assert driver.verify_click_fallback(element, "demo") is element
+    with pytest.raises(ComputerUseError) as caught:
+        driver.verify_click_fallback(element, "demo")
+    assert caught.value.detail["reason"] == "fallback_target_unverified"
+    driver._click_without_press = object()
+    with pytest.raises(ComputerUseError):
+        driver.verify_click_fallback(element, "demo")
+
+
+@pytest.mark.parametrize("identity", ["role", "service", "application"])
+def test_math_command_prefers_native_identity_to_title(fake_atspi, identity):
+    panel, paragraph = _math_command("abc")
+    frame = panel.parent.parent.parent
+    frame.name = "Localized formula document"
+    if identity == "role":
+        panel.parent.role = "document math"
+    elif identity == "service":
+        frame.get_attributes = lambda: {"service-name": "com.sun.star.formula.FormulaProperties"}
+    else:
+        frame.parent.name = "LibreOffice Math"
+    assert _atspi.math_command_editable(paragraph)
+    frame.role = "dialog"
+    assert not _atspi.math_command_editable(paragraph)
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_math_type_preserves_middle_caret_and_selection(fake_atspi, monkeypatch, selected):
+    panel, paragraph = _math_command("abcd")
+    paragraph.caret = 2
+    paragraph.selection = (1, 3) if selected else None
+
+    def delete(start, end):
+        paragraph.text = paragraph.text[:start] + paragraph.text[end:]
+        paragraph.selection = None
+        # Math can retain the old selection endpoint after EditableText writes.
+        paragraph.caret = end
+        return True
+
+    paragraph.delete_text = delete
+    element = Element(ref="e1", role="AXTextArea", title="Commands", value="abcd",
+                      bounds=None, editable=True, snapshot_id="s1")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: paragraph)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda handle: pytest.fail("would reset caret"))
+    assert driver.type_into(element, "Q") == 1
+    assert paragraph.text == ("aQd" if selected else "abQcd")
+    assert paragraph.caret == (2 if selected else 3)
+
+
+@pytest.mark.parametrize("replace", [True, False])
+def test_math_write_refuses_unverified_caret(fake_atspi, monkeypatch, replace):
+    _, paragraph = _math_command("old")
+    paragraph.caret = 0
+    monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", lambda *args: True)
+    with pytest.raises(ComputerUseError) as exc:
+        if replace:
+            _atspi.set_text(paragraph, "x^2")
+        else:
+            _atspi.insert_text(paragraph, "x^2")
+    assert exc.value.detail["reason"] == "caret_not_advanced"
+    assert paragraph.text == ("x^2" if replace else "x^2old")
+    assert paragraph.caret == 0
+
+
+def test_math_command_label_without_named_container(fake_atspi, monkeypatch):
+    panel, paragraph = _math_command("a")
+    panel.parent.parent.name = ""
+    panel.name = "Untitled 1 — LibreOffice Math"
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    raw = _atspi.ATSPIAccessor().read(paragraph)
+    assert raw.title == "Formula commands"
+    assert raw.editable

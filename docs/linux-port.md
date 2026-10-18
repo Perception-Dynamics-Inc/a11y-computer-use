@@ -77,7 +77,7 @@ AT-SPI `level bar` maps to `AXProgressIndicator` and shows its current Value wit
 
 ## Chromium pages
 
-Chrome can publish one permission dialog under its frame and again as an application child. Linux snapshots collapse these exposures only when every node in the dialog subtree has the same native AT-SPI bus/object identity, measured bounds, state, and relative hierarchy. Equal labels or Chromium `id` attributes alone do not qualify; unknown identity or geometry keeps the ambiguity refusal. This is covered by synthetic snapshot/ref tests, not a live Chrome run. Permission confirmation and action-effect verification remain separate requirements.
+Chrome can publish one permission dialog under its frame and again as an application child. Linux snapshots collapse these exposures only when every node in the dialog subtree has the same native AT-SPI bus/object identity, measured bounds, state, and relative hierarchy. Equal labels or Chromium `id` attributes alone do not qualify; unknown identity or geometry keeps the ambiguity refusal. Duplicate native dialog exposures may differ in window-derived document identity when one exposure has no document id. That absence does not distinguish otherwise identical native subtrees; conflicting nonempty document ids still do. Ref dispatch re-resolves against the fresh snapshot and its native handles. Permission confirmation and action-effect verification remain separate requirements.
 
 A Chrome document can hide a whole form under one zero-height section. On the Figma login page the raw AT-SPI tree is `document web` "Login | Figma" (1279 by 812) → `section` with height 0 (1279 by 0) → `section` (1279 by 812) → `section` → `form` → entry "EMAIL", password text "PASSWORD", push buttons "Continue with Google" and "Log in", and links. The snapshot used to print only `group "Login | Figma"` with no children. The pruner dropped any node whose bounds were zero-size, and the zero-height section took the painted form with it. Chrome does expose those children.
 
@@ -130,8 +130,11 @@ For Chrome/Electron processes that advertise a DevTools port, the Linux form ove
 
 Chromium page checkbox, radio, and toggle-button clicks compare fresh native
 `CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
-clicks use the accessible hit at the requested point, including a toggle's text
-descendant and nested web documents. A state change confirms the effect without
+clicks resolve the native window-owner PID and hit-test its showing AT-SPI frame
+at the requested point, including a toggle's text descendant and nested web
+documents. Missing owners or ambiguous overlapping frames retain normal
+verification. The registry desktop does not need a Component interface.
+A state change confirms the effect without
 another full-window snapshot or the process-exit grace wait; process liveness is
 still checked immediately. Unchanged, defunct, or unreadable targets retain the
 normal outcome check. This does not change the requested click or establish a
@@ -885,17 +888,46 @@ remains off screen (including Scintilla implementations without that scroll
 API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
 caret-based reveal fallback and verifies the resulting character extents.
 
+Ref-click coordinate fallback after a dispatched but declined accessibility press takes a new
+snapshot and requires the same native target, name, role, SHOWING state, and an
+exact accessibility hit at its fresh center. If any check is unavailable or
+mismatched, it refuses with `fallback_target_unverified` and sends no fallback
+pointer click. A Qt modal action can open a dialog despite returning false on a
+D-Bus timeout; inspect a fresh snapshot after refusal before issuing another click.
+
+The agent treats this refusal (including its `stale_ref` error) as final for the
+step: it surfaces the error to the model without a coordinate, vision, or other
+click retry, and does not mark the step verified. If complete native reads before
+and after the declined press show a newly visible dialog, Runtime instead returns
+`dispatched`, naming the dialog, with no retry hints in `next`. The agent's
+step status is also `dispatched`, and its result retains the dialog name. This
+is dispatch evidence, not a verified outcome; inspect the fresh observation
+before choosing the next action.
+
+A false press result with an exact, single-use receipt proving no native action
+was dispatched retains the ordinary click path and its existing geometry guards.
+This distinguishes controls without a supported native action from actions that
+may already have opened a dialog despite a failed reply.
+
 LibreOffice Math command paragraphs with native EDITABLE state and EditableText
 are exposed as editable text areas. Recognition requires an editable parent
-panel and a LibreOffice frame title ending in ` - LibreOffice Math`; other
-paragraphs keep their existing rules. An unnamed command paragraph uses its
-nearest named container (for example, `Commands`) as its label. Ref typing and
-replacement verify the command paragraph's Text value. When Math marks both
+panel in a LibreOffice frame. Native Math roles or formula service metadata
+identify the document when exposed; the fallback accepts `LibreOffice Math`
+after a hyphen, en dash, or em dash in the frame title. Other paragraphs keep
+their existing rules. An unnamed command paragraph uses its nearest named
+container (for example, `Commands`), or `Formula commands` when no such label
+is available. Ref typing preserves an already focused command's caret and
+selection instead of resetting them through another focus request. Replacement
+verifies the command paragraph's Text value and moves the caret to the end,
+verifying that position before success. Insertion also verifies the caret after
+the inserted text, including replacement of a selection. When Math marks both
 the panel and one child paragraph focused, no-ref typing resolves that child
 and uses EditableText without entering the Calc settlement poller. Read-only
 paragraphs and ambiguous focused children are not accepted by this resolver.
-This path has synthetic regression coverage; native Math behavior and latency
-have not been measured by those tests.
+Synthetic regressions cover title separators, native identity, and caret
+placement. Ref insertion, replacement, subsequent no-ref typing, and insertion
+at a middle caret were also checked with LibreOffice Math 25.2.3 on Linux under
+Xvfb, xfwm4, and AT-SPI; these checks establish behavior, not a latency bound.
 
 Chromium page keys use focused text/caret/selection plus a native document-child
 anchor and window name/child count before considering a full-window reread.
@@ -904,3 +936,14 @@ effect; unchanged evidence returns `unverifiable` without retry advice. Missing
 page evidence retains the full-window fallback. Copy chords still require
 clipboard owner/target evidence, and process-exit checks remain in place. This
 path has hermetic regression coverage; live latency has not been measured.
+
+### Shaded X11 windows
+
+Activation removes `_NET_WM_STATE_SHADED` through the window manager. Focus and
+raise require two consecutive reads showing the target active, mapped and
+unshaded; an ignored request returns an error rather than confirmed success.
+Direct typing and key input refuse a known shaded or unmapped client with
+`window_shaded` or `window_unmapped`. Ref input also checks the owning X client
+when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
+to restore the client before retrying. These checks do not change the window
+listing or snapshot visibility reporting tracked separately in #913.

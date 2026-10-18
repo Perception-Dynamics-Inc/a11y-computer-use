@@ -5050,3 +5050,146 @@ def test_text_range_single_click_keeps_pointer_semantics(tmp_path, monkeypatch):
     rt.click(ref=el.ref)
     assert d.clicked == [el]
     assert d.clicked[0].bounds.center == Point(0, 120, 29)
+
+
+@pytest.mark.parametrize("label", ["Leave", "Reload"])
+@pytest.mark.parametrize("response", ["accept", "decline", "unavailable"])
+async def test_beforeunload_ref_click_confirmation(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch, label, response
+) -> None:
+    base = build_synthetic_snapshot()
+    button = base.element("e2")
+    dialog = dataclasses.replace(
+        button, ref="dialog", role="AXDialog", title=f"{label} site?",
+        parent=button.parent, clickable=False,
+    )
+    elements = tuple(
+        dataclasses.replace(el, title=label, parent=dialog.ref) if el.ref == "e2" else el
+        for el in base.elements
+    ) + (dialog,)
+    snap = dataclasses.replace(base, elements=elements)
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snap)
+    monkeypatch.setattr(observe, "resolve_ref", lambda s, ref, *, live=None: s.element(ref))
+    store.set_tier(APP, safety.Tier.FULL)
+    callback = {"accept": _accept_elicitation, "decline": _decline_elicitation,
+                "unavailable": None}[response]
+    result = await _snapshot_then_click_e2(mcp_server, callback)
+    if response == "accept":
+        assert not result.isError
+        assert len(mocked_driver["click"]) == 1
+    else:
+        assert result.isError
+        assert "confirmation_declined" in result.content[0].text
+        assert label in result.content[0].text
+        assert mocked_driver["click"] == []
+        assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("click", {"x": 300, "y": 168, "display_id": 1}),
+    ("key", {"chord": "Return"}),
+    ("key", {"chord": "KP_Enter"}),
+])
+@pytest.mark.parametrize("response", ["accept", "decline", "unavailable"])
+async def test_browser_dialog_pointer_and_key_confirmation(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch, tool, args, response
+):
+    base = build_synthetic_snapshot()
+    snap = dataclasses.replace(base, elements=(
+        dataclasses.replace(base.element("e1"), role="AXDialog", title="Leave site?"),
+        dataclasses.replace(base.element("e2"), title="Leave", focused=True, default=True),
+    ))
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snap)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: APP)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    store.set_tier(APP, safety.Tier.FULL)
+    callback = {"accept": _accept_elicitation, "decline": _decline_elicitation,
+                "unavailable": None}[response]
+    async with client_session(mcp_server, elicitation_callback=callback) as client:
+        await client.call_tool("desktop_snapshot", {"app": APP})
+        result = await client.call_tool(tool, args)
+    if response == "accept":
+        assert not result.isError, result
+        assert len(mocked_driver[tool]) == 1
+        if tool == "key":
+            assert mocked_driver[tool] == [args["chord"]]
+        else:
+            assert mocked_driver[tool][0][0] == Point(1, 300, 168)
+    else:
+        assert result.isError
+        assert "confirmation_declined" in result.content[0].text
+        assert mocked_driver[tool] == []
+        assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"
+
+
+@pytest.mark.parametrize("valid", [False, True])
+async def test_declined_press_checks_fallback_before_click_or_confirmation(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch, valid,
+):
+    """An action may open a dialog and still return False; never click its checkbox."""
+    from a11y_computer_use.drivers.macos import MacOSDriver
+
+    store.set_tier(APP, safety.Tier.FULL)
+    events = []
+    fresh_targets = []
+
+    def press(element):
+        events.append("press opened dialog but returned False")
+        return False
+
+    def check(self, element, app):
+        events.append("fresh ref and hit test")
+        if not valid:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF, "fallback point now hits Do not show toolbar; no click sent",
+                detail={"reason": "fallback_target_unverified", "outcome": "refused"},
+            )
+        fresh = dataclasses.replace(element, bounds=Bounds(1, 400, 300, 80, 30))
+        fresh_targets.append(fresh)
+        return fresh
+
+    monkeypatch.setattr(observe, "press_element", press)
+    monkeypatch.setattr(MacOSDriver, "verify_click_fallback", check, raising=False)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert events == ["press opened dialog but returned False", "fresh ref and hit test"]
+    assert result.isError is (not valid)
+    assert len(mocked_driver["click"]) == int(valid)
+    if valid:
+        assert mocked_driver["click"][0][0] is fresh_targets[0]
+    if not valid:
+        assert "fallback_target_unverified" in result.content[0].text
+        assert "confirmed" not in result.content[0].text
+        assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+
+
+@pytest.mark.parametrize("before,after,new", [
+    ({}, {"dialog-id": "Preferences"}, True),
+    ({"dialog-id": "Preferences"}, {"dialog-id": "Preferences"}, False),
+    (None, {"dialog-id": "Preferences"}, False),
+    ({}, None, False),
+])
+async def test_declined_press_new_dialog_receipt(
+    mcp_server, mocked_driver, store, monkeypatch, before, after, new,
+):
+    from a11y_computer_use.drivers.macos import MacOSDriver
+
+    store.set_tier(APP, safety.Tier.FULL)
+    states = iter([before, after])
+    monkeypatch.setattr(MacOSDriver, "click_dialog_state", lambda *args: next(states), raising=False)
+    monkeypatch.setattr(observe, "press_element", lambda element: False)
+    def refuse(*args):
+        raise ComputerUseError(ErrorCode.STALE_REF, "uncertain press",
+                               detail={"reason": "fallback_target_unverified"})
+    monkeypatch.setattr(MacOSDriver, "verify_click_fallback", refuse, raising=False)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert mocked_driver["click"] == []
+    assert result.isError is (not new)
+    if new:
+        assert 'dispatched: opened dialog "Preferences"' in result.content[0].text
+        assert result.structuredContent["outcome"] == "dispatched"
+        assert result.structuredContent["next"] == []
+        assert "not verified" in result.content[0].text
+    else:
+        assert "fallback_target_unverified" in result.content[0].text

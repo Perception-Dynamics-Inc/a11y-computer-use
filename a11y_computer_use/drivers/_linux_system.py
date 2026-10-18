@@ -999,10 +999,62 @@ def _active_window_id(d) -> int | None:
     return value or None
 
 
+def _activation_blocker(d, win) -> str | None:
+    """Read client visibility, independently of the WM's active-window flag."""
+    atoms = _prop(win, d, "_NET_WM_STATE")
+    shaded = _atom(d, "_NET_WM_STATE_SHADED")
+    if atoms is not None and any(_atom_is(item, shaded) for item in atoms):
+        return "window_shaded"
+    try:
+        # X.IsViewable; keep the probe importable without python-xlib.
+        if win.get_attributes().map_state != 2:
+            return "window_unmapped"
+    except Exception:
+        return "window_visibility_unverified"
+    return None
+
+
+def _activation_error(win, reason: str):
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"window {win.id} is not ready for input: {reason}",
+        detail={"reason": reason, "window_id": int(win.id),
+                "hint": "Use window focus to restore the window, then retry."},
+    )
+
+
+def refuse_unviewable_input(window_id: int | None = None) -> None:
+    """Refuse input to a known shaded/unmapped X client, including active ones.
+
+    No X display leaves the existing AT-SPI/Wayland checks responsible for
+    input. This probe never activates another window or sends input itself.
+    """
+    try:
+        d = _display()
+    except Exception:
+        return
+    try:
+        target = window_id if window_id is not None else _active_window_id(d)
+        if target is None:
+            return
+        win = d.create_resource_object("window", int(target))
+        reason = _activation_blocker(d, win)
+        if reason in {"window_shaded", "window_unmapped"}:
+            raise _activation_error(win, reason)
+    finally:
+        _close_display(d)
+
+
 def _request_activation(d, win, *, restore: bool) -> None:
-    """Send ``_NET_ACTIVE_WINDOW``. ``restore`` uniconifies a minimized window first."""
+    """Unshade, optionally uniconify, then request WM activation."""
     if restore:
         _restore_if_hidden(d, win)
+    atoms = _prop(win, d, "_NET_WM_STATE")
+    shaded = _atom(d, "_NET_WM_STATE_SHADED")
+    if atoms is not None and any(_atom_is(item, shaded) for item in atoms):
+        _client_message(d, win, "_NET_WM_STATE", [0, shaded, 0, 1, 0])
     _send_active_window(d, win)
 
 
@@ -1016,13 +1068,16 @@ def _activate_and_settle(d, win, *, restore: bool) -> None:
     uniconifies only when the focus change is allowed. The uniconify
     messages do not depend on it.
 
-    Two consecutive reads of this window mean the activation settled. A
+    Two consecutive active, mapped and unshaded reads mean activation settled. A
     read of a different window sends the request again. A root that does
     not answer ``_NET_ACTIVE_WINDOW`` (no window manager, or a caller that
     only records the client message) gets the one request and does not wait.
     """
     if _active_window_property(d) is None:
         _request_activation(d, win, restore=restore)
+        reason = _activation_blocker(d, win)
+        if reason:
+            raise _activation_error(win, reason)
         return
     target = int(win.id)
     hits = 0
@@ -1030,15 +1085,16 @@ def _activate_and_settle(d, win, *, restore: bool) -> None:
     for _ in range(_ACTIVATE_MAX_POLLS):
         if hits == 0:
             _request_activation(d, win, restore=restore)
-        if _active_window_id(d) == target:
+        if _active_window_id(d) == target and _activation_blocker(d, win) is None:
             hits += 1
             if hits >= _ACTIVATE_SETTLE_HITS:
                 return
         else:
             hits = 0
         if time.monotonic() >= deadline:
-            return
+            break
         time.sleep(_ACTIVATE_POLL_S)
+    raise _activation_error(win, _activation_blocker(d, win) or "window_activation_unverified")
 
 
 # A move, resize, minimize, maximize, or close can be sent before Openbox
@@ -1141,8 +1197,8 @@ def _restore_if_hidden(d, win) -> None:
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
 
-    A minimized window is uniconified first. The request is sent again until
-    ``_NET_ACTIVE_WINDOW`` stays on this window, so a present() from another
+    A minimized window is uniconified and a shaded window is unshaded first.
+    The client must stay mapped, unshaded and active, so a present() from another
     client in the same moment does not leave the previous window active.
     Returns False when no managed window has that id.
     """

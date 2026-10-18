@@ -1770,3 +1770,58 @@ def test_insert_preserves_native_caret_advancement(atspi, monkeypatch, text):
     assert _atspi.insert_text(field, text) == len(text)
     assert field.caret == 6 + len(text)
     assert moves == []
+
+
+@pytest.mark.parametrize("role", ["file chooser", "color chooser"])
+@pytest.mark.parametrize("cover", [False, True])
+def test_embedded_gtk_chooser_uses_owning_dialog_for_occlusion(atspi, monkeypatch, role, cover):
+    """#918: embedded chooser geometry must not match the blocked main frame."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Bounds, Element
+
+    cell = _Node("table cell", "track-b.ogg", toolkit="gtk")
+    chooser = _Node(role, children=[cell], toolkit="gtk", x=100, y=100, w=400, h=300)
+    dialog = _Node("dialog", "Open Media Files", children=[chooser], toolkit="gtk",
+                   states=("ACTIVE",), x=90, y=90, w=420, h=340)
+    frame = _Node("frame", "Parole", children=[dialog], toolkit="gtk")
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 42)
+    rows = [dict(window_id=1, title="Parole", pid=42, on_screen=True,
+                 bounds=dict(x=0, y=0, width=800, height=600)),
+            dict(window_id=2, title="Open Media Files", pid=42, on_screen=True,
+                 bounds=dict(x=90, y=90, width=420, height=340))]
+    if cover:
+        rows.append(dict(window_id=3, title="Other dialog", pid=42, on_screen=True,
+                         bounds=dict(x=90, y=90, width=420, height=340)))
+    monkeypatch.setattr(_linux_system, "windows", lambda: rows)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 42)
+    monkeypatch.setattr(_linux_system, "window_at_point", lambda x, y: rows[-1])
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda *args: False)
+    element = Element("e1", "AXCell", "track-b.ogg", None, Bounds(0, 120, 120, 100, 25), "snap")
+    for node in (cell, chooser, dialog):
+        monkeypatch.setattr(observe, "ax_handle_for", lambda *args: node)
+        assert _atspi.toplevel_raise_target(node)[:3] == (True, "Open Media Files", 42)
+        expected = "Other dialog" if cover else None
+        assert driver.same_app_window_cover(element, "parole") == expected
+        assert driver.same_app_window_cover(
+            element, "parole", _discovery=(element, rows, {}),
+        ) == expected
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: frame)
+    assert driver.same_app_window_cover(element, "parole") == (
+        "Other dialog" if cover else "Open Media Files"
+    )
+
+
+def test_standalone_unnamed_gtk_chooser_keeps_own_window(atspi):
+    chooser = _Node("file chooser", toolkit="gtk")
+    _Node("application", "parole", children=[chooser], toolkit="gtk")
+    assert _atspi.toplevel_raise_target(chooser)[1] == ""
+
+
+def test_named_gtk_chooser_keeps_own_window(atspi):
+    chooser = _Node("file chooser", "Open File", toolkit="gtk")
+    _Node("frame", "Editor", children=[chooser], toolkit="gtk")
+    assert _atspi.toplevel_raise_target(chooser)[1] == "Open File"

@@ -1892,6 +1892,12 @@ class LinuxDriver:
                 return None
         return self._run(read)
 
+    def browser_dialog_confirmation(self, action, app: str):
+        """Check live target ancestry or browser chrome without a page reread."""
+        from a11y_computer_use.drivers._browser_dialog import linux_prompt
+
+        return self._run(lambda: linux_prompt(action, app))
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
@@ -2251,12 +2257,124 @@ class LinuxDriver:
                 },
             )
 
+    def click_dialog_state(self, element: Element) -> dict | None:
+        """Read visible native dialog identities around a node-bound press.
+
+        Unknown or incomplete reads cannot establish that a dialog is new.
+        """
+        if getattr(self, "_click_without_press", None) is element:
+            return None  # no dispatch to attribute a new dialog to
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def read():
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None:
+                return None
+            app = _atspi._application_of(handle)
+            if app is None:
+                return None
+
+            def children():
+                count = _atspi._raw_child_count(app)
+                if count < 0 or _atspi.call_went_unanswered():
+                    return None
+                dialogs = {}
+                for index in range(count):
+                    child = _atspi._child_at(app, index)
+                    if child is None:
+                        return None
+                    _atspi._refresh_event_cache(child)
+                    role = _atspi._role_name(child)
+                    if not role:
+                        return None
+                    if (_atspi._is_dialog_role(role)
+                            and _atspi._state_has(child, "SHOWING")):
+                        name = child.get_name()
+                        if not name:
+                            return None
+                        identity = _atspi._atspi_wrapper_key(child)
+                        if identity is None:
+                            return None
+                        dialogs[identity] = str(name)
+                    if _atspi.call_went_unanswered():
+                        return None
+                return dialogs
+
+            return _atspi._without_child_cache(app, children)
+
+        try:
+            return self._run(read)
+        except Exception:
+            return None
+
+    def verify_click_fallback(self, element: Element, app: str) -> Element:
+        """Require a fresh, showing ref and an exact native hit after a failed press.
+
+        A modal action can take effect despite returning False on D-Bus timeout.
+        Neither old bounds nor an unrelated tree change authorizes a second input.
+        Missing identity, visibility, or hit evidence fails closed.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        # False also means there was no native action to dispatch. Preserve
+        # the ordinary click path (including its platform geometry guards)
+        # only with this exact, single-use receipt from press_element.
+        no_press = getattr(self, "_click_without_press", None)
+        self._click_without_press = None
+        if no_press is element:
+            return element
+
+        def refused() -> ComputerUseError:
+            return ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.role} {element.title!r}) could not be verified "
+                "after the accessibility press; no fallback pointer click was sent",
+                detail={
+                    "ref": element.ref, "reason": "fallback_target_unverified",
+                    "outcome": "refused",
+                    "hint": "The press may already have opened a dialog. Take a fresh "
+                    "snapshot and inspect the result before clicking again.",
+                },
+            )
+
+        try:
+            original = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if original is None:
+                raise refused()
+            live = self.snapshot(Scope.WINDOW, app)
+            # Re-resolve using the shared matcher, then additionally require
+            # native identity: a same-named replacement is not this target.
+            anchor = replace(live, snapshot_id=element.snapshot_id, elements=(element,))
+            resolved = observe.rematch_ref(anchor, element.ref, live)
+            handle = observe.ax_handle_for(resolved.snapshot_id, resolved.ref)
+            if handle is None or (resolved.role, resolved.title) != (element.role, element.title):
+                raise refused()
+            if self.same_app_window_cover(resolved, app):
+                raise refused()
+            x, y = _point_of(resolved)
+
+            def verified() -> bool:
+                _atspi._refresh_event_cache(handle)
+                if (_atspi._ancestor_key(original) != _atspi._ancestor_key(handle)
+                        or not _atspi._state_has(handle, "SHOWING")):
+                    return False
+                return _atspi.fallback_pointer_target(handle, x, y)
+
+            if not self._run(verified):
+                raise refused()
+            return resolved
+        except Exception as exc:
+            raise refused() from exc
+
     def _raise_handle_window(self, handle) -> None:
         """Raise the X window that owns ``handle`` when that window is not active.
 
         A ref in a sibling dialog is acted on only after that dialog is
         frontmost. No matching X window does not fail the action: the AT-SPI
-        action still runs. An already ACTIVE window is left alone. A window
+        action still runs. A known shaded/unmapped client is refused, even
+        when AT-SPI reports ACTIVE. An already ACTIVE visible window is left alone. A window
         that is already the EWMH active window is left alone too: Chrome's
         page frame often lacks STATE_ACTIVE while the omnibox popup of that
         same window has it, and raising the window focuses the address bar.
@@ -2269,7 +2387,7 @@ class LinuxDriver:
             target = self._run(lambda: _atspi.toplevel_raise_target(handle))
         except Exception:
             return
-        if target is None or target[0]:
+        if target is None:
             return
         _active, title, pid, extents = target
         try:
@@ -2279,6 +2397,9 @@ class LinuxDriver:
         except Exception:
             return
         if window_id is None:
+            return
+        _linux_system.refuse_unviewable_input(int(window_id))
+        if target[0]:
             return
         try:
             current = _linux_system.active_window()
@@ -2451,6 +2572,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._focused_editable = None
+        self._click_without_press = None
         if element.secure:
             return False
         # A checkbox or radio in a Chrome/Electron window that already
@@ -2473,6 +2595,7 @@ class LinuxDriver:
         # A plain zero-size web wrapper can carry Chrome's click action and
         # still not be a target. press_element must not fire that action.
         if not element.clickable and not element.editable:
+            self._click_without_press = element
             return False
         if handle is None:
             return False
@@ -2718,7 +2841,12 @@ class LinuxDriver:
         choice = self._run(lambda: _atspi.combobox_option_context(handle))
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
-            pressed = self._run(lambda: _atspi.do_press(handle))
+            dispatched = []
+            pressed = self._run(lambda: _atspi.do_press(
+                handle, on_dispatch=lambda: dispatched.append(True),
+            ))
+            if not pressed and not dispatched:
+                self._click_without_press = element
             # A Chrome <select> option's click action changes the value and
             # leaves the native popup open. Close it the way set_value does,
             # and only when this item belongs to that select.
@@ -3902,7 +4030,13 @@ class LinuxDriver:
                     lambda: _atspi.place_drawing_caret_at_end(handle, ignore_focus=True)
                 )
         else:
-            self._run(lambda: _atspi.grab_focus(handle))
+            # Math's grab_focus resets an already focused command caret to zero.
+            # Keep its native caret/selection when focus is already confirmed.
+            math_focused = self._run(lambda: (
+                _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
+            ))
+            if not math_focused:
+                self._run(lambda: _atspi.grab_focus(handle))
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
                 raise self._focus_lost_on(element)
         self._focused_editable = handle
@@ -4061,6 +4195,9 @@ class LinuxDriver:
         """
         if dry_run or not text:
             return None
+        from a11y_computer_use.drivers import _linux_system
+
+        _linux_system.refuse_unviewable_input()
         self._chooser_readback = None
         self._sheet_type_readback = None
         self._math_type_readback = None
@@ -4758,6 +4895,9 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
+        from a11y_computer_use.drivers import _linux_system
+
+        _linux_system.refuse_unviewable_input()
         # Return in a file chooser's location entry closes the dialog and
         # leaves the file unchosen. Activate Open or Save instead, and do
         # not report the key as pressed unless the opener shows the file.
@@ -5489,14 +5629,14 @@ class LinuxDriver:
     def raise_window(self, window_id: int) -> None:
         """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
 
-        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        The request is retried until the client is mapped, unshaded and active.
         """
         self._ewmh(window_id, "raise_window", lambda sys: sys.raise_window(window_id))
 
     def focus_window(self, window_id: int) -> None:
         """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
 
-        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        The request is retried until the client is mapped, unshaded and active.
         """
         self._ewmh(window_id, "focus_window", lambda sys: sys.focus_window(window_id))
 
