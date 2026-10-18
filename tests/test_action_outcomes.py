@@ -2546,6 +2546,7 @@ def test_writer_key_carries_scoped_evidence_without_calc_or_window_reads(tmp_pat
     driver.key_effect = lambda key: state.__setitem__(0, 3)
     result = runtime.key(chord, app=APP)
     assert result.outcome == ("unverifiable" if chord == "ctrl+c" else "confirmed")
+    assert ("clipboard" if chord == "ctrl+c" else "Writer") in result.evidence
     assert driver.calls == [("key", chord)]
 
 
@@ -2751,8 +2752,53 @@ def test_clipboard_owner_survives_unavailable_targets(monkeypatch):
     assert system.clipboard_copy_state() == (7, None)
 
 
+@pytest.mark.parametrize("chord", ["ctrl+a", "shift+ctrl+End", "ctrl+shift+Home"])
+@pytest.mark.parametrize("change", ["selected", "unchanged", "missing", "invalid", "oversized"])
+def test_empty_writer_selection_reads_sibling_ranges(monkeypatch, chord, change):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    paragraph, sibling, document, window = object(), object(), object(), object()
+    state = {"selected": False, "count": 2, "missing": False, "invalid": False}
+    parent = SimpleNamespace(
+        get_child_count=lambda: state["count"],
+        get_child_at_index=lambda i: None if state["missing"] else [sibling, paragraph][i],
+    )
+    monkeypatch.setattr(_atspi, "libreoffice_app", lambda app: True)
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: window)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (paragraph, False))
+    monkeypatch.setattr(_atspi, "_state_has", lambda *args: True)
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: document)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda acc: parent)
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: "paragraph")
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "")
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda acc: 0 if acc is paragraph else 10,
+        get_caret_offset=lambda acc: 0,
+        get_n_selections=lambda acc: int(acc is sibling and state["selected"]),
+        get_selection=lambda acc, i: (0, 11 if state["invalid"] else 10),
+    )))
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    before = runtime._writer_key_probe("soffice", chord)
+    assert before is not None and len(before) == 8
+    state.update(selected=change in {"selected", "invalid"}, missing=change == "missing",
+                 invalid=change == "invalid", count=257 if change == "oversized" else 2)
+    after = runtime._writer_key_probe("soffice", chord, before)
+    if change in {"missing", "invalid", "oversized"}:
+        assert after is None
+    else:
+        assert after[:7] == before[:7]
+        verdict = runtime._writer_key_verdict("soffice", chord, before)
+        assert verdict[0] == ("confirmed" if change == "selected" else "unverifiable")
+
+
 @pytest.mark.parametrize("focused_frame", [False, True])
-def test_impress_key_reads_paragraph_and_frame_metadata(monkeypatch, focused_frame):
+@pytest.mark.parametrize("chord", ["ctrl+v", "ctrl+a", "ctrl+shift+Home"])
+@pytest.mark.parametrize("text", ["abc", ""])
+def test_impress_key_reads_paragraph_and_frame_metadata(monkeypatch, focused_frame, chord, text):
     """#843: paste can split a frame without changing the original text."""
     from types import SimpleNamespace
     from a11y_computer_use.drivers import _atspi
@@ -2779,13 +2825,13 @@ def test_impress_key_reads_paragraph_and_frame_metadata(monkeypatch, focused_fra
     monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: acc)
     monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
     monkeypatch.setattr(_atspi, "_parent_of", lambda acc: frame)
-    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "abc")
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: text)
     monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
-        get_character_count=lambda acc: 3, get_caret_offset=lambda acc: 0,
+        get_character_count=lambda acc: len(text), get_caret_offset=lambda acc: 0,
         get_n_selections=lambda acc: 0,
     )))
     before = _atspi.writer_key_state("soffice")
-    assert before == (window, document, paragraph, 3, 0, (), "abc", (frame, 2, 0))
+    assert before == (window, document, paragraph, len(text), 0, (), text, (frame, 2, 0))
     frame.count = 3
     after = _atspi.writer_key_state("soffice", before)
     assert after[-1] == (frame, 3, 0)
@@ -2796,7 +2842,7 @@ def test_impress_key_reads_paragraph_and_frame_metadata(monkeypatch, focused_fra
     monkeypatch.setattr(runtime, "_process_died", lambda before: False)
     monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("window scan"))
     verdict = runtime._judge_mutation(
-        "soffice", None, None, None, key_focus=True, key_chord="ctrl+v", writer_before=before,
+        "soffice", None, None, None, key_focus=True, key_chord=chord, writer_before=before,
     )
     assert verdict[0] == "confirmed"
     assert runtime._action_baseline["capture"] is None
