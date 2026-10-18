@@ -858,3 +858,9 @@ editable paragraph in the active window and checks the selected range's exact
 replacement. Ambiguous or incomplete paragraph discovery is unverified, rather
 than a mismatch against the stale icon's empty text. This path has synthetic
 regression coverage; live Math validation is still required.
+
+Plain `find` on GTK multiline documents uses only the non-mutating AT-SPI
+text scroll API and leaves the caret and selection untouched. If the match
+remains off screen (including Scintilla implementations without that scroll
+API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
+caret-based reveal fallback and verifies the resulting character extents.

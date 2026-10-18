@@ -3319,8 +3319,12 @@ class LinuxDriver:
         except Exception:
             return None
 
-    def reveal_buffer_match(self, target: Element, text: str) -> str | None:
+    def reveal_buffer_match(
+        self, target: Element, text: str, *, move_caret: bool = False,
+    ) -> str | None:
         """Scroll a hidden document match into the widget.
+
+        Only explicit scroll-search may enable the caret-moving fallback.
 
         ``scrolled`` only when character extents afterwards intersect the
         widget. ``visible`` means they already did, and the caret is left
@@ -3339,7 +3343,7 @@ class LinuxDriver:
         if handle is None:
             return None
         try:
-            return self._run(lambda: _atspi.reveal_buffer_match(handle, text))
+            return self._run(lambda: _atspi.reveal_buffer_match(handle, text, move_caret=move_caret))
         except Exception:
             return None
 

@@ -13142,8 +13142,8 @@ def _scintilla_document(fake_atspi, monkeypatch, *, scroll: bool):
 
     Twenty lines fit in the box. ``ROW-150`` is below that. Character
     extents are the line's real screen rect, including when it misses the
-    widget. ``scroll`` makes ``set_caret_offset`` move the view the way
-    Scintilla does. Not a live window.
+    widget. ``scroll`` enables native substring scrolling and makes
+    ``set_caret_offset`` move the view the way Scintilla does. Not a live window.
     """
     lines = [f"ROW-{index:03d}" for index in range(304)]
     body = "\n".join(lines)
@@ -13175,6 +13175,13 @@ def _scintilla_document(fake_atspi, monkeypatch, *, scroll: bool):
     )
     monkeypatch.setattr(fake_atspi.Text, "get_character_extents", staticmethod(extents), raising=False)
     monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", staticmethod(set_caret))
+
+    def scroll_substring(acc, start, end, scroll_type):
+        if scroll:
+            view["line"] = max(0, int(start) // width - 1)
+        return scroll
+
+    monkeypatch.setattr(fake_atspi.Text, "scroll_substring_to", staticmethod(scroll_substring), raising=False)
     window = _Acc("frame", name="Geany", width=640, height=560)
     _place_row(window, 20, 40, 640, 560)
     _bind_gtk_app(window)
@@ -17265,3 +17272,55 @@ def test_math_type_reads_command_paragraph_after_elements_activation(
     _adopt(panel, paragraph, other)
     assert _atspi.focused_text("soffice") is None
     assert _atspi.focused_text("soffice", max_nodes=2) is None
+
+
+@pytest.mark.parametrize("native_scroll", [False, True])
+@pytest.mark.parametrize("selection", [None, (8, 19)])
+def test_find_scintilla_preserves_caret_and_selection(
+    fake_atspi, monkeypatch, native_scroll, selection,
+):
+    """Lookup never falls back to Scintilla's caret-moving reveal."""
+    from a11y_computer_use import server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=native_scroll)
+    editor.caret = 19
+    editor.selection = selection
+    mutations = []
+
+    def move_caret(acc, offset):
+        mutations.append(offset)
+        acc.caret = offset
+        acc.selection = None
+        view["line"] = max(0, offset // 8 - 1)
+        return True
+
+    monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", move_caret)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    result = runtime.find("geany", text="ROW-150")
+    assert editor.caret == 19
+    assert editor.selection == selection
+    assert mutations == []
+    if native_scroll:
+        assert "textarea" in result
+    else:
+        assert "no elements match" in result
+        assert "not in the visible text" in result
+        assert view["line"] == 0
+
+
+def test_scroll_to_find_scintilla_retains_caret_fallback(fake_atspi, monkeypatch):
+    """Explicit scroll-search still reveals when substring scrolling is absent."""
+    from a11y_computer_use import server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    monkeypatch.setattr(fake_atspi.Text, "scroll_substring_to", lambda *args: False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    result = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=4)
+    assert result.startswith("found after 1 scroll"), result
+    assert editor.caret == editor.text.index("ROW-150")
+    assert view["line"] > 0
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
