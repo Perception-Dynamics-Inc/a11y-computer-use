@@ -183,3 +183,90 @@ def test_coordinate_hit_failure_keeps_normal_verification(toggle_case, monkeypat
         raise RuntimeError("hit testing unavailable")
     monkeypatch.setattr(_atspi, "_accessible_at_point", hit)
     assert driver.toggle_click_probe(Point(0, 36, 129)) is None
+
+
+@pytest.fixture
+def native_point_tree(monkeypatch):
+    """Registry/application roots deliberately have no Component interface."""
+    from a11y_computer_use.drivers import _linux_system
+    from tests.test_linux_synthetic import _GeckoNode
+
+    frame, panel, node, text = _chrome_collapsed_panel()
+    node.role = "check box"
+    node.states.add("SHOWING")
+    app = node.application
+    app.children = [frame]
+    app.get_process_id = lambda: 123
+    other = _GeckoNode("application", "Background")
+    other.get_process_id = lambda: 456
+    other.get_child_count = lambda: pytest.fail("walked another app")
+    desktop = _GeckoNode("desktop frame", children=[other, app])
+    api = SimpleNamespace(get_desktop=lambda index: desktop,
+                          CoordType=SimpleNamespace(SCREEN=0))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: api)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 123)
+    document = frame.children[0]
+    iframe = _GeckoNode("document web", "Cross-origin", ("SHOWING",), [node])
+    iframe.application = app
+    iframe.parent = document
+    text.parent = node
+    hits = []
+
+    def component(owner, child):
+        def hit(x, y, coord):
+            hits.append(owner)
+            assert (x, y, coord) == (36, 129, 0)
+            return child
+        return SimpleNamespace(
+            get_accessible_at_point=hit,
+            get_extents=lambda coord: SimpleNamespace(x=0, y=0, width=800, height=600),
+        )
+
+    for owner, child in ((frame, document), (document, iframe), (iframe, node), (node, text)):
+        owner.get_component_iface = lambda owner=owner, child=child: component(owner, child)
+    driver = LinuxDriver(visible_actions=False)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    return driver, app, frame, node, hits
+
+
+def test_coordinate_probe_hit_tests_from_owner_frame(native_point_tree):
+    driver, app, frame, node, hits = native_point_tree
+    probe = driver.toggle_click_probe(Point(0, 36, 129))
+    assert probe is not None and probe[0] is node
+    assert hits[0] is frame
+    assert len(hits) == 4
+    node.states.add("CHECKED")
+    assert driver.toggle_click_evidence(probe) == "the clicked toggle's checked/pressed state changed"
+
+
+@pytest.mark.parametrize("failure", ["no_pid", "wrong_pid", "hidden", "outside",
+                                     "missing_component", "ambiguous", "no_hit", "hit_error"])
+def test_coordinate_probe_unavailable_frame_keeps_fallback(native_point_tree, monkeypatch, failure):
+    from a11y_computer_use.drivers import _linux_system
+    from tests.test_linux_synthetic import _GeckoNode
+
+    driver, app, frame, node, hits = native_point_tree
+    if failure in {"no_pid", "wrong_pid"}:
+        monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: None if failure == "no_pid" else 789)
+    elif failure == "hidden":
+        frame.states.discard("SHOWING")
+    elif failure == "outside":
+        comp = frame.get_component_iface()
+        comp.get_extents = lambda coord: SimpleNamespace(x=100, y=200, width=800, height=600)
+        frame.get_component_iface = lambda: comp
+    elif failure == "missing_component":
+        frame.get_component_iface = lambda: None
+    elif failure == "ambiguous":
+        sibling = _GeckoNode("frame", "Other window", ("SHOWING",))
+        sibling.get_component_iface = frame.get_component_iface
+        app.children.append(sibling)
+    else:
+        comp = frame.get_component_iface()
+        def hit(*args):
+            if failure == "hit_error":
+                raise RuntimeError("disconnected")
+            return None
+        comp.get_accessible_at_point = hit
+        frame.get_component_iface = lambda: comp
+    assert driver.toggle_click_probe(Point(0, 36, 129)) is None
+    assert hits == []
