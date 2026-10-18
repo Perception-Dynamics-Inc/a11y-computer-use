@@ -890,11 +890,10 @@ def browser_dialog_prompt(action: Action, snap: object, app: str) -> str | None:
 
         key = canonical_chord(action.chord).casefold()
         if key.startswith("alt+"):
-            # Prefer a reported binding; otherwise conservatively check the
-            # English label's access key. Ancestry below scopes the risk.
+            # A label's first letter is not evidence of an access key.
             candidates = [el for el in elements if _role_key(el.role) == "button"
-                          and (canonical_chord(el.shortcut).casefold() == key
-                               if el.shortcut else el.title.strip().casefold().startswith(key[4:]))]
+                          and el.shortcut
+                          and canonical_chord(el.shortcut).casefold() == key]
         else:
             focused = [el for el in elements if el.focused and _role_key(el.role) == "button"]
             candidates = focused or [el for el in elements if el.default]

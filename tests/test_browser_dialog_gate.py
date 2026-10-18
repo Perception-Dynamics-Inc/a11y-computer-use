@@ -241,7 +241,11 @@ def test_gap_trials(gate, case, title, label, kind, risky, path):
 @pytest.mark.parametrize("path", ["library", "agent"])
 def test_dialog_access_keys(gate, title, label, chord, path):
     rt, current = gate
-    rt._current = current[0] = tree(title, label)
+    base = tree(title, label)
+    # Access-key cases represent a real reported binding, not the label's
+    # first letter. Missing and different bindings are separate controls.
+    button = replace(base.element("e2"), shortcut=chord if chord.startswith("Alt+") else None)
+    rt._current = current[0] = replace(base, elements=(base.elements[0], button))
     check_paths(rt, KeyChord(chord), Action("key", {"chord": chord}), path, True)
 
 
@@ -301,7 +305,20 @@ def native_gate(gate, monkeypatch):
     monkeypatch.setattr(api, "_atspi_wrapper_key", lambda node: id(node))
     roles = {"AXDialog": "dialog", "AXWindow": "frame", "AXButton": "button", "AXWebArea": "document web"}
     monkeypatch.setattr(api, "_role_name", lambda node: roles.get(node.el.role, node.el.role))
-    monkeypatch.setattr(api, "_call_first", lambda node, methods, **kw: node.el.title)
+    def call(node, methods, *args, default=None):
+        if "get_name" in methods:
+            return node.el.title
+        if "get_state_set" in methods:
+            return SimpleNamespace(contains=lambda flag: {
+                "FOCUSED": node.el.focused, "IS_DEFAULT": node.el.default,
+            }.get(flag, False))
+        return default
+
+    monkeypatch.setattr(api, "_call_first", call)
+    monkeypatch.setattr(api, "_atspi", lambda: SimpleNamespace(
+        StateType=SimpleNamespace(FOCUSED="FOCUSED", IS_DEFAULT="IS_DEFAULT")))
+    from a11y_computer_use.drivers import _linux_menus
+    monkeypatch.setattr(_linux_menus, "_key_binding", lambda node: node.el.shortcut or "")
     monkeypatch.setattr(api, "_state_has", lambda node, name: node.el.focused)
     monkeypatch.setattr(api, "_has_default_state", lambda node: node.el.default)
     monkeypatch.setattr(api, "_extents", lambda node: ((node.el.bounds.x, node.el.bounds.y),
@@ -359,3 +376,120 @@ def test_native_key_probe_skips_document(native_gate):
     rt._current = current[0] = replace(base, elements=base.elements + (document,))
     check_paths(rt, KeyChord("Return"), Action("key", {"chord": "Return"}), "library", False)
     assert "web" not in reads
+
+
+@pytest.mark.parametrize("kind", ["Return", "Space", "Alt+L", "coordinate", "ref"])
+def test_no_dialog_probed_once_per_action(gate, monkeypatch, kind):
+    rt, current = gate
+    rt._current = current[0] = tree("Plain page", "Allow")
+    calls = []
+    original = rt._dialog_confirmation
+    def probe(action, app):
+        calls.append(action)
+        return original(action, app)
+    monkeypatch.setattr(rt, "_dialog_confirmation", probe)
+    target = current[0].element("e2")
+    action = (Click(target.bounds.center) if kind == "coordinate" else
+              Click(target) if kind == "ref" else KeyChord(kind))
+    sent = []
+    rt._run_gated(action, "browser", lambda: sent.append(action))
+    assert calls == [action]
+    assert sent == [action]
+
+
+@pytest.mark.parametrize("binding,risky", [(None, False), ("Alt+C", False), ("Alt+L", True)])
+@pytest.mark.parametrize("path", ["library", "agent"])
+def test_access_key_requires_reported_binding(native_gate, binding, risky, path):
+    (rt, current), _ = native_gate
+    base = tree("Leave site?", "Leave")
+    button = replace(base.element("e2"), shortcut=binding)
+    rt._current = current[0] = replace(base, elements=(base.elements[0], button))
+    check_paths(rt, KeyChord("Alt+L"), Action("key", {"chord": "Alt+L"}), path, risky)
+
+
+@pytest.mark.parametrize("binding,expected", [
+    ("l;<Alt>l;", "Alt+l"), ("_L;;", "Alt+l"),
+    ("<Alt>l", "alt+l"), ("", None), ("c;<Alt>c;", "Alt+c"),
+])
+def test_native_button_binding(monkeypatch, binding, expected):
+    from a11y_computer_use.drivers import _browser_dialog, _linux_menus
+    monkeypatch.setattr(_linux_menus, "_key_binding", lambda node: binding)
+    assert _browser_dialog._button_shortcut(object()) == expected
+
+
+def test_native_empty_dialog_query_never_walks_toolbar(native_gate, monkeypatch):
+    from a11y_computer_use.drivers import _atspi as api
+    (rt, current), reads = native_gate
+    base = tree("Plain page", "Page button")
+    buttons = tuple(replace(base.element("e2"), ref=f"toolbar{i}") for i in range(230))
+    rt._current = current[0] = replace(base, elements=(base.elements[0], *buttons))
+    original = api._call_first
+    queries = []
+    def matches(*args):
+        queries.append(args)
+        return []
+    def call(node, methods, *args, **kwargs):
+        if "get_collection_iface" in methods:
+            return SimpleNamespace(get_matches=matches)
+        return original(node, methods, *args, **kwargs)
+    monkeypatch.setattr(api, "_call_first", call)
+    monkeypatch.setattr(api, "_atspi", lambda: SimpleNamespace(
+        StateSet=SimpleNamespace(new=lambda states: states),
+        CollectionMatchType=SimpleNamespace(NONE=0, ANY=1),
+        CollectionSortOrder=SimpleNamespace(CANONICAL=0),
+        Role=SimpleNamespace(DIALOG=1, ALERT=2, WINDOW=3, FRAME=4),
+        MatchRule=SimpleNamespace(new=lambda *args: args)))
+    for action in (KeyChord("Return"), KeyChord("Space"), KeyChord("Alt+L"),
+                   Click(base.element("e2").bounds.center)):
+        rt._run_gated(action, "browser", lambda: None)
+    assert len(queries) == 4
+    assert reads == []
+
+
+def test_native_button_states_read_once(native_gate, monkeypatch):
+    from a11y_computer_use.drivers import _atspi as api
+    (rt, current), _ = native_gate
+    rt._current = current[0] = tree("Leave site?", "Leave", default=True)
+    original = api._call_first
+    reads = []
+    def call(node, methods, *args, **kwargs):
+        if "get_state_set" in methods:
+            reads.append(node.el.ref)
+        return original(node, methods, *args, **kwargs)
+    monkeypatch.setattr(api, "_call_first", call)
+    check_paths(rt, KeyChord("Return"), Action("key", {"chord": "Return"}), "library", True)
+    assert reads == ["e2"]
+
+
+@pytest.mark.parametrize("result", ["empty", "nested", "error"])
+def test_dialog_collection_preserves_hits_and_failure_fallback(monkeypatch, result):
+    from a11y_computer_use.drivers import _atspi as api, _browser_dialog
+    nested = object()
+    def matches(rule, order, count, traverse):
+        assert rule[4] == [1, 2, 3, 4]
+        assert count == 0 and traverse is True
+        if result == "error":
+            raise RuntimeError("Collection unavailable")
+        return [nested] if result == "nested" else []
+    monkeypatch.setattr(api, "_drop_cached_properties", lambda node: None)
+    monkeypatch.setattr(api, "_role_name", lambda node: "frame")
+    monkeypatch.setattr(api, "_call_first", lambda node, methods, **kw:
+                        "Page" if "get_name" in methods else SimpleNamespace(get_matches=matches))
+    monkeypatch.setattr(api, "_atspi", lambda: SimpleNamespace(
+        StateSet=SimpleNamespace(new=lambda states: states),
+        CollectionMatchType=SimpleNamespace(NONE=0, ANY=1),
+        CollectionSortOrder=SimpleNamespace(CANONICAL=0),
+        Role=SimpleNamespace(DIALOG=1, ALERT=2, WINDOW=3, FRAME=4),
+        MatchRule=SimpleNamespace(new=lambda *args: args)))
+    assert _browser_dialog._dialog_roots(object()) == {
+        "empty": [], "nested": [nested], "error": None,
+    }[result]
+
+
+@pytest.mark.parametrize("path", ["library", "agent"])
+def test_access_key_on_cancel_is_not_gated(native_gate, path):
+    (rt, current), _ = native_gate
+    base = tree("Leave site?", "Cancel")
+    button = replace(base.element("e2"), shortcut="Alt+L")
+    rt._current = current[0] = replace(base, elements=(base.elements[0], button))
+    check_paths(rt, KeyChord("Alt+L"), Action("key", {"chord": "Alt+L"}), path, False)

@@ -2708,7 +2708,10 @@ class Runtime:
             if recheck is not None:
                 recheck(app)
             if CONFIRMATION_GATE:
-                latest = self._dialog_confirmation(action, app)
+                # Without a human callback there has been no suspension or
+                # input since this action's probe. Reuse it; approval waits
+                # must still re-read the live dialog before injection.
+                latest = self._dialog_confirmation(action, app) if prompt is not None else None
                 if latest is not None and latest != prompt:
                     raise ComputerUseError(ErrorCode.CONFIRMATION_DECLINED,
                                            "The dialog changed before dispatch; " + latest)
