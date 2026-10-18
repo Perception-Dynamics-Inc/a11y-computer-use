@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-StepStatus = Literal["confirmed", "unverifiable", "no_op", "failed", "skipped"]
+StepStatus = Literal["confirmed", "dispatched", "unverifiable", "no_op", "failed", "skipped"]
 
 
 def step_status(
@@ -22,6 +22,8 @@ def step_status(
         return "failed"
     if marker in {"partial", "refused"}:
         return "failed"
+    if marker == "dispatched":
+        return "dispatched"
     if marker == "suspected_noop":
         return "no_op"
     if marker == "unverifiable":
