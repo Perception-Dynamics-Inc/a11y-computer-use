@@ -9223,6 +9223,10 @@ def insert_text(acc, text: str) -> int | None:
     the native count to equal the string’s UTF-16 length: a D-Bus string stops at an
     embedded NUL, so the text alone can look right while the widget holds
     extra characters.
+
+    After an exact buffer read-back, a caret still at the insertion point is
+    advanced past the inserted text and read back before reporting success.
+    Draw/Impress paragraphs retain their separate append-at-end behavior.
     """
     _refuse_chromium_tab_text(acc, text)
     typed = text.replace("\r\n", "\n")
@@ -9295,6 +9299,24 @@ def insert_text(acc, text: str) -> int | None:
     length = _insert_length(insert, typed, acc) if insert is not None else len(typed)
     wrote = bool(_call_first(eti, ("insert_text", "insertText"), int(offset), typed, int(length), default=False))
     if _confirm_text(acc, expected):
+        # Scintilla inserts the buffer text without advancing the caret. Only
+        # correct a caret still at the verified insertion point; other native
+        # caret movement belongs to the widget. Positions are not UTF-8 bytes.
+        Atspi = _atspi()
+        after_caret = _safe(lambda: Atspi.Text.get_caret_offset(acc)) if typed else None
+        if (
+            typed and type(after_caret) is int and after_caret == offset
+            and not drawing_text_editable(acc)
+        ):
+            target = offset + (_utf16_length(typed) if qt else len(typed))
+            _move_caret(Atspi, acc, target)
+            if _safe(lambda: Atspi.Text.get_caret_offset(acc)) != target:
+                raise _text_mismatch(
+                    "caret_not_advanced",
+                    "the text was inserted but the caret could not be advanced",
+                    inserted_chars=len(typed),
+                    unchanged=False,
+                )
         return len(typed)
     # The raw string can still be U+FFFC, or spaces can come back as NBSP.
     # Compare the expanded read so a successful insert is not a mismatch.
