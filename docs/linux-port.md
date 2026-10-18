@@ -872,3 +872,11 @@ text scroll API and leaves the caret and selection untouched. If the match
 remains off screen (including Scintilla implementations without that scroll
 API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
 caret-based reveal fallback and verifies the resulting character extents.
+
+Chromium page keys use focused text/caret/selection plus a native document-child
+anchor and window name/child count before considering a full-window reread.
+When both scoped reads are available, a changed probe confirms an observed
+effect; unchanged evidence returns `unverifiable` without retry advice. Missing
+page evidence retains the full-window fallback. Copy chords still require
+clipboard owner/target evidence, and process-exit checks remain in place. This
+path has hermetic regression coverage; live latency has not been measured.
