@@ -859,6 +859,16 @@ def _confirmation_text(
     return " ".join(parts) + f"? (matched \u201c{match}\u201d)"
 
 
+def browser_dialog_key(chord: str) -> bool:
+    """Whether a chord can activate one of the supported dialog buttons."""
+    from a11y_computer_use.schema import canonical_chord
+
+    key = canonical_chord(chord).casefold()
+    return key in {"return", "enter", "kp_enter", "space"} or (
+        key.startswith("alt+") and len(key.split("+")) == 2
+    )
+
+
 def browser_dialog_prompt(action: Action, snap: object, app: str) -> str | None:
     """Judge browser dialog activation using a dispatch-time tree.
 
@@ -875,11 +885,19 @@ def browser_dialog_prompt(action: Action, snap: object, app: str) -> str | None:
         if not isinstance(target, Element):
             target = element_at_point(snap, target)
         candidates = [target] if isinstance(target, Element) else []
-    elif isinstance(action, KeyChord) and action.chord.casefold() in {
-        "return", "enter", "kp_enter",
-    }:
-        focused = [el for el in elements if el.focused and _role_key(el.role) == "button"]
-        candidates = focused or [el for el in elements if el.default]
+    elif isinstance(action, KeyChord) and browser_dialog_key(action.chord):
+        from a11y_computer_use.schema import canonical_chord
+
+        key = canonical_chord(action.chord).casefold()
+        if key.startswith("alt+"):
+            # Prefer a reported binding; otherwise conservatively check the
+            # English label's access key. Ancestry below scopes the risk.
+            candidates = [el for el in elements if _role_key(el.role) == "button"
+                          and (canonical_chord(el.shortcut).casefold() == key
+                               if el.shortcut else el.title.strip().casefold().startswith(key[4:]))]
+        else:
+            focused = [el for el in elements if el.focused and _role_key(el.role) == "button"]
+            candidates = focused or [el for el in elements if el.default]
     else:
         return None
     for target in candidates:

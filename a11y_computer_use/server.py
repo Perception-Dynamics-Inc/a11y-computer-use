@@ -2585,7 +2585,7 @@ class Runtime:
         """Read the current dialog, never the tree that issued the ref."""
         if not isinstance(action, Click) and not (
             isinstance(action, KeyChord)
-            and action.chord.casefold() in {"enter", "return", "kp_enter"}
+            and safety.browser_dialog_key(action.chord)
         ):
             return None
         if isinstance(action, Click) and isinstance(action.target, Element):
@@ -2606,6 +2606,11 @@ class Runtime:
                     "msedge", "microsoft.edge", "opera", "vivaldi", "arc",
                 ))):
             return None
+        scoped = getattr(self.driver, "browser_dialog_confirmation", None)
+        if callable(scoped):
+            result = scoped(action, app)
+            if result is not NotImplemented:
+                return result
         snapshot = getattr(self.driver, "snapshot", None)
         if not callable(snapshot):
             return None  # Legacy injected drivers without tree observation.
@@ -10356,8 +10361,9 @@ def build_server(
         focused paragraph is empty; unchanged
         scoped state and copy remain unverifiable without further evidence, with
         no retry hints. Linux X11 copy checks clipboard owner/target metadata.
-        Return/KP_Enter on browser permission or unsaved-change dialog buttons
-        requires confirmation, using the dialog present at dispatch.
+        Return/KP_Enter, Space, and Alt access keys on browser permission or
+        unsaved-change dialog buttons require confirmation, using the dialog
+        present at dispatch.
         Thunar location-entry Return/KP_Enter reports
         suspected_noop when an error icon appears or the window title stays unchanged;
         check the path or create missing folders from the nearest existing parent."""
