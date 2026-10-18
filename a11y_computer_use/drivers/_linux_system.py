@@ -1194,6 +1194,26 @@ def _restore_if_hidden(d, win) -> None:
     _client_message(d, win, "_NET_WM_STATE", [0, hidden, 0, 1, 0])  # _NET_WM_STATE_REMOVE
 
 
+def is_notification_window(window_id: int) -> bool:
+    """Whether the managed client explicitly reports the EWMH notification type.
+
+    Notification bubbles accept pointer input without becoming active. This
+    probe is only for implicit ref-action preparation, not explicit focus.
+    Missing or unreadable metadata keeps the ordinary activation path.
+    """
+    try:
+        with _with_window(window_id) as (d, win):
+            if win is None:
+                return False
+            types = _prop(win, d, "_NET_WM_WINDOW_TYPE")
+            notification = _atom(d, "_NET_WM_WINDOW_TYPE_NOTIFICATION")
+            return types is not None and any(
+                _atom_is(item, notification) for item in types
+            )
+    except Exception:
+        return False
+
+
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
 

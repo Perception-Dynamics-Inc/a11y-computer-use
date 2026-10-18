@@ -437,3 +437,5 @@
 - 2026-10-18 (PR #905 main merge): Browser dialog gating and shaded-window input refusal protect different dispatch conditions. Preserve the approved dialog probe unchanged when importing the window visibility guard, and run both gate and Linux synthetic regressions.
 
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
+
+- 2026-10-19 (#935): Skip implicit ref-action activation only for a reported X11 notification type; explicit focus/raise must still verify activation. Input=False or SKIP_TASKBAR/SKIP_PAGER alone are not sufficient to bypass ordinary window activation. Preserve visibility refusal before the shortcut; shortening activation preparation does not resolve the separate expiring-target race (#936).
