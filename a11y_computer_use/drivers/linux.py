@@ -1969,6 +1969,52 @@ class LinuxDriver:
             return resolved[1]
         return None
 
+    def toggle_click_probe(self, target: Target):
+        """Capture a Chromium toggle immediately before the requested click."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def read():
+            if isinstance(target, Element):
+                handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            else:
+                x, y = _point_of(target)
+                handle = _atspi._accessible_at_point(x, y)
+                # Hit tests can return a text child of a checkable control.
+                for node in _atspi._ancestor_chain(handle):
+                    if _atspi._role_name(node) in {"check box", "radio button", "toggle button"}:
+                        handle = node
+                        break
+            state = _atspi.chromium_toggle_state(handle)
+            return (handle, state) if state is not None else None
+
+        try:
+            return self._run(read)
+        except Exception:
+            return None
+
+    def toggle_click_evidence(self, probe) -> str | None:
+        """Compare the same native toggle with its pre-input state."""
+        from a11y_computer_use.drivers import _atspi
+
+        if probe is None:
+            return None
+        handle, previous = probe
+        # XSync acknowledges delivery, not Chromium's event handler. Keep
+        # these short waits outside the AT-SPI thread so state events run.
+        for attempt in range(3):
+            try:
+                current = self._run(lambda: _atspi.chromium_toggle_state(handle))
+            except Exception:
+                return None
+            if current is None:
+                return None
+            if current != previous:
+                return "the clicked toggle's checked/pressed state changed"
+            if attempt < 2:
+                time.sleep(0.01)
+        return None
+
     def button_click_evidence(self, element: Element) -> str | None:
         """Consume a native button name change; acknowledgement is not evidence.
 

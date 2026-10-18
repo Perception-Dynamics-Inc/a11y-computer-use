@@ -126,6 +126,16 @@ For Chrome/Electron processes that advertise a DevTools port, the Linux form ove
 
 **App identity** on Linux is the process **comm name** (`/proc/<pid>/comm`, exe-basename fallback), the analog of a macOS bundle id / Windows exe for permission-keying and the safety layer's app gating.
 
+Chromium page checkbox, radio, and toggle-button clicks compare fresh native
+`CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
+clicks use the accessible hit at the requested point, including a toggle's text
+descendant and nested web documents. A state change confirms the effect without
+another full-window snapshot or the process-exit grace wait; process liveness is
+still checked immediately. Unchanged, defunct, or unreadable targets retain the
+normal outcome check. This does not change the requested click or establish a
+CAPTCHA challenge's completion. The scoped path is covered by hermetic tests;
+live Chromium timing has not been measured for this change.
+
 HTML `section` nodes tagged `div`, `pre`, `code`, `blockquote`, `address`,
 or `figcaption` expose their own AT-SPI Text as snapshot values, including
 when Gecko or WebKitGTK provides no static-text children. This makes those

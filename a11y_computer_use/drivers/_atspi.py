@@ -18834,6 +18834,43 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
     return hidden and not showing
 
 
+def chromium_toggle_state(acc) -> tuple[bool, bool] | None:
+    """Fresh checked/pressed bits, or None when a page toggle is unreadable.
+
+    Unlike general observation flags, missing states must not become False:
+    that would turn a failed read after a click into evidence of unchecking.
+    """
+    if acc is None or _role_name(acc) not in {"check box", "radio button", "toggle button"}:
+        return None
+    if not _chromium_app(acc):
+        return None
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            break
+        if role in {"frame", "window", "application"}:
+            return None
+    else:
+        return None
+    try:
+        _drop_cached_properties(acc)
+        states = acc.get_state_set()
+        if states is None:
+            return None
+        names = getattr(states, "names", None)
+        if isinstance(names, (set, frozenset, list, tuple)):
+            names = {str(name).upper() for name in names}
+            has = lambda name: name in names
+        else:
+            state_type = _atspi().StateType
+            has = lambda name: bool(states.contains(getattr(state_type, name)))
+        if has("DEFUNCT"):
+            return None
+        return has("CHECKED"), has("PRESSED")
+    except Exception:
+        return None
+
+
 def chromium_page_button(acc) -> bool:
     """Whether this is a native Chromium push button inside a web document."""
     # AXButton also represents native toggle buttons. Keep those on the
