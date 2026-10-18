@@ -2544,6 +2544,7 @@ def test_writer_key_carries_scoped_evidence_without_calc_or_window_reads(tmp_pat
     driver.key_effect = lambda key: state.__setitem__(0, 3)
     result = runtime.key(chord, app=APP)
     assert result.outcome == ("unverifiable" if chord == "ctrl+c" else "confirmed")
+    assert ("clipboard" if chord == "ctrl+c" else "Writer") in result.evidence
     assert driver.calls == [("key", chord)]
 
 
