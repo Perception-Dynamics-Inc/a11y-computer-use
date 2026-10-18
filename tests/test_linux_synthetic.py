@@ -17324,3 +17324,93 @@ def test_scroll_to_find_scintilla_retains_caret_fallback(fake_atspi, monkeypatch
     assert editor.caret == editor.text.index("ROW-150")
     assert view["line"] > 0
     assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
+
+
+@pytest.mark.parametrize("selected", [True, False])
+def test_math_type_outcome_reuses_verified_command_without_snapshot_polling(
+    fake_atspi, monkeypatch, selected,
+):
+    """One type reads the command before/after, with no outcome tree retry."""
+    app = _Acc("application", name="soffice")
+    icon = _Acc("icon", states={"FOCUSED"})
+    paragraph = _Acc("paragraph", states={"FOCUSED", "EDITABLE", "SHOWING"})
+    paragraph.text = "frac {<?>} {<?>}"
+    paragraph.selection = (6, 9) if selected else None
+    root = _adopt(_Acc("frame"), icon, paragraph)
+    for node in (icon, paragraph):
+        node.get_application = lambda: app
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: root)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (icon, False))
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *a, **kw: None)
+    for name in ("sheet_editor_text", "writer_type_before", "focused_shape_edit_text"):
+        monkeypatch.setattr(_atspi, name, lambda app: None)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("soffice.bin", 1))
+    reads = []
+    sleeps = []
+    sent = []
+    call_first = _atspi._call_first
+
+    def read(acc, names, *args, **kwargs):
+        reads.append(names)
+        return call_first(acc, names, *args, **kwargs)
+
+    def type_string(text):
+        sent.append(text)
+        paragraph.text = (paragraph.text.replace("<?>", text, 1) if selected
+                          else paragraph.text + text)
+        paragraph.selection = None
+
+    monkeypatch.setattr(_atspi, "_call_first", read)
+    monkeypatch.setattr(_atspi.time, "sleep", sleeps.append)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    runtime = _bare_runtime(driver)
+    runtime._current = object()
+    runtime._action_baseline = {"token": id(runtime._current), "capture": "old tree"}
+
+    def no_snapshot(*args, **kwargs):
+        pytest.fail("verified Math type must not re-read the window")
+
+    monkeypatch.setattr(runtime, "_reread", no_snapshot)
+    monkeypatch.setattr(driver, "snapshot", no_snapshot)
+    assert driver.type_text("p") == 1
+    receipt = driver._math_type_readback
+    verdict, evidence = runtime._judge_mutation("soffice.bin", None, None, "p", previous="")
+    assert verdict == "confirmed"
+    assert paragraph.text in evidence
+    assert driver._math_type_readback is None
+    assert runtime._action_baseline["capture"] is None
+    assert sent == ["p"]
+    assert sleeps == []
+    assert len(reads) <= 100
+    assert sum(names == ("get_child_count",) for names in reads) <= 9
+    assert sum(names == ("get_child_at_index",) for names in reads) <= 6
+
+    # Evidence is single-use and bound to both app and requested text.
+    for app_id, text, stored in (
+        ("soffice.bin", "p", None),
+        ("other", "p", receipt),
+        ("soffice.bin", "q", receipt),
+        ("soffice.bin", "p", ("soffice.bin", "p", "before", "unchanged", None)),
+    ):
+        driver._math_type_readback = stored
+        monkeypatch.setattr(runtime, "_reread", lambda *args: None)
+        monkeypatch.setattr(runtime, "_capture", lambda *a, **kw: None)
+        assert runtime._judge_mutation(app_id, None, None, text)[0] != "confirmed"
+        assert driver._math_type_readback is None
+
+    driver._math_type_readback = receipt
+    monkeypatch.setattr(runtime, "_process_died", lambda before: True)
+    assert runtime._judge_mutation("soffice.bin", None, None, "p")[0] == "partial"
+    assert driver._math_type_readback is None
+
+    # A failed next type must not retain the previous call's evidence.
+    driver._math_type_readback = receipt
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("q")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert driver._math_type_readback is None

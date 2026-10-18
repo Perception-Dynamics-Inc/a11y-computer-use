@@ -2965,6 +2965,9 @@ class Runtime:
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> tuple[str, str]:
+        settled = getattr(self.driver, "_math_type_readback", None)
+        if settled is not None:
+            self.driver._math_type_readback = None
         drawing = self._drawing_type_verdict(app, requested)
         if drawing is not None:
             if self._process_died(before):
@@ -2993,6 +2996,26 @@ class Runtime:
             if died:
                 return "partial", "the target process exited after the action"
             return calc
+        if (
+            getattr(self.driver, "name", None) == "linux"
+            and isinstance(settled, tuple) and len(settled) == 5
+            and requested is not None and settled[:2] == (app, requested)
+        ):
+            from a11y_computer_use.drivers import _atspi
+
+            _, _, command_before, command_after, command_selection = settled
+            if _atspi._typed_visible(
+                command_before, command_after, requested, selection=command_selection,
+            ):
+                self.driver._type_expected = None
+                current = getattr(self, "_current", None)
+                if current is not None:
+                    self._action_baseline = {
+                        "token": id(current), "app": app, "capture": None, "process": process,
+                    }
+                if died:
+                    return "partial", "the target process exited after the action"
+                return "confirmed", f"read back Math command {command_after!r}"
         verified = getattr(self.driver, "_writer_cell_verified", None)
         if verified is not None:
             self.driver._writer_cell_verified = None
