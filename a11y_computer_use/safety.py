@@ -859,6 +859,75 @@ def _confirmation_text(
     return " ".join(parts) + f"? (matched \u201c{match}\u201d)"
 
 
+def browser_dialog_key(chord: str) -> bool:
+    """Whether a chord can activate one of the supported dialog buttons."""
+    from a11y_computer_use.schema import canonical_chord
+
+    key = canonical_chord(chord).casefold()
+    return key in {"return", "enter", "kp_enter", "space"} or (
+        key.startswith("alt+") and len(key.split("+")) == 2
+    )
+
+
+def browser_dialog_prompt(action: Action, snap: object, app: str) -> str | None:
+    """Judge browser dialog activation using a dispatch-time tree.
+
+    This describes risk only; it never changes the requested input or derives
+    a click point. Coordinate matching uses only reported bounds. Ref targets
+    must already have been resolved into this tree by the caller.
+    """
+    from a11y_computer_use.outcome import element_at_point
+
+    elements = tuple(getattr(snap, "elements", ()) or ())
+    by_ref = {el.ref: el for el in elements}
+    if isinstance(action, Click):
+        target = action.target
+        if not isinstance(target, Element):
+            target = element_at_point(snap, target)
+        candidates = [target] if isinstance(target, Element) else []
+    elif isinstance(action, KeyChord) and browser_dialog_key(action.chord):
+        from a11y_computer_use.schema import canonical_chord
+
+        key = canonical_chord(action.chord).casefold()
+        if key.startswith("alt+"):
+            # A label's first letter is not evidence of an access key.
+            candidates = [el for el in elements if _role_key(el.role) == "button"
+                          and el.shortcut
+                          and canonical_chord(el.shortcut).casefold() == key]
+        else:
+            focused = [el for el in elements if el.focused and _role_key(el.role) == "button"]
+            candidates = focused or [el for el in elements if el.default]
+    else:
+        return None
+    for target in candidates:
+        seen = set()
+        current = target
+        button = None
+        while current is not None and current.ref not in seen:
+            seen.add(current.ref)
+            if _role_key(current.role) == "button" and button is None:
+                button = current
+            title = current.title.strip()
+            role = _role_key(current.role)
+            if button is not None and role in {"dialog", "alert", "alertdialog", "window"}:
+                label = button.title.strip().casefold()
+                reason = None
+                if label in {"leave", "reload"} and title.casefold() == f"{label} site?":
+                    reason = "unsaved changes"
+                elif label in {"allow", "allow this time", "allow while visiting the site"} and "wants to:" in title.casefold():
+                    reason = "browser permission"
+                if reason:
+                    summary = (_click_summary(action) if isinstance(action, Click)
+                               else _summary_json({"chord": action.chord}))
+                    text = _confirmation_text(verb="activate", role=button.role,
+                                              name=button.title, window=title, app=app,
+                                              summary=summary, match=reason)
+                    return ApprovalPrompt(text, role=button.role, target_name=button.title,
+                                          window=title, summary=summary, reason=reason)
+            current = by_ref.get(current.parent)
+    return None
+
+
 def confirmation_prompt(
     action: Action, target_app: str, *, window: str | None = None,
     menu_path: Sequence[str] | None = None,
@@ -880,6 +949,10 @@ def confirmation_prompt(
     is an :class:`ApprovalPrompt` (a ``str`` with those fields) when a prompt
     is warranted.
 
+    Leave/Reload buttons in the corresponding "Leave site?"/"Reload site?"
+    window also prompt because those browser dialogs discard unsaved changes.
+    Ordinary Leave/Reload controls remain outside this contextual rule.
+
     ``menu_path`` is the clicked element's menu path from the snapshot that
     issued its ref (see :func:`menu_path`). Every component is judged, so
     Table > Delete > Rows prompts although "Rows" alone would not, and the
@@ -889,7 +962,7 @@ def confirmation_prompt(
         A confirmation question to route to the host (e.g. via MCP
         elicitation), or None when the action needs no extra confirmation.
     """
-    described = _irreversible_target(action, menu_path)
+    described = _irreversible_target(action, menu_path, window=window)
     if described is None:
         return None
     verb, role, name, summary, match = described
@@ -1000,7 +1073,7 @@ def judge_command(
 
 
 def _irreversible_target(
-    action: Action, path: Sequence[str] | None = None,
+    action: Action, path: Sequence[str] | None = None, *, window: str | None = None,
 ) -> tuple[str, str | None, str, str, str] | None:
     """``(verb, role, name, summary, match)`` or None when no prompt is due.
 
@@ -1034,6 +1107,15 @@ def _irreversible_target(
     ancestors = [str(part).strip() for part in tuple(path or ())[:-1] if str(part).strip()]
     components = ancestors + ([title] if title else [])
     match = judge_command(components, role=action.target.role)
+    # Chrome's beforeunload dialogs use otherwise harmless labels to discard
+    # edits. Match the whole title, not page prose mentioning such a dialog.
+    if (
+        match is None
+        and action.target.role.casefold().removeprefix("ax") == "button"
+        and title.casefold() in {"leave", "reload"}
+        and (window or "").strip().casefold() == f"{title.casefold()} site?"
+    ):
+        match = "unsaved changes"
     if match is None:
         return None
     role = action.target.role or None
