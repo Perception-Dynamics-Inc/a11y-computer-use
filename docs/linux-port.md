@@ -872,3 +872,10 @@ text scroll API and leaves the caret and selection untouched. If the match
 remains off screen (including Scintilla implementations without that scroll
 API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
 caret-based reveal fallback and verifies the resulting character extents.
+
+Ref-click coordinate fallback after a declined accessibility press takes a new
+snapshot and requires the same native target, name, role, SHOWING state, and an
+exact accessibility hit at its fresh center. If any check is unavailable or
+mismatched, it refuses with `fallback_target_unverified` and sends no fallback
+pointer click. A Qt modal action can open a dialog despite returning false on a
+D-Bus timeout; inspect a fresh snapshot after refusal before issuing another click.

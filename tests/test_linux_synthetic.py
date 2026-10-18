@@ -17414,3 +17414,71 @@ def test_math_type_outcome_reuses_verified_command_without_snapshot_polling(
         driver.type_text("q")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert driver._math_type_readback is None
+
+
+@pytest.mark.parametrize("case", [
+    "valid", "checkbox", "namesake", "hidden", "missing_hit", "hit_error",
+    "gone", "renamed", "role_changed", "replacement", "moved", "covered",
+    "popup_hidden", "no_root", "no_component", "cycle", "proxy",
+])
+def test_ref_click_fallback_requires_fresh_identity_and_hit(monkeypatch, case):
+    """A declined modal press must never click the checkbox at its old point."""
+    from dataclasses import replace
+
+    tree = _node("AXWindow", "Editor", children=[
+        _node("AXMenuItem", "Preferences", actions=("AXPress",),
+              pos=(652, 471), size=(276, 25), stable_id="preferences"),
+    ])
+    issued = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                            app="featherpad", pid=42, geometry=_geometry())
+    element = next(el for el in issued.elements if el.title == "Preferences")
+    fresh = replace(element, snapshot_id="fallback-live", ref="e20")
+    original, other = object(), object()
+    if case == "renamed":
+        fresh = replace(fresh, title="Do not show toolbar")
+    elif case == "role_changed":
+        fresh = replace(fresh, role="AXCheckBox")
+    elif case == "moved":
+        fresh = replace(fresh, bounds=Bounds(0, 500, 400, 200, 20))
+    live = replace(issued, snapshot_id="fallback-live",
+                   elements=() if case == "gone" else (fresh,))
+    observe._register_epoch(issued.snapshot_id, {}, {element.ref: original})
+    handle = other if case == "replacement" else original
+    observe._register_epoch(live.snapshot_id, {}, {fresh.ref: handle})
+    driver = LinuxDriver()
+    snapshots, hits = [], []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *args: "Preferences" if case == "covered" else None)
+    monkeypatch.setattr(driver, "snapshot", lambda scope, app: snapshots.append((scope, app)) or live)
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", lambda node: None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: case != "hidden")
+
+    def hit(x, y):
+        hits.append((x, y))
+        if case == "hit_error":
+            raise RuntimeError("D-Bus unavailable")
+        if case == "missing_hit":
+            return None
+        if case == "cycle":
+            return popup
+        return other if case in {"checkbox", "namesake", "proxy"} else original
+
+    popup = object()
+    if case == "proxy":
+        monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: (":1.2", "/preferences") if node in (original, other) else None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: case != "hidden" and not (case == "popup_hidden" and node is popup))
+    monkeypatch.setattr(_atspi, "_ancestor_chain", lambda node: iter((node,) if case == "no_root" else (node, popup)))
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: "popup menu" if node is popup else "menu item")
+    monkeypatch.setattr(_atspi, "_component", lambda node: None if case == "no_component" else node)
+    monkeypatch.setattr(_atspi, "_hit_at", lambda comp, x, y: hit(x, y))
+    if case in {"valid", "moved", "proxy"}:
+        assert driver.verify_click_fallback(element, "featherpad") is fresh
+        assert hits == ([(600, 410)] if case == "moved" else [(790, 483)])
+    else:
+        with pytest.raises(ComputerUseError) as caught:
+            driver.verify_click_fallback(element, "featherpad")
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["outcome"] == "refused"
+        assert caught.value.detail["reason"] == "fallback_target_unverified"
+        assert "no fallback pointer click was sent" in str(caught.value)
+    assert snapshots == [(Scope.WINDOW, "featherpad")]

@@ -5530,6 +5530,14 @@ class Runtime:
                 if mechanism is not None:
                     button_mechanism.append(mechanism)
                     return
+            # A declined native press may already have opened a modal dialog.
+            # The old point can now belong to a completely different control.
+            fallback_check = getattr(self.driver, "verify_click_fallback", None)
+            if plain and isinstance(act, Element) and callable(fallback_check):
+                act = fallback_check(act, app)
+                self._refuse_disabled(act, verb="click")
+                self._refuse_secure(act)
+                self._recheck_target(app, act)
             if verify_selection:
                 selection_before = selection_reader(act)
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
@@ -10089,6 +10097,9 @@ def build_server(
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
+        On Linux a declined accessibility press permits pointer fallback only
+        after fresh ref, visibility, and exact target hit checks; otherwise it
+        returns fallback_target_unverified with no fallback click sent.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
         Valid x is 0..width-1 and valid y is 0..height-1 on that display. A

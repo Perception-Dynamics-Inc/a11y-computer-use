@@ -2205,6 +2205,58 @@ class LinuxDriver:
                 },
             )
 
+    def verify_click_fallback(self, element: Element, app: str) -> Element:
+        """Require a fresh, showing ref and an exact native hit after a failed press.
+
+        A modal action can take effect despite returning False on D-Bus timeout.
+        Neither old bounds nor an unrelated tree change authorizes a second input.
+        Missing identity, visibility, or hit evidence fails closed.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def refused() -> ComputerUseError:
+            return ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.role} {element.title!r}) could not be verified "
+                "after the accessibility press; no fallback pointer click was sent",
+                detail={
+                    "ref": element.ref, "reason": "fallback_target_unverified",
+                    "outcome": "refused",
+                    "hint": "The press may already have opened a dialog. Take a fresh "
+                    "snapshot and inspect the result before clicking again.",
+                },
+            )
+
+        try:
+            original = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if original is None:
+                raise refused()
+            live = self.snapshot(Scope.WINDOW, app)
+            # Re-resolve using the shared matcher, then additionally require
+            # native identity: a same-named replacement is not this target.
+            anchor = replace(live, snapshot_id=element.snapshot_id, elements=(element,))
+            resolved = observe.rematch_ref(anchor, element.ref, live)
+            handle = observe.ax_handle_for(resolved.snapshot_id, resolved.ref)
+            if handle is None or (resolved.role, resolved.title) != (element.role, element.title):
+                raise refused()
+            if self.same_app_window_cover(resolved, app):
+                raise refused()
+            x, y = _point_of(resolved)
+
+            def verified() -> bool:
+                _atspi._refresh_event_cache(handle)
+                if (_atspi._ancestor_key(original) != _atspi._ancestor_key(handle)
+                        or not _atspi._state_has(handle, "SHOWING")):
+                    return False
+                return _atspi.fallback_pointer_target(handle, x, y)
+
+            if not self._run(verified):
+                raise refused()
+            return resolved
+        except Exception as exc:
+            raise refused() from exc
+
     def _raise_handle_window(self, handle) -> None:
         """Raise the X window that owns ``handle`` when that window is not active.
 

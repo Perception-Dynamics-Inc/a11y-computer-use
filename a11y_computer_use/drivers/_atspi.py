@@ -18816,6 +18816,39 @@ def chromium_button_click_action(acc):
     return None
 
 
+def fallback_pointer_target(acc, x: int, y: int) -> bool:
+    """Hit-test a ref from its owning popup/window, never from the target itself.
+
+    Qt popups are not hit-testable through the desktop or their owner's frame.
+    Require the popup itself to remain showing, and descend only native hits.
+    Missing hits and cycles are refusals, not evidence from overlapping bounds.
+    """
+    root = next((node for node in _ancestor_chain(acc)
+                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog"}), None)
+    if root is None or root is acc or not _state_has(root, "SHOWING"):
+        return False
+    target_key = _ancestor_key(acc)
+    node = root
+    seen: set[object] = set()
+    pinned = []
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            return False
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            return False
+        hit = _hit_at(comp, x, y)
+        if hit is None:
+            return False
+        if _ancestor_key(hit) == target_key:
+            return True
+        node = hit
+    return False
+
+
 def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     """Verify a Chromium page ref against the document's native hit test.
 
