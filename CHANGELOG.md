@@ -7,9 +7,27 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.73] - 2026-10-18
+
+Four commits since v0.4.72, through #841.
+
+### Safety
+
+- Two-ref drags and covered ref clicks refuse refs that another app's snapshot issued, returning `stale_ref` with `reason: "other_snapshot"`, the issuing app and snapshot, and `outcome: "refused"` before any input, while the previous app's snapshot is kept until the agent re-observes the current app. Drags from a ref to another app's coordinates and drags after re-observing still run. This also removes the 0.4.72 regression where a stale Mousepad ref reused after a terminal snapshot clicked the terminal's scrollbar. Fixes #836 (#837) (c51c99a, 2026-10-18).
+
+### Linux drivers
+
+- Plain left clicks on Chromium page push buttons send exactly one advertised AT-SPI `click` or `press` action to the resolved node instead of a pointer click at a possibly stale point, and never fall back to the pointer when the action is missing or fails. Right, multiple, modified and forced-pointer clicks are refused for these refs; the effect judge still decides the outcome. Fixes #800 (#835) (d89a16a, 2026-10-18).
+- Chromium textarea and contenteditable writes containing a tab refuse with `tab_moves_focus` before mutation, instead of moving focus and leaving partial text. Fixes #829 (#834) (62be977, 2026-10-18).
+- GTK text-view `find(text=...)` matches bind refs to native character offsets and screen range extents, so double-clicks, drags and hovers target the matched text; wrapped, clipped, changed or unreadable ranges are refused with a hint. A Linux text-ref double-click is confirmed only when a readable selection changed to a nonempty range. Fixes #838 (#841) (fcebd66, 2026-10-18).
+
+### Packaging
+
+- The package version is 0.4.73.
+
 ## [0.4.72] - 2026-10-18
 
-Five commits since v0.4.71, through #827.
+Six commits since v0.4.71, through #823.
 
 ### Safety
 
@@ -24,6 +42,7 @@ Five commits since v0.4.71, through #827.
 - A ref click covered by another app raises the gated app, re-resolves the same ref and rechecks the pointer target before clicking once. Failed raises or persistent covers return `covered` without pointer input, and raising alone cannot confirm the click. Live Chrome/Mousepad checks covered both successful clicks and always-on-top refusal. Fixes #815 (#819) (1a19dd1, 2026-10-18).
 - Chromium page ref pointer clicks hit-test the requested point first and refuse with `stale_ref` / `hit_test_unverified` when the hit is a different, missing or failed element, including the image/canvas pointer fallback. Explicit coordinate clicks and toolbar controls are unchanged. Partial for #800: Chrome can keep reporting the old carousel position for up to about 3 s after a slide moves, so #800 stays open (#828) (80ff60b, 2026-10-18).
 - Calc edit keys (paste, delete, undo, cut) read the selected cells before and after the key instead of rescanning the whole window. Changed text confirms the effect; copy returns unverifiable because clipboard ownership is not checked. Larger or changed selections keep the old fallback. Fixes #824 (#827) (1c3049e, 2026-10-18).
+- Qt text insertion and read-back verification count UTF-16 units, so emoji and other astral characters are no longer truncated by `type` and a correct `set_value` verifies; offsets inside surrogate pairs are refused before mutation. Fixes #820 (#823) (04dcf74, 2026-10-18).
 
 ### Packaging
 
