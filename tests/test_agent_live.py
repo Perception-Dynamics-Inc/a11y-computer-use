@@ -1834,6 +1834,65 @@ def test_agent_file_save_done_rejects_a_matching_window_title(tmp_path, isolated
         stop_process(proc)
 
 
+def _display_pids(name: str) -> set[int]:
+    """Pids of ``name`` processes started on this test's X display.
+
+    Matched on ``/proc/<pid>/comm`` (the 15-byte cut of the name) and on the
+    process's own ``DISPLAY``, so a terminal on another display of the same
+    machine is never counted.
+    """
+    display = os.environ.get("DISPLAY", "")
+    comm = name[:15]
+    found: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if (entry / "comm").read_text().strip() != comm:
+                continue
+            environ = (entry / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if f"DISPLAY={display}".encode() in environ:
+            found.add(int(entry.name))
+    return found
+
+
+def _running(pid: int) -> bool:
+    """True while ``pid`` exists and is not a zombie its launcher has not reaped."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[-1].split()[0] != "Z"
+
+
+def _stop_launched(name: str, before: set[int], timeout: float = 5.0) -> None:
+    """End the ``name`` processes this test started, by pid, and wait for them.
+
+    ``app quit`` sends the desktop quit chord (ctrl+q). xfce4-terminal does
+    not bind ctrl+q, so it reports "still running" and the terminal stayed
+    up into the next test, whose short run needs an empty desktop.
+    """
+    import signal
+
+    launched = {pid for pid in _display_pids(name) - before if _running(pid)}
+    for pid in launched:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + timeout
+    while launched and time.monotonic() < deadline:
+        launched = {pid for pid in launched if _running(pid)}
+        time.sleep(0.05)
+    for pid in launched:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 @requires_display
 def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home) -> None:
     """Binary grants cover Files and Terminal; Terminal also needs exec."""
@@ -1853,6 +1912,7 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
     ), None)
     if files is None and terminal is None:
         pytest.skip("no file manager or terminal binary")
+    already = {name: _display_pids(name) for name in (files, terminal) if name}
     store = safety.PermissionStore()
     runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
     runtime.APP_LAUNCH_WAIT_S = 12
@@ -1883,7 +1943,10 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
             try:
                 runtime.app("quit", name)
             except Exception:
-                subprocess.run(["pkill", "-x", name], check=False, timeout=3)
+                pass
+            # A quit that leaves the app running is not an error, so the
+            # pids this test launched are ended either way.
+            _stop_launched(name, already[name])
 
 
 @requires_display
