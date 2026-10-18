@@ -354,6 +354,19 @@ def test_menu_press_on_a_destructive_label_needs_confirmation(tmp_path, monkeypa
     assert rt.menu(APP, "File > Move to Trash", confirm=lambda prompt: True).startswith("pressed")
 
 
+def test_menu_press_under_a_destructive_submenu_needs_confirmation(tmp_path, monkeypatch) -> None:
+    """#847: menu(path="Table > Delete > Rows") deleted a row with no prompt."""
+    monkeypatch.setattr(server, "CONFIRMATION_GATE", True)
+    rt, driver, _ = make_runtime(tmp_path)
+    with pytest.raises(ComputerUseError) as exc:
+        rt.menu(APP, "Table > Delete > Rows")
+    assert exc.value.code is ErrorCode.CONFIRMATION_DECLINED
+    assert "Table > Delete > Rows" in str(exc.value)
+    assert not any(c[0] == "menu_press" for c in driver.calls)
+    assert rt.menu(APP, "Table > Delete > Rows", confirm=lambda prompt: True).startswith("pressed")
+    assert rt.menu(APP, "Table > Insert > Rows Above").startswith("pressed")
+
+
 def test_menu_press_validates_the_path_before_gating(tmp_path) -> None:
     rt, _, _ = make_runtime(tmp_path)
     with pytest.raises(ValueError):

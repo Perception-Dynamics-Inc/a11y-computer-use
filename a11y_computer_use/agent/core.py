@@ -5223,11 +5223,22 @@ def _action_key(action: Action) -> tuple:
 
 
 def _action_label(action: Action, snap: Snapshot | None) -> str | None:
+    """The command the approval gate judges: a whole menu path, or the target's name.
+
+    A ``menu`` call is labelled with its full path and a menu item with its
+    ancestor menus from the snapshot (Table > Delete > Rows), the same path
+    the library gate judges (#847). Other targets keep their own name.
+    """
+    from a11y_computer_use.safety import menu_op_path, menu_path
+
     if action.name == "menu":
         path = str(action.args.get("path") or "")
-        return path.split(">")[-1].strip() or path or None
+        return " > ".join(menu_op_path(path)) or path or None
     element = _element_for(action, snap)
     if element is not None and element.title:
+        components = menu_path(snap, element)
+        if len(components) > 1:
+            return " > ".join(components)
         return element.title
     name = action.args.get("name")
     return str(name) if name else None
