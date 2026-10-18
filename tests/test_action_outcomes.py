@@ -386,6 +386,7 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     died = outcome.judge(changed=True, process_died=True)
     assert died == ("partial", "the target process exited after the action")
     assert outcome.suggest_next("click", "confirmed") == ()
+    assert outcome.suggest_next("click", "dispatched", had_ref=True) == ()
     assert outcome.suggest_next("click", "partial", process_died=True) == ("ref", "foreground")
     assert outcome.suggest_next("set_value", "suspected_noop")[0] == "ref"
     assert "cdp" in outcome.suggest_next("select", "partial", browser=True)
@@ -2907,3 +2908,9 @@ def test_impress_shape_key_selection_evidence(monkeypatch, change):
         assert verdict is None
     else:
         assert verdict[0] == ("confirmed" if change == "selected" else "unverifiable")
+
+
+def test_declined_press_refusal_never_suggests_recovery():
+    assert outcome.next_for_error("stale_ref", {
+        "reason": "fallback_target_unverified", "next": ["coordinates", "ref"],
+    }) == ()
