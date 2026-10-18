@@ -812,7 +812,11 @@ Writer navigation and edit keys (arrows, Home/End/PageUp/PageDown with Ctrl/Shif
 selection, delete/backspace, paste/cut/undo/redo, and Return) use a scoped native
 read of the focused text object, caret and selection. Same-length text edits
 are detected. One short settlement reread precedes an unverifiable result for
-unchanged state. Return/Enter/Delete/BackSpace refresh the focused paragraph
+unchanged state. Select-all and Shift navigation from an empty paragraph also
+compare native sibling paragraph selection ranges, since the focused empty
+paragraph cannot expose a range. Incomplete reads or sibling lists larger than
+256 retain the ordinary verification fallback; no truncated sample confirms a key.
+Return/Enter/Delete/BackSpace refresh the focused paragraph
 and compare its native sibling count and index, so empty paragraph edits can
 be verified without a document subtree scan. X11 copy compares clipboard owner
 and advertised targets without reading clipboard content. A changed owner or
@@ -856,8 +860,12 @@ LibreOffice Math can retain accessibility focus on an Elements icon or its
 command panel after insertion. Typing read-back uses a unique showing, focused,
 editable paragraph in the active window and checks the selected range's exact
 replacement. Ambiguous or incomplete paragraph discovery is unverified, rather
-than a mismatch against the stale icon's empty text. This path has synthetic
-regression coverage; live Math validation is still required.
+than a mismatch against the stale icon's empty text. The verified command read
+is consumed once by the immediate type outcome, bound to the app and requested
+text, avoiding snapshot settlement against the stale icon. Hermetic regressions
+bound native reads and require no sleeps or outcome snapshots on successful
+Math typing. Placeholder replacement and subsequent typing were also checked
+with LibreOffice Math under Xvfb, xfwm4, and AT-SPI.
 
 Plain `find` on GTK multiline documents uses only the non-mutating AT-SPI
 text scroll API and leaves the caret and selection untouched. If the match
