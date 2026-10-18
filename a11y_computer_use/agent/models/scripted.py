@@ -118,22 +118,29 @@ class ScriptedModel:
         if turn_number < before:
             return
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                text = Path(path).read_text(encoding="utf-8").strip()
-            except OSError:
-                text = ""
-            if text:
-                try:
-                    seen = int(text)
-                except ValueError:
-                    seen = 0
-                if seen >= 1:
-                    return
+        # Read first, then check the deadline. A thread descheduled across the
+        # deadline still reads a record written before it gave up (#925).
+        while True:
+            if _cancel_recorded(path):
+                return
+            if time.monotonic() >= deadline:
+                break
             time.sleep(0.02)
         raise ModelError(
             f"scripted model held turn {turn_number} until {path} recorded a cancel"
         )
+
+
+def _cancel_recorded(path: str) -> bool:
+    """True when ``path`` holds an integer >= 1."""
+    try:
+        text = Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    try:
+        return int(text) >= 1
+    except ValueError:
+        return False
 
 
 def _load_path(path: str) -> tuple[list[TurnSource], tuple[int, str, float] | None]:
