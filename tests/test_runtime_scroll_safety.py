@@ -175,7 +175,7 @@ def test_secure_scroll_target_is_refused_before_pointer_input(runtime, pinned: b
 def test_permission_revoked_during_confirmation_prevents_injection(runtime, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(server, "CONFIRMATION_GATE", True)
     clicked = []
-    monkeypatch.setattr(safety, "confirmation_prompt", lambda action, app, window=None: "Confirm?")
+    monkeypatch.setattr(safety, "confirmation_prompt", lambda action, app, window=None, menu_path=None: "Confirm?")
 
     def confirm(_prompt: str) -> bool:
         runtime.store.set_tier("test-app", safety.Tier.READ)

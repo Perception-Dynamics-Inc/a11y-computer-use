@@ -136,3 +136,103 @@ def test_native_toggle_keeps_existing_click_route(button_case, kwargs):
     params.update(kwargs)
     assert driver.click_button_action(element, **params) is None
     assert calls == []  # Do not substitute the advertised toggle for a click.
+
+
+@pytest.mark.parametrize("changed", [True, False])
+def test_ref_click_counts_full_window_reads(button_case, monkeypatch, changed):
+    """Real resolve/click/judge paths; only native transport and guards are fake."""
+    from dataclasses import replace
+
+    driver, element, node, frame, action, names, calls = button_case
+    snap = Snapshot(element.snapshot_id, Scope.WINDOW, "chrome", 0, 0.0, (), (element,))
+    reads = []
+    node.name = element.title
+
+    def snapshot(scope, app):
+        reads.append((scope, app))
+        return replace(snap, elements=(replace(element, title=node.name),))
+
+    def send(index):
+        calls.append(names[index])
+        if changed:
+            node.name = "Count 1"
+        return True
+
+    action.do_action = send
+    monkeypatch.setattr(driver, "snapshot", snapshot)
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt.driver = driver
+    rt._target = lambda *a, **kw: (driver.resolve_ref(snap, "e1"), "chrome")
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._resolves_apps = lambda: False
+    rt._dismiss_open_menu = lambda app: ""
+    guards = []
+    for name in ("_reject_coordinate", "_refuse_disabled", "_refuse_secure", "_recheck_target",
+                 "_guard_user", "_popover_cover", "_refuse_vanished_target", "_cover_owner",
+                 "_paragraph_click_verdict", "_opaque_click_verdict", "_navigating_row_location"):
+        setattr(rt, name, lambda *a, _name=name, **kw: guards.append(_name))
+    rt._canvas_fallback_target = lambda element: False
+    rt._effect_after = lambda pre: ""
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *a: None)
+    monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
+    result = rt.click(ref="e1")
+    assert len(reads) == (1 if changed else 2)
+    assert result.outcome == ("confirmed" if changed else "suspected_noop")
+    assert calls == ["click"]
+    assert "_recheck_target" in guards
+    assert "_popover_cover" in guards
+    assert "_refuse_vanished_target" in guards
+    if changed:
+        assert result.evidence == "the clicked button's accessible name changed"
+        assert rt._action_baseline["capture"] is None
+        assert driver.button_click_evidence(element) is None
+
+
+@pytest.mark.parametrize("case", ["unchanged", "missing_before", "missing_after", "defunct", "foreign", "changed"])
+def test_button_evidence_requires_fresh_bound_name_change(button_case, monkeypatch, case):
+    from dataclasses import replace
+
+    driver, element, node, frame, action, names, calls = button_case
+    node.name = "Count 0"
+    if case == "missing_before":
+        node.get_name = lambda: None
+    driver.click_button_action(element, button=MouseButton.LEFT, count=1, modifiers=())
+    node.get_name = lambda: "Count 0" if case == "unchanged" else "Count 1"
+    if case == "missing_after":
+        node.get_name = lambda: None
+    if case == "defunct":
+        node.states.add("DEFUNCT")
+    target = replace(element) if case == "foreign" else element
+    evidence = driver.button_click_evidence(target)
+    assert (evidence is not None) == (case == "changed")
+    assert driver.button_click_evidence(element) is None
+
+
+def test_resolve_snapshot_is_one_use_and_target_bound(button_case, monkeypatch):
+    from dataclasses import replace
+
+    driver, element, node, frame, action, names, calls = button_case
+    snap = Snapshot(element.snapshot_id, Scope.WINDOW, "chrome", 0, 0.0, (), (element,))
+    monkeypatch.setattr(driver, "snapshot", lambda *a: snap)
+    resolved = driver.resolve_ref(snap, element.ref)
+    assert driver.take_click_snapshot(replace(resolved)) is None
+    assert driver.take_click_snapshot(resolved) is None
+    resolved = driver.resolve_ref(snap, element.ref)
+    assert driver.take_click_snapshot(resolved) is snap
+    assert driver.take_click_snapshot(resolved) is None
+
+
+def test_scoped_click_evidence_preserves_process_exit(button_case, monkeypatch):
+    driver, element, node, frame, action, names, calls = button_case
+    node.name = "Count 0"
+    driver.click_button_action(element, button=MouseButton.LEFT, count=1, modifiers=())
+    node.name = "Count 1"
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = driver
+    rt._current = None
+    monkeypatch.setattr(rt, "_process_died", lambda before: True)
+    monkeypatch.setattr(rt, "_reread", lambda *a: pytest.fail("unnecessary full read"))
+    verdict, evidence = rt._judge_mutation("chrome", None, element, None, cover_click=True)
+    assert verdict == "partial"
+    assert "process exited" in evidence
