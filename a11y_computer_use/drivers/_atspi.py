@@ -19967,3 +19967,39 @@ def scroll_at_point(x: int, y: int, *, dx: int = 0, dy: int = 0) -> bool:
     if acc is None:
         return False
     return scroll_by_pixels(acc, dx=dx, dy=dy)
+
+
+def text_range_rect(acc, start: int, end: int, expected: str):
+    """Read a SCREEN range only when every character is inside the visible widget.
+
+    Wrapped ranges are refused: their enclosing rectangle can centre on blank
+    space. Missing native geometry never falls back to the widget centre.
+    """
+    if acc is None or is_secure(acc) or not _state_has(acc, "SHOWING"):
+        return None
+    try:
+        Atspi = _atspi()
+        raw = _full_text(acc)
+        if not isinstance(raw, str) or start < 0 or end <= start or raw[start:end] != expected:
+            return None
+        widget = _raw_rect(acc, "SCREEN")
+        coord = Atspi.CoordType.SCREEN
+        rect = Atspi.Text.get_range_extents(acc, start, end, coord)
+        chars = [Atspi.Text.get_character_extents(acc, i, coord) for i in range(start, end)]
+        if widget is None or rect is None or not chars:
+            return None
+        x, y, width, height = widget
+        def inside(r):
+            return (r is not None and all(math.isfinite(v) for v in (r.x, r.y, r.width, r.height))
+                    and r.width > 0 and r.height > 0 and x <= r.x and y <= r.y
+                    and r.x + r.width <= x + width and r.y + r.height <= y + height)
+        if not inside(rect) or not all(inside(r) for r in chars):
+            return None
+        cx, cy = rect.x + rect.width / 2, rect.y + rect.height / 2
+        if not all(r.y == chars[0].y for r in chars):
+            return None
+        if not any(r.x <= cx < r.x + r.width and r.y <= cy < r.y + r.height for r in chars):
+            return None
+        return rect.x, rect.y, rect.width, rect.height
+    except Exception:
+        return None
