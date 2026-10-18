@@ -2967,6 +2967,24 @@ class Runtime:
             if died:
                 return "partial", "the target process exited after the action"
             return calc
+        verified = getattr(self.driver, "_writer_cell_verified", None)
+        if verified is not None:
+            self.driver._writer_cell_verified = None
+        if (
+            getattr(self.driver, "name", None) == "linux"
+            and element is not None and requested is not None
+            and verified == (element.snapshot_id, element.ref, requested)
+        ):
+            # The driver compared every paragraph, including blanks, before
+            # returning. Consume that ref-bound evidence exactly once.
+            current = getattr(self, "_current", None)
+            if current is not None:
+                self._action_baseline = {
+                    "token": id(current), "app": app, "capture": None, "process": process,
+                }
+            if died:
+                return "partial", "the target process exited after the action"
+            return "confirmed", f"Writer cell paragraphs match the requested value {requested!r}"
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
         readable = after is not None and before is not None
