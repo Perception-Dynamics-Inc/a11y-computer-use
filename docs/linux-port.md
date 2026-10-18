@@ -883,6 +883,27 @@ remains off screen (including Scintilla implementations without that scroll
 API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
 caret-based reveal fallback and verifies the resulting character extents.
 
+Ref-click coordinate fallback after a dispatched but declined accessibility press takes a new
+snapshot and requires the same native target, name, role, SHOWING state, and an
+exact accessibility hit at its fresh center. If any check is unavailable or
+mismatched, it refuses with `fallback_target_unverified` and sends no fallback
+pointer click. A Qt modal action can open a dialog despite returning false on a
+D-Bus timeout; inspect a fresh snapshot after refusal before issuing another click.
+
+The agent treats this refusal (including its `stale_ref` error) as final for the
+step: it surfaces the error to the model without a coordinate, vision, or other
+click retry, and does not mark the step verified. If complete native reads before
+and after the declined press show a newly visible dialog, Runtime instead returns
+`dispatched`, naming the dialog, with no retry hints in `next`. The agent's
+step status is also `dispatched`, and its result retains the dialog name. This
+is dispatch evidence, not a verified outcome; inspect the fresh observation
+before choosing the next action.
+
+A false press result with an exact, single-use receipt proving no native action
+was dispatched retains the ordinary click path and its existing geometry guards.
+This distinguishes controls without a supported native action from actions that
+may already have opened a dialog despite a failed reply.
+
 LibreOffice Math command paragraphs with native EDITABLE state and EditableText
 are exposed as editable text areas. Recognition requires an editable parent
 panel and a LibreOffice frame title ending in ` - LibreOffice Math`; other

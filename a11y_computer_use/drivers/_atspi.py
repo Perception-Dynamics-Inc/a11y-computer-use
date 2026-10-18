@@ -8092,8 +8092,12 @@ def qt_menu_button_without_press(acc) -> bool:
     return qt_menu_button(acc) and not (_MAIN_BUTTON_ACTIONS & set(_raw_action_names(acc)))
 
 
-def do_press(acc) -> bool:
-    """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
+def do_press(acc, *, on_dispatch=None) -> bool:
+    """Perform an activating AT-SPI action (True on success).
+
+    ``on_dispatch`` runs immediately before each native action attempt, even
+    when its reply fails. No callback means no action was sent.
+    """
     action = _action_iface(acc)
     if action is None:
         return False
@@ -8102,6 +8106,8 @@ def do_press(acc) -> bool:
     for i in range(int(n)):
         raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
         if raw in allowed:
+            if on_dispatch is not None:
+                on_dispatch()
             if _call_first(action, ("do_action", "doAction"), i, default=False):
                 return True
     return False
@@ -12207,7 +12213,7 @@ def _cache_masks():
     return none, getattr(cache, "UNDEFINED", None)
 
 
-def _without_child_cache(node, fn):
+def _without_child_cache(node, fn, *, preserve_properties=False):
     """Run ``fn`` without trusting this application's child cache.
 
     ``clear_cache_single`` sets ``cached_properties`` to none and leaves the
@@ -12222,6 +12228,10 @@ def _without_child_cache(node, fn):
     The operation-scoped getter cache is invalidated around the walk too,
     since it can retain child counts and handles read before the edit. The
     mask change and walk share the event thread, including direct native calls.
+    Chromium snapshot walks set ``preserve_properties`` to retain native
+    caching of roles, names, states and interfaces. Only CHILDREN is bypassed
+    there; disabling every property adds D-Bus round trips across the page.
+    Calc callers retain the full cache bypass needed during editor mutations.
     A node without ``set_cache_mask`` is a test double and is walked as it is.
     """
     from a11y_computer_use.drivers import _atspi_events
@@ -12232,10 +12242,16 @@ def _without_child_cache(node, fn):
         setter = getattr(target, "set_cache_mask", None)
         if setter is None:
             return fn()
-        none, undefined = _cache_masks()
+        mask, undefined = _cache_masks()
+        if preserve_properties:
+            try:
+                cache = _atspi().Cache
+                mask = int(cache.DEFAULT) & ~int(cache.CHILDREN)
+            except (AttributeError, ImportError):
+                pass
         try:
             _drop_read_cache()
-            setter(none)
+            setter(mask)
         except Exception:
             return fn()
         try:
@@ -18973,6 +18989,39 @@ def chromium_button_click_action(acc):
         if name in {"click", "press"}:
             return action, index, name
     return None
+
+
+def fallback_pointer_target(acc, x: int, y: int) -> bool:
+    """Hit-test a ref from its owning popup/window, never from the target itself.
+
+    Qt popups are not hit-testable through the desktop or their owner's frame.
+    Require the popup itself to remain showing, and descend only native hits.
+    Missing hits and cycles are refusals, not evidence from overlapping bounds.
+    """
+    root = next((node for node in _ancestor_chain(acc)
+                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog"}), None)
+    if root is None or root is acc or not _state_has(root, "SHOWING"):
+        return False
+    target_key = _ancestor_key(acc)
+    node = root
+    seen: set[object] = set()
+    pinned = []
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            return False
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            return False
+        hit = _hit_at(comp, x, y)
+        if hit is None:
+            return False
+        if _ancestor_key(hit) == target_key:
+            return True
+        node = hit
+    return False
 
 
 def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
