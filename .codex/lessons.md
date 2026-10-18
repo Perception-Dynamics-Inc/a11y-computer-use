@@ -376,3 +376,5 @@
 - 2026-10-18 (#850): Chrome ref-click cost includes a menu-bar discovery traversal as well as resolve/outcome snapshots. A live Collection query can prove menu-bar absence without walking the page; hits and failures must retain active-frame selection. Scoped button name evidence must be bound to the exact sent node action, consumed once, and invalidate the old full-tree baseline. The fifteen 20 ms sleeps are process-exit verification, not input settlement; preserve that grace.
 
 - 2026-10-18 (PR #826 safety/performance merge): Retain issuing-snapshot menu ancestry and exact-target click evidence alongside Geany navigation verification when merging shared Runtime click changes; validate the menu gate, Chromium button, and Scintilla regressions together.
+
+- 2026-10-18 (#873): Scintilla caret movement is an input mutation even when used to reveal text. Plain find may use Text.scroll_substring_to but must never fall back to set_caret_offset; reserve that fallback for explicit scroll_to_find and verify native extents afterwards.
