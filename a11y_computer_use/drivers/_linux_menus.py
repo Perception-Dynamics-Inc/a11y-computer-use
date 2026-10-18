@@ -542,6 +542,27 @@ def find_menu_bar(root: object) -> object | None:
         return None
     if _role(root) == "menu bar":
         return root
+    # Chrome has no native menu bar, but walking its entire page to prove
+    # that costs another tree traversal on every ref click. Collection can
+    # establish absence with one live query. A hit or unavailable query keeps
+    # the existing walk and its active-frame preference.
+    collection = _call(root, ("get_collection_iface", "get_collection"))
+    if collection is not None:
+        try:
+            from a11y_computer_use.drivers import _atspi
+
+            if _atspi._chromium_app(root):
+                api = _atspi._atspi()
+                mt = api.CollectionMatchType
+                rule = api.MatchRule.new(
+                    api.StateSet.new([]), mt.NONE, {}, mt.NONE,
+                    [api.Role.MENU_BAR], mt.ANY, [], mt.NONE, False,
+                )
+                hits = collection.get_matches(rule, api.CollectionSortOrder.CANONICAL, 1, True)
+                if hits is not None and len(hits) == 0:
+                    return None
+        except Exception:
+            pass  # No Collection support: retain the complete native walk.
     found: list[object] = []
     parent: dict[object, object] = {}
     # Keep every proxy alive. Dropping one lets its id be reused for a node

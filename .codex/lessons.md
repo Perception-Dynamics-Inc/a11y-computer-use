@@ -278,3 +278,5 @@
 - 2026-10-18 (PR #834 repair): Chromium tab-write preflight and node-bound button clicks protect independent input paths. Preserve the tab refusal before any insertion or replacement mutation alongside main’s updated click mechanism and freshness limitations when merging backend documentation.
 
 - 2026-10-18 (#842): Impress/Draw EditableText multiline replacement splits a paragraph while its frame child list can stay stale. Refuse LF/CR replacement before writing; LinuxDriver captures/restores caret separately from set_text, so preflight both entry points before that state handling.
+
+- 2026-10-18 (#850): Chrome ref-click cost includes a menu-bar discovery traversal as well as resolve/outcome snapshots. A live Collection query can prove menu-bar absence without walking the page; hits and failures must retain active-frame selection. Scoped button name evidence must be bound to the exact sent node action, consumed once, and invalidate the old full-tree baseline. The fifteen 20 ms sleeps are process-exit verification, not input settlement; preserve that grace.
