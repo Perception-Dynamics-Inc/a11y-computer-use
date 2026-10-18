@@ -2132,6 +2132,8 @@ class Runtime:
         if visible_actions is not None and getattr(self.driver, "name", None) == "linux":
             self.driver.visible_actions = visible_actions
         self._current: Snapshot | None = None
+        # (live element, issuing snapshot, anchor) of the last ref resolve.
+        self._gate_anchor: tuple[Element, Snapshot, Element] | None = None
         #: The rendering view ("full" | "interactive") the agent last asked for;
         #: diff snapshots and Effect Receipts render in it so an agent that chose
         #: the cheap view keeps getting it.
@@ -2586,6 +2588,29 @@ class Runtime:
         element = target if isinstance(target, Element) else None
         return safety.window_title(snap, element)
 
+    def _confirmation_menu_path(self, action: object) -> tuple[str, ...] | None:
+        """Menu path of a clicked element, read from the snapshot that issued its ref.
+
+        A ref click acts on the live re-resolved element, which carries the
+        live tree's snapshot id and has no ancestors to read. ``_resolve``
+        keeps the issuing anchor, so Table > Delete > Rows is judged whole
+        rather than as "Rows" (#847).
+        """
+        target = getattr(action, "target", None)
+        if not isinstance(target, Element):
+            return None
+        held = getattr(self, "_gate_anchor", None)
+        if held is not None:
+            live, snap, anchor = held
+            if live is target or (
+                live.snapshot_id == target.snapshot_id and live.ref == target.ref
+            ):
+                return safety.menu_path(snap, anchor)
+        snap = getattr(self, "_current", None)
+        if snap is not None and snap.snapshot_id == target.snapshot_id:
+            return safety.menu_path(snap, target)
+        return None
+
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
         input_target=None,
@@ -2615,6 +2640,7 @@ class Runtime:
             if CONFIRMATION_GATE:
                 prompt = safety.confirmation_prompt(
                     action, app, window=self._confirmation_window(action),
+                    menu_path=self._confirmation_menu_path(action),
                 )
                 if prompt is not None and not (confirm is not None and confirm(prompt)):
                     detail = {"app": app, "confirmable": confirm is not None}
@@ -2985,6 +3011,19 @@ class Runtime:
             if died:
                 return "partial", "the target process exited after the action"
             return "confirmed", f"Writer cell paragraphs match the requested value {requested!r}"
+        button_evidence = getattr(self.driver, "button_click_evidence", None)
+        if cover_click and element is not None and callable(button_evidence):
+            evidence = button_evidence(element)
+            if evidence is not None:
+                # A scoped native read is real effect evidence, but is not a
+                # new full-tree baseline for the next action.
+                self._action_baseline = {
+                    "token": id(getattr(self, "_current", None)), "app": app,
+                    "capture": None, "process": process,
+                }
+                if died:
+                    return "partial", "the target process exited after the action"
+                return "confirmed", evidence
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
         readable = after is not None and before is not None
@@ -3593,12 +3632,16 @@ class Runtime:
                 except Exception:  # noqa: BLE001 - the full read decides
                     cell = None
                 if isinstance(cell, Element):
+                    self._gate_anchor = (cell, snap, anchor)
                     return snap, cell
+        self._gate_anchor = None
         try:
             live = self.driver.resolve_ref(snap, ref)
         except ComputerUseError as exc:
             self._audit_stale(kind, ref, exc)
             raise
+        # The confirmation gate reads the issuing anchor's menu ancestors.
+        self._gate_anchor = (live, snap, anchor)
         return snap, live
 
     def _alive_offscreen(self, ref: str) -> Bounds | None:
@@ -5304,7 +5347,11 @@ class Runtime:
         self._reject_coordinate(ref, x, y, display_id)
         target, app = self._target(ref, x, y, display_id, kind="click")
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
-        before = self._capture()
+        resolved_tree = None
+        take_tree = getattr(self.driver, "take_click_snapshot", None)
+        if isinstance(target, Element) and callable(take_tree):
+            resolved_tree = take_tree(target)
+        before = self._freeze(resolved_tree) if isinstance(resolved_tree, Snapshot) else self._capture()
 
         selection_reader = getattr(self.driver, "text_selection", None)
         verify_selection = (count == 2 and isinstance(target, Element)

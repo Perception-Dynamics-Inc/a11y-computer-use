@@ -769,6 +769,17 @@ Previously issued refs are refused with `not_showing` before input; reveal the
 panel and find the control again. This uses native visibility state and does
 not establish general hit-test protection against overlapping page controls.
 
+Linux ref clicks reuse the live resolution tree as their outcome baseline.
+For a node-bound Chromium button click, a fresh accessible-name read before
+input and another after the unchanged process-exit grace can confirm a name
+change on that exact native button. This uses one full-window read per click
+on the issue #850 counter page. Missing, unchanged, or unreadable names retain
+the full outcome re-read; delivery acknowledgement alone never confirms an
+effect. Scoped verification invalidates the old whole-tree baseline. Existing
+visibility, popover, same-app cover, and input-target guards remain in place.
+Menu-bar absence uses a live AT-SPI Collection query when available; a hit or
+failed query retains the normal traversal and active-window preference.
+
 Chromium page push buttons (native `button` or `push button`) use a node-bound AT-SPI `click` or `press` action for
 plain left ref clicks through the Runtime/MCP tool. The result names the
 mechanism (`via AT-SPI doAction(press)` or `doAction(click)`), and normal

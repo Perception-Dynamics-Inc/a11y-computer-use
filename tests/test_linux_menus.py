@@ -1405,3 +1405,48 @@ def test_popup_cleanup_does_not_send_second_escape_to_new_dialog():
         app, "File > Open", settle=lambda _: None, dismiss=dismiss,
     ) == "Open"
     assert sent == ["escape"]
+
+
+@pytest.mark.parametrize("reply", ["empty", "hit", "unavailable", "failed"])
+def test_menu_bar_collection_absence_avoids_walk(monkeypatch, reply):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    root, _ = mousepad()
+    bar = root.children[0].children[0]
+    rules = []
+    queries = []
+    api = SimpleNamespace(
+        CollectionMatchType=SimpleNamespace(NONE=0, ANY=1),
+        CollectionSortOrder=SimpleNamespace(CANONICAL=2),
+        Role=SimpleNamespace(MENU_BAR=3),
+        StateSet=SimpleNamespace(new=lambda states: states),
+        MatchRule=SimpleNamespace(new=lambda *args: rules.append(args) or "rule"),
+    )
+    monkeypatch.setattr(_atspi, "_atspi", lambda: api)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda root: True)
+
+    def matches(*args):
+        queries.append(args)
+        if reply == "failed":
+            raise RuntimeError("unsupported Collection")
+        return {"empty": [], "hit": [bar], "unavailable": None}[reply]
+
+    root.get_collection_iface = lambda: SimpleNamespace(get_matches=matches)
+    if reply == "empty":
+        root.get_child_count = lambda: pytest.fail("empty native query must avoid traversal")
+    assert _linux_menus.find_menu_bar(root) is (None if reply == "empty" else bar)
+    assert rules == [([], 0, {}, 0, [3], 1, [], 0, False)]
+    assert queries == [("rule", 2, 1, True)]
+
+
+def test_nonchromium_menu_discovery_retains_walk(monkeypatch):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    root, _ = mousepad()
+    root.get_collection_iface = lambda: SimpleNamespace(
+        get_matches=lambda *args: pytest.fail("non-Chromium Collection queried"),
+    )
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda root: False)
+    assert _linux_menus.find_menu_bar(root) is root.children[0].children[0]
