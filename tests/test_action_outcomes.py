@@ -2573,3 +2573,177 @@ def test_writer_probe_runs_on_owner_thread_and_falls_back(monkeypatch):
     assert runtime._writer_key_probe("soffice", "ctrl+s") is None
     runtime.driver.name = "windows"
     assert runtime._writer_key_probe("soffice", "End") is None
+
+
+@pytest.mark.parametrize("value", ["NEWB2-1", "Replaced note", "Line one\nLine two", ""])
+def test_writer_verified_cell_avoids_window_reread(monkeypatch, value):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    target = _tree()[1]
+    runtime.driver._writer_cell_verified = (target.snapshot_id, target.ref, value)
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("full window reread"))
+    result, evidence = runtime._judge_mutation("soffice.bin", None, target, value)
+    assert result == "confirmed"
+    assert repr(value) in evidence
+    assert runtime.driver._writer_cell_verified is None
+    assert runtime._capture("soffice.bin", targeted=True) is None
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    assert runtime._judge_mutation("soffice.bin", None, target, value)[0] != "confirmed"
+    assert reads
+
+
+@pytest.mark.parametrize("wrong", ["ref", "snapshot", "value", "dead"])
+def test_writer_cell_evidence_cannot_confirm_other_writes(monkeypatch, wrong):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    target = _tree()[1]
+    runtime.driver._writer_cell_verified = (
+        "other" if wrong == "snapshot" else target.snapshot_id,
+        "other" if wrong == "ref" else target.ref,
+        "other" if wrong == "value" else "new",
+    )
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: wrong == "dead")
+    monkeypatch.setattr(runtime, "_reread", lambda *args: None)
+    assert runtime._judge_mutation("soffice.bin", None, target, "new")[0] != "confirmed"
+    assert runtime.driver._writer_cell_verified is None
+
+
+@pytest.mark.parametrize("app", ["soffice.bin", "chrome"])
+@pytest.mark.parametrize("after,expected", [
+    ((2, ("text/html",)), "confirmed"),
+    ((1, ("text/html",)), "confirmed"),
+    ((1, ("UTF8_STRING",)), "unverifiable"),
+    (None, "unverifiable"),
+    ((0, None), "unverifiable"),
+])
+def test_copy_uses_clipboard_evidence_without_retry_hints(tmp_path, monkeypatch, app, after, expected):
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    monkeypatch.setattr(runtime, "_clipboard_key_probe", lambda chord: after)
+    # Even a changed tree is not evidence that a copy succeeded.
+    result = runtime._conclude(
+        "pressed ctrl+c", tool="key", app=app, key_chord="ctrl+c",
+        clipboard_before=(1, ("UTF8_STRING",)),
+        verdict=("confirmed", "the accessibility state changed"),
+    )
+    assert result.outcome == expected
+    assert result.as_dict()["next"] == []
+    assert "clipboard" in result.evidence
+
+
+@pytest.mark.parametrize("change", ["paragraph", "count", "index", "unchanged", "missing"])
+def test_empty_writer_return_structure_and_no_retry(tmp_path, monkeypatch, change):
+    runtime = _runtime(tmp_path, TreeDriver())
+    before = ("window", "doc", "para", 0, 0, (), "", ("parent", 2, 1))
+    after = list(before)
+    if change == "paragraph":
+        after[2] = "new paragraph"
+    elif change == "count":
+        after[7] = ("parent", 3, 1)
+    elif change == "index":
+        after[7] = ("parent", 2, 0)
+    monkeypatch.setattr(runtime, "_writer_key_probe", lambda *args: None if change == "missing" else tuple(after))
+    monkeypatch.setattr(runtime, "_reread", lambda *args: None)
+    result = runtime._conclude(
+        "pressed Return", tool="key", app="soffice.bin", key_focus=True,
+        key_chord="Return", writer_before=before,
+    )
+    assert result.outcome == ("unverifiable" if change in {"unchanged", "missing"} else "confirmed")
+    assert result.as_dict()["next"] == []
+
+
+def test_writer_structure_refreshes_focus_and_reads_native_siblings(monkeypatch):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    state = {"count": 1, "index": 0}
+    parent = SimpleNamespace(get_child_count=lambda: state["count"])
+    paragraph = SimpleNamespace(get_index_in_parent=lambda: state["index"])
+    monkeypatch.setattr(_atspi, "libreoffice_app", lambda app: True)
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: "window")
+    discoveries = []
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (discoveries.append(app) or paragraph, False))
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: "document")
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda acc: parent)
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "")
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda acc: 0, get_caret_offset=lambda acc: 0,
+        get_n_selections=lambda acc: 0,
+    )))
+    before = _atspi.writer_key_state("soffice", structure=True)
+    state.update(count=2, index=1)
+    after = _atspi.writer_key_state("soffice", before, structure=True)
+    assert before[:7] == after[:7]
+    assert before[7][1:] == (1, 0)
+    assert after[7][1:] == (2, 1)
+    assert len(discoveries) == 2
+    state["count"] = -1
+    assert _atspi.writer_key_state("soffice", after, structure=True) is None
+
+
+def test_copy_runtime_carries_metadata(tmp_path, monkeypatch):
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    reads = iter([(1, ("text/plain",)), (2, ("text/html",))])
+    monkeypatch.setattr(runtime, "_clipboard_key_probe", lambda chord: next(reads))
+    result = runtime.key("ctrl+c")
+    assert result.outcome == "confirmed"
+    assert result.as_dict()["next"] == []
+    assert driver.calls == [("key", "ctrl+c")]
+
+
+@pytest.mark.parametrize("owners,targets,expected", [
+    ([1, 1], b"UTF8_STRING\ntext/html\n", (1, ("UTF8_STRING", "text/html"))),
+    ([0, 0], b"", (0, None)),
+    ([1, 2], b"text/html\n", None),
+])
+def test_clipboard_copy_metadata_is_coherent(monkeypatch, owners, targets, expected):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _linux_system as system
+
+    owner_reads = iter(owners)
+    closed, commands = [], []
+    display = SimpleNamespace(
+        intern_atom=lambda name: name,
+        get_selection_owner=lambda atom: SimpleNamespace(id=next(owner_reads)),
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setenv("DISPLAY", ":fake")
+    monkeypatch.setattr(system, "_display", lambda: display)
+    monkeypatch.setattr(system.shutil, "which", lambda name: "/usr/bin/xclip")
+    def run(cmd, **kwargs):
+        commands.append(cmd)
+        assert kwargs["timeout"] == 0.2
+        return SimpleNamespace(returncode=0, stdout=targets)
+    monkeypatch.setattr(system.subprocess, "run", run)
+    assert system.clipboard_copy_state() == expected
+    assert closed == [True]
+    assert all(cmd[-2:] == ["TARGETS", "-o"] for cmd in commands)
+
+
+def test_clipboard_copy_metadata_unavailable(monkeypatch):
+    from a11y_computer_use.drivers import _linux_system as system
+    monkeypatch.setenv("DISPLAY", ":fake")
+    monkeypatch.setattr(system, "_display", lambda: (_ for _ in ()).throw(RuntimeError("unavailable")))
+    assert system.clipboard_copy_state() is None
+
+
+def test_clipboard_owner_survives_unavailable_targets(monkeypatch):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _linux_system as system
+    monkeypatch.setenv("DISPLAY", ":fake")
+    monkeypatch.setattr(system, "_display", lambda: SimpleNamespace(
+        intern_atom=lambda name: name, get_selection_owner=lambda atom: SimpleNamespace(id=7),
+    ))
+    monkeypatch.setattr(system.shutil, "which", lambda name: "/usr/bin/xclip")
+    def timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+    monkeypatch.setattr(system.subprocess, "run", timeout)
+    assert system.clipboard_copy_state() == (7, None)
