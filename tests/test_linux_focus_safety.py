@@ -390,3 +390,27 @@ def test_xtest_type_returns_the_count_when_the_readback_matches(focus_driver) ->
     _atspi.focused_text = lambda app: state["text"]
     _atspi.focused_editable = lambda app: None
     assert driver.type_text("Hello") == 5
+
+
+@pytest.mark.parametrize("focus_arrives", [False, True])
+def test_native_replacement_establishes_actual_typing_focus(
+    focus_driver, monkeypatch, focus_arrives,
+) -> None:
+    """EditableText can replace A while keyboard focus remains on B."""
+    driver, _, field, handle, _, _ = focus_driver
+    calls = []
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: False)
+    monkeypatch.setattr(_atspi, "set_text", lambda acc, text: calls.append("replace") or True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: calls.append("focus") or True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: focus_arrives)
+    assert driver.set_value(field, "replacement")
+    assert calls == ["replace", "focus"]
+    assert driver._focused_editable is (handle if focus_arrives else None)
+
+
+def test_native_replacement_keeps_already_focused_caret(focus_driver, monkeypatch) -> None:
+    driver, _, field, handle, _, _ = focus_driver
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: pytest.fail("would reset caret"))
+    assert driver.set_value(field, "replacement")
+    assert driver._focused_editable is handle

@@ -3148,6 +3148,14 @@ class LinuxDriver:
                 f"the value read back does not match {value!r}",
                 detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
             )
+        # Native EditableText replacement need not move keyboard focus.
+        # Establish the remembered typing target on the real widget too;
+        # otherwise a later ref to the old field appears already focused
+        # and retains its old caret instead of focusing it.
+        if self._run(lambda: _atspi._focus_on_target(handle)) is False:
+            self._run(lambda: _atspi.grab_focus(handle))
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                return success  # The value was verified, but focus was not.
         self._focused_editable = handle
         return success
 

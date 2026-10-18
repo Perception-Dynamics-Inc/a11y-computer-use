@@ -964,3 +964,9 @@ are unknown (`null` in error details). A partial or transformed insertion
 reports the observed buffer and does not suggest retrying the input. Inspect
 and reconcile the field before further typing. Read-only refusals also have
 no retry hint. These checks add no fixed waits.
+
+After a native `set_value` replacement, the driver establishes keyboard focus
+before remembering the field as the typing target. EditableText itself can
+leave focus on a different entry. An already focused field keeps its caret;
+if focus cannot be confirmed, the verified replacement still succeeds but the
+field is not remembered for subsequent typing.

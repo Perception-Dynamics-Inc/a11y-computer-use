@@ -5199,6 +5199,13 @@ def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
         shot = current()
         assert float(find(shot, "Quantity").value) == 7.0
         _assert_ref_caret_outcomes(runtime, _QT_APP, "Qt name", qt=True)
+    except ComputerUseError as exc:
+        # CI uses --tb=line: retain the native offset and before/after
+        # evidence there instead of only the generic mismatch message.
+        raise AssertionError(
+            f"Qt input failed: {exc}; detail={exc.detail!r}; "
+            f"widget_state={_read_qt_state(state)!r}"
+        ) from exc
     finally:
         _stop(proc)
         log.close()
