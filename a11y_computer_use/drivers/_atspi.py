@@ -6603,19 +6603,24 @@ def toplevel_raise_target(node):
     STATE_ACTIVE on that window. ``extents`` is ``(x, y, width, height)`` in
     screen pixels, or None when the window has no box. The caller raises the
     matching X window before it acts, and leaves an already active window
-    alone.
+    alone. Embedded unnamed chooser widgets use their enclosing window, so
+    occlusion checks cannot mistake that window for a separate covering one.
     """
     top = _toplevel_of(node)
     if top is None:
         return None
-    if _role_name(top) in {"frame", "window"} and not _node_name(top) and _qt_app(top):
-        # Qt exposes stacked/tab pages as unnamed windows inside QDialog.
+    if not _node_name(top) and (
+        _role_name(top) in {"file chooser", "color chooser"}
+        or (_role_name(top) in {"frame", "window"} and _qt_app(top))
+    ):
+        # GTK exposes embedded chooser widgets with top-level roles; Qt
+        # exposes stacked/tab pages as unnamed windows inside QDialog.
         # Their box overlaps both the dialog and the blocked main window;
         # choosing by overlap can spend the whole activation wait on the
         # main window. Use the enclosing native dialog's title and bounds.
         enclosing = _toplevel_of(_parent_of(top))
         if enclosing is not None and _role_name(enclosing) in {
-            "dialog", "alert", "file chooser", "color chooser",
+            "frame", "window", "dialog", "alert", "file chooser", "color chooser",
         }:
             top = enclosing
     title = str(_call_first(top, ("get_name", "getName"), default="") or "")
