@@ -2465,6 +2465,8 @@ def test_writer_key_scoped_outcome(monkeypatch, change, chord):
         "unverifiable" if chord == "ctrl+c" or change in {"unchanged", "missing"} else "confirmed"
     )
     assert result == expected
+    if result == "confirmed":
+        assert "Writer" in evidence
     assert len(scans) == (1 if change == "missing" else 0)
     assert len(reads) == (2 if change in {"unchanged", "settled"} else 1)
     if not scans:
@@ -2747,3 +2749,115 @@ def test_clipboard_owner_survives_unavailable_targets(monkeypatch):
         raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
     monkeypatch.setattr(system.subprocess, "run", timeout)
     assert system.clipboard_copy_state() == (7, None)
+
+
+@pytest.mark.parametrize("focused_frame", [False, True])
+def test_impress_key_reads_paragraph_and_frame_metadata(monkeypatch, focused_frame):
+    """#843: paste can split a frame without changing the original text."""
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    class Frame:
+        count = 2
+
+        def get_child_count(self):
+            return self.count
+
+    class Paragraph:
+        def get_index_in_parent(self):
+            return 0
+
+    frame, paragraph, document, window = Frame(), Paragraph(), object(), object()
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: window)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (frame if focused_frame else paragraph, False))
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_drawing_document_of", lambda acc: document)
+    monkeypatch.setattr(_atspi, "_drawing_frame", lambda doc: frame)
+    monkeypatch.setattr(_atspi, "_frame_paragraphs", lambda node: [paragraph])
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: "paragraph" if acc is paragraph else "panel")
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, flag: flag == "FOCUSED")
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: acc)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda acc: frame)
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "abc")
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda acc: 3, get_caret_offset=lambda acc: 0,
+        get_n_selections=lambda acc: 0,
+    )))
+    before = _atspi.writer_key_state("soffice")
+    assert before == (window, document, paragraph, 3, 0, (), "abc", (frame, 2, 0))
+    frame.count = 3
+    after = _atspi.writer_key_state("soffice", before)
+    assert after[-1] == (frame, 3, 0)
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice")
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("window scan"))
+    verdict = runtime._judge_mutation(
+        "soffice", None, None, None, key_focus=True, key_chord="ctrl+v", writer_before=before,
+    )
+    assert verdict[0] == "confirmed"
+    assert runtime._action_baseline["capture"] is None
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: object())
+    assert _atspi.writer_key_state("soffice", before) is None
+
+
+@pytest.mark.parametrize("verdict", [
+    ("confirmed", "a focused editable paragraph is inside the text frame"),
+    ("partial", "the text frame is not in text edit"),
+])
+def test_impress_click_scoped_verdict_skips_effect_scan(tmp_path, monkeypatch, verdict):
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    monkeypatch.setattr(runtime, "_paragraph_click_verdict", lambda element: verdict)
+    monkeypatch.setattr(runtime, "_effect_after", lambda *args: pytest.fail("effect scan"))
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("outcome scan"))
+    result = runtime.click("e4")
+    assert (result.outcome, result.evidence) == verdict
+    assert runtime._action_baseline["capture"] is None
+
+
+@pytest.mark.parametrize("change", ["selected", "unchanged", "missing", "window"])
+def test_impress_shape_key_selection_evidence(monkeypatch, change):
+    from a11y_computer_use.drivers import _atspi
+
+    class Document:
+        selected = object()
+
+        def get_selection_iface(self):
+            return self
+
+        def get_n_selected_children(self):
+            return 1
+
+        def get_selected_child(self, index):
+            return self.selected
+
+    document, window = Document(), object()
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: window)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (document, False))
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_drawing_document_of", lambda acc: document)
+    monkeypatch.setattr(_atspi, "_drawing_frame", lambda doc: None)
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: "document presentation")
+    monkeypatch.setattr(_atspi, "_state_has", lambda *args: True)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_full_text", lambda *args: pytest.fail("shape text read"))
+    before = _atspi.writer_key_state("soffice")
+    assert before == (window, document, document, (document.selected,))
+    if change == "selected":
+        document.selected = object()
+    elif change == "missing":
+        document.selected = None
+    elif change == "window":
+        monkeypatch.setattr(_atspi, "find_root", lambda *args: object())
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    verdict = runtime._writer_key_verdict("soffice", "Escape", before)
+    if change in {"missing", "window"}:
+        assert verdict is None
+    else:
+        assert verdict[0] == ("confirmed" if change == "selected" else "unverifiable")
