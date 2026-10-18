@@ -934,3 +934,14 @@ effect; unchanged evidence returns `unverifiable` without retry advice. Missing
 page evidence retains the full-window fallback. Copy chords still require
 clipboard owner/target evidence, and process-exit checks remain in place. This
 path has hermetic regression coverage; live latency has not been measured.
+
+### Shaded X11 windows
+
+Activation removes `_NET_WM_STATE_SHADED` through the window manager. Focus and
+raise require two consecutive reads showing the target active, mapped and
+unshaded; an ignored request returns an error rather than confirmed success.
+Direct typing and key input refuse a known shaded or unmapped client with
+`window_shaded` or `window_unmapped`. Ref input also checks the owning X client
+when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
+to restore the client before retrying. These checks do not change the window
+listing or snapshot visibility reporting tracked separately in #913.
