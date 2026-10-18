@@ -3240,7 +3240,7 @@ class Runtime:
     def _writer_key_probe(
         self, app: str | None, chord: str | None, previous: tuple | None = None,
     ) -> tuple | None:
-        """Read scoped Writer evidence on the native owner thread."""
+        """Read scoped LibreOffice paragraph evidence on the native owner thread."""
         if getattr(self.driver, "name", None) != "linux" or not app:
             return None
         parts = (chord or "").casefold().split("+")
@@ -3250,7 +3250,7 @@ class Runtime:
             or (chord or "").casefold() in {
                 "delete", "backspace", "ctrl+delete", "ctrl+backspace", "ctrl+a",
                 "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+c", "ctrl+insert",
-                "shift+insert", "shift+delete", "return", "enter",
+                "shift+insert", "shift+delete", "return", "enter", "escape",
             }
         ):
             return None
@@ -3283,13 +3283,17 @@ class Runtime:
             after = self._writer_key_probe(app, chord, before)
         if after is None:
             if (chord or "").casefold() in {"return", "enter", "backspace", "delete"}:
-                return "unverifiable", "Writer paragraph evidence is unavailable after the key"
+                return "unverifiable", "Writer/Impress/Draw paragraph evidence is unavailable after the key"
             return None
         if (chord or "").casefold() in {"ctrl+c", "ctrl+insert"}:
             return "unverifiable", "clipboard ownership was not verified"
+        if len(before) == 4 or len(after) == 4:
+            if after[2:] != before[2:]:
+                return "confirmed", "the drawing document focus or selection changed"
+            return "unverifiable", "the drawing document focus and selection are unchanged"
         if after[2:] != before[2:]:
-            return "confirmed", "the Writer paragraph, text, caret, or selection changed"
-        return "unverifiable", "the focused Writer paragraph, text, caret, and selection are unchanged"
+            return "confirmed", "the Writer/Impress/Draw paragraph, text, caret, or selection changed"
+        return "unverifiable", "the focused Writer/Impress/Draw paragraph, text, caret, and selection are unchanged"
 
     def _sheet_key_probe(
         self, app: str | None, chord: str | None, previous: tuple | None = None,
@@ -5540,12 +5544,24 @@ class Runtime:
         if outline_note:
             # The click stayed a single click. The row opens on a double-click.
             msg = f"{msg} (activates on double-click)"
-        effect = self._effect_after(pre)
+        paragraph_verdict = (
+            self._paragraph_click_verdict(target)
+            if isinstance(target, Element) and not activated else None
+        )
+        if paragraph_verdict is not None:
+            # Native caret/frame evidence makes a window effect scan redundant.
+            self._action_baseline = {
+                "token": id(getattr(self, "_current", None)), "app": app,
+                "capture": None, "process": before,
+            }
+            if self._process_died(before):
+                paragraph_verdict = ("partial", "the target process exited after the action")
+        effect = "" if paragraph_verdict is not None else self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
         judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
         verdict = None
         if isinstance(target, Element) and not activated:
-            verdict = self._paragraph_click_verdict(target)
+            verdict = paragraph_verdict
             if verdict is None and nav_before is not None:
                 verdict = self._folder_navigation_verdict(target, nav_before)
             if verdict is None:

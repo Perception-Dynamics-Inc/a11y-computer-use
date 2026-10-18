@@ -827,6 +827,15 @@ retain the ordinary window verification fallback. Key delivery and safety
 checks are unchanged. This path is hermetic-tested; native timing requires the
 Writer live regression.
 
+Impress/Draw uses the same scoped key verification for focused editable
+paragraphs, including the native frame child count and paragraph index for
+paste and undo. Outside text edit, the drawing document's native Selection and
+focused object provide evidence, including for Escape. Missing or changed-window
+evidence retains the ordinary fallback; unchanged evidence is unverifiable.
+Paragraph/frame ref clicks use their native caret/text-edit verdict without an
+additional whole-window effect scan. Scoped results invalidate the old window
+baseline. These paths are hermetic-tested; no live latency claim is made.
+
 GTK text matches returned by `find(text=...)` carry native character offsets
 and SCREEN range bounds. Ref clicks, double-clicks, hover, and drag starts use
 that word rectangle. Resolution rechecks the exact text at those offsets and

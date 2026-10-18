@@ -12807,7 +12807,7 @@ def writer_key_state(
     app: str, previous: tuple | None = None, *, structure: bool = False,
     selection: bool = False,
 ) -> tuple | None:
-    """Read focused Writer evidence, optionally including sibling selections.
+    """Read Writer or Impress/Draw evidence, optionally Writer sibling selections.
 
     Reuse the native handle while it remains focused in the same window.
     Missing native offsets are unknown, not fabricated caret positions.
@@ -12827,6 +12827,35 @@ def writer_key_state(
         if truncated or acc is None:
             return None
     document = writer_document_for(acc)
+    if document is None:
+        document = _drawing_document_of(acc)
+        if document is not None:
+            # A focused frame alone is not text evidence.
+            focused_object = acc
+            if _role_name(acc) not in {"paragraph", "heading"}:
+                frame = _drawing_frame(document)
+                paragraphs = _frame_paragraphs(frame) if frame is not None else []
+                acc = next((node for node in paragraphs if (
+                    _state_has(node, "FOCUSED") or _state_has(node, "ACTIVE")
+                )), None)
+            if acc is None:
+                if previous is not None and document != previous[1]:
+                    return None
+                iface = _call_first(document, ("get_selection_iface", "get_selection"))
+                count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+                if type(count) is not int or not 0 <= count <= 256:
+                    return None
+                selected = tuple(
+                    _call_first(iface, ("get_selected_child", "getSelectedChild"), index)
+                    for index in range(count)
+                )
+                if any(node is None for node in selected) or is_secure(focused_object):
+                    return None
+                return (root, document, focused_object, selected)
+            if _editable_iface(acc) is None:
+                return None
+            # Paste and undo can split frames too; always read sibling metadata.
+            structure = True
     if document is None or (previous is not None and document != previous[1]) or is_secure(acc):
         return None
     _call_first(acc, ("clear_cache", "clearCache"))
@@ -12848,7 +12877,9 @@ def writer_key_state(
     if text is None:
         return None
     state = (root, document, acc, count, caret, tuple(selections), text)
-    if selection and (count == 0 or previous is not None and len(previous) == 8):
+    if selection and writer_document_for(acc) == document and (
+        count == 0 or previous is not None and len(previous) == 8
+    ):
         # Empty paragraphs cannot expose a selection. Read complete sibling
         # ranges; missing or oversized sibling lists are not evidence.
         parent = _parent_of(acc)
