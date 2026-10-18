@@ -1686,3 +1686,87 @@ def test_gtk_astral_insert_keeps_codepoint_offsets(atspi):
     assert _atspi.insert_text(field, "👩‍💻") == 3
     assert field.text == "😀👩‍💻tail"
     assert field.lengths == [len("👩‍💻".encode("utf-8"))]
+
+
+@pytest.mark.parametrize("qt", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_insert_advances_stationary_caret_in_native_units(utf16_atspi, monkeypatch, qt, selected):
+    """Scintilla-style inserts must compose in order, including Unicode."""
+    if not qt:
+        monkeypatch.setattr(_Atspi.Text, "get_character_count", lambda acc: len(acc.text))
+    unit_length = _atspi._utf16_length if qt else len
+    prefix = "😀"
+    start = unit_length(prefix)
+    field = (_Utf16QtField(prefix + "oldtail", caret=start) if qt
+             else _ByteField(prefix + "oldtail", caret=start, toolkit="gtk"))
+    field.selection = (start, start + 3) if selected else None
+    original_delete = field.delete_text
+
+    def delete_selection(start, end):
+        result = original_delete(start, end)
+        field.selection = None
+        return result
+
+    field.delete_text = delete_selection
+    original_insert = field.insert_text
+
+    def stationary_insert(pos, text, length):
+        result = original_insert(pos, text, length)
+        field.caret = pos
+        return result
+
+    if not qt:
+        stationary_insert._length_unit = "bytes"
+    field.insert_text = stationary_insert
+    moves = []
+
+    def set_caret(acc, offset):
+        moves.append(offset)
+        acc.caret = offset
+        return True
+
+    monkeypatch.setattr(_Atspi.Text, "set_caret_offset", set_caret, raising=False)
+    with _atspi.read_cache():
+        assert _atspi.insert_text(field, "A👩‍💻") == 4
+        assert _atspi.insert_text(field, "CD") == 2
+    assert field.text == prefix + "A👩‍💻CD" + ("tail" if selected else "oldtail")
+    assert field.caret == unit_length(prefix + "A👩‍💻CD")
+    assert moves == [unit_length(prefix + "A👩‍💻"), field.caret]
+
+
+@pytest.mark.parametrize("failure", ["no_effect", "refused", "raises"])
+def test_insert_reports_unverified_caret_after_text_changed(atspi, monkeypatch, failure):
+    field = _ByteField("prefix", caret=6, toolkit="gtk")
+    original_insert = field.insert_text
+
+    def stationary_insert(pos, text, length):
+        original_insert(pos, text, length)
+        field.caret = pos
+        return True
+
+    field.insert_text = stationary_insert
+
+    def set_caret(acc, offset):
+        if failure == "raises":
+            raise RuntimeError("caret unavailable")
+        return failure == "no_effect"
+
+    monkeypatch.setattr(_Atspi.Text, "set_caret_offset", set_caret, raising=False)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.insert_text(field, "AB")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "caret_not_advanced"
+    assert exc.value.detail["unchanged"] is False
+    assert field.text == "prefixAB"
+    assert field.caret == 6
+
+
+@pytest.mark.parametrize("text", ["", "AB", "👩‍💻"])
+def test_insert_preserves_native_caret_advancement(atspi, monkeypatch, text):
+    field = _ByteField("prefix", caret=6, toolkit="gtk")
+    moves = []
+    monkeypatch.setattr(_Atspi.Text, "set_caret_offset",
+                        lambda acc, offset: moves.append(offset), raising=False)
+    assert _atspi.insert_text(field, text) == len(text)
+    assert field.caret == 6 + len(text)
+    assert moves == []
