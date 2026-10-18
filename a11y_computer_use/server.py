@@ -2983,6 +2983,29 @@ class Runtime:
             if died:
                 return "partial", "the target process exited after the action"
             return writer
+        if (
+            key_focus and getattr(self.driver, "name", None) == "linux"
+            and isinstance(focus_before, tuple) and len(focus_before) == 6
+        ):
+            after_focus = self._key_focus_probe(app)
+            if after_focus == focus_before:
+                time.sleep(0.05)
+                after_focus = self._key_focus_probe(app)
+            if isinstance(after_focus, tuple) and len(after_focus) == 6:
+                evidence = outcome.key_focus_evidence(focus_before[:5], after_focus[:5], (), ())
+                if evidence is None and focus_before[5] != after_focus[5]:
+                    evidence = "the Chromium page anchor or window changed"
+                self._action_baseline = {
+                    "token": id(getattr(self, "_current", None)), "app": app,
+                    "capture": None, "process": process,
+                }
+                if died:
+                    return "partial", "the target process exited after the action"
+                if (key_chord or "").casefold() in {"ctrl+c", "ctrl+insert"}:
+                    return "unverifiable", "clipboard ownership was not verified"
+                return ("confirmed", evidence) if evidence else (
+                    "unverifiable", "the scoped Chromium page evidence is unchanged",
+                )
         calc = self._calc_mutation_verdict(
             app, requested, previous, selection, key_focus, focus_before, key_chord, sheet_before,
         )
@@ -3039,9 +3062,10 @@ class Runtime:
             if bounds and not changed:
                 changed = before["bounds"] != outcome.bounds_fingerprint(after)
             if key_focus and not changed:
+                live_focus = self._key_focus_probe(app)
                 focus_note = outcome.key_focus_evidence(
-                    focus_before,
-                    self._key_focus_probe(app),
+                    focus_before[:5] if focus_before is not None else None,
+                    live_focus[:5] if live_focus is not None else None,
                     outcome.key_focus_rows(before["snap"]),
                     outcome.key_focus_rows(after),
                 )
@@ -3328,7 +3352,7 @@ class Runtime:
         runner = getattr(self.driver, "_run", None)
 
         def read():
-            return _atspi.focused_key_evidence(app)
+            return _atspi.focused_key_evidence(app, include_page=True)
 
         try:
             if callable(runner):

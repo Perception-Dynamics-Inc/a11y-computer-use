@@ -13029,14 +13029,52 @@ def sheet_key_state(app: str, previous: tuple | None = None) -> tuple | None:
     return (table, tuple(result))
 
 
-def focused_key_evidence(app: str) -> tuple:
+def _chromium_page_key_state(acc) -> tuple | None:
+    """Read a native page anchor and window metadata without walking the page.
+
+    The first child remains the scroll anchor even when it moves off screen.
+    Missing geometry is unknown, not evidence of scrolling.
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    document = window = None
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if document is None and role in {"document web", "document frame"}:
+            document = node
+        if role in {"frame", "window", "dialog"}:
+            window = node
+            break
+    if document is None or window is None:
+        return None
+    # Clear only these nodes, not a recursively populated page cache.
+    for node in (document, window):
+        _call_first(node, ("clear_cache",))
+    child = _child_at(document, 0)
+    if child is None:
+        return None
+    _call_first(child, ("clear_cache",))
+    rect = _raw_rect(child, "WINDOW")
+    count = _call_first(window, ("get_child_count", "get_childCount"))
+    name = _call_first(window, ("get_name", "getName"))
+    if (
+        rect is None or not all(math.isfinite(value) for value in rect)
+        or rect[2] <= 0 or rect[3] <= 0
+        or not isinstance(count, int) or count < 0 or name is None
+    ):
+        return None
+    return (_ancestor_key(document), _ancestor_key(window), _ancestor_key(child), rect, name, count)
+
+
+def focused_key_evidence(app: str, *, include_page: bool = False) -> tuple:
     """``(text, caret, selection start, selection end, cell address)``.
 
     Text is the focused node's text. An open Calc cell editor replaces it,
     because the grid's own text stays empty while the digits are in the
     editor. The cell address is the selected sheet cell, falling back to
     the focused visible cell when Calc exposes an empty Selection. Missing
-    pieces are None. This is not a password check.
+    pieces are None. This is not a password check. With include_page, a sixth
+    item carries scoped Chromium document/window evidence when available.
     """
     text = None
     caret = start = end = None
@@ -13077,7 +13115,15 @@ def focused_key_evidence(app: str) -> tuple:
                 cell = _focused_sheet_address(app)
             except Exception:
                 cell = None
-    return (text, caret, start, end, cell)
+    result = (text, caret, start, end, cell)
+    if include_page and acc is not None and not truncated:
+        try:
+            page = _chromium_page_key_state(acc)
+        except Exception:
+            page = None
+        if page is not None:
+            return (*result, page)
+    return result
 
 
 def control_kind(acc) -> str | None:
