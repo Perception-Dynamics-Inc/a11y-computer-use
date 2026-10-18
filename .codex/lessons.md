@@ -274,3 +274,5 @@
 - 2026-10-18 (#800 reopened): Chromium Component hit tests share stale transform-only geometry with extents and SHOWING; a matching native hit is not freshness evidence. Use exact node-bound click/press for Runtime page-button clicks, report doAction honestly, and never fall back after an absent/failed action. Live Chrome 155 reports native role `button` (not only `push button`); regression fixtures must cover both.
 
 - 2026-10-18 (PR #835 repair): AXButton includes Chromium native toggle buttons, whose advertised action need not be click/press. Scope the node-bound push-button route by native button/push button roles and retain the existing click path for toggles; never substitute toggle for an explicit click. Cover the distinction with synthetic routing tests and the unchanged live form-state test.
+
+- 2026-10-18 (PR #834 repair): Chromium tab-write preflight and node-bound button clicks protect independent input paths. Preserve the tab refusal before any insertion or replacement mutation alongside main’s updated click mechanism and freshness limitations when merging backend documentation.

@@ -8698,6 +8698,28 @@ def _excerpt(value: str | None) -> str | None:
     return value[:80] + "…"
 
 
+def _refuse_chromium_tab_text(acc, text: str) -> None:
+    """Reject tabs before a Chromium field write can clear or type a prefix.
+
+    Chromium's key fallback interprets TAB as focus navigation. Even an
+    advertised EditableText interface may fail and fall back to those keys,
+    so preflight the entire write before attempting either route.
+    """
+    if "\t" in text and _chromium_app(acc):
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "TAB would move focus in a Chromium field; nothing was typed or cleared",
+            detail={
+                "platform": "linux",
+                "reason": "tab_moves_focus",
+                "outcome": "refused",
+                "next": ["clipboard", "cdp"],
+                "hint": "Paste the text using the clipboard or use the CDP browser "
+                        "backend, then verify the complete field value.",
+            },
+        )
+
+
 def insert_text(acc, text: str) -> int | None:
     """Insert ``text`` at the caret via AT-SPI EditableText.
 
@@ -8714,6 +8736,7 @@ def insert_text(acc, text: str) -> int | None:
     embedded NUL, so the text alone can look right while the widget holds
     extra characters.
     """
+    _refuse_chromium_tab_text(acc, text)
     typed = text.replace("\r\n", "\n")
     if text_visibility_unknown(acc):
         if _write_unknown_entry(acc, typed, insert=True):
@@ -9117,6 +9140,7 @@ def _type_into_target(acc, text: str) -> None:
     A node that cannot report focus is typed as one batch, which is the
     older test-double path.
     """
+    _refuse_chromium_tab_text(acc, text)
     if text == "":
         return
     if not _confirm_focus_on_target(acc):
@@ -15661,6 +15685,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     node and its document ancestors before the write. That restore sends
     no keys. Success leaves the caret where the write put it.
     """
+    _refuse_chromium_tab_text(acc, text)
     saved = _capture_text_points(acc)
     try:
         ok = _set_text_body(acc, text, force=force)

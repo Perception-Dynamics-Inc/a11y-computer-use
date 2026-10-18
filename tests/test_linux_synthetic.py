@@ -16486,3 +16486,47 @@ def test_chromium_hit_guard_does_not_change_explicit_coordinate_click(monkeypatc
     driver.click(Point(0, 162, 135), button=MouseButton.RIGHT, count=2, modifiers=("shift",))
     assert clicks == [((162, 135), {"button": "right", "count": 2})]
     assert modifiers == [("shift",)]
+
+
+@pytest.mark.parametrize("operation", ["insert_text", "set_text", "_type_into_target"])
+@pytest.mark.parametrize("role,tag", [("entry", "textarea"), ("section", "div")])
+@pytest.mark.parametrize("text", ["Item\tQty\nTea\t2", "\tItem", "Item\t"])
+def test_chromium_tab_write_refuses_before_any_mutation(
+    fake_atspi, monkeypatch, operation, role, tag, text,
+) -> None:
+    app = _Acc("application", name="chrome")
+    field = _Acc(role, name="Notes", states={"EDITABLE", "MULTI_LINE"})
+    field.text = "Original"
+    field.get_application = lambda: app
+    field.get_attributes = lambda: [f"tag:{tag}"]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("tab preflight must precede focus, selection, deletion and typing")
+
+    field.get_editable_text_iface = forbidden
+    for name in ("_type_string", "grab_focus", "_capture_text_points",
+                 "_x11_select_all_and_delete", "_clear_contenteditable"):
+        monkeypatch.setattr(_atspi, name, forbidden)
+    with pytest.raises(ComputerUseError) as caught:
+        getattr(_atspi, operation)(field, text)
+    assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "tab_moves_focus"
+    assert caught.value.detail["outcome"] == "refused"
+    assert caught.value.detail["next"] == ["clipboard", "cdp"]
+    assert "verify" in caught.value.detail["hint"]
+    assert field.text == "Original"
+
+
+def test_tab_preflight_preserves_native_text_and_chromium_plain_input(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_atspi, "_type_string", calls.append)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: None)
+    for app, text in (("gtk", "Item\tQty\nTea\t2"),
+                      ("soffice", "Item\tQty\nTea\t2"),
+                      ("chrome", "Item Qty\nTea 2")):
+        field = _Acc("text")
+        field.get_application = lambda: _Acc("application", name=app)
+        _atspi._type_into_target(field, text)
+        assert calls[-1] == text
+    assert len(calls) == 3

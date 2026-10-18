@@ -13858,3 +13858,66 @@ def test_linux_gtk_icon_view_ref_click_selects_without_activation(tmp_path) -> N
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_linux_chrome_tab_writes_refuse_without_partial_text(tmp_path) -> None:
+    """Both field kinds and operations preserve target and peer text (#829)."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    assert binary, "Chrome is not installed"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "tabs.html"
+    page.write_text(
+        '<title>Tab829</title><textarea aria-label="Notes">Original</textarea>'
+        '<input aria-label="Next"><div contenteditable="true" role="textbox" '
+        'aria-label="Editor">Original</div><input aria-label="After">'
+    )
+    proc = subprocess.Popen(
+        [binary, "--no-sandbox", "--force-renderer-accessibility",
+         "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+         "--password-store=basic", f"--user-data-dir={tmp_path / 'profile'}",
+         page.resolve().as_uri()],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if {"Notes", "Editor", "Next", "After"} <= {e.title for e in shot.elements}:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Chrome tab fixture did not expose its fields"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", "chromium")
+        for label in ("Notes", "Editor"):
+            for operation in ("type", "set_value"):
+                snap = driver.snapshot(Scope.WINDOW, "chrome")
+                field = next(e for e in snap.elements if e.title == label)
+                runtime._current = snap
+                with pytest.raises(ComputerUseError) as caught:
+                    if operation == "type":
+                        runtime.type_text("Item\tQty\nTea\t2", ref=field.ref)
+                    else:
+                        runtime.set_value(field.ref, "Item\tQty\nTea\t2")
+                assert caught.value.code is ErrorCode.UNSUPPORTED
+                assert caught.value.detail["reason"] == "tab_moves_focus"
+                assert caught.value.detail["next"] == ["clipboard", "cdp"]
+                # Read native Text, independently of the receipt/snapshot value.
+                for title, expected in (("Notes", "Original"), ("Editor", "Original"),
+                                        ("Next", ""), ("After", "")):
+                    node = next(e for e in snap.elements if e.title == title)
+                    handle = observe.ax_handle_for(node.snapshot_id, node.ref)
+                    actual = driver._run(lambda: _atspi._readable_text(handle))
+                    assert actual == expected, (label, operation, title, actual)
+    finally:
+        _stop(proc)

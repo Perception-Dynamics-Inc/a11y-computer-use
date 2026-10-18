@@ -787,3 +787,10 @@ hit-test answers after a timer-driven CSS transform. The node-bound button
 route avoids that geometry; it does not establish freshness for other roles
 or for direct low-level `LinuxDriver.click` pointer calls. Explicit coordinate
 clicks continue to send the requested pointer input.
+
+Chromium field writes containing TAB (`type` and `set_value`) are refused before
+inserting text or clearing the existing value, with `unsupported` and
+`reason: tab_moves_focus`. The AT-SPI key fallback sends Tab as focus navigation,
+which could otherwise leave a partial prefix or type into another field. Paste
+through the clipboard or use the CDP browser backend and verify the full field
+value. This preflight does not change native GTK text insertion or Calc grid input.
