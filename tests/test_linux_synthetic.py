@@ -9721,6 +9721,48 @@ def test_draw_shape_paragraph_is_an_edit_target_and_a_browser_paragraph_is_not(
     assert bare.text.endswith("Z")
 
 
+@pytest.mark.parametrize("value", ["one\ntwo", "one\r\ntwo", "one\rtwo", "one\n", "\n"])
+@pytest.mark.parametrize("role", ["document presentation", "document frame"])
+@pytest.mark.parametrize("following", [False, True])
+def test_drawing_multiline_set_value_refuses_before_mutation(
+    fake_atspi, monkeypatch, value, role, following,
+) -> None:
+    from a11y_computer_use import observe
+
+    panel, paragraph = _shape_paragraph(
+        "Revenue up 12%", states={"EDITABLE", "ENABLED", "SHOWING"}, role=role,
+    )
+    sibling = _Acc("paragraph", name="Churn", states={"SHOWING"})
+    sibling.text = "Churn down to 3.1%"
+    if following:
+        _adopt(panel, paragraph, sibling)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Multiline replacement must refuse before text or caret mutation")
+
+    paragraph.set_text_contents = unexpected
+    paragraph.insert_text = unexpected
+    monkeypatch.setattr(_atspi, "_capture_text_points", unexpected)
+    monkeypatch.setattr(_atspi, "_restore_text_points", unexpected)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    element = Element(
+        "e24", "AXStaticText", "Paragraph: 0 Revenue up 12%", paragraph.text,
+        Bounds(0, 8, 40, 120, 20), "snap-1", editable=True,
+    )
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    for _ in range(2):
+        with pytest.raises(ComputerUseError) as exc:
+            driver.set_value(element, value)
+        assert exc.value.code == ErrorCode.UNSUPPORTED
+        assert exc.value.detail["reason"] == "multiline_value_for_paragraph"
+        assert exc.value.detail["outcome"] == "refused"
+        assert exc.value.detail["next"] == ["keyboard"]
+        assert paragraph.text == "Revenue up 12%"
+        assert sibling.text == "Churn down to 3.1%"
+        assert panel.children == ([paragraph, sibling] if following else [paragraph])
+
+
 def _set_paragraph(paragraph, value):
     paragraph.text = value
     return True
