@@ -815,3 +815,12 @@ Other toolkits retain their existing find behavior. Linux text-ref double-clicks
 are confirmed only when a readable, nonempty text selection changes, not when
 only focus or the caret changes. Existing cross-app/cross-snapshot drag refusals
 remain in force.
+
+
+Writer table-cell `set_value` verifies the exact paragraph list, including empty
+paragraphs. Newlines request paragraph boundaries, not line breaks within one
+paragraph. Boundary changes require X11 keys and a verified native caret and
+focus; failures return `text_mismatch` with the observed paragraph count.
+Successful writes use the targeted cell read-back without a post-write window
+snapshot. This route is covered by hermetic regressions; live verification is
+still required.

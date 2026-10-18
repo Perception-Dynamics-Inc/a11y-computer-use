@@ -2573,3 +2573,42 @@ def test_writer_probe_runs_on_owner_thread_and_falls_back(monkeypatch):
     assert runtime._writer_key_probe("soffice", "ctrl+s") is None
     runtime.driver.name = "windows"
     assert runtime._writer_key_probe("soffice", "End") is None
+
+
+@pytest.mark.parametrize("value", ["NEWB2-1", "Replaced note", "Line one\nLine two", ""])
+def test_writer_verified_cell_avoids_window_reread(monkeypatch, value):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    target = _tree()[1]
+    runtime.driver._writer_cell_verified = (target.snapshot_id, target.ref, value)
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("full window reread"))
+    result, evidence = runtime._judge_mutation("soffice.bin", None, target, value)
+    assert result == "confirmed"
+    assert repr(value) in evidence
+    assert runtime.driver._writer_cell_verified is None
+    assert runtime._capture("soffice.bin", targeted=True) is None
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    assert runtime._judge_mutation("soffice.bin", None, target, value)[0] != "confirmed"
+    assert reads
+
+
+@pytest.mark.parametrize("wrong", ["ref", "snapshot", "value", "dead"])
+def test_writer_cell_evidence_cannot_confirm_other_writes(monkeypatch, wrong):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    target = _tree()[1]
+    runtime.driver._writer_cell_verified = (
+        "other" if wrong == "snapshot" else target.snapshot_id,
+        "other" if wrong == "ref" else target.ref,
+        "other" if wrong == "value" else "new",
+    )
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: wrong == "dead")
+    monkeypatch.setattr(runtime, "_reread", lambda *args: None)
+    assert runtime._judge_mutation("soffice.bin", None, target, "new")[0] != "confirmed"
+    assert runtime.driver._writer_cell_verified is None
