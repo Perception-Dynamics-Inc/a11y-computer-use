@@ -368,3 +368,8 @@
 - 2026-10-18 (PR #826 range integration): Keep observed widget geometry in the current snapshot when publishing native text-range matches. Render the measured range and retain its offsets for act-time revalidation; replacing widget bounds breaks document-visibility checks after reveal. The unchanged GTK TextView and both Geany live regressions passed together under Xvfb/Openbox/D-Bus.
 
 - 2026-10-18 (PR #826 clipped outline repair): GTK text-cell bounds can extend beyond the Symbols scroll pane into Geany’s editor. Identical requested/sent points do not establish that the point belongs to the row. A long-symbol live regression reproduced navigation to editor line 5; intersecting the reported cell, tree, and viewport rectangles made the unchanged double-click and line-301 verification pass. Preserve both pointer clicks and the native destination check.
+
+
+- 2026-10-18 (#842): Impress/Draw EditableText multiline replacement splits a paragraph while its frame child list can stay stale. Refuse LF/CR replacement before writing; LinuxDriver captures/restores caret separately from set_text, so preflight both entry points before that state handling.
+
+- 2026-10-18 (PR #826 merge repair): Keep Geany outline viewport regressions and Writer exact-paragraph replacement regressions together when appended tests conflict; they protect independent native geometry and text-verification behavior.

@@ -10622,124 +10622,122 @@ def poll_focused_writer_type(app: str, before: str | None, text: str) -> str | N
 
 
 def writer_cell_outcome_text(requested: str, cell) -> str | None:
-    """The requested string when a Writer cell's paragraph now holds it.
+    """The requested string when all Writer cell paragraphs match exactly.
 
     The cell node's own text stays empty, so the snapshot value cannot
     confirm the write. None for a Calc cell and when the paragraph does
     not match.
     """
-    if not requested or cell is None or not writer_text_cell(cell):
+    if cell is None or not writer_text_cell(cell):
         return None
-    if writer_cell_text(cell) == requested:
+    if _writer_cell_parts(cell) == requested.split("\n"):
         return requested
     return None
 
 
-def replace_writer_cell_text(acc, value: str) -> None:
-    """Replace the paragraph text of a Writer table cell.
-
-    The write is ``set_text_contents`` on a paragraph resolved from the
-    cell on each try. Writer may still return the previous line, an empty
-    child list, or the new line in front of the old paragraph while it
-    rebuilds that child. Those reads are polled for
-    ``_WRITER_CELL_SETTLE_S`` seconds. A paragraph that already holds
-    ``value`` is kept, and a sibling that still holds the old line is
-    cleared. Nothing is selected and no key is sent. When the window ends
-    on some other text, each paragraph is put back and this raises
-    ``text_mismatch``. The error's actual text is the read-back from
-    before that restore.
-    """
-    paragraphs = _writer_paragraphs(acc)
-    if not paragraphs:
+def _writer_cell_parts(cell) -> list[str | None]:
+    """Read every paragraph, retaining blanks and refusing truncated cells."""
+    _drop_read_cache()
+    _call_first(cell, ("clear_cache", "clearCache"))
+    if _child_count(cell) > 16:
         raise _text_mismatch(
-            "text_mismatch",
-            f"the value read back does not match {value!r}",
-            expected=value,
-            actual="",
-            formula=None,
+            "text_mismatch", "Writer cell exceeds the paragraph read limit",
         )
-    originals = [(_full_text(child) or "") for child in paragraphs]
+    children = _writer_paragraphs(cell)
+    if len(children) != _child_count(cell):
+        raise _text_mismatch("text_mismatch", "cannot read every Writer cell paragraph")
+    return [_full_text(child) for child in children]
 
-    def parts_of(node) -> list[str]:
-        return [text for text in ((_full_text(child) or "") for child in _writer_paragraphs(node)) if text]
 
-    def matches() -> bool:
-        parts = parts_of(acc)
-        if value == "":
-            return parts == []
-        return parts == [value] or parts == value.split("\n")
+def _writer_cell_boundary(cell, paragraph, offset: int, chord: str) -> bool:
+    """Send one boundary edit only at a verified caret inside this cell."""
+    if not _x11_keys_available():
+        return False
+    Atspi = _atspi()
+    grab_focus(paragraph)
+    if not _move_caret(Atspi, paragraph, offset):
+        return False
+    if _caret_offset(paragraph) != offset or _focus_on_target(paragraph) is not True:
+        return False
+    from a11y_computer_use.drivers import _linux_input
 
-    if matches():
-        return
-    lines = value.split("\n") if value else []
+    _linux_input.press_chord(chord)
+    _drop_read_cache()
+    _call_first(cell, ("clear_cache", "clearCache"))
+    return True
 
-    def blank_leftovers() -> None:
-        """Drop siblings that are not the requested text.
 
-        A committed edit can show the new paragraph in front of the old one
-        for a moment, or replace the accessible the write was aimed at.
-        The paragraphs are read from the cell again, not from the list
-        captured before the write.
-        """
-        live = _writer_paragraphs(acc)
-        texts = [(_full_text(child) or "") for child in live]
-        nonempty = [text for text in texts if text]
-        if value == "":
-            return
-        if nonempty == [value] or nonempty == lines:
-            return
-        if value not in nonempty and nonempty != lines:
-            return
-        for child, text in zip(live, texts):
-            if text and text != value and text not in lines:
-                set_text(child, "", force=True)
+def replace_writer_cell_text(
+    acc, value: str, *, run: Callable | None = None,
+) -> None:
+    """Replace and verify the complete Writer cell paragraph list.
 
-    # A paragraph is blocked in set_text so a Firefox page is not selected.
-    # This cell's paragraph is the value, so the write is forced. The forced
-    # path does not select or type. Another write waits, so a lagging read
-    # of the old line is not a second insert.
+    EditableText replaces characters, not paragraph boundaries. Empty extra
+    paragraphs are merged with BackSpace at their verified start; Return at
+    a verified paragraph end creates missing paragraphs. No document-wide
+    selection or observation is used. A failed structural edit is not retried
+    blindly: its unchanged count is polled within the existing settle bound.
+    """
+    if run is None:
+        run = lambda operation: operation()
+    originals = run(lambda: _writer_cell_parts(acc))
+    wanted = value.split("\n")
     deadline = time.monotonic() + _WRITER_CELL_SETTLE_S
     next_write = 0.0
+    last_write_index = None
+    pending_count = None
     while True:
-        if matches():
-            return
-        blank_leftovers()
-        if matches():
+        parts = run(lambda: _writer_cell_parts(acc))
+        if parts == wanted:
             return
         now = time.monotonic()
         if now >= deadline:
             break
-        if now >= next_write:
-            live = _writer_paragraphs(acc)
-            target = None
-            for child in live:
-                if (_full_text(child) or "") != value:
-                    target = child
-                    break
-            if target is None and live:
-                target = live[0]
-            if target is not None:
-                set_text(target, value, force=True)
-                next_write = time.monotonic() + 0.4
-                if matches():
-                    return
-                blank_leftovers()
-                if matches():
-                    return
+        if pending_count is not None:
+            if len(parts) == pending_count:
+                time.sleep(0.05)
+                continue
+            pending_count = None
+        live = run(lambda: _writer_paragraphs(acc))
+        if live and all(isinstance(part, str) for part in parts):
+            # First remove excess paragraphs, including empty ones. Keeping
+            # the first paragraph also handles a freshly rebuilt child.
+            if len(parts) > len(wanted):
+                child = live[-1]
+                if parts[-1] != "":
+                    run(lambda: set_text(child, "", force=True))
+                if run(lambda: _full_text(child)) == "":
+                    pending_count = len(parts)
+                    run(lambda: _writer_cell_boundary(acc, child, 0, "backspace"))
+            else:
+                mismatch = next((i for i, part in enumerate(parts)
+                                 if part != wanted[i]), None)
+                if mismatch is not None:
+                    # Only retrying an unconfirmed write needs the backoff.
+                    # A different paragraph can be written immediately once
+                    # the preceding paragraph has read back correctly.
+                    if mismatch != last_write_index or now >= next_write:
+                        run(lambda: set_text(live[mismatch], wanted[mismatch], force=True))
+                        last_write_index = mismatch
+                        next_write = time.monotonic() + 0.4
+                elif len(parts) < len(wanted):
+                    pending_count = len(parts)
+                    run(lambda: _writer_cell_boundary(acc, live[-1], len(parts[-1]), "return"))
         time.sleep(0.05)
-    # Report the text that failed the check. Restoring first would make the
-    # error show the original paragraph instead of the read-back.
-    failed = writer_cell_text(acc)
-    current = _writer_paragraphs(acc)
-    for child, original in zip(current, originals):
-        if (_full_text(child) or "") != original:
-            set_text(child, original, force=True)
+    failed_parts = run(lambda: _writer_cell_parts(acc))
+    failed = "\n".join(part or "" for part in failed_parts)
+    # Restore characters only when the original paragraph structure remains.
+    # Do not claim rollback after an unverified structural mutation.
+    current = run(lambda: _writer_paragraphs(acc))
+    if len(current) == len(originals):
+        for child, original in zip(current, originals):
+            if original is not None and run(lambda: _full_text(child)) != original:
+                run(lambda: set_text(child, original, force=True))
     raise _text_mismatch(
         "text_mismatch",
-        f"the value read back {failed!r} does not match {value!r}",
-        expected=value,
-        actual=failed,
-        formula=None,
+        f"the value read back {failed!r} does not match {value!r}; "
+        f"cell kept {len(failed_parts)} paragraphs (expected {len(wanted)})",
+        expected=value, actual=failed, formula=None,
     )
 
 
@@ -15949,8 +15947,31 @@ def _replace_editable_text(acc, text: str) -> bool:
     return _shown_is(acc, text)
 
 
+def _refuse_drawing_multiline_value(acc, text: str) -> None:
+    """Reject paragraph-splitting replacements before any mutation."""
+    if ("\n" in text or "\r" in text) and drawing_text_editable(acc):
+        # LibreOffice splits the paragraph but can leave the frame's child
+        # list stale. The old paragraph cannot verify the complete write.
+        # Refuse before even capturing/restoring caret or selection state.
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "Multiline replacement of an Impress or Draw paragraph is unsupported; "
+            "no text was changed",
+            detail={
+                "platform": "linux",
+                "reason": "multiline_value_for_paragraph",
+                "outcome": "refused",
+                "next": ["keyboard"],
+                "hint": "Use keyboard editing for paragraph breaks, then verify "
+                        "all paragraphs in the text frame.",
+            },
+        )
+
+
 def _replace_drawing_paragraph(acc, text: str) -> bool:
     """Replace an Impress or Draw paragraph. No selection and no keys.
+
+    ``set_text`` preflights paragraph breaks before calling this writer.
 
     One ``set_text_contents``. Success is ``Text.get_text(0, -1)`` equaling
     ``text``, the same read a snapshot uses, polled the way other
@@ -16112,6 +16133,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     no keys. Success leaves the caret where the write put it.
     """
     _refuse_chromium_tab_text(acc, text)
+    _refuse_drawing_multiline_value(acc, text)
     saved = _capture_text_points(acc)
     try:
         ok = _set_text_body(acc, text, force=force)
