@@ -2428,3 +2428,40 @@ def test_linux_covered_click_raises_again_after_the_app_is_re_observed(
 
     assert result.startswith("clicked e2")
     assert _clicks(driver) == [("click", "e2", (10, 20))]
+
+
+@pytest.mark.parametrize("value", ["Replaced note", "Line one\nLine two", ""])
+def test_writer_verified_cell_avoids_window_reread(monkeypatch, value):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = runtime.driver.snapshot(Scope.WINDOW, "soffice.bin")
+    target = _tree()[1]
+    runtime.driver._writer_cell_verified = (target.snapshot_id, target.ref, value)
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: False)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("full window reread"))
+    assert runtime._judge_mutation("soffice.bin", None, target, value)[0] == "confirmed"
+    assert runtime.driver._writer_cell_verified is None
+    assert runtime._capture("soffice.bin", targeted=True) is None
+    reads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: reads.append(args))
+    assert runtime._judge_mutation("soffice.bin", None, target, value)[0] != "confirmed"
+    assert reads
+
+
+@pytest.mark.parametrize("wrong", ["ref", "snapshot", "value", "dead"])
+def test_writer_cell_evidence_cannot_confirm_other_writes(monkeypatch, wrong):
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    runtime._current = None
+    target = _tree()[1]
+    runtime.driver._writer_cell_verified = (
+        "other" if wrong == "snapshot" else target.snapshot_id,
+        "other" if wrong == "ref" else target.ref,
+        "other" if wrong == "value" else "new",
+    )
+    monkeypatch.setattr(runtime, "_process_died", lambda _before: wrong == "dead")
+    monkeypatch.setattr(runtime, "_reread", lambda *args: None)
+    assert runtime._judge_mutation("soffice.bin", None, target, "new")[0] != "confirmed"
+    assert runtime.driver._writer_cell_verified is None
