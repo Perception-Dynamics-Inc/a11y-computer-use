@@ -8043,8 +8043,12 @@ def qt_menu_button_without_press(acc) -> bool:
     return qt_menu_button(acc) and not (_MAIN_BUTTON_ACTIONS & set(_raw_action_names(acc)))
 
 
-def do_press(acc) -> bool:
-    """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
+def do_press(acc, *, on_dispatch=None) -> bool:
+    """Perform an activating AT-SPI action (True on success).
+
+    ``on_dispatch`` runs immediately before each native action attempt, even
+    when its reply fails. No callback means no action was sent.
+    """
     action = _action_iface(acc)
     if action is None:
         return False
@@ -8053,6 +8057,8 @@ def do_press(acc) -> bool:
     for i in range(int(n)):
         raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
         if raw in allowed:
+            if on_dispatch is not None:
+                on_dispatch()
             if _call_first(action, ("do_action", "doAction"), i, default=False):
                 return True
     return False

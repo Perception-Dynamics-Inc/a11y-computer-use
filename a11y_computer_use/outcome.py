@@ -14,6 +14,8 @@ structured content. The agent loop reads the attributes.
 - ``partial`` — something landed, but not the requested effect. A process that
   exits after a click is this case: the click was delivered and the app is gone,
   so the result is not ``confirmed``.
+- ``dispatched_new_dialog`` — a native press was attempted and a new visible
+  dialog was observed; the requested effect is not yet verified.
 - ``refused`` — the action was not performed (permission, a hidden target, a
   disabled or secure control, a failed confirmation).
 
@@ -36,6 +38,7 @@ OUTCOMES = frozenset({
     "suspected_noop",
     "unverifiable",
     "partial",
+    "dispatched_new_dialog",
     "refused",
 })
 
@@ -129,6 +132,8 @@ def suggest_next(
 def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
     """Escalation for a raised error. Empty when retrying would repeat a refusal."""
     info = detail or {}
+    if info.get("reason") == "fallback_target_unverified":
+        return ()
     named = info.get("next")
     if isinstance(named, (list, tuple)) and named:
         return clean_next(named)

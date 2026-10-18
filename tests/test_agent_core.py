@@ -5095,3 +5095,84 @@ def test_pointer_gesture_without_geometry_reports_failure(tmp_path, gesture, but
         message.role == "tool" and "not verified" in str(message.content)
         for message in agent._messages
     )
+
+
+@pytest.mark.parametrize("detail,message", [
+    ({"reason": "fallback_target_unverified", "next": ["coordinates", "ref"]}, "press may have opened Preferences"),
+    ({}, "target could not be verified after the accessibility press"),
+])
+def test_declined_press_error_ends_step_without_any_retry(tmp_path, monkeypatch, detail, message):
+    elements = window(el("e2", "AXMenuItem", "Preferences", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+
+    def on_call(name, params, runtime):
+        runtime.elements = window(el("e3", "AXCheckBox", "Side pane", parent="e1"), title="Preferences")
+        raise ComputerUseError(ErrorCode.STALE_REF, message, detail=detail)
+
+    runtime.on_call = on_call
+    def no_point(*args, **kwargs):
+        pytest.fail("a terminal press error must not enter point/vision recovery")
+    monkeypatch.setattr(Agent, "_recover", no_point)
+    result, events, runtime, agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"}), ToolCall("click", {"x": 30, "y": 40})),
+            turn(done("observed", [{"element": {"role": "AXCheckBox", "name": "Side pane"}}])),
+        ]), elements, runtime=runtime, max_retries=3, vision=True, trace_dir=tmp_path,
+    )
+    assert runtime.calls == [("click", {"ref": "e2"})]
+    assert result.step_log[0].verified is False
+    assert result.step_log[0].error and "stale_ref" in result.step_log[0].error
+    rows = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    row = next(row for row in rows if "recovery" in row)
+    assert row["recovery"] == []
+    step = next(event for event in events if event.type == "step_finished")
+    assert step.data["verified"] is False
+    assert any(message in str(m.content) for m in agent._messages if m.role == "tool")
+
+
+def test_new_dialog_receipt_is_not_verified_or_retried(tmp_path):
+    from a11y_computer_use.outcome import ActionResult
+
+    class DialogRuntime(FakeRuntime):
+        def call_tool(self, name, params, confirm=None):
+            self.calls.append((name, params))
+            self.elements = window(title="Preferences")
+            return ActionResult("native press dispatched; new dialog: Preferences",
+                                outcome="dispatched_new_dialog", next=())
+
+    elements = window(el("e2", "AXMenuItem", "Preferences", parent="e1"))
+    runtime = DialogRuntime(elements)
+    result, _, runtime, agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(done("observed", [{"element": {"role": "AXWindow", "name": "Preferences"}}])),
+        ]), elements, runtime=runtime, max_retries=3, trace_dir=tmp_path,
+    )
+    assert runtime.calls == [("click", {"ref": "e2"})]
+    assert result.step_log[0].verified is False
+    assert any("Preferences" in str(m.content) and "dispatched_new_dialog" in str(m.content)
+               for m in agent._messages if m.role == "tool")
+
+
+def test_declined_press_during_recovery_stops_remaining_strategies(monkeypatch):
+    from a11y_computer_use import outcome
+    from a11y_computer_use.agent import core
+
+    requested = Action(name="click", args={"ref": "e2"})
+    retry = Action(name="click", args={"ref": "e3"})
+    agent = Agent(ScriptedModel([]), runtime=FakeRuntime(window()), max_retries=3)
+    agent._last_snap = None
+    monkeypatch.setattr(agent, "_app_name", lambda: "demo")
+    attempted = []
+    monkeypatch.setattr(core, "strategy_action", lambda *args, **kw: (retry, "ref"))
+    monkeypatch.setattr(core, "_same_intent", lambda *args: True)
+    error = "stale_ref: fallback_target_unverified"
+    marker = outcome.ActionResult(error, outcome="refused", next=())
+    def invoke(action):
+        attempted.append(action)
+        return "", error, marker
+    monkeypatch.setattr(agent, "_invoke", invoke)
+    recovered, _ = agent._recover(requested, requested, ("ref", "coordinates", "keyboard"))
+    assert attempted == [retry]
+    assert recovered[2] == error
+    assert recovered[3] is marker

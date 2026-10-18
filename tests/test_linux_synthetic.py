@@ -2110,7 +2110,7 @@ def test_chromium_zero_height_section_keeps_the_login_form(monkeypatch) -> None:
     assert not any(el.role == "AXSecureTextField" for el in bare.elements)
 
     pressed: list[object] = []
-    monkeypatch.setattr(_atspi, "do_press", lambda handle: pressed.append(handle) or True)
+    monkeypatch.setattr(_atspi, "do_press", lambda handle, **kwargs: pressed.append(handle) or True)
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     for el in snap.elements:
@@ -2490,7 +2490,7 @@ def test_nested_iframe_checkbox_survives_depth_and_presses_via_do_action(monkeyp
     assert box.ref in {el.ref for el in observe.find_elements(snap, role="checkbox")}
 
     pressed: list[object] = []
-    monkeypatch.setattr(_atspi, "do_press", lambda acc: pressed.append(acc) or True)
+    monkeypatch.setattr(_atspi, "do_press", lambda acc, **kwargs: pressed.append(acc) or True)
     monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
     assert LinuxDriver().press_element(box) is True
     assert pressed == [checkbox]
@@ -17482,3 +17482,76 @@ def test_ref_click_fallback_requires_fresh_identity_and_hit(monkeypatch, case):
         assert caught.value.detail["reason"] == "fallback_target_unverified"
         assert "no fallback pointer click was sent" in str(caught.value)
     assert snapshots == [(Scope.WINDOW, "featherpad")]
+
+
+@pytest.mark.parametrize("case", ["dialog", "hidden", "window", "missing", "error", "unanswered", "no_identity"])
+def test_click_dialog_state_requires_complete_visible_native_evidence(monkeypatch, case):
+    from types import SimpleNamespace
+
+    driver = LinuxDriver()
+    element = SimpleNamespace(snapshot_id="issued", ref="e2")
+    app = object()
+    child = SimpleNamespace(get_name=lambda: "Preferences")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: object())
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_application_of", lambda handle: app)
+    uncached = []
+    def without_cache(owner, fn):
+        uncached.append(owner)
+        return fn()
+    monkeypatch.setattr(_atspi, "_without_child_cache", without_cache)
+    monkeypatch.setattr(_atspi, "_raw_child_count", lambda node: 1)
+    monkeypatch.setattr(_atspi, "_child_at", lambda *args: None if case == "missing" else child)
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", lambda node: None)
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: "frame" if case == "window" else "dialog")
+    monkeypatch.setattr(_atspi, "_state_has", lambda *args: case != "hidden")
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key",
+                        lambda node: None if case == "no_identity" else "native-dialog-id")
+    monkeypatch.setattr(_atspi, "call_went_unanswered", lambda: case == "unanswered")
+    if case == "error":
+        def fail():
+            raise RuntimeError("D-Bus unavailable")
+        child.get_name = fail
+    result = driver.click_dialog_state(element)
+    assert uncached == [app]
+    if case == "dialog":
+        assert result == {"native-dialog-id": "Preferences"}
+    elif case in {"hidden", "window"}:
+        assert result == {}
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize("names,dispatched", [([], False), (["check"], False), (["click"], True)])
+def test_declined_press_receipt_distinguishes_no_action_from_failed_dispatch(monkeypatch, names, dispatched):
+    from types import SimpleNamespace
+
+    calls = []
+    action = SimpleNamespace(
+        get_n_actions=lambda: len(names),
+        get_action_name=lambda index: names[index],
+        do_action=lambda index: calls.append(index) or False,
+    )
+    monkeypatch.setattr(_atspi, "_action_iface", lambda acc: action)
+    monkeypatch.setattr(_atspi, "qt_menu_button", lambda acc: False)
+    attempts = []
+    assert _atspi.do_press(object(), on_dispatch=lambda: attempts.append(True)) is False
+    assert bool(attempts) is dispatched
+    assert bool(calls) is dispatched
+
+
+def test_no_press_receipt_is_bound_to_exact_target_and_consumed_once(monkeypatch):
+    from types import SimpleNamespace
+
+    element = SimpleNamespace(ref="e2", role="AXRow", title="Folder", snapshot_id="snap")
+    driver = LinuxDriver()
+    driver._click_without_press = element
+    assert driver.click_dialog_state(element) is None
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    assert driver.verify_click_fallback(element, "demo") is element
+    with pytest.raises(ComputerUseError) as caught:
+        driver.verify_click_fallback(element, "demo")
+    assert caught.value.detail["reason"] == "fallback_target_unverified"
+    driver._click_without_press = object()
+    with pytest.raises(ComputerUseError):
+        driver.verify_click_fallback(element, "demo")

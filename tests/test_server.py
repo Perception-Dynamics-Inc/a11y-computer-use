@@ -5091,3 +5091,34 @@ async def test_declined_press_checks_fallback_before_click_or_confirmation(
         assert "fallback_target_unverified" in result.content[0].text
         assert "confirmed" not in result.content[0].text
         assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+
+
+@pytest.mark.parametrize("before,after,new", [
+    ({}, {"dialog-id": "Preferences"}, True),
+    ({"dialog-id": "Preferences"}, {"dialog-id": "Preferences"}, False),
+    (None, {"dialog-id": "Preferences"}, False),
+    ({}, None, False),
+])
+async def test_declined_press_new_dialog_receipt(
+    mcp_server, mocked_driver, store, monkeypatch, before, after, new,
+):
+    from a11y_computer_use.drivers.macos import MacOSDriver
+
+    store.set_tier(APP, safety.Tier.FULL)
+    states = iter([before, after])
+    monkeypatch.setattr(MacOSDriver, "click_dialog_state", lambda *args: next(states), raising=False)
+    monkeypatch.setattr(observe, "press_element", lambda element: False)
+    def refuse(*args):
+        raise ComputerUseError(ErrorCode.STALE_REF, "uncertain press",
+                               detail={"reason": "fallback_target_unverified"})
+    monkeypatch.setattr(MacOSDriver, "verify_click_fallback", refuse, raising=False)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert mocked_driver["click"] == []
+    assert result.isError is (not new)
+    if new:
+        assert "Preferences" in result.content[0].text
+        assert "dispatched_new_dialog" in str(result.structuredContent)
+        assert "not verified" in result.content[0].text
+    else:
+        assert "fallback_target_unverified" in result.content[0].text

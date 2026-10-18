@@ -2907,3 +2907,9 @@ def test_impress_shape_key_selection_evidence(monkeypatch, change):
         assert verdict is None
     else:
         assert verdict[0] == ("confirmed" if change == "selected" else "unverifiable")
+
+
+def test_declined_press_refusal_never_suggests_recovery():
+    assert outcome.next_for_error("stale_ref", {
+        "reason": "fallback_target_unverified", "next": ["coordinates", "ref"],
+    }) == ()

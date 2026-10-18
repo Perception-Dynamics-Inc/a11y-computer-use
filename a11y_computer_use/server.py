@@ -5399,6 +5399,7 @@ class Runtime:
 
         menu_note: list[str] = []
         button_mechanism: list[str] = []
+        new_dialogs: list[str] = []
         # A non-clickable text ref that stands for a button or link. The
         # click lands on that control. Empty when the ref is the control.
         activated: list[Element] = []
@@ -5471,8 +5472,19 @@ class Runtime:
                 and not mods
                 and not _linux_button_uses_pointer(self.driver, act)
             )
+            dialog_reader = getattr(self.driver, "click_dialog_state", None)
+            dialogs_before = dialog_reader(act) if plain and callable(dialog_reader) else None
             if plain and self.driver.press_element(act):
                 return  # activated via AX — the user's cursor never moved
+            if plain and dialogs_before is not None:
+                dialogs_after = dialog_reader(act)
+                if dialogs_after is not None:
+                    new_dialogs.extend(
+                        name for identity, name in dialogs_after.items()
+                        if identity not in dialogs_before
+                    )
+                    if new_dialogs:
+                        return
             if activated and isinstance(act, Element) and not _positive_box(act):
                 control = activated[0]
                 raise ComputerUseError(
@@ -5549,6 +5561,15 @@ class Runtime:
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
+        if new_dialogs:
+            names = ", ".join(repr(name) for name in new_dialogs)
+            return outcome.ActionResult(
+                f"native press dispatched; new dialog observed: {names}. "
+                "Take a fresh snapshot and inspect the dialog before continuing; "
+                "the requested effect is not verified. No fallback click was sent.",
+                outcome="dispatched_new_dialog", next=(),
+                evidence=f"new visible native dialog: {names}",
+            )
         if raised and not activated:
             target = raised[0]
         if unbound:
@@ -10099,7 +10120,9 @@ def build_server(
         x/y point in physical pixels (display_id defaults to the main display).
         On Linux a declined accessibility press permits pointer fallback only
         after fresh ref, visibility, and exact target hit checks; otherwise it
-        returns fallback_target_unverified with no fallback click sent.
+        returns fallback_target_unverified with no fallback click sent. A newly
+        visible native dialog is named in a dispatched_new_dialog receipt; this
+        is not verified effect. Inspect a fresh snapshot before continuing.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
         Valid x is 0..width-1 and valid y is 0..height-1 on that display. A

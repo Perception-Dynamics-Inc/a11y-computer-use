@@ -2205,6 +2205,57 @@ class LinuxDriver:
                 },
             )
 
+    def click_dialog_state(self, element: Element) -> dict | None:
+        """Read visible native dialog identities around a node-bound press.
+
+        Unknown or incomplete reads cannot establish that a dialog is new.
+        """
+        if getattr(self, "_click_without_press", None) is element:
+            return None  # no dispatch to attribute a new dialog to
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def read():
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None:
+                return None
+            app = _atspi._application_of(handle)
+            if app is None:
+                return None
+
+            def children():
+                count = _atspi._raw_child_count(app)
+                if count < 0 or _atspi.call_went_unanswered():
+                    return None
+                dialogs = {}
+                for index in range(count):
+                    child = _atspi._child_at(app, index)
+                    if child is None:
+                        return None
+                    _atspi._refresh_event_cache(child)
+                    role = _atspi._role_name(child)
+                    if not role:
+                        return None
+                    if (_atspi._is_dialog_role(role)
+                            and _atspi._state_has(child, "SHOWING")):
+                        name = child.get_name()
+                        if not name:
+                            return None
+                        identity = _atspi._atspi_wrapper_key(child)
+                        if identity is None:
+                            return None
+                        dialogs[identity] = str(name)
+                    if _atspi.call_went_unanswered():
+                        return None
+                return dialogs
+
+            return _atspi._without_child_cache(app, children)
+
+        try:
+            return self._run(read)
+        except Exception:
+            return None
+
     def verify_click_fallback(self, element: Element, app: str) -> Element:
         """Require a fresh, showing ref and an exact native hit after a failed press.
 
@@ -2214,6 +2265,14 @@ class LinuxDriver:
         """
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
+
+        # False also means there was no native action to dispatch. Preserve
+        # the ordinary click path (including its platform geometry guards)
+        # only with this exact, single-use receipt from press_element.
+        no_press = getattr(self, "_click_without_press", None)
+        self._click_without_press = None
+        if no_press is element:
+            return element
 
         def refused() -> ComputerUseError:
             return ComputerUseError(
@@ -2457,6 +2516,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._focused_editable = None
+        self._click_without_press = None
         if element.secure:
             return False
         # A checkbox or radio in a Chrome/Electron window that already
@@ -2479,6 +2539,7 @@ class LinuxDriver:
         # A plain zero-size web wrapper can carry Chrome's click action and
         # still not be a target. press_element must not fire that action.
         if not element.clickable and not element.editable:
+            self._click_without_press = element
             return False
         if handle is None:
             return False
@@ -2724,7 +2785,12 @@ class LinuxDriver:
         choice = self._run(lambda: _atspi.combobox_option_context(handle))
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
-            pressed = self._run(lambda: _atspi.do_press(handle))
+            dispatched = []
+            pressed = self._run(lambda: _atspi.do_press(
+                handle, on_dispatch=lambda: dispatched.append(True),
+            ))
+            if not pressed and not dispatched:
+                self._click_without_press = element
             # A Chrome <select> option's click action changes the value and
             # leaves the native popup open. Close it the way set_value does,
             # and only when this item belongs to that select.

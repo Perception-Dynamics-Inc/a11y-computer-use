@@ -1141,7 +1141,8 @@ class Agent:
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
         first_error = error
-        if error and self.max_retries > 0 and requested.name != "crop" and not self._stop_requested():
+        if (error and not _final_click_error(error) and self.max_retries > 0
+                and requested.name != "crop" and not self._stop_requested()):
             hint = None if marker is None else marker.next
             retried, retry_notes = self._recover(requested, executed, hint)
             recovery.extend(retry_notes)
@@ -1456,6 +1457,10 @@ class Agent:
             attempts += 1
             result, error, marker = self._invoke(action)
             notes.append(label)
+            if _final_click_error(error) or (
+                marker is not None and marker.outcome == "dispatched_new_dialog"
+            ):
+                return (action, result, error, marker), notes
             if error is None and (marker is None or marker.outcome == "confirmed"):
                 return (action, result, error, marker), notes
         return None, notes
@@ -5254,6 +5259,14 @@ def _action_label(action: Action, snap: Snapshot | None) -> str | None:
         return element.title
     name = action.args.get("name")
     return str(name) if name else None
+
+
+def _final_click_error(error: str | None) -> bool:
+    """A declined press may have acted; never retry its stale target this step."""
+    return bool(error and (
+        "fallback_target_unverified" in error
+        or ("stale_ref" in error and "after the accessibility press" in error)
+    ))
 
 
 def _verified(
