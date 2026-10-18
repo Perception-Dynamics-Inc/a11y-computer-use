@@ -1918,11 +1918,13 @@ class LinuxDriver:
             return self._text_range_target(resolved, anchor.text_range)
 
         self._resolved_popover_cover = None
+        self._resolved_click_snapshot = None
         if live is None:
             live = self.snapshot(snap.scope, snap.app)
         try:
             resolved = observe.rematch_ref(snap, ref, live)
             self._remember_popover_cover(live, resolved)
+            self._resolved_click_snapshot = (resolved, live)
             return resolved
         except ComputerUseError as exc:
             if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
@@ -1958,6 +1960,44 @@ class LinuxDriver:
             }:
                 self._raise_if_hidden_alive(snap, ref)
             raise
+
+    def take_click_snapshot(self, element: Element) -> Snapshot | None:
+        """Consume the full live tree that resolved this exact click target."""
+        resolved = getattr(self, "_resolved_click_snapshot", None)
+        self._resolved_click_snapshot = None
+        if resolved is not None and resolved[0] is element:
+            return resolved[1]
+        return None
+
+    def button_click_evidence(self, element: Element) -> str | None:
+        """Consume a native button name change; acknowledgement is not evidence.
+
+        Unchanged, missing, or unreadable names require the normal whole-tree
+        outcome check. Only the exact node-bound action can issue this probe.
+        """
+        probe = getattr(self, "_button_click_probe", None)
+        self._button_click_probe = None
+        if probe is None or probe[0] is not element:
+            return None
+        _, handle, previous = probe
+        current = self._button_name(handle)
+        if previous is not None and current is not None and current != previous:
+            return "the clicked button's accessible name changed"
+        return None
+
+    def _button_name(self, handle) -> str | None:
+        from a11y_computer_use.drivers import _atspi
+
+        def read():
+            _atspi._call_first(handle, ("clear_cache", "clearCache"))
+            if _atspi._state_has(handle, "DEFUNCT"):
+                return None
+            return _atspi._call_first(handle, ("get_name",), default=None)
+
+        try:
+            return self._run(read)
+        except Exception:
+            return None
 
     def resolve_sheet_cell(self, snap: Snapshot, ref: str) -> Element | None:
         """The issued Calc cell itself when one targeted read vouches for it.
@@ -2321,6 +2361,7 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
+        self._button_click_probe = None
         if element.role != "AXButton":
             return None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
@@ -2339,11 +2380,13 @@ class LinuxDriver:
             action = self._run(lambda: _atspi.chromium_button_click_action(handle))
             if action is not None:
                 iface, index, name = action
+                previous = self._button_name(handle)
                 attempted = True
                 sent = self._run(lambda: _atspi._call_first(
                     iface, ("do_action", "doAction"), index, default=False,
                 ))
                 if sent:
+                    self._button_click_probe = (element, handle, previous)
                     return f"AT-SPI doAction({name})"
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
