@@ -17414,3 +17414,47 @@ def test_math_type_outcome_reuses_verified_command_without_snapshot_polling(
         driver.type_text("q")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert driver._math_type_readback is None
+
+
+@pytest.mark.parametrize("cached", ["empty", "old_document"])
+def test_chromium_snapshot_reads_page_beyond_stale_child_cache(
+    fake_atspi, monkeypatch, cached,
+):
+    """Startup/reload child arrays must not hide the current table indefinitely."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    row = _Acc("static", name="ROW-0001", width=120, height=24, states={"SHOWING"})
+    document = _adopt(
+        _Acc("document web", name="rowtable", width=1000, height=700,
+             states={"SHOWING"}), row,
+    )
+    old_document = _Acc("document web", name="loading", width=1000, height=700,
+                        states={"SHOWING"})
+    panel = _adopt(_Acc("panel", width=1000, height=700), document)
+    window = _adopt(_Acc("frame", name="rowtable", width=1000, height=700), panel)
+    app = _adopt(_Acc("application", name="chrome"), window)
+    app.get_toolkit_name = lambda: "Chrome"
+    masks = []
+    state = {"mask": 1}
+
+    def set_mask(mask):
+        masks.append(mask)
+        state["mask"] = mask
+
+    app.set_cache_mask = set_mask
+    for node in (app, window, panel, document, old_document, row):
+        node.get_application = lambda: app
+    panel.get_child_count = lambda: 1 if state["mask"] == 0 or cached == "old_document" else 0
+    panel.get_child_at_index = lambda index: document if state["mask"] == 0 else old_document
+    # clear_cache alone does not prevent a reentrant native cache event from
+    # restoring the old children array during the next D-Bus call.
+    panel.clear_cache = lambda: None
+    monkeypatch.setattr(_atspi, "_cache_masks", lambda: (0, 1))
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    driver = _wire_gtk_tree(monkeypatch, window)
+    for _ in range(2):
+        snap = driver._snapshot_root("chrome", window, Scope.WINDOW)
+        assert "ROW-0001" in {el.title for el in snap.elements}
+        assert "loading" not in {el.title for el in snap.elements}
+        assert state["mask"] == 1
+    assert masks == [0, 1, 0, 1]
