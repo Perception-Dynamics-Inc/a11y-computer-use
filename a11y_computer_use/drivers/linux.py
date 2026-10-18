@@ -4020,7 +4020,13 @@ class LinuxDriver:
                     lambda: _atspi.place_drawing_caret_at_end(handle, ignore_focus=True)
                 )
         else:
-            self._run(lambda: _atspi.grab_focus(handle))
+            # Math's grab_focus resets an already focused command caret to zero.
+            # Keep its native caret/selection when focus is already confirmed.
+            math_focused = self._run(lambda: (
+                _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
+            ))
+            if not math_focused:
+                self._run(lambda: _atspi.grab_focus(handle))
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
                 raise self._focus_lost_on(element)
         self._focused_editable = handle

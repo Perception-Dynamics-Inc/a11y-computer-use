@@ -4730,11 +4730,12 @@ class ATSPIAccessor:
         if entry and role_str == "paragraph" and math_command_editable(node):
             role = "AXTextArea"
             if not str(name).strip():
+                name, description = "Formula commands", ""
                 for ancestor in _ancestor_nodes(_parent_of(node)):
                     if _role_name(ancestor) in {"frame", "dialog", "application"}:
                         break
                     label = _node_name(ancestor).strip()
-                    if label:
+                    if label and not re.search(r" [—–-] LibreOffice Math$", label):
                         name, description = label, ""
                         break
         if role_str == "push button" and _gtk4_menu_button_wrapper(node):
@@ -7382,11 +7383,26 @@ def math_command_editable(acc) -> bool:
     parent = _parent_of(acc)
     if parent is None or _role_name(parent) != "panel" or not _state_has(parent, "EDITABLE"):
         return False
+    math_identity = False
+    frame = None
     for node in _ancestor_nodes(parent):
         role = _role_name(node)
-        if role in {"frame", "dialog"}:
-            return role == "frame" and _node_name(node).endswith(" - LibreOffice Math")
-    return False
+        if role == "dialog":
+            return False
+        attrs = _get_attributes(node)
+        services = str(attrs.get("service-name") or attrs.get("service") or "").split()
+        math_identity |= (
+            role in {"math", "document math"}
+            or "com.sun.star.formula.FormulaProperties" in services
+            or (role == "application" and _node_name(node).casefold() == "libreoffice math")
+        )
+        if role == "frame":
+            frame = node
+        if role == "application":
+            break
+    if frame is None:
+        return False
+    return math_identity or bool(re.search(r" [—–-] LibreOffice Math$", _node_name(frame)))
 
 
 def _focused_math_command(acc, *, max_nodes: int = 400):
@@ -9307,12 +9323,17 @@ def insert_text(acc, text: str) -> int | None:
     if _confirm_text(acc, expected):
         # Scintilla inserts the buffer text without advancing the caret. Only
         # correct a caret still at the verified insertion point; other native
-        # caret movement belongs to the widget. Positions are not UTF-8 bytes.
+        # caret movement belongs to the widget. Math can also retain the old
+        # selection endpoint after replacement; place its caret after the
+        # verified insertion. Positions are not UTF-8 bytes.
         Atspi = _atspi()
         after_caret = _safe(lambda: Atspi.Text.get_caret_offset(acc)) if typed else None
         if (
-            typed and type(after_caret) is int and after_caret == offset
-            and not drawing_text_editable(acc)
+            typed and (
+                math_command_editable(acc)
+                or (type(after_caret) is int and after_caret == offset
+                    and not drawing_text_editable(acc))
+            )
         ):
             target = offset + (_utf16_length(typed) if qt else len(typed))
             _move_caret(Atspi, acc, target)
@@ -16573,7 +16594,17 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     if is_secure(acc):
         return False
     if math_command_editable(acc):
-        return _replace_editable_text(acc, text)
+        if not _replace_editable_text(acc, text):
+            return False
+        target = _utf16_length(text) if _qt_app(acc) else len(text)
+        Atspi = _atspi()
+        _move_caret(Atspi, acc, target)
+        if _safe(lambda: Atspi.Text.get_caret_offset(acc)) != target:
+            raise _text_mismatch(
+                "caret_not_advanced", "the text was replaced but the caret could not be advanced",
+                unchanged=False,
+            )
+        return True
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
