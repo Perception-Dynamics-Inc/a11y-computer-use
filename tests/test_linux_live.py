@@ -6005,12 +6005,13 @@ def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
-    time.sleep(0.4)
     profile = tmp_path / "lo-grid"
     (profile / "user").mkdir(parents=True)
     (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
     env = os.environ.copy()
+    home = tmp_path / "home"
+    home.mkdir()
+    env["HOME"] = str(home)
     env["SAL_USE_VCLPLUGIN"] = "gtk3"
     env["GTK_MODULES"] = "gail:atk-bridge"
     env["NO_AT_BRIDGE"] = "0"
@@ -6107,7 +6108,6 @@ def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
                 assert kind == "match", (address, kind, actual, wanted)
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
 
 
 def _impress_subtitle_point(root) -> tuple[int, int] | None:

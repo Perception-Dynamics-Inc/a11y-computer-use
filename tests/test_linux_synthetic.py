@@ -17830,3 +17830,50 @@ def test_math_command_label_without_named_container(fake_atspi, monkeypatch):
     raw = _atspi.ATSPIAccessor().read(paragraph)
     assert raw.title == "Formula commands"
     assert raw.editable
+
+
+@pytest.mark.parametrize("actual", ["", "Ite", "ItemX", None])
+def test_calc_grid_mismatch_reports_actual_expected_and_timings(fake_atspi, monkeypatch, actual):
+    """CI's one-line traceback retains the evidence needed to diagnose #927."""
+    from a11y_computer_use.drivers import linux
+
+    driver = LinuxDriver()
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    driver._refuse_xtest_password_focus = lambda: None
+    driver._typed_readback = lambda app: ""
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "drawing_focus_text", lambda app: ("skip", None))
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: "A1")
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", lambda app: False)
+    clock = [10.0]
+    sent = []
+
+    def type_string(text):
+        sent.append(text)
+        clock[0] = 11.25
+
+    def check(*args):
+        clock[0] = 11.75
+        return "A1", "Item", actual
+
+    monkeypatch.setattr(_atspi, "sheet_grid_check", check)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(linux.time, "perf_counter", lambda: clock[0])
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("Item\tQ1")
+    assert exc.value.message == (
+        f"the text read back from A1 is {actual!r}, expected 'Item' "
+        "(input=1.250s, verification=0.500s)"
+    )
+    assert exc.value.detail == {
+        "platform": "linux", "reason": "text_mismatch",
+        "expected": "Item", "actual": actual, "cell": "A1",
+    }
+    assert driver._sheet_type_origin is None
+    assert sent == ["Item\tQ1"]
