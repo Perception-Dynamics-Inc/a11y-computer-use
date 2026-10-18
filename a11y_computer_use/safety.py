@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -861,6 +861,7 @@ def _confirmation_text(
 
 def confirmation_prompt(
     action: Action, target_app: str, *, window: str | None = None,
+    menu_path: Sequence[str] | None = None,
 ) -> str | None:
     """One human-readable confirmation question, or None if none is warranted.
 
@@ -879,11 +880,16 @@ def confirmation_prompt(
     is an :class:`ApprovalPrompt` (a ``str`` with those fields) when a prompt
     is warranted.
 
+    ``menu_path`` is the clicked element's menu path from the snapshot that
+    issued its ref (see :func:`menu_path`). Every component is judged, so
+    Table > Delete > Rows prompts although "Rows" alone would not, and the
+    question names the whole path (#847).
+
     Returns:
         A confirmation question to route to the host (e.g. via MCP
         elicitation), or None when the action needs no extra confirmation.
     """
-    described = _irreversible_target(action)
+    described = _irreversible_target(action, menu_path)
     if described is None:
         return None
     verb, role, name, summary, match = described
@@ -909,19 +915,82 @@ def confirmation_prompt(
     )
 
 
-def _irreversible_target(
-    action: Action,
-) -> tuple[str, str | None, str, str, str] | None:
-    """``(verb, role, name, summary, match)`` or None when no prompt is due."""
-    if isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS:
-        # The last path component is the label the user would read.
-        title = action.path.split(">")[-1].strip()
-        lowered = title.lower()
+#: Roles (casefolded, ``ax`` prefix dropped) whose names form a menu path.
+#: AT-SPI ``menu`` / ``popup menu`` map to ``AXMenu``; ``menu item`` and its
+#: check/radio forms map to ``AXMenuItem``; macOS adds ``AXMenuBarItem``.
+_MENU_PATH_ROLES = frozenset({"menu", "menuitem", "menubaritem"})
+#: A click on one of these only opens a submenu. LibreOffice and GTK expose a
+#: submenu opener such as Table > "Delete" as role ``menu`` (``AXMenu``); a
+#: leaf command is ``menu item``. Opening a submenu changes nothing, so the
+#: gate judges the leaf under it instead (#847).
+_SUBMENU_OPENER_ROLES = frozenset({"menu"})
+
+
+def _role_key(role: object) -> str:
+    return str(role or "").casefold().removeprefix("ax")
+
+
+def menu_path(snap: object, element: Element) -> tuple[str, ...]:
+    """Names from the outermost menu down to ``element``, e.g. Table > Delete > Rows.
+
+    Ancestors are read from ``snap`` through ``Element.parent``. Only
+    ancestors with a menu role and a name count, and the walk stops at the
+    containing window. ``element`` must belong to ``snap`` (same
+    ``snapshot_id``); otherwise a ref from another snapshot could borrow an
+    unrelated parent chain, so only the element's own name is returned. A
+    non-menu target returns just its own title.
+    """
+    own = element.title.strip()
+    if _role_key(element.role) not in _MENU_PATH_ROLES or snap is None:
+        return (own,)
+    if getattr(snap, "snapshot_id", None) != element.snapshot_id:
+        return (own,)
+    by_ref = {item.ref: item for item in tuple(getattr(snap, "elements", ()) or ())}
+    names: list[str] = []
+    seen: set[str] = {element.ref}
+    parent = element.parent
+    while parent and parent not in seen:
+        seen.add(parent)
+        current = by_ref.get(parent)
+        if current is None:
+            break
+        role = _role_key(current.role)
+        if role in _WINDOW_ROLES:
+            break
+        title = str(current.title or "").strip()
+        if role in _MENU_PATH_ROLES and title:
+            names.append(title)
+        parent = current.parent
+    return tuple(reversed(names)) + (own,)
+
+
+def _destructive_match(components: Sequence[str]) -> str | None:
+    """The first destructive keyword found in any path component, or None."""
+    for component in components:
+        lowered = component.lower()
         match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
+        if match is not None:
+            return match
+    return None
+
+
+def _irreversible_target(
+    action: Action, path: Sequence[str] | None = None,
+) -> tuple[str, str | None, str, str, str] | None:
+    """``(verb, role, name, summary, match)`` or None when no prompt is due.
+
+    A menu command is judged on its whole path, not its last label:
+    LibreOffice's Table > Delete > Rows deletes a row from an item named
+    "Rows" (#847). A click on a submenu opener is never gated; the leaf
+    under it is.
+    """
+    if isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS:
+        components = [part.strip() for part in action.path.split(">") if part.strip()]
+        match = _destructive_match(components)
         if match is None:
             return None
         summary = _summary_json({"verb": "press"})
-        return ("choose the menu item", "menu item", title, summary, match)
+        return ("choose the menu item", "menu item", " > ".join(components), summary, match)
     if isinstance(action, WebMcpOp) and action.verb is WebMcpVerb.CALL:
         # A tool named delete_order or remove_item is the page's own word for
         # an irreversible step; the same keyword rule as a button label.
@@ -934,13 +1003,18 @@ def _irreversible_target(
         return ("call the WebMCP tool", "webmcp tool", name, summary, match)
     if not isinstance(action, Click) or not isinstance(action.target, Element):
         return None
+    if _role_key(action.target.role) in _SUBMENU_OPENER_ROLES:
+        return None
     title = action.target.title.strip()
-    lowered = title.lower()
-    match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
+    # The ancestors come from the issuing snapshot; the leaf is always the
+    # element actually being clicked.
+    ancestors = [str(part).strip() for part in tuple(path or ())[:-1] if str(part).strip()]
+    components = ancestors + ([title] if title else [])
+    match = _destructive_match(components)
     if match is None:
         return None
     role = action.target.role or None
-    return ("click", role, title, _click_summary(action), match)
+    return ("click", role, " > ".join(components), _click_summary(action), match)
 
 
 #: An action that would take the app away from the human is refused while
