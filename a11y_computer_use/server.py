@@ -3188,6 +3188,16 @@ class Runtime:
             "Create the missing folder from the nearest existing parent, or check the path."
         )
 
+    def _clipboard_key_probe(self, chord: str | None) -> tuple | None:
+        """Read clipboard metadata, never its text, for a copy chord."""
+        if (chord or "").casefold() not in {"ctrl+c", "ctrl+insert"}:
+            return None
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use.drivers import _linux_system
+
+        return _linux_system.clipboard_copy_state()
+
     def _writer_key_probe(
         self, app: str | None, chord: str | None, previous: tuple | None = None,
     ) -> tuple | None:
@@ -3209,7 +3219,9 @@ class Runtime:
 
         runner = getattr(self.driver, "_run", None)
         try:
-            read = lambda: _atspi.writer_key_state(app, previous)
+            read = lambda: _atspi.writer_key_state(app, previous, structure=True) if (
+                (chord or "").casefold() in {"return", "enter", "backspace", "delete"}
+            ) else _atspi.writer_key_state(app, previous)
             return runner(read) if callable(runner) else read()
         except Exception:
             return None
@@ -3225,12 +3237,14 @@ class Runtime:
             time.sleep(0.05)
             after = self._writer_key_probe(app, chord, before)
         if after is None:
+            if (chord or "").casefold() in {"return", "enter", "backspace", "delete"}:
+                return "unverifiable", "Writer paragraph evidence is unavailable after the key"
             return None
         if (chord or "").casefold() in {"ctrl+c", "ctrl+insert"}:
             return "unverifiable", "clipboard ownership was not verified"
         if after[2:] != before[2:]:
-            return "confirmed", "the focused Writer text, caret, or selection changed"
-        return "unverifiable", "the focused Writer text, caret, and selection are unchanged"
+            return "confirmed", "the focused Writer paragraph, text, caret, or selection changed"
+        return "unverifiable", "the focused Writer paragraph, text, caret, and selection are unchanged"
 
     def _sheet_key_probe(
         self, app: str | None, chord: str | None, previous: tuple | None = None,
@@ -3365,6 +3379,7 @@ class Runtime:
         focus_before: tuple | None = None,
         sheet_before: tuple | None = None,
         writer_before: tuple | None = None,
+        clipboard_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> outcome.ActionResult:
@@ -3385,11 +3400,26 @@ class Runtime:
         if tool == "key" and evidence.startswith("location not opened:"):
             text = evidence
         died = "exited after the action" in evidence
+        copy = tool == "key" and (key_chord or "").casefold() in {"ctrl+c", "ctrl+insert"}
+        if copy and not died:
+            after = self._clipboard_key_probe(key_chord)
+            changed = (
+                clipboard_before is not None and after is not None and after[0]
+                and (after[0] != clipboard_before[0] or (
+                    after[1] is not None and clipboard_before[1] is not None
+                    and after[1] != clipboard_before[1]
+                ))
+            )
+            judged, evidence = (
+                ("confirmed", "clipboard owner or targets changed") if changed else
+                ("unverifiable", "clipboard ownership change was not verified")
+            )
+        no_retry = copy or (tool == "key" and judged == "unverifiable")
         browser = getattr(self.driver, "name", None) == "browser"
         return outcome.ActionResult(
             text,
             outcome=judged,
-            next=outcome.suggest_next(
+            next=[] if no_retry else outcome.suggest_next(
                 tool, judged, had_ref=had_ref or element is not None, browser=browser,
                 process_died=died,
             ),
@@ -6038,6 +6068,7 @@ class Runtime:
                 self.driver.key_chord(chord)
 
         before = self._capture(bundle, targeted=True)
+        clipboard_before = self._clipboard_key_probe(chord)
         writer_before = self._writer_key_probe(bundle, chord)
         focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
         sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
@@ -6047,7 +6078,7 @@ class Runtime:
             f"pressed {chord} in {bundle}{note}",
             tool="key", app=bundle, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
-            writer_before=writer_before,
+            writer_before=writer_before, clipboard_before=clipboard_before,
         )
 
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
@@ -6275,6 +6306,7 @@ class Runtime:
         before = self._capture(targeted=True)
         if target is not None:
             bundle, pid = target
+            clipboard_before = self._clipboard_key_probe(chord)
             writer_before = self._writer_key_probe(bundle, chord)
             focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
             sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
@@ -6288,7 +6320,7 @@ class Runtime:
                 f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
                 tool="key", app=bundle, before=before,
                 key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
-                writer_before=writer_before,
+                writer_before=writer_before, clipboard_before=clipboard_before,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -6297,6 +6329,7 @@ class Runtime:
         # is what made Down leave the menu and Return insert a newline. type
         # and click still dismiss, so typed text does not fall into the menu.
         target = self._open_menu_app(front) or front
+        clipboard_before = self._clipboard_key_probe(chord)
         writer_before = self._writer_key_probe(target, chord)
         focus_before = None if writer_before is not None else self._key_focus_probe(target)
         sheet_before = None if writer_before is not None else self._sheet_key_probe(target, chord)
@@ -6316,7 +6349,7 @@ class Runtime:
             f"pressed {chord}{''.join(note)}",
             tool="key", app=target, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
-            writer_before=writer_before,
+            writer_before=writer_before, clipboard_before=clipboard_before,
         )
 
     @_serialized
@@ -10130,7 +10163,8 @@ def build_server(
         page fingerprint does not. Linux Calc edit keys also compare selected
         cell text. Linux Writer navigation/edit keys compare the focused text
         object, caret and selection without scanning the window; unchanged
-        scoped state and copy remain unverifiable without further evidence.
+        scoped state and copy remain unverifiable without further evidence, with
+        no retry hints. Linux X11 copy checks clipboard owner/target metadata.
         Thunar location-entry Return/KP_Enter reports
         suspected_noop when an error icon appears or the window title stays unchanged;
         check the path or create missing folders from the nearest existing parent."""

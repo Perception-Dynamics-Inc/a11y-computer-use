@@ -801,8 +801,13 @@ Writer navigation and edit keys (arrows, Home/End/PageUp/PageDown with Ctrl/Shif
 selection, delete/backspace, paste/cut/undo/redo, and Return) use a scoped native
 read of the focused text object, caret and selection. Same-length text edits
 are detected. One short settlement reread precedes an unverifiable result for
-unchanged state; copy remains unverifiable because clipboard ownership is not
-checked. Missing text/offsets, changed windows, or focus leaving the document
+unchanged state. Return/Enter/Delete/BackSpace refresh the focused paragraph
+and compare its native sibling count and index, so empty paragraph edits can
+be verified without a document subtree scan. X11 copy compares clipboard owner
+and advertised targets without reading clipboard content. A changed owner or
+known target list confirms copy; missing or unchanged metadata is unverifiable.
+Unverifiable keys and copy results carry no coordinate, keyboard, or foreground
+retry hints. Missing text/offsets, changed windows, or focus leaving the document
 retain the ordinary window verification fallback. Key delivery and safety
 checks are unchanged. This path is hermetic-tested; native timing requires the
 Writer live regression.
