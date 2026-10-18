@@ -799,7 +799,11 @@ Writer navigation and edit keys (arrows, Home/End/PageUp/PageDown with Ctrl/Shif
 selection, delete/backspace, paste/cut/undo/redo, and Return) use a scoped native
 read of the focused text object, caret and selection. Same-length text edits
 are detected. One short settlement reread precedes an unverifiable result for
-unchanged state. Return/Enter/Delete/BackSpace refresh the focused paragraph
+unchanged state. Select-all and Shift navigation from an empty paragraph also
+compare native sibling paragraph selection ranges, since the focused empty
+paragraph cannot expose a range. Incomplete reads or sibling lists larger than
+256 retain the ordinary verification fallback; no truncated sample confirms a key.
+Return/Enter/Delete/BackSpace refresh the focused paragraph
 and compare its native sibling count and index, so empty paragraph edits can
 be verified without a document subtree scan. X11 copy compares clipboard owner
 and advertised targets without reading clipboard content. A changed owner or

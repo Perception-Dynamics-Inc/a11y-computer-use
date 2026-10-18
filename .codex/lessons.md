@@ -278,3 +278,5 @@
 - 2026-10-18 (PR #834 repair): Chromium tab-write preflight and node-bound button clicks protect independent input paths. Preserve the tab refusal before any insertion or replacement mutation alongside main’s updated click mechanism and freshness limitations when merging backend documentation.
 
 - 2026-10-18 (#842): Impress/Draw EditableText multiline replacement splits a paragraph while its frame child list can stay stale. Refuse LF/CR replacement before writing; LinuxDriver captures/restores caret separately from set_text, so preflight both entry points before that state handling.
+
+- 2026-10-18 (#864): Writer select-all from an empty focused paragraph can change only sibling Text selection ranges. Compare native sibling ranges for selection chords; an unchanged empty paragraph is insufficient evidence of a no-op. Reject incomplete or oversized sibling reads rather than confirming from a truncated sample.

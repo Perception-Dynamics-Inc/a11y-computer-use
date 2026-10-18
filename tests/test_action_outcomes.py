@@ -2747,3 +2747,46 @@ def test_clipboard_owner_survives_unavailable_targets(monkeypatch):
         raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
     monkeypatch.setattr(system.subprocess, "run", timeout)
     assert system.clipboard_copy_state() == (7, None)
+
+
+@pytest.mark.parametrize("chord", ["ctrl+a", "shift+ctrl+End", "ctrl+shift+Home"])
+@pytest.mark.parametrize("change", ["selected", "unchanged", "missing", "invalid", "oversized"])
+def test_empty_writer_selection_reads_sibling_ranges(monkeypatch, chord, change):
+    from types import SimpleNamespace
+    from a11y_computer_use.drivers import _atspi
+
+    paragraph, sibling, document, window = object(), object(), object(), object()
+    state = {"selected": False, "count": 2, "missing": False, "invalid": False}
+    parent = SimpleNamespace(
+        get_child_count=lambda: state["count"],
+        get_child_at_index=lambda i: None if state["missing"] else [sibling, paragraph][i],
+    )
+    monkeypatch.setattr(_atspi, "libreoffice_app", lambda app: True)
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: window)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (paragraph, False))
+    monkeypatch.setattr(_atspi, "_state_has", lambda *args: True)
+    monkeypatch.setattr(_atspi, "writer_document_for", lambda acc: document)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda acc: parent)
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: "paragraph")
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "")
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda acc: 0 if acc is paragraph else 10,
+        get_caret_offset=lambda acc: 0,
+        get_n_selections=lambda acc: int(acc is sibling and state["selected"]),
+        get_selection=lambda acc, i: (0, 11 if state["invalid"] else 10),
+    )))
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = TreeDriver()
+    runtime.driver.name = "linux"
+    before = runtime._writer_key_probe("soffice", chord)
+    assert before is not None and len(before) == 8
+    state.update(selected=change in {"selected", "invalid"}, missing=change == "missing",
+                 invalid=change == "invalid", count=257 if change == "oversized" else 2)
+    after = runtime._writer_key_probe("soffice", chord, before)
+    if change in {"missing", "invalid", "oversized"}:
+        assert after is None
+    else:
+        assert after[:7] == before[:7]
+        verdict = runtime._writer_key_verdict("soffice", chord, before)
+        assert verdict[0] == ("confirmed" if change == "selected" else "unverifiable")
