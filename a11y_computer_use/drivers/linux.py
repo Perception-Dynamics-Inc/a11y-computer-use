@@ -1892,6 +1892,12 @@ class LinuxDriver:
                 return None
         return self._run(read)
 
+    def browser_dialog_confirmation(self, action, app: str):
+        """Check live target ancestry or browser chrome without a page reread."""
+        from a11y_computer_use.drivers._browser_dialog import linux_prompt
+
+        return self._run(lambda: linux_prompt(action, app))
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution

@@ -685,3 +685,24 @@ def test_granted_apps_lists_grants_the_deny_and_allow_lists_do_not_override(tmp_
     assert store.granted_apps() == ["gedit"]  # a denied app is never a trusted key
     store.add_allow("nothing-else")
     assert store.granted_apps() == []  # a non-empty allow list is a whitelist
+
+
+@pytest.mark.parametrize("label,window", [
+    ("Leave", "Leave site?"), ("Reload", "Reload site?"),
+    (" LEAVE ", " Leave SITE? "),
+])
+def test_confirmation_prompt_gates_beforeunload_buttons(label, window) -> None:
+    prompt = confirmation_prompt(Click(target=_clickable(label)), APP, window=window)
+    assert prompt is not None
+    assert "unsaved changes" in prompt
+    assert prompt.window == window.strip()
+
+
+@pytest.mark.parametrize("label,window", [
+    ("Leave", None), ("Reload", "Ordinary page"),
+    ("Cancel", "Leave site?"), ("Cancel", "Reload site?"),
+    ("Save", "Leave site?"), ("Leave feedback", "Leave site?"),
+    ("Leave", "Article about Leave site?"), ("Reload", "Leave site?"),
+])
+def test_confirmation_prompt_beforeunload_keeps_safe_controls(label, window) -> None:
+    assert confirmation_prompt(Click(target=_clickable(label)), APP, window=window) is None
