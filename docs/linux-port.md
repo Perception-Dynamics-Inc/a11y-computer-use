@@ -906,15 +906,23 @@ may already have opened a dialog despite a failed reply.
 
 LibreOffice Math command paragraphs with native EDITABLE state and EditableText
 are exposed as editable text areas. Recognition requires an editable parent
-panel and a LibreOffice frame title ending in ` - LibreOffice Math`; other
-paragraphs keep their existing rules. An unnamed command paragraph uses its
-nearest named container (for example, `Commands`) as its label. Ref typing and
-replacement verify the command paragraph's Text value. When Math marks both
+panel in a LibreOffice frame. Native Math roles or formula service metadata
+identify the document when exposed; the fallback accepts `LibreOffice Math`
+after a hyphen, en dash, or em dash in the frame title. Other paragraphs keep
+their existing rules. An unnamed command paragraph uses its nearest named
+container (for example, `Commands`), or `Formula commands` when no such label
+is available. Ref typing preserves an already focused command's caret and
+selection instead of resetting them through another focus request. Replacement
+verifies the command paragraph's Text value and moves the caret to the end,
+verifying that position before success. Insertion also verifies the caret after
+the inserted text, including replacement of a selection. When Math marks both
 the panel and one child paragraph focused, no-ref typing resolves that child
 and uses EditableText without entering the Calc settlement poller. Read-only
 paragraphs and ambiguous focused children are not accepted by this resolver.
-This path has synthetic regression coverage; native Math behavior and latency
-have not been measured by those tests.
+Synthetic regressions cover title separators, native identity, and caret
+placement. Ref insertion, replacement, subsequent no-ref typing, and insertion
+at a middle caret were also checked with LibreOffice Math 25.2.3 on Linux under
+Xvfb, xfwm4, and AT-SPI; these checks establish behavior, not a latency bound.
 
 Chromium page keys use focused text/caret/selection plus a native document-child
 anchor and window name/child count before considering a full-window reread.
