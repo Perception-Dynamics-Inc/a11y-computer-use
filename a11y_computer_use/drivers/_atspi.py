@@ -12421,7 +12421,9 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
-def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
+def writer_key_state(
+    app: str, previous: tuple | None = None, *, structure: bool = False,
+) -> tuple | None:
     """Read only the focused Writer text object, never its document subtree.
 
     Reuse the native handle while it remains focused in the same window.
@@ -12434,7 +12436,7 @@ def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
     root = find_root(app, Scope.WINDOW)
     if root is None or (previous is not None and root != previous[0]):
         return None
-    acc = previous[2] if previous is not None else None
+    acc = previous[2] if previous is not None and not structure else None
     if acc is not None:
         _call_first(acc, ("clear_cache", "clearCache"))
     if acc is None or not _state_has(acc, "FOCUSED"):
@@ -12462,7 +12464,20 @@ def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
     text = _full_text(acc)
     if text is None:
         return None
-    return (root, document, acc, count, caret, tuple(selections), text)
+    state = (root, document, acc, count, caret, tuple(selections), text)
+    if not structure:
+        return state
+    # Paragraph splitting can preserve text/caret and even reuse the handle.
+    # Read native sibling metadata without enumerating the document subtree.
+    parent = _parent_of(acc)
+    if parent is None:
+        return None
+    _call_first(parent, ("clear_cache", "clearCache"))
+    children = _call_first(parent, ("get_child_count", "getChildCount"))
+    index = _call_first(acc, ("get_index_in_parent", "getIndexInParent"))
+    if type(children) is not int or type(index) is not int or not 0 <= index < children:
+        return None
+    return state + ((parent, children, index),)
 
 
 def sheet_key_state(app: str, previous: tuple | None = None) -> tuple | None:
