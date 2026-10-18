@@ -2245,3 +2245,37 @@ def write_clipboard(text: str) -> None:
         _run_clip(cmd, payload, capture=False)
     except Exception as exc:
         raise _clipboard_error("clipboard_write_failed", f"clipboard write failed: {exc}") from exc
+
+
+def clipboard_copy_state() -> tuple | None:
+    """X11 clipboard owner and advertised targets; no clipboard content read.
+
+    Missing metadata stays unknown. A missing owner is a real baseline, so
+    a subsequent owner can establish a copy into an initially empty clipboard.
+    """
+    if not os.environ.get("DISPLAY"):
+        return None
+    try:
+        with _open_display() as display:
+            atom = _atom(display, "CLIPBOARD")
+            owner = display.get_selection_owner(atom)
+            owner_id = getattr(owner, "id", owner)
+            targets = None
+            if owner_id and shutil.which("xclip"):
+                try:
+                    result = subprocess.run(
+                        ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+                        capture_output=True, timeout=0.2, check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    pass  # Owner evidence remains useful without target metadata.
+                else:
+                    if result.returncode == 0:
+                        targets = tuple(sorted(set(_target_lines(result.stdout))))
+            # A replacement during TARGETS conversion makes this read incoherent.
+            current = display.get_selection_owner(atom)
+            if getattr(current, "id", current) != owner_id:
+                return None
+            return (owner_id, targets)
+    except Exception:
+        return None

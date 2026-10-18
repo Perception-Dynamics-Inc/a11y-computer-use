@@ -942,6 +942,35 @@ def _raw_rect(acc, coord_name: str):
     )
 
 
+def _share_parent_application(parent, kids) -> None:
+    """Give each child its parent's application for the rest of this read.
+
+    ``get_application`` climbs every ancestor, and on LibreOffice each of
+    those climbs is a bus round trip. A Calc sheet walk asked it of every
+    cell and widget, once from each toolkit check. A child whose own
+    parent is ``parent`` has the same application, which the walk already
+    knows. A child that names another parent climbs as before. Nothing is
+    stored outside a ``read_cache`` block.
+    """
+    if parent is None or not kids or not _read_cache_stack():
+        return
+    if _role_name(parent) in {"application", "desktop frame"}:
+        app = parent if _role_name(parent) == "application" else None
+    else:
+        app = _call_first(parent, ("get_application",))
+    if app is None:
+        return
+    key = _cache_key("get_application", ())
+    for kid in kids:
+        if kid is None or not hasattr(kid, "get_application"):
+            continue
+        if _lookup_read_cache(kid, key) is not _CACHE_MISS:
+            continue
+        if _call_first(kid, ("get_parent",)) is not parent:
+            continue
+        _store_read_cache(kid, key, app)
+
+
 def _frame_ancestor(acc):
     """The top-level frame that contains ``acc``, or ``acc`` when it is one."""
     node = acc
@@ -3948,6 +3977,12 @@ class ATSPIAccessor:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
+        # Whether this walk's application is Chromium. One walk reads one
+        # application, so this is asked once instead of for every child.
+        self._chromium: bool | None = None
+        # id(node) -> (node, its frame or None) for LibreOffice placement.
+        self._frames: dict[int, tuple[object, object]] = {}
+        self._frame_screens: dict[int, tuple[object, tuple]] = {}
         # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
         # snapshot, so listing the window does not scroll the tree.
         self._table_seek: str | None = None
@@ -4538,7 +4573,7 @@ class ATSPIAccessor:
         page = self._expand_page
         if page is not None and _frame_cache_key(node) == page[0]:
             return self._expanded_child_page(node, int(page[1]), int(page[2]))
-        if _role_name(node) in _LIST_ROLES and _chromium_app(node):
+        if _role_name(node) in _LIST_ROLES and self._tree_is_chromium(node):
             seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
             role = _role_name(node)
             if seek and role in {"table", "tree table"}:
@@ -4591,7 +4626,9 @@ class ATSPIAccessor:
         # box. Those are banded: a flat list would keep the first 96 and
         # drop the rows below that, which is most of a 1280×800 sheet.
         if count > _MAX_CHILDREN_FETCH and _spreadsheet_table(node):
-            return _publish_sheet_cells(_sheet_window_cells(node))
+            cells = _sheet_window_cells(node)
+            _share_parent_application(node, cells)
+            return _publish_sheet_cells(cells)
         count = min(count, _MAX_CHILDREN_FETCH)
         kids = []
         for i in range(count):
@@ -4607,8 +4644,11 @@ class ATSPIAccessor:
         ]
         # A scrolled Chromium container may lack SHOWING while its children
         # are painted. Keep traversing it; apply clipping to leaf targets.
-        kids = [child for child in kids
-                if not chromium_clipped_target(child) or _child_count(child) > 0]
+        # Only a Chromium tree has these. Asking each child walked its
+        # parents to the application on every node of a Calc sheet.
+        if self._tree_is_chromium(node):
+            kids = [child for child in kids
+                    if not chromium_clipped_target(child) or _child_count(child) > 0]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
@@ -4622,6 +4662,7 @@ class ATSPIAccessor:
         if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
             return []
         kids = _with_table_body(node, kids)
+        _share_parent_application(node, kids)
         if role == "page tab list":
             return _hoist_hidden_page_tabs(kids)
         return kids
@@ -4632,7 +4673,7 @@ class ATSPIAccessor:
         The client origin is None when no managed window sits on the frame's
         SCREEN rectangle. The flag is the root-pane check against that origin.
         """
-        screen = _raw_rect(frame, "SCREEN")
+        screen = self._frame_screen(frame)
         if screen is None or screen[2] <= 0 or screen[3] <= 0:
             return None, True
         key = (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
@@ -4666,7 +4707,7 @@ class ATSPIAccessor:
             return None
         if _role_name(node) == "frame":
             return None
-        frame = _frame_ancestor(node)
+        frame = self._frame_ancestor_of(node)
         if frame is None:
             return None
         client, screen_is_absolute = self._lo_placement(frame)
@@ -4675,12 +4716,63 @@ class ATSPIAccessor:
         window = _raw_rect(node, "WINDOW")
         if not _usable_window_rect(window):
             return None
-        frame_screen = _raw_rect(frame, "SCREEN")
+        frame_screen = self._frame_screen(frame)
         if frame_screen is None:
             return None
         return _libreoffice_content_origin(
             position, window, frame_screen, client, screen_is_absolute=screen_is_absolute,
         )
+
+    def _frame_screen(self, frame: object):
+        """The frame's SCREEN rectangle, read once for this walk.
+
+        Each content node placed against its frame read that rectangle
+        twice, which on a Calc sheet was about 1500 extents round trips
+        for one window. A failed read is not kept, so the next node asks.
+        """
+        known = self._frame_screens.get(id(frame))
+        if known is not None and known[0] is frame:
+            return known[1]
+        rect = _raw_rect(frame, "SCREEN")
+        if rect is not None:
+            self._frame_screens[id(frame)] = (frame, rect)
+        return rect
+
+    def _frame_ancestor_of(self, node: object):
+        """``_frame_ancestor`` for this walk, sharing each parent's answer.
+
+        Every LibreOffice content node asked for its frame by climbing to
+        it, so a Calc sheet climbed about five parents per node. The walk
+        reaches a node through its parent, so the climb stops at the first
+        ancestor this walk already placed. Entries hold the node itself,
+        so a freed wrapper cannot reuse an id.
+        """
+        chain: list = []
+        frame = None
+        current = node
+        for _ in range(32):
+            if current is None:
+                break
+            known = self._frames.get(id(current))
+            if known is not None and known[0] is current:
+                frame = known[1]
+                break
+            chain.append(current)
+            role = _role_name(current)
+            if role == "frame":
+                frame = current
+                break
+            if role == "application":
+                break
+            current = _call_first(current, ("get_parent", "getParent"))
+        for item in chain:
+            self._frames[id(item)] = (item, frame)
+        return frame
+
+    def _tree_is_chromium(self, node: object) -> bool:
+        if self._chromium is None:
+            self._chromium = _chromium_app(node)
+        return self._chromium
 
     def _tree_is_gecko(self, node: object) -> bool:
         if self._gecko is None:
@@ -10332,124 +10424,122 @@ def poll_focused_writer_type(app: str, before: str | None, text: str) -> str | N
 
 
 def writer_cell_outcome_text(requested: str, cell) -> str | None:
-    """The requested string when a Writer cell's paragraph now holds it.
+    """The requested string when all Writer cell paragraphs match exactly.
 
     The cell node's own text stays empty, so the snapshot value cannot
     confirm the write. None for a Calc cell and when the paragraph does
     not match.
     """
-    if not requested or cell is None or not writer_text_cell(cell):
+    if cell is None or not writer_text_cell(cell):
         return None
-    if writer_cell_text(cell) == requested:
+    if _writer_cell_parts(cell) == requested.split("\n"):
         return requested
     return None
 
 
-def replace_writer_cell_text(acc, value: str) -> None:
-    """Replace the paragraph text of a Writer table cell.
-
-    The write is ``set_text_contents`` on a paragraph resolved from the
-    cell on each try. Writer may still return the previous line, an empty
-    child list, or the new line in front of the old paragraph while it
-    rebuilds that child. Those reads are polled for
-    ``_WRITER_CELL_SETTLE_S`` seconds. A paragraph that already holds
-    ``value`` is kept, and a sibling that still holds the old line is
-    cleared. Nothing is selected and no key is sent. When the window ends
-    on some other text, each paragraph is put back and this raises
-    ``text_mismatch``. The error's actual text is the read-back from
-    before that restore.
-    """
-    paragraphs = _writer_paragraphs(acc)
-    if not paragraphs:
+def _writer_cell_parts(cell) -> list[str | None]:
+    """Read every paragraph, retaining blanks and refusing truncated cells."""
+    _drop_read_cache()
+    _call_first(cell, ("clear_cache", "clearCache"))
+    if _child_count(cell) > 16:
         raise _text_mismatch(
-            "text_mismatch",
-            f"the value read back does not match {value!r}",
-            expected=value,
-            actual="",
-            formula=None,
+            "text_mismatch", "Writer cell exceeds the paragraph read limit",
         )
-    originals = [(_full_text(child) or "") for child in paragraphs]
+    children = _writer_paragraphs(cell)
+    if len(children) != _child_count(cell):
+        raise _text_mismatch("text_mismatch", "cannot read every Writer cell paragraph")
+    return [_full_text(child) for child in children]
 
-    def parts_of(node) -> list[str]:
-        return [text for text in ((_full_text(child) or "") for child in _writer_paragraphs(node)) if text]
 
-    def matches() -> bool:
-        parts = parts_of(acc)
-        if value == "":
-            return parts == []
-        return parts == [value] or parts == value.split("\n")
+def _writer_cell_boundary(cell, paragraph, offset: int, chord: str) -> bool:
+    """Send one boundary edit only at a verified caret inside this cell."""
+    if not _x11_keys_available():
+        return False
+    Atspi = _atspi()
+    grab_focus(paragraph)
+    if not _move_caret(Atspi, paragraph, offset):
+        return False
+    if _caret_offset(paragraph) != offset or _focus_on_target(paragraph) is not True:
+        return False
+    from a11y_computer_use.drivers import _linux_input
 
-    if matches():
-        return
-    lines = value.split("\n") if value else []
+    _linux_input.press_chord(chord)
+    _drop_read_cache()
+    _call_first(cell, ("clear_cache", "clearCache"))
+    return True
 
-    def blank_leftovers() -> None:
-        """Drop siblings that are not the requested text.
 
-        A committed edit can show the new paragraph in front of the old one
-        for a moment, or replace the accessible the write was aimed at.
-        The paragraphs are read from the cell again, not from the list
-        captured before the write.
-        """
-        live = _writer_paragraphs(acc)
-        texts = [(_full_text(child) or "") for child in live]
-        nonempty = [text for text in texts if text]
-        if value == "":
-            return
-        if nonempty == [value] or nonempty == lines:
-            return
-        if value not in nonempty and nonempty != lines:
-            return
-        for child, text in zip(live, texts):
-            if text and text != value and text not in lines:
-                set_text(child, "", force=True)
+def replace_writer_cell_text(
+    acc, value: str, *, run: Callable | None = None,
+) -> None:
+    """Replace and verify the complete Writer cell paragraph list.
 
-    # A paragraph is blocked in set_text so a Firefox page is not selected.
-    # This cell's paragraph is the value, so the write is forced. The forced
-    # path does not select or type. Another write waits, so a lagging read
-    # of the old line is not a second insert.
+    EditableText replaces characters, not paragraph boundaries. Empty extra
+    paragraphs are merged with BackSpace at their verified start; Return at
+    a verified paragraph end creates missing paragraphs. No document-wide
+    selection or observation is used. A failed structural edit is not retried
+    blindly: its unchanged count is polled within the existing settle bound.
+    """
+    if run is None:
+        run = lambda operation: operation()
+    originals = run(lambda: _writer_cell_parts(acc))
+    wanted = value.split("\n")
     deadline = time.monotonic() + _WRITER_CELL_SETTLE_S
     next_write = 0.0
+    last_write_index = None
+    pending_count = None
     while True:
-        if matches():
-            return
-        blank_leftovers()
-        if matches():
+        parts = run(lambda: _writer_cell_parts(acc))
+        if parts == wanted:
             return
         now = time.monotonic()
         if now >= deadline:
             break
-        if now >= next_write:
-            live = _writer_paragraphs(acc)
-            target = None
-            for child in live:
-                if (_full_text(child) or "") != value:
-                    target = child
-                    break
-            if target is None and live:
-                target = live[0]
-            if target is not None:
-                set_text(target, value, force=True)
-                next_write = time.monotonic() + 0.4
-                if matches():
-                    return
-                blank_leftovers()
-                if matches():
-                    return
+        if pending_count is not None:
+            if len(parts) == pending_count:
+                time.sleep(0.05)
+                continue
+            pending_count = None
+        live = run(lambda: _writer_paragraphs(acc))
+        if live and all(isinstance(part, str) for part in parts):
+            # First remove excess paragraphs, including empty ones. Keeping
+            # the first paragraph also handles a freshly rebuilt child.
+            if len(parts) > len(wanted):
+                child = live[-1]
+                if parts[-1] != "":
+                    run(lambda: set_text(child, "", force=True))
+                if run(lambda: _full_text(child)) == "":
+                    pending_count = len(parts)
+                    run(lambda: _writer_cell_boundary(acc, child, 0, "backspace"))
+            else:
+                mismatch = next((i for i, part in enumerate(parts)
+                                 if part != wanted[i]), None)
+                if mismatch is not None:
+                    # Only retrying an unconfirmed write needs the backoff.
+                    # A different paragraph can be written immediately once
+                    # the preceding paragraph has read back correctly.
+                    if mismatch != last_write_index or now >= next_write:
+                        run(lambda: set_text(live[mismatch], wanted[mismatch], force=True))
+                        last_write_index = mismatch
+                        next_write = time.monotonic() + 0.4
+                elif len(parts) < len(wanted):
+                    pending_count = len(parts)
+                    run(lambda: _writer_cell_boundary(acc, live[-1], len(parts[-1]), "return"))
         time.sleep(0.05)
-    # Report the text that failed the check. Restoring first would make the
-    # error show the original paragraph instead of the read-back.
-    failed = writer_cell_text(acc)
-    current = _writer_paragraphs(acc)
-    for child, original in zip(current, originals):
-        if (_full_text(child) or "") != original:
-            set_text(child, original, force=True)
+    failed_parts = run(lambda: _writer_cell_parts(acc))
+    failed = "\n".join(part or "" for part in failed_parts)
+    # Restore characters only when the original paragraph structure remains.
+    # Do not claim rollback after an unverified structural mutation.
+    current = run(lambda: _writer_paragraphs(acc))
+    if len(current) == len(originals):
+        for child, original in zip(current, originals):
+            if original is not None and run(lambda: _full_text(child)) != original:
+                run(lambda: set_text(child, original, force=True))
     raise _text_mismatch(
         "text_mismatch",
-        f"the value read back {failed!r} does not match {value!r}",
-        expected=value,
-        actual=failed,
-        formula=None,
+        f"the value read back {failed!r} does not match {value!r}; "
+        f"cell kept {len(failed_parts)} paragraphs (expected {len(wanted)})",
+        expected=value, actual=failed, formula=None,
     )
 
 
@@ -12423,7 +12513,9 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
-def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
+def writer_key_state(
+    app: str, previous: tuple | None = None, *, structure: bool = False,
+) -> tuple | None:
     """Read only the focused Writer text object, never its document subtree.
 
     Reuse the native handle while it remains focused in the same window.
@@ -12436,7 +12528,7 @@ def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
     root = find_root(app, Scope.WINDOW)
     if root is None or (previous is not None and root != previous[0]):
         return None
-    acc = previous[2] if previous is not None else None
+    acc = previous[2] if previous is not None and not structure else None
     if acc is not None:
         _call_first(acc, ("clear_cache", "clearCache"))
     if acc is None or not _state_has(acc, "FOCUSED"):
@@ -12464,7 +12556,20 @@ def writer_key_state(app: str, previous: tuple | None = None) -> tuple | None:
     text = _full_text(acc)
     if text is None:
         return None
-    return (root, document, acc, count, caret, tuple(selections), text)
+    state = (root, document, acc, count, caret, tuple(selections), text)
+    if not structure:
+        return state
+    # Paragraph splitting can preserve text/caret and even reuse the handle.
+    # Read native sibling metadata without enumerating the document subtree.
+    parent = _parent_of(acc)
+    if parent is None:
+        return None
+    _call_first(parent, ("clear_cache", "clearCache"))
+    children = _call_first(parent, ("get_child_count", "getChildCount"))
+    index = _call_first(acc, ("get_index_in_parent", "getIndexInParent"))
+    if type(children) is not int or type(index) is not int or not 0 <= index < children:
+        return None
+    return state + ((parent, children, index),)
 
 
 def sheet_key_state(app: str, previous: tuple | None = None) -> tuple | None:
@@ -15567,8 +15672,31 @@ def _replace_editable_text(acc, text: str) -> bool:
     return _shown_is(acc, text)
 
 
+def _refuse_drawing_multiline_value(acc, text: str) -> None:
+    """Reject paragraph-splitting replacements before any mutation."""
+    if ("\n" in text or "\r" in text) and drawing_text_editable(acc):
+        # LibreOffice splits the paragraph but can leave the frame's child
+        # list stale. The old paragraph cannot verify the complete write.
+        # Refuse before even capturing/restoring caret or selection state.
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "Multiline replacement of an Impress or Draw paragraph is unsupported; "
+            "no text was changed",
+            detail={
+                "platform": "linux",
+                "reason": "multiline_value_for_paragraph",
+                "outcome": "refused",
+                "next": ["keyboard"],
+                "hint": "Use keyboard editing for paragraph breaks, then verify "
+                        "all paragraphs in the text frame.",
+            },
+        )
+
+
 def _replace_drawing_paragraph(acc, text: str) -> bool:
     """Replace an Impress or Draw paragraph. No selection and no keys.
+
+    ``set_text`` preflights paragraph breaks before calling this writer.
 
     One ``set_text_contents``. Success is ``Text.get_text(0, -1)`` equaling
     ``text``, the same read a snapshot uses, polled the way other
@@ -15730,6 +15858,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     no keys. Success leaves the caret where the write put it.
     """
     _refuse_chromium_tab_text(acc, text)
+    _refuse_drawing_multiline_value(acc, text)
     saved = _capture_text_points(acc)
     try:
         ok = _set_text_body(acc, text, force=force)

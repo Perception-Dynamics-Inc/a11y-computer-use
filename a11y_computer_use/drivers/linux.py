@@ -2760,6 +2760,7 @@ class LinuxDriver:
             self._focused_editable = None
             return False
         self._focused_editable = None
+        self._writer_cell_verified = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None:
             self._raise_handle_window(handle)
@@ -2831,9 +2832,10 @@ class LinuxDriver:
         if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
             # A Writer table cell is named like a Calc address, but typing
             # into it inserts a paragraph and the cell node reads back empty.
-            # Replace the child paragraph, and put the old text back on a miss.
+            # Replace and verify the entire paragraph list with a cell-local read.
             if self._run(lambda: _atspi.writer_text_cell(handle)):
-                self._run(lambda: _atspi.replace_writer_cell_text(handle, value))
+                _atspi.replace_writer_cell_text(handle, value, run=self._run)
+                self._writer_cell_verified = (element.snapshot_id, element.ref, value)
                 return True
             # Not the Value interface: that range is a double and rejects text.
             # Focus, type (a selected cell replaces), commit with Return, then
@@ -2875,6 +2877,7 @@ class LinuxDriver:
         # the call, including on the document, and that restore sends no keys.
         points = []
         if handle is not None:
+            self._run(lambda: _atspi._refuse_drawing_multiline_value(handle, value))
             points = self._run(lambda: _atspi._capture_text_points(handle)) or []
 
         def restore() -> None:

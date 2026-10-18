@@ -9721,6 +9721,48 @@ def test_draw_shape_paragraph_is_an_edit_target_and_a_browser_paragraph_is_not(
     assert bare.text.endswith("Z")
 
 
+@pytest.mark.parametrize("value", ["one\ntwo", "one\r\ntwo", "one\rtwo", "one\n", "\n"])
+@pytest.mark.parametrize("role", ["document presentation", "document frame"])
+@pytest.mark.parametrize("following", [False, True])
+def test_drawing_multiline_set_value_refuses_before_mutation(
+    fake_atspi, monkeypatch, value, role, following,
+) -> None:
+    from a11y_computer_use import observe
+
+    panel, paragraph = _shape_paragraph(
+        "Revenue up 12%", states={"EDITABLE", "ENABLED", "SHOWING"}, role=role,
+    )
+    sibling = _Acc("paragraph", name="Churn", states={"SHOWING"})
+    sibling.text = "Churn down to 3.1%"
+    if following:
+        _adopt(panel, paragraph, sibling)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Multiline replacement must refuse before text or caret mutation")
+
+    paragraph.set_text_contents = unexpected
+    paragraph.insert_text = unexpected
+    monkeypatch.setattr(_atspi, "_capture_text_points", unexpected)
+    monkeypatch.setattr(_atspi, "_restore_text_points", unexpected)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    element = Element(
+        "e24", "AXStaticText", "Paragraph: 0 Revenue up 12%", paragraph.text,
+        Bounds(0, 8, 40, 120, 20), "snap-1", editable=True,
+    )
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    for _ in range(2):
+        with pytest.raises(ComputerUseError) as exc:
+            driver.set_value(element, value)
+        assert exc.value.code == ErrorCode.UNSUPPORTED
+        assert exc.value.detail["reason"] == "multiline_value_for_paragraph"
+        assert exc.value.detail["outcome"] == "refused"
+        assert exc.value.detail["next"] == ["keyboard"]
+        assert paragraph.text == "Revenue up 12%"
+        assert sibling.text == "Churn down to 3.1%"
+        assert panel.children == ([paragraph, sibling] if following else [paragraph])
+
+
 def _set_paragraph(paragraph, value):
     paragraph.text = value
     return True
@@ -9829,7 +9871,7 @@ def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch
 
     Writer can rebuild the cell child the write was aimed at. The first
     walk then shows ``NEWB2-1`` and ``Cell B2``. That is not a miss: the
-    new paragraph stays and the old line is cleared.
+    new paragraph stays and the old paragraph is cleared and removed.
     """
     table = _Acc("table", name="Table1-1")
     cell = _Acc("table cell", name="B2")
@@ -9853,6 +9895,13 @@ def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch
         acc.text = text
         return True
 
+    def merge(cell, child, offset, chord):
+        assert child is paragraph and child.text == ""
+        assert offset == 0 and chord == "backspace"
+        _adopt(cell, fresh["node"])
+        return True
+
+    monkeypatch.setattr(_atspi, "_writer_cell_boundary", merge)
     monkeypatch.setattr(_atspi, "set_text", write)
     _atspi.replace_writer_cell_text(cell, "NEWB2-1")
     assert fresh["node"] is not None and fresh["node"].text == "NEWB2-1"
@@ -16530,3 +16579,163 @@ def test_tab_preflight_preserves_native_text_and_chromium_plain_input(monkeypatc
         _atspi._type_into_target(field, text)
         assert calls[-1] == text
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize("initial,value", [
+    (["First note line", "Second note line"], "Replaced note"),
+    (["Old"], "Line one\nLine two"),
+    (["Old", ""], ""),
+    (["Old"], "\nMiddle\n"),
+    (["Same", "Same"], "Same"),
+    (["Old"], "One\nTwo\nThree\nFour\nFive"),
+])
+def test_writer_cell_exact_paragraph_replacement(fake_atspi, monkeypatch, initial, value):
+    cell = _Acc("table cell", name="C2")
+    _adopt(_Acc("table", name="Inv-1"), cell)
+    def paragraph(text):
+        child = _Acc("paragraph")
+        child.text = text
+        return child
+    _adopt(cell, *(paragraph(text) for text in initial))
+    keys = []
+    def write(child, text, force=False):
+        assert force is True and "\n" not in text
+        child.text = text
+        return True
+    def boundary(target, child, offset, chord):
+        assert target is cell
+        live = _atspi._writer_paragraphs(cell)
+        assert child is live[-1]
+        keys.append(chord)
+        if chord == "backspace":
+            assert offset == 0 and child.text == "" and len(live) > 1
+            _adopt(cell, *live[:-1])
+        else:
+            assert chord == "return" and offset == len(child.text)
+            _adopt(cell, *live, paragraph(""))
+        return True
+    monkeypatch.setattr(_atspi, "set_text", write)
+    monkeypatch.setattr(_atspi, "_writer_cell_boundary", boundary)
+    _atspi.replace_writer_cell_text(cell, value)
+    assert _atspi._writer_cell_parts(cell) == value.split("\n")
+    assert _atspi.writer_cell_outcome_text(value, cell) == value
+    assert len(keys) == abs(len(initial) - len(value.split("\n")))
+
+
+@pytest.mark.parametrize("parts,value", [
+    (["Replaced note", ""], "Replaced note"),
+    (["Line one\nLine two"], "Line one\nLine two"),
+    ([None], ""),
+])
+def test_writer_cell_rejects_inexact_paragraphs(fake_atspi, monkeypatch, parts, value):
+    cell = _Acc("table cell", name="C2")
+    _adopt(_Acc("table", name="Inv-1"), cell)
+    children = [_Acc("paragraph") for _ in parts]
+    for child, text in zip(children, parts):
+        child.text = text
+    _adopt(cell, *children)
+    monkeypatch.setattr(_atspi, "set_text", lambda *a, **k: False)
+    monkeypatch.setattr(_atspi, "_writer_cell_boundary", lambda *a: False)
+    monkeypatch.setattr(_atspi, "_WRITER_CELL_SETTLE_S", 0.1)
+    assert _atspi.writer_cell_outcome_text(value, cell) is None
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.replace_writer_cell_text(cell, value)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert "cell kept" in exc.value.message
+
+
+@pytest.mark.parametrize("focus,caret", [(False, 0), (None, 0), (True, 1)])
+def test_writer_cell_boundary_requires_focus_and_caret(fake_atspi, monkeypatch, focus, caret):
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_move_caret", lambda *args: True)
+    monkeypatch.setattr(_atspi, "_caret_offset", lambda acc: caret)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: focus)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda *args: pytest.fail("unsafe key"))
+    assert _atspi._writer_cell_boundary(_Acc("table cell"), _Acc("paragraph"), 0, "backspace") is False
+
+
+def test_writer_cell_replacement_runs_native_calls_but_not_waits_on_owner(fake_atspi, monkeypatch):
+    cell = _Acc("table cell", name="C2")
+    child = _Acc("paragraph")
+    child.text = "old"
+    _adopt(cell, child)
+    inside = False
+    original_parts = _atspi._writer_cell_parts
+    def run(operation):
+        nonlocal inside
+        assert not inside
+        inside = True
+        try:
+            return operation()
+        finally:
+            inside = False
+    def parts(target):
+        assert inside
+        return original_parts(target)
+    def write(target, value, force=False):
+        assert inside and force
+        target.text = value
+        return True
+    def sleep(seconds):
+        assert not inside
+    monkeypatch.setattr(_atspi, "_writer_cell_parts", parts)
+    monkeypatch.setattr(_atspi, "set_text", write)
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    _atspi.replace_writer_cell_text(cell, "new", run=run)
+    assert child.text == "new"
+
+
+def test_writer_cell_refuses_truncated_paragraph_list(fake_atspi, monkeypatch):
+    cell = _Acc("table cell", name="C2")
+    _adopt(cell, *(_Acc("paragraph") for _ in range(17)))
+    monkeypatch.setattr(_atspi, "set_text", lambda *a, **k: pytest.fail("truncated write"))
+    with pytest.raises(ComputerUseError, match="paragraph read limit"):
+        _atspi.replace_writer_cell_text(cell, "new")
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_writer_cell_driver_receipt_requires_verified_replacement(monkeypatch, fail):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    driver = LinuxDriver()
+    element = Element(ref="e1", snapshot_id="cell-epoch", role="AXCell", title="C2", value=None, bounds=None)
+    handle = object()
+    monkeypatch.setattr(driver, "_run", lambda operation: operation())
+    monkeypatch.setattr(driver, "_dom_window_title", lambda handle: "")
+    monkeypatch.setattr(driver, "_dom_pids", lambda handle: ())
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda *a, **k: None)
+    monkeypatch.setattr(_atspi, "is_sheet_cell", lambda handle: True)
+    monkeypatch.setattr(_atspi, "writer_text_cell", lambda handle: True)
+    calls = []
+    def replace(target, value, *, run):
+        assert target is handle and value == "one\ntwo" and run == driver._run
+        calls.append(value)
+        if fail:
+            raise _atspi._text_mismatch("text_mismatch", "cell kept an empty paragraph")
+    monkeypatch.setattr(_atspi, "replace_writer_cell_text", replace)
+    if fail:
+        with pytest.raises(ComputerUseError):
+            driver._apply_set_value(element, "one\ntwo", handle)
+        assert getattr(driver, "_writer_cell_verified", None) is None
+    else:
+        assert driver._apply_set_value(element, "one\ntwo", handle) is True
+        assert driver._writer_cell_verified == ("cell-epoch", "e1", "one\ntwo")
+    assert calls == ["one\ntwo"]
+
+
+@pytest.mark.parametrize("chord,offset", [("backspace", 0), ("return", 3)])
+def test_writer_cell_boundary_sends_key_at_verified_native_caret(fake_atspi, monkeypatch, chord, offset):
+    cell = _Acc("table cell", name="C2")
+    paragraph = _Acc("paragraph", states=("FOCUSED",))
+    paragraph.text = "old"
+    _adopt(cell, paragraph)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda target: True)
+    keys = []
+    def press(key):
+        assert paragraph.caret == offset
+        keys.append(key)
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    assert _atspi._writer_cell_boundary(cell, paragraph, offset, chord) is True
+    assert keys == [chord]
