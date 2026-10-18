@@ -437,3 +437,5 @@
 - 2026-10-18 (PR #905 main merge): Browser dialog gating and shaded-window input refusal protect different dispatch conditions. Preserve the approved dialog probe unchanged when importing the window visibility guard, and run both gate and Linux synthetic regressions.
 
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
+
+- 2026-10-19 (#936): Notification activation and visual feedback can outlive a bubble. Retain its native window before preparation and check fresh visibility, bounds, and exact target hit immediately before pointer dispatch; classifying only after expiry can lose the parent chain. The activation-delay fix (#935) does not replace this guard.
