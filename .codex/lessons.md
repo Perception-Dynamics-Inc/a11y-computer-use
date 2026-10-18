@@ -422,3 +422,5 @@
 
 
 - 2026-10-18 (#867 reopened): LibreOffice Math 25.2 uses an em-dash frame title; grab_focus resets an already focused command caret to zero, and EditableText selection replacement can retain the old endpoint. Preserve confirmed focus and verify the post-write caret as well as text. Native parent links can omit the visible Commands container, so retain a generic command label instead of inheriting the window title.
+
+- 2026-10-18 (PR #902 diagnostics): Check the current-head failure before pursuing an older timing report: both Chrome timing tests passed on 6939004f, while the large-table test failed with an empty row list. With CI's `--tb=line`, that assertion did not identify initial launch versus reload or show the selected process/tree. Keep phase, sampled timings/PIDs, window and snapshot evidence, and bounded cached/fresh native trees in the failure message itself; collect native diagnostics on the AT-SPI thread only after the original deadline. Isolated Chrome passes do not establish the full-file CI cause.
