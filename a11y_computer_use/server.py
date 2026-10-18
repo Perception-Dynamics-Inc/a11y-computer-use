@@ -2935,6 +2935,7 @@ class Runtime:
         key_chord: str | None = None,
         focus_before: tuple | None = None,
         sheet_before: tuple | None = None,
+        writer_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> tuple[str, str]:
@@ -2946,6 +2947,16 @@ class Runtime:
         died = self._process_died(before)
         baseline = getattr(self, "_action_baseline", None)
         process = before or (baseline.get("process") if isinstance(baseline, dict) else None)
+        writer = self._writer_key_verdict(app, key_chord, writer_before) if key_focus else None
+        if writer is not None:
+            current = getattr(self, "_current", None)
+            if current is not None:
+                self._action_baseline = {
+                    "token": id(current), "app": app, "capture": None, "process": process,
+                }
+            if died:
+                return "partial", "the target process exited after the action"
+            return writer
         calc = self._calc_mutation_verdict(
             app, requested, previous, selection, key_focus, focus_before, key_chord, sheet_before,
         )
@@ -3159,6 +3170,50 @@ class Runtime:
             "Create the missing folder from the nearest existing parent, or check the path."
         )
 
+    def _writer_key_probe(
+        self, app: str | None, chord: str | None, previous: tuple | None = None,
+    ) -> tuple | None:
+        """Read scoped Writer evidence on the native owner thread."""
+        if getattr(self.driver, "name", None) != "linux" or not app:
+            return None
+        parts = (chord or "").casefold().split("+")
+        navigation = {"home", "end", "left", "right", "up", "down", "pageup", "pagedown"}
+        if not (
+            parts[-1] in navigation and set(parts[:-1]) <= {"ctrl", "shift"}
+            or (chord or "").casefold() in {
+                "delete", "backspace", "ctrl+delete", "ctrl+backspace", "ctrl+a",
+                "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+c", "ctrl+insert",
+                "shift+insert", "shift+delete", "return", "enter",
+            }
+        ):
+            return None
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+        try:
+            read = lambda: _atspi.writer_key_state(app, previous)
+            return runner(read) if callable(runner) else read()
+        except Exception:
+            return None
+
+    def _writer_key_verdict(
+        self, app: str | None, chord: str | None, before: tuple | None,
+    ) -> tuple[str, str] | None:
+        """Confirm observed text/caret/selection changes without a window scan."""
+        if before is None:
+            return None
+        after = self._writer_key_probe(app, chord, before)
+        if after == before:
+            time.sleep(0.05)
+            after = self._writer_key_probe(app, chord, before)
+        if after is None:
+            return None
+        if (chord or "").casefold() in {"ctrl+c", "ctrl+insert"}:
+            return "unverifiable", "clipboard ownership was not verified"
+        if after[2:] != before[2:]:
+            return "confirmed", "the focused Writer text, caret, or selection changed"
+        return "unverifiable", "the focused Writer text, caret, and selection are unchanged"
+
     def _sheet_key_probe(
         self, app: str | None, chord: str | None, previous: tuple | None = None,
     ) -> tuple | None:
@@ -3291,6 +3346,7 @@ class Runtime:
         key_chord: str | None = None,
         focus_before: tuple | None = None,
         sheet_before: tuple | None = None,
+        writer_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> outcome.ActionResult:
@@ -3303,7 +3359,7 @@ class Runtime:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
                 key_focus=key_focus, key_chord=key_chord, focus_before=focus_before,
-                sheet_before=sheet_before, selection=selection,
+                sheet_before=sheet_before, writer_before=writer_before, selection=selection,
                 cover_click=cover_click,
             )
         else:
@@ -5964,14 +6020,16 @@ class Runtime:
                 self.driver.key_chord(chord)
 
         before = self._capture(bundle, targeted=True)
-        focus_before = self._key_focus_probe(bundle)
-        sheet_before = self._sheet_key_probe(bundle, chord)
+        writer_before = self._writer_key_probe(bundle, chord)
+        focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
+        sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
         self._run_gated(action, bundle, execute)
         note = " (focused its window first)" if focused else ""
         return self._conclude(
             f"pressed {chord} in {bundle}{note}",
             tool="key", app=bundle, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
+            writer_before=writer_before,
         )
 
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
@@ -6199,8 +6257,9 @@ class Runtime:
         before = self._capture(targeted=True)
         if target is not None:
             bundle, pid = target
-            focus_before = self._key_focus_probe(bundle)
-            sheet_before = self._sheet_key_probe(bundle, chord)
+            writer_before = self._writer_key_probe(bundle, chord)
+            focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
+            sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
 
             def execute_bg() -> None:
                 self._guard_user(bundle, addressed=True)
@@ -6211,6 +6270,7 @@ class Runtime:
                 f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
                 tool="key", app=bundle, before=before,
                 key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
+                writer_before=writer_before,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -6219,8 +6279,9 @@ class Runtime:
         # is what made Down leave the menu and Return insert a newline. type
         # and click still dismiss, so typed text does not fall into the menu.
         target = self._open_menu_app(front) or front
-        focus_before = self._key_focus_probe(target)
-        sheet_before = self._sheet_key_probe(target, chord)
+        writer_before = self._writer_key_probe(target, chord)
+        focus_before = None if writer_before is not None else self._key_focus_probe(target)
+        sheet_before = None if writer_before is not None else self._sheet_key_probe(target, chord)
 
         def execute() -> None:
             self._guard_user(target)
@@ -6237,6 +6298,7 @@ class Runtime:
             f"pressed {chord}{''.join(note)}",
             tool="key", app=target, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
+            writer_before=writer_before,
         )
 
     @_serialized
@@ -10048,7 +10110,9 @@ def build_server(
         and evidence. A key is confirmed when the focused text, caret,
         selection, or focused cell changes, including when the rest of the
         page fingerprint does not. Linux Calc edit keys also compare selected
-        cell text; copy remains unverifiable without clipboard evidence.
+        cell text. Linux Writer navigation/edit keys compare the focused text
+        object, caret and selection without scanning the window; unchanged
+        scoped state and copy remain unverifiable without further evidence.
         Thunar location-entry Return/KP_Enter reports
         suspected_noop when an error icon appears or the window title stays unchanged;
         check the path or create missing folders from the nearest existing parent."""

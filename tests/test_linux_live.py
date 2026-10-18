@@ -14196,3 +14196,88 @@ def test_linux_chrome_tab_writes_refuse_without_partial_text(tmp_path) -> None:
                     assert actual == expected, (label, operation, title, actual)
     finally:
         _stop(proc)
+
+
+def test_linux_writer_key_scoped_timing(tmp_path) -> None:
+    """Writer caret/selection keys avoid the per-key whole-window scan."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-writer is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    odt = tmp_path / "memo.odt"
+    _empty_odt(odt)
+    profile = tmp_path / "writer-type"
+    _writer_profile(profile)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(odt),
+        ],
+        env=env, start_new_session=True,
+    )
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    try:
+        deadline = time.monotonic() + 90
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                area = next(
+                    (
+                        el for el in shot.elements
+                        if el.role == "AXTextArea" and "Document" in (el.title or "")
+                    ),
+                    None,
+                )
+                if area is not None and "Tip of the Day" not in last:
+                    break
+            time.sleep(0.4)
+        assert area is not None, f"Writer did not expose the document\n{last}"
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea" and "Document" in (el.title or ""))
+        runtime.click(area.ref)
+        typed = runtime.type_text(value)
+        assert typed.outcome == "confirmed", (typed, getattr(typed, "evidence", None))
+        assert "line break" not in typed.evidence.casefold()
+        assert "Quarterly Update" in typed.evidence
+        # Establish a known caret, outside the timed batch.
+        runtime.key("ctrl+Home", app="soffice")
+        started = time.monotonic()
+        results = [runtime.key(chord, app="soffice") for chord in (
+            "End", "Home", "shift+End", "ctrl+End",
+        )]
+        elapsed = time.monotonic() - started
+        assert all(result.outcome == "confirmed" for result in results), results
+        assert all("Writer" in result.evidence for result in results), results
+        assert elapsed < 5.0, f"four scoped Writer keys took {elapsed:.3f}s"
+        copied = runtime.key("ctrl+c", app="soffice")
+        assert copied.outcome == "unverifiable", copied
+        assert "clipboard" in copied.evidence
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
