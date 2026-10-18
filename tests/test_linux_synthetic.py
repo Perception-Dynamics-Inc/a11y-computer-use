@@ -17346,8 +17346,17 @@ def _math_command(text=""):
     return panel, paragraph
 
 
-def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch):
+@pytest.mark.parametrize("separator", ["-", "—", "–"])
+def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch, separator):
     panel, paragraph = _math_command("a")
+    panel.parent.parent.parent.name = f"Untitled 1 {separator} LibreOffice Math"
+    panel.name = panel.parent.parent.parent.name
+
+    def reset_focus():
+        paragraph.caret = 0
+        return True
+
+    paragraph.component.grab_focus = reset_focus
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
     monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
     monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: getattr(acc, "text", None))
@@ -17365,8 +17374,14 @@ def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch):
     monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
     assert driver.type_into(element, " over b") == 7
     assert paragraph.text == "a over b"
+    assert paragraph.caret == 8
     assert driver.set_value(element, "x^2") is True
     assert paragraph.text == "x^2"
+    assert paragraph.caret == 3
+    assert driver.type_into(element, "+y") == 2
+    assert paragraph.text == "x^2+y"
+    assert paragraph.caret == 5
+    assert driver.set_value(element, "x^2") is True
     paragraph.set_text_contents = lambda text: True
     assert _atspi.set_text(paragraph, "not written") is False
     assert paragraph.text == "x^2"
@@ -17747,3 +17762,71 @@ def test_chromium_child_cache_bypass_retains_native_properties(fake_atspi, monke
             app, walk, preserve_properties=True,
         ) == "current children"
     assert masks == [125, 128]
+
+
+@pytest.mark.parametrize("identity", ["role", "service", "application"])
+def test_math_command_prefers_native_identity_to_title(fake_atspi, identity):
+    panel, paragraph = _math_command("abc")
+    frame = panel.parent.parent.parent
+    frame.name = "Localized formula document"
+    if identity == "role":
+        panel.parent.role = "document math"
+    elif identity == "service":
+        frame.get_attributes = lambda: {"service-name": "com.sun.star.formula.FormulaProperties"}
+    else:
+        frame.parent.name = "LibreOffice Math"
+    assert _atspi.math_command_editable(paragraph)
+    frame.role = "dialog"
+    assert not _atspi.math_command_editable(paragraph)
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_math_type_preserves_middle_caret_and_selection(fake_atspi, monkeypatch, selected):
+    panel, paragraph = _math_command("abcd")
+    paragraph.caret = 2
+    paragraph.selection = (1, 3) if selected else None
+
+    def delete(start, end):
+        paragraph.text = paragraph.text[:start] + paragraph.text[end:]
+        paragraph.selection = None
+        # Math can retain the old selection endpoint after EditableText writes.
+        paragraph.caret = end
+        return True
+
+    paragraph.delete_text = delete
+    element = Element(ref="e1", role="AXTextArea", title="Commands", value="abcd",
+                      bounds=None, editable=True, snapshot_id="s1")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: paragraph)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda handle: pytest.fail("would reset caret"))
+    assert driver.type_into(element, "Q") == 1
+    assert paragraph.text == ("aQd" if selected else "abQcd")
+    assert paragraph.caret == (2 if selected else 3)
+
+
+@pytest.mark.parametrize("replace", [True, False])
+def test_math_write_refuses_unverified_caret(fake_atspi, monkeypatch, replace):
+    _, paragraph = _math_command("old")
+    paragraph.caret = 0
+    monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", lambda *args: True)
+    with pytest.raises(ComputerUseError) as exc:
+        if replace:
+            _atspi.set_text(paragraph, "x^2")
+        else:
+            _atspi.insert_text(paragraph, "x^2")
+    assert exc.value.detail["reason"] == "caret_not_advanced"
+    assert paragraph.text == ("x^2" if replace else "x^2old")
+    assert paragraph.caret == 0
+
+
+def test_math_command_label_without_named_container(fake_atspi, monkeypatch):
+    panel, paragraph = _math_command("a")
+    panel.parent.parent.name = ""
+    panel.name = "Untitled 1 — LibreOffice Math"
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    raw = _atspi.ATSPIAccessor().read(paragraph)
+    assert raw.title == "Formula commands"
+    assert raw.editable

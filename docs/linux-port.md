@@ -128,8 +128,11 @@ For Chrome/Electron processes that advertise a DevTools port, the Linux form ove
 
 Chromium page checkbox, radio, and toggle-button clicks compare fresh native
 `CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
-clicks use the accessible hit at the requested point, including a toggle's text
-descendant and nested web documents. A state change confirms the effect without
+clicks resolve the native window-owner PID and hit-test its showing AT-SPI frame
+at the requested point, including a toggle's text descendant and nested web
+documents. Missing owners or ambiguous overlapping frames retain normal
+verification. The registry desktop does not need a Component interface.
+A state change confirms the effect without
 another full-window snapshot or the process-exit grace wait; process liveness is
 still checked immediately. Unchanged, defunct, or unreadable targets retain the
 normal outcome check. This does not change the requested click or establish a
@@ -906,15 +909,23 @@ may already have opened a dialog despite a failed reply.
 
 LibreOffice Math command paragraphs with native EDITABLE state and EditableText
 are exposed as editable text areas. Recognition requires an editable parent
-panel and a LibreOffice frame title ending in ` - LibreOffice Math`; other
-paragraphs keep their existing rules. An unnamed command paragraph uses its
-nearest named container (for example, `Commands`) as its label. Ref typing and
-replacement verify the command paragraph's Text value. When Math marks both
+panel in a LibreOffice frame. Native Math roles or formula service metadata
+identify the document when exposed; the fallback accepts `LibreOffice Math`
+after a hyphen, en dash, or em dash in the frame title. Other paragraphs keep
+their existing rules. An unnamed command paragraph uses its nearest named
+container (for example, `Commands`), or `Formula commands` when no such label
+is available. Ref typing preserves an already focused command's caret and
+selection instead of resetting them through another focus request. Replacement
+verifies the command paragraph's Text value and moves the caret to the end,
+verifying that position before success. Insertion also verifies the caret after
+the inserted text, including replacement of a selection. When Math marks both
 the panel and one child paragraph focused, no-ref typing resolves that child
 and uses EditableText without entering the Calc settlement poller. Read-only
 paragraphs and ambiguous focused children are not accepted by this resolver.
-This path has synthetic regression coverage; native Math behavior and latency
-have not been measured by those tests.
+Synthetic regressions cover title separators, native identity, and caret
+placement. Ref insertion, replacement, subsequent no-ref typing, and insertion
+at a middle caret were also checked with LibreOffice Math 25.2.3 on Linux under
+Xvfb, xfwm4, and AT-SPI; these checks establish behavior, not a latency bound.
 
 Chromium page keys use focused text/caret/selection plus a native document-child
 anchor and window name/child count before considering a full-window reread.
@@ -923,3 +934,14 @@ effect; unchanged evidence returns `unverifiable` without retry advice. Missing
 page evidence retains the full-window fallback. Copy chords still require
 clipboard owner/target evidence, and process-exit checks remain in place. This
 path has hermetic regression coverage; live latency has not been measured.
+
+### Shaded X11 windows
+
+Activation removes `_NET_WM_STATE_SHADED` through the window manager. Focus and
+raise require two consecutive reads showing the target active, mapped and
+unshaded; an ignored request returns an error rather than confirmed success.
+Direct typing and key input refuse a known shaded or unmapped client with
+`window_shaded` or `window_unmapped`. Ref input also checks the owning X client
+when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
+to restore the client before retrying. These checks do not change the window
+listing or snapshot visibility reporting tracked separately in #913.

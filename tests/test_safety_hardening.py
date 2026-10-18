@@ -756,6 +756,9 @@ class _FakeXWin:
     def __init__(self, wid: int):
         self.id = wid
 
+    def get_attributes(self):
+        return types.SimpleNamespace(map_state=2)  # mapped client after the WM request
+
 
 @pytest.fixture
 def fake_x11(monkeypatch):

@@ -2380,7 +2380,8 @@ class LinuxDriver:
 
         A ref in a sibling dialog is acted on only after that dialog is
         frontmost. No matching X window does not fail the action: the AT-SPI
-        action still runs. An already ACTIVE window is left alone. A window
+        action still runs. A known shaded/unmapped client is refused, even
+        when AT-SPI reports ACTIVE. An already ACTIVE visible window is left alone. A window
         that is already the EWMH active window is left alone too: Chrome's
         page frame often lacks STATE_ACTIVE while the omnibox popup of that
         same window has it, and raising the window focuses the address bar.
@@ -2393,7 +2394,7 @@ class LinuxDriver:
             target = self._run(lambda: _atspi.toplevel_raise_target(handle))
         except Exception:
             return
-        if target is None or target[0]:
+        if target is None:
             return
         _active, title, pid, extents = target
         try:
@@ -2403,6 +2404,9 @@ class LinuxDriver:
         except Exception:
             return
         if window_id is None:
+            return
+        _linux_system.refuse_unviewable_input(int(window_id))
+        if target[0]:
             return
         try:
             current = _linux_system.active_window()
@@ -4033,7 +4037,13 @@ class LinuxDriver:
                     lambda: _atspi.place_drawing_caret_at_end(handle, ignore_focus=True)
                 )
         else:
-            self._run(lambda: _atspi.grab_focus(handle))
+            # Math's grab_focus resets an already focused command caret to zero.
+            # Keep its native caret/selection when focus is already confirmed.
+            math_focused = self._run(lambda: (
+                _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
+            ))
+            if not math_focused:
+                self._run(lambda: _atspi.grab_focus(handle))
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
                 raise self._focus_lost_on(element)
         self._focused_editable = handle
@@ -4192,6 +4202,9 @@ class LinuxDriver:
         """
         if dry_run or not text:
             return None
+        from a11y_computer_use.drivers import _linux_system
+
+        _linux_system.refuse_unviewable_input()
         self._chooser_readback = None
         self._sheet_type_readback = None
         self._math_type_readback = None
@@ -4889,6 +4902,9 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
+        from a11y_computer_use.drivers import _linux_system
+
+        _linux_system.refuse_unviewable_input()
         # Return in a file chooser's location entry closes the dialog and
         # leaves the file unchosen. Activate Open or Save instead, and do
         # not report the key as pressed unless the opener shows the file.
@@ -5620,14 +5636,14 @@ class LinuxDriver:
     def raise_window(self, window_id: int) -> None:
         """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
 
-        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        The request is retried until the client is mapped, unshaded and active.
         """
         self._ewmh(window_id, "raise_window", lambda sys: sys.raise_window(window_id))
 
     def focus_window(self, window_id: int) -> None:
         """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
 
-        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        The request is retried until the client is mapped, unshaded and active.
         """
         self._ewmh(window_id, "focus_window", lambda sys: sys.focus_window(window_id))
 

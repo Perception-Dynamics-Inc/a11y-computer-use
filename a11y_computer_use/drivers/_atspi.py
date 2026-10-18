@@ -4730,11 +4730,12 @@ class ATSPIAccessor:
         if entry and role_str == "paragraph" and math_command_editable(node):
             role = "AXTextArea"
             if not str(name).strip():
+                name, description = "Formula commands", ""
                 for ancestor in _ancestor_nodes(_parent_of(node)):
                     if _role_name(ancestor) in {"frame", "dialog", "application"}:
                         break
                     label = _node_name(ancestor).strip()
-                    if label:
+                    if label and not re.search(r" [—–-] LibreOffice Math$", label):
                         name, description = label, ""
                         break
         if role_str == "push button" and _gtk4_menu_button_wrapper(node):
@@ -7382,11 +7383,26 @@ def math_command_editable(acc) -> bool:
     parent = _parent_of(acc)
     if parent is None or _role_name(parent) != "panel" or not _state_has(parent, "EDITABLE"):
         return False
+    math_identity = False
+    frame = None
     for node in _ancestor_nodes(parent):
         role = _role_name(node)
-        if role in {"frame", "dialog"}:
-            return role == "frame" and _node_name(node).endswith(" - LibreOffice Math")
-    return False
+        if role == "dialog":
+            return False
+        attrs = _get_attributes(node)
+        services = str(attrs.get("service-name") or attrs.get("service") or "").split()
+        math_identity |= (
+            role in {"math", "document math"}
+            or "com.sun.star.formula.FormulaProperties" in services
+            or (role == "application" and _node_name(node).casefold() == "libreoffice math")
+        )
+        if role == "frame":
+            frame = node
+        if role == "application":
+            break
+    if frame is None:
+        return False
+    return math_identity or bool(re.search(r" [—–-] LibreOffice Math$", _node_name(frame)))
 
 
 def _focused_math_command(acc, *, max_nodes: int = 400):
@@ -9307,12 +9323,17 @@ def insert_text(acc, text: str) -> int | None:
     if _confirm_text(acc, expected):
         # Scintilla inserts the buffer text without advancing the caret. Only
         # correct a caret still at the verified insertion point; other native
-        # caret movement belongs to the widget. Positions are not UTF-8 bytes.
+        # caret movement belongs to the widget. Math can also retain the old
+        # selection endpoint after replacement; place its caret after the
+        # verified insertion. Positions are not UTF-8 bytes.
         Atspi = _atspi()
         after_caret = _safe(lambda: Atspi.Text.get_caret_offset(acc)) if typed else None
         if (
-            typed and type(after_caret) is int and after_caret == offset
-            and not drawing_text_editable(acc)
+            typed and (
+                math_command_editable(acc)
+                or (type(after_caret) is int and after_caret == offset
+                    and not drawing_text_editable(acc))
+            )
         ):
             target = offset + (_utf16_length(typed) if qt else len(typed))
             _move_caret(Atspi, acc, target)
@@ -16583,7 +16604,17 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     if is_secure(acc):
         return False
     if math_command_editable(acc):
-        return _replace_editable_text(acc, text)
+        if not _replace_editable_text(acc, text):
+            return False
+        target = _utf16_length(text) if _qt_app(acc) else len(text)
+        Atspi = _atspi()
+        _move_caret(Atspi, acc, target)
+        if _safe(lambda: Atspi.Text.get_caret_offset(acc)) != target:
+            raise _text_mismatch(
+                "caret_not_advanced", "the text was replaced but the caret could not be advanced",
+                unchanged=False,
+            )
+        return True
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
@@ -20804,15 +20835,40 @@ def scroll_by_pixels(acc, *, dx: int = 0, dy: int = 0) -> bool:
 
 
 def _accessible_at_point(x: int, y: int):
-    """Deepest accessible under screen point ``(x, y)``, or None."""
+    """Hit-test the desktop, falling back to the native owner's showing frame.
+
+    The registry desktop and application roots need not expose Component.
+    Do not walk arbitrary background apps or guess between overlapping frames.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
     Atspi = _atspi()
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return None
     found = _deepest_at_point(desktop, int(x), int(y), 0, set())
-    if found is None or found is desktop:
+    if found is not None and found is not desktop:
+        return found
+    pid = _linux_system.pid_at_point(x, y)
+    if pid is None:
         return None
-    return found
+    frames = []
+    for index in range(_child_count(desktop)):
+        app = _child_at(desktop, index)
+        if pid_of(app) != pid:
+            continue
+        for frame in _fresh_application_children(app):
+            if not _state_has(frame, "SHOWING"):
+                continue
+            rect = _raw_rect(frame, "SCREEN")
+            if rect is None:
+                continue
+            left, top, width, height = rect
+            if left <= x < left + width and top <= y < top + height:
+                frames.append(frame)
+    if len(frames) != 1:
+        return None
+    return _deepest_at_point(frames[0], int(x), int(y), 0, set())
 
 
 def _deepest_at_point(acc, x: int, y: int, depth: int, seen: set[int]):
