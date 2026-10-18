@@ -1194,6 +1194,19 @@ def _restore_if_hidden(d, win) -> None:
     _client_message(d, win, "_NET_WM_STATE", [0, hidden, 0, 1, 0])  # _NET_WM_STATE_REMOVE
 
 
+def request_input_activation(window_id: int) -> bool:
+    """Request focus once for a viewable client; the caller verifies focus.
+
+    Unlike the window-management verb, input recovery must neither restore
+    a hidden window nor start a second activation wait inside its deadline.
+    """
+    with _with_window(window_id) as (d, win):
+        if win is None or _activation_blocker(d, win) is not None:
+            return False
+        _send_active_window(d, win)
+        return True
+
+
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
 

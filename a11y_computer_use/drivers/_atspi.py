@@ -6607,6 +6607,15 @@ def toplevel_raise_target(node):
     occlusion checks cannot mistake that window for a separate covering one.
     """
     top = _toplevel_of(node)
+    if top is None and _qt_app(node):
+        # A plain top-level QWidget is a filler, not a frame. Only accept
+        # the application's direct child; embedded layout fillers are not
+        # windows and must not supply guessed window geometry.
+        for candidate in _ancestor_chain(node):
+            if (_role_name(candidate) == "filler"
+                    and _role_name(_parent_of(candidate)) == "application"):
+                top = candidate
+                break
     if top is None:
         return None
     if not _node_name(top) and (
@@ -9668,10 +9677,39 @@ def _confirm_focus_on_target(acc) -> bool:
         if seen is None or seen is True:
             return True
         if attempt + 1 == _FOCUS_CONFIRM_REGRAB:
+            _request_qt_focus_activation(acc)
             grab_focus(acc)
         if attempt + 1 < _FOCUS_CONFIRM_POLLS:
             time.sleep(_FOCUS_CONFIRM_PAUSE_S)
     return False
+
+
+def _request_qt_focus_activation(acc) -> None:
+    """Request the missing window activation before retrying Qt child focus.
+
+    Qt's child-widget GrabFocus calls setFocus without activateWindow. An
+    inactive window therefore remembers the widget but cannot give it input
+    focus. Send one WM request; the existing FOCUSED polling remains the
+    success signal and the only wait. Do not restore hidden windows here.
+    """
+    if not _qt_app(acc) or not _x11_keys_available():
+        return
+    target = toplevel_raise_target(acc)
+    if target is None:
+        return
+    from a11y_computer_use.drivers import _linux_system
+
+    _active, title, pid, extents = target
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return
+    # The general matcher allows title/geometry fallbacks for clients without
+    # PID metadata. Focus recovery must stay within this target's process.
+    rows = [row for row in _linux_system.windows() if row.get("pid") == pid]
+    window_id = _linux_system.window_id_for_toplevel(
+        title=title, pid=pid, extents=extents, rows=rows,
+    )
+    if window_id is not None:
+        _linux_system.request_input_activation(window_id)
 
 
 def _type_into_target(acc, text: str) -> None:
