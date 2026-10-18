@@ -379,7 +379,10 @@
 - 2026-10-18 (PR #826 safety/performance merge): Retain issuing-snapshot menu ancestry and exact-target click evidence alongside Geany navigation verification when merging shared Runtime click changes; validate the menu gate, Chromium button, and Scintilla regressions together.
 
 - 2026-10-18 (PR #866 repair): Scoped Writer key outcomes must retain Writer-specific evidence when sharing probes with Impress. PR #870 failed the evidence-label assertion after all four outcomes were confirmed; its generic LibreOffice label caused the failure, not missing caret confirmation. Cover the label in the hermetic Runtime regression as well as the live timing test. An isolated Calc grid pass does not explain a loaded-CI A1 read-back mismatch.
+- 2026-10-18 (#873): Scintilla caret movement is an input mutation even when used to reveal text. Plain find may use Text.scroll_substring_to but must never fall back to set_caret_offset; reserve that fallback for explicit scroll_to_find and verify native extents afterwards.
 
 - 2026-10-18 (PR #870 repair): Extending a scoped Writer key probe to Impress/Draw must preserve the Writer identity in its evidence text. The live timing test checks confirmed outcomes and then that identity separately; its string-list assertion does not imply input or confirmation failed. Cover the evidence contract in hermetic outcome tests too.
 
 - 2026-10-18 (PR #866 merge): Writer sibling-selection evidence and Impress frame metadata both extend key states to eight items. Tuple length alone cannot select the Writer path; retain a native Writer-document check so Ctrl+A and Shift navigation preserve Impress metadata evidence for empty and non-empty paragraphs. Cover both selection chords when merging these probes.
+
+- 2026-10-18 (PR #866 Geany merge): Writer sibling-selection probes and Geany reveal behavior are independent. Preserve plain find’s non-mutating scroll path and explicit scroll_to_find’s caret fallback while retaining Writer’s native document guard and complete sibling-range evidence.

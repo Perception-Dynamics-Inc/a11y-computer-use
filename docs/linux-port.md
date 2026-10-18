@@ -855,3 +855,9 @@ focus; failures return `text_mismatch` with the observed paragraph count.
 Successful writes use the targeted cell read-back without a post-write window
 snapshot. This route is covered by hermetic regressions; live verification is
 still required.
+
+Plain `find` on GTK multiline documents uses only the non-mutating AT-SPI
+text scroll API and leaves the caret and selection untouched. If the match
+remains off screen (including Scintilla implementations without that scroll
+API), it is omitted with a hidden-buffer note. `scroll_to_find` retains its
+caret-based reveal fallback and verifies the resulting character extents.
