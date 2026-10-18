@@ -42,7 +42,7 @@ from a11y_computer_use.observe import (
     _generic_region_name,
     normalize_document_title,
 )
-from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
+from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode, Snapshot
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
 # Keyed by the human role-name string rather than the numeric Atspi.Role enum
@@ -6571,6 +6571,56 @@ def showing_toplevels(node) -> list:
         head = [frame for frame in frames if _frame_cache_key(frame) == chosen][:1]
     head_keys = {_frame_cache_key(frame) for frame in head}
     return head + [frame for frame in frames if _frame_cache_key(frame) not in head_keys]
+
+
+def deduplicate_dialog_exposures(snapshot: Snapshot) -> Snapshot:
+    """Collapse repeated native dialogs only when their complete trees agree.
+
+    Chromium can expose one permission bubble below its frame and again as
+    an application child. Stable HTML ids and coincident rectangles do not
+    prove identity: every node must have the same AT-SPI bus/object pair,
+    measured bounds, state, and relative hierarchy. Unknown identity or
+    geometry keeps both exposures, preserving the matcher's refusal.
+    Handles and refs for the retained exposure are unchanged.
+    """
+    from dataclasses import replace
+    from a11y_computer_use import observe
+
+    elements = snapshot.elements
+    seen = []
+    removed = set()
+    for index, element in enumerate(elements):
+        if element.ref in removed or element.role != "AXDialog":
+            continue
+        subtree = [element]
+        refs = {element.ref}
+        for child in elements[index + 1:]:
+            if child.parent not in refs:
+                break
+            subtree.append(child)
+            refs.add(child.ref)
+        signature = []
+        relative_refs = {item.ref: offset for offset, item in enumerate(subtree)}
+        for item in subtree:
+            handle = observe.ax_handle_for(snapshot.snapshot_id, item.ref)
+            identity = _atspi_wrapper_key(handle) if handle is not None else None
+            if identity is None or item.bounds is None:
+                break
+            signature.append((
+                identity,
+                relative_refs.get(item.parent),
+                replace(item, ref="", snapshot_id="", parent=None, path=()),
+            ))
+        else:
+            if signature in seen:
+                removed.update(refs)
+            else:
+                seen.append(signature)
+    if not removed:
+        return snapshot
+    return replace(snapshot, elements=tuple(
+        item for item in elements if item.ref not in removed
+    ))
 
 
 def snapshot_window_list(node) -> list:

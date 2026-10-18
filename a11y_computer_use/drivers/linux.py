@@ -1616,7 +1616,7 @@ class LinuxDriver:
 
                 page_snap = _walk(walked)
                 if not all_windows:
-                    return page_snap
+                    return _atspi.deduplicate_dialog_exposures(page_snap)
                 page_key = _atspi._frame_cache_key(walked)
                 # One real window is the page already walked. Resolving that
                 # Chrome root again clears the client cache, and the next
@@ -1649,7 +1649,7 @@ class LinuxDriver:
                     if not active_known:
                         active_known = True
                 if not extras:
-                    return page_snap
+                    return _atspi.deduplicate_dialog_exposures(page_snap)
                 snaps = [page_snap, *extras] if page_is_active else [extras[0], page_snap, *extras[1:]]
                 merged = observe.merge_window_snapshots(
                     snaps, scope=scope, app=app, pid=watch.pid,
@@ -1659,7 +1659,7 @@ class LinuxDriver:
                 # not evict the handles the caller still holds.
                 for snap in snaps:
                     observe.discard_epoch(snap.snapshot_id)
-                return merged
+                return _atspi.deduplicate_dialog_exposures(merged)
 
         snap = self._run(_do)
         # Carry native window ownership evidence into discovery, using the
