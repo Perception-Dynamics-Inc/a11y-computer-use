@@ -7,6 +7,31 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.75] - 2026-10-18
+
+Eight commits since v0.4.74, through #917.
+
+### Safety
+
+- Uncertain native menu presses require fresh target identity and an exact native hit before pointer fallback; the agent stops same-step retries after a stale-target refusal. Complete native evidence of a newly opened dialog reports `dispatched` with its name and no retry hints, without claiming verified effect. A single-use receipt preserves ordinary guarded clicks when no native action was sent. Refs #886 (#889) (eca4a98, 2026-10-18).
+- Linux focus/raise removes the shaded state and verifies consecutive active, mapped, unshaded reads within the existing budget; failed restoration returns an error. Direct input refuses known shaded or unmapped clients, and ref input checks the owning client even when AT-SPI reports ACTIVE. Window-list visibility and broader minimized-ref behavior remain separate work. Fixes #915 (#917) (ba6ce76, 2026-10-18).
+
+### Linux drivers
+
+- LibreOffice Math command paragraphs become editable text areas with verified insertion/replacement, and no-ref typing resolves a focused panel to its unique focused command paragraph. This initial fix required an ASCII-hyphen frame title; the reopened native recognition and caret failures were addressed by #912 below. Fixes #867 (#877) (d256317, 2026-10-18).
+- Math command recognition prefers native identity/metadata and accepts hyphen, en dash and em dash title fallbacks. Confirmed command focus is preserved, and insertion/replacement verifies the intended caret as well as text; failed caret checks return an error without repeating input. Native Math checks exercised the title fallback; service metadata recognition was tested synthetically. Fixes #867 (#912) (d612286, 2026-10-18).
+- Verified text insertion advances a caret that remained at the insertion point using native GTK or Qt offsets, preventing consecutive Scintilla inserts from appearing in reverse order. Failed caret correction returns an error without repeating the inserted text; Draw/Impress keeps its separate append behavior. Native Geany behavior was not locally live-verified in this PR. Fixes #878 (#883) (23e1c0c, 2026-10-18).
+
+### Performance
+
+- Chromium page keys compare bounded native document, anchor, geometry and window evidence before a full-window reread. Unchanged evidence remains unverifiable without retry advice, and missing evidence retains the fallback; exact key delivery, clipboard checks and process-exit verification remain. Live Chrome latency improvement was not measured. Fixes #881 (#885) (0408b9e, 2026-10-18).
+- Chromium toggle clicks compare fresh checked/pressed states on the same native target; a verified transition avoids a full-window outcome read and process-exit grace while retaining an immediate liveness check. Missing, unreadable or unchanged evidence keeps normal verification. Live latency and CAPTCHA behavior were not measured. Fixes #874 (#894) (b31e3e6, 2026-10-18).
+- Coordinate toggle probes fall back from unavailable desktop hit-testing to the native point owner's unique showing frame and descend through Component hits, including text descendants and nested documents. Missing or ambiguous evidence retains full outcome verification; input delivery is unchanged, and live Chromium timing was not measured. Fixes #874 (#903) (e89f901, 2026-10-18).
+
+### Packaging
+
+- The package version is 0.4.75.
+
 ## [0.4.74] - 2026-10-18
 
 Fifteen commits since v0.4.73, through #884.
