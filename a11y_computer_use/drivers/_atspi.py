@@ -7406,6 +7406,49 @@ def _focused_math_command(acc, *, max_nodes: int = 400):
     return matches[0] if len(matches) == 1 else None
 
 
+def _focused_office_paragraph(app: str, *, max_nodes: int):
+    """Unique focused editable paragraph in the active window, or None.
+
+    Math leaves FOCUSED on an Elements icon and the command panel after
+    activation. Neither is the keyboard destination; its paragraph is.
+    An incomplete or ambiguous walk cannot establish a read-back target.
+    """
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    queue = [root] if root is not None else []
+    candidate = None
+    seen = 0
+    while queue and seen < max_nodes:
+        node = queue.pop(0)
+        seen += 1
+        role = _role_name(node)
+        if role in {"menu", "popup menu"} and not (
+            _state_has(node, "EXPANDED")
+            or _state_has(node, "FOCUSED")
+            or _state_has(node, "SELECTED")
+        ):
+            continue
+        if (
+            role == "paragraph"
+            and _state_has(node, "FOCUSED")
+            and _state_has(node, "EDITABLE")
+            and _state_has(node, "SHOWING")
+            and not is_secure(node)
+        ):
+            if candidate is not None:
+                return None
+            candidate = node
+        count = int(_call_first(node, ("get_child_count",), default=0) or 0)
+        if count > max_nodes - seen - len(queue):
+            return None
+        for index in range(count):
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                queue.append(child)
+    return None if queue else candidate
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -7420,9 +7463,10 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
-    command = _focused_math_command(acc, max_nodes=max_nodes)
-    if command is not None:
-        acc = command
+    if _role_name(acc) in {"icon", "panel"} and _libreoffice_accessible(acc):
+        acc = _focused_office_paragraph(app, max_nodes=max_nodes)
+        if acc is None:
+            return None
     if _chromium_app(acc):
         entry = focused_chromium_entry(app, max_nodes=max_nodes)
         if entry is not None:

@@ -17201,6 +17201,79 @@ def test_writer_cell_boundary_sends_key_at_verified_native_caret(fake_atspi, mon
     assert keys == [chord]
 
 
+@pytest.mark.parametrize("focused_role", ["icon", "panel"])
+def test_math_type_reads_command_paragraph_after_elements_activation(
+    fake_atspi, monkeypatch, focused_role,
+):
+    """Stale icon/panel focus must not turn delivered keys into a mismatch."""
+    app = _Acc("application", name="soffice")
+    icon = _Acc("icon", name="Fraction", states={"FOCUSED"})
+    paragraph = _Acc("paragraph", states={"FOCUSED", "EDITABLE", "SHOWING"})
+    paragraph.text = "a over b frac {<?>} {<?>}"
+    start = paragraph.text.index("<?>")
+    paragraph.selection = (start, start + 3)
+    panel = _adopt(_Acc("panel", states={"FOCUSED"}), paragraph)
+    menu = _adopt(_Acc("menu"), *[_Acc("menu item") for _ in range(401)])
+    root = _adopt(_Acc("frame"), menu, icon, panel)
+    for node in (icon, panel, paragraph):
+        node.get_application = lambda: app
+    focused = icon if focused_role == "icon" else panel
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (focused, False))
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *a, **kw: None)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("soffice", 1))
+    sent = []
+
+    def type_string(text):
+        sent.append(text)
+        paragraph.text = paragraph.text.replace("<?>", text, 1)
+        paragraph.selection = None
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    assert driver.type_text("p") == 1
+    assert sent == ["p"]
+    assert driver._type_expected == "a over b frac {p} {<?>}"
+    assert driver._type_unverified is False
+    assert _atspi.focused_text("soffice") == "a over b frac {p} {<?>}"
+
+    # Seeing the requested character elsewhere is not exact replacement.
+    paragraph.text = "a over b frac {<?>} {<?>}"
+    paragraph.selection = (start, start + 3)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "type_string",
+                        lambda text: setattr(paragraph, "text", paragraph.text + text))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("p")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    paragraph.selection = None
+
+    # An unchanged destination still fails verification.
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("q")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == paragraph.text
+
+    # Missing focus, hidden/noneditable text, ambiguity, and a truncated
+    # search must never fall back to reading the stale icon's empty text.
+    for state in ("FOCUSED", "EDITABLE", "SHOWING"):
+        paragraph.states.remove(state)
+        assert _atspi.focused_text("soffice") is None
+        paragraph.states.add(state)
+    other = _Acc("paragraph", states=paragraph.states)
+    _adopt(panel, paragraph, other)
+    assert _atspi.focused_text("soffice") is None
+    assert _atspi.focused_text("soffice", max_nodes=2) is None
+
+
 @pytest.mark.parametrize("native_scroll", [False, True])
 @pytest.mark.parametrize("selection", [None, (8, 19)])
 def test_find_scintilla_preserves_caret_and_selection(
@@ -17261,6 +17334,7 @@ def _math_command(text=""):
     frame = panel.parent
     app = frame.parent
     paragraph.get_application = lambda: app
+    panel.get_application = lambda: app
     paragraph.get_description = lambda: "Paragraph: 0 " + paragraph.text
     panel.name = ""
     panel.states.update({"EDITABLE", "FOCUSED"})
@@ -17306,6 +17380,7 @@ def test_math_command_snapshot_and_verified_ref_writes(fake_atspi, monkeypatch):
 
 def test_math_focused_panel_uses_child_without_sheet_poll(fake_atspi, monkeypatch):
     panel, paragraph = _math_command()
+    monkeypatch.setattr(_atspi, "find_root", lambda *a, **kw: panel.parent.parent.parent)
     monkeypatch.setattr(_atspi, "_focused_node", lambda *args, **kwargs: (panel, False))
     assert _atspi.focused_editable("soffice.bin") is paragraph
     assert _atspi.focused_text("soffice.bin") == ""
@@ -17345,3 +17420,22 @@ def test_math_command_recognition_is_scoped(fake_atspi, monkeypatch, case):
     if case not in {"unfocused", "ambiguous"}:
         assert not _atspi.editable_entry(paragraph)
         assert _atspi._blocks_text_replace(paragraph)
+
+
+@pytest.mark.parametrize("focused_role", ["icon", "panel"])
+def test_math_command_readback_keeps_active_window_ambiguity_guard(
+    fake_atspi, monkeypatch, focused_role,
+):
+    panel, paragraph = _math_command("a over b")
+    frame = panel.parent.parent.parent
+    icon = _Acc("icon", states={"FOCUSED"})
+    icon.get_application = paragraph.get_application
+    _adopt(frame, *frame.children, icon)
+    focused = icon if focused_role == "icon" else panel
+    monkeypatch.setattr(_atspi, "find_root", lambda *a, **kw: frame)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (focused, False))
+    assert _atspi.focused_text("soffice.bin") == "a over b"
+    _, other = _math_command("other")
+    _adopt(frame, *frame.children, other)
+    assert _atspi.focused_text("soffice.bin") is None
+    assert _atspi.focused_text("soffice.bin", max_nodes=2) is None
