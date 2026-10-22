@@ -126,6 +126,15 @@ For Chrome/Electron processes that advertise a DevTools port, the Linux form ove
 
 **App identity** on Linux is the process **comm name** (`/proc/<pid>/comm`, exe-basename fallback), the analog of a macOS bundle id / Windows exe for permission-keying and the safety layer's app gating.
 
+Notification ref pointer clicks retain the original native notification window
+(including xfce4-notifyd window-role bubbles) across activation and visual feedback.
+Immediately before pointer input, fresh SHOWING/non-DEFUNCT states, bounds containing
+the requested point, and a native hit on the original target are required. Expired,
+moved, replaced, or unreadable targets return `stale_ref` without pointer input.
+The requested button, count, and modifiers are preserved. This guard is covered by
+synthetic tests; it does not make the native check and XTEST delivery atomic or
+establish live notification-action verification.
+
 Chromium page checkbox, radio, and toggle-button clicks compare fresh native
 `CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
 clicks resolve the native window-owner PID and hit-test its showing AT-SPI frame

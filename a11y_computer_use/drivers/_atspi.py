@@ -19065,6 +19065,41 @@ def chromium_button_click_action(acc):
     return None
 
 
+def notification_window(acc):
+    """Capture the notification owner before activation can outlive the bubble."""
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role == "notification":
+            return node
+        if role in {"frame", "window", "dialog"}:
+            return node if _application_name(acc).casefold() == "xfce4-notifyd" else None
+    return None
+
+
+def notification_pointer_target(acc, window, x: int, y: int) -> bool:
+    """Require fresh visibility, geometry and identity for a bubble pointer click.
+
+    Keep the original window even if expiry severs the target's parent link.
+    Missing native replies are refusal, never evidence that old pixels are safe.
+    """
+    try:
+        for node in (window, acc):
+            _drop_cached_properties(node)
+            states = _call_first(node, ("get_state_set",))
+            if (states is None
+                    or _state_flag(node, "DEFUNCT", drop_cache=False, states=states)
+                    or not _state_flag(node, "SHOWING", drop_cache=False, states=states)):
+                return False
+            pos, size = _extents(node)
+            if (pos is None or size is None
+                    or not (pos[0] <= x < pos[0] + size[0]
+                            and pos[1] <= y < pos[1] + size[1])):
+                return False
+        return fallback_pointer_target(acc, x, y)
+    except Exception:
+        return False
+
+
 def fallback_pointer_target(acc, x: int, y: int) -> bool:
     """Hit-test a ref from its owning popup/window, never from the target itself.
 
@@ -19073,7 +19108,7 @@ def fallback_pointer_target(acc, x: int, y: int) -> bool:
     Missing hits and cycles are refusals, not evidence from overlapping bounds.
     """
     root = next((node for node in _ancestor_chain(acc)
-                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog"}), None)
+                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog", "notification"}), None)
     if root is None or root is acc or not _state_has(root, "SHOWING"):
         return False
     target_key = _ancestor_key(acc)
