@@ -5686,6 +5686,16 @@ class Runtime:
         if outline_note:
             # The click stayed a single click. The row opens on a double-click.
             msg = f"{msg} (activates on double-click)"
+        table_selection_note = (
+            isinstance(target, Element)
+            and not activated
+            and count == 1
+            and parsed_button is MouseButton.LEFT
+            and not mods
+            and target.note == "single click selects only; activation may require count=2"
+        )
+        if table_selection_note:
+            msg = f"{msg} ({target.note})"
         paragraph_verdict = (
             self._paragraph_click_verdict(target)
             if isinstance(target, Element) and not activated else None
@@ -5719,6 +5729,8 @@ class Runtime:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:
             verdict = ("partial", "the row was selected and activates on double-click")
+        if verdict is None and table_selection_note:
+            verdict = ("partial", "row activation is not verified; single click selects only")
         toggle_evidence = getattr(self.driver, "toggle_click_evidence", None)
         if verdict is None and toggle_probe is not None and callable(toggle_evidence):
             evidence = toggle_evidence(toggle_probe)
@@ -10236,6 +10248,8 @@ def build_server(
         is not verified effect. Inspect a fresh snapshot before continuing.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
+        GTK table rows marked selection-only report a partial single-click
+        outcome: selection does not verify activation or an applied setting.
         Valid x is 0..width-1 and valid y is 0..height-1 on that display. A
         point outside it, including the display's own width and height, is
         invalid_arguments and sends no input. An unknown display_id is

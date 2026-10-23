@@ -17999,3 +17999,64 @@ def test_find_root_refreshes_registry_after_calc_restart(
         )
     assert changes == [0, 1]
     assert mask["value"] == 1
+
+
+@pytest.mark.parametrize("verify", [False, True])
+def test_gtk_flat_table_click_reports_selection_only(
+    fake_atspi, monkeypatch, xtest_recorder, tmp_path, verify
+) -> None:
+    """A GTK theme-list selection is not evidence of row-activated (#929)."""
+    from a11y_computer_use import observe, safety, server
+
+    events, _display = xtest_recorder
+    cell = _outline_cell("Adwaita-dark", ["expand or contract", "edit", "activate"])
+    window = _outline_window(cell, role="table")
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    actions = []
+    cell.do_action = lambda index: actions.append(index) or True
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(shot.app or "outline", safety.Tier.FULL)
+    runtime = server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    runtime._current = shot
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    target = next(el for el in shot.elements if el.title == "Adwaita-dark")
+    note = "single click selects only; activation may require count=2"
+    assert target.note == note
+    assert note in observe.render_matches(shot, (target,))
+    events.clear()
+    result = runtime.click(target.ref, verify=verify)
+    assert note in result
+    assert result.outcome == "partial"
+    assert result.evidence == "row activation is not verified; single click selects only"
+    assert "SELECTED" in cell.states
+    assert actions == []
+    assert not [event for event in events if event[0] == _X_BPRESS]
+
+    runtime._current = driver.snapshot(Scope.WINDOW, "outline")
+    target = next(el for el in runtime._current.elements if el.title == "Adwaita-dark")
+    events.clear()
+    double = runtime.click(target.ref, count=2)
+    assert note not in double
+    assert len([event for event in events if event[0] == _X_BPRESS]) == 2
+    assert actions == []
+
+
+@pytest.mark.parametrize("actions,role,toolkit,expected", [
+    (["activate"], "table", "gtk", True),
+    (["click", "activate"], "table", "gtk", False),
+    ([], "table", "gtk", False),
+    (["activate"], "tree table", "gtk", False),
+    (["activate"], "table", "Qt", False),
+])
+def test_gtk_table_selection_note_scope(fake_atspi, actions, role, toolkit, expected) -> None:
+    cell = _outline_cell("row", actions)
+    _outline_window(cell, role=role)
+    cell.get_application().get_toolkit_name = lambda: toolkit
+    parent = cell.parent
+    parent.get_child_at_index = lambda index: pytest.fail("note must not scan table cells")
+    assert bool(_atspi.gtk_table_selection_note(cell)) is expected
