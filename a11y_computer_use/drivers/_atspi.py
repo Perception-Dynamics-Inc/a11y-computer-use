@@ -6375,7 +6375,10 @@ def find_root(app: str, scope) -> object | None:
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return None
-    count = _call_first(desktop, ("get_child_count",), default=0) or 0
+    # A killed/restarted app can be absent from the desktop's cached child
+    # array. Refresh the registry before ranking candidates: refreshing the
+    # selected app's windows cannot discover its replacement registrant.
+    applications = _fresh_application_children(desktop)
     st = getattr(Atspi, "StateType", None)
     active = getattr(st, "ACTIVE", None)
 
@@ -6423,8 +6426,7 @@ def find_root(app: str, scope) -> object | None:
     except Exception:  # noqa: BLE001 - unavailable X11 cannot authorize a portal
         pass
     if portal is not None:
-        for i in range(int(count)):
-            candidate = _call_first(desktop, ("get_child_at_index",), i)
+        for candidate in applications:
             if candidate is None or pid_of(candidate) != portal["pid"]:
                 continue
             frames = [f for f in _frames(candidate)
@@ -6435,8 +6437,7 @@ def find_root(app: str, scope) -> object | None:
     best = None
     best_rank = -1
     hinted = next(iter(pids)) if len(pids) == 1 else None
-    for i in range(int(count)):
-        candidate = _call_first(desktop, ("get_child_at_index",), i)
+    for candidate in applications:
         if candidate is None:
             continue
         name = (_call_first(candidate, ("get_name",), default="") or "").lower()
