@@ -496,3 +496,5 @@
 - 2026-10-24 (#966): Chromium native menus can live inside unnamed top-level frames with no usable wrapper geometry or SHOWING state. Snapshot the showing native menu handle directly; retaining only the wrapper can still prune every menu item. Keep empty cached frames and find-bar recovery separate.
 
 - 2026-10-24 (PR #979 repair): Filtered-find anchor retention must be scoped to the observed process instance as well as the app name. Startup polling can first observe a departing Firefox process, then a new process whose omitted paragraph reuses the old Name field's ref. Reset retained anchors when both observations record disjoint instance identities; missing metadata is not restart evidence. Keep the ordinary audited app_restarted refusal when no new observation has occurred.
+
+- 2026-10-24 (#969): When mapping a previously generic AT-SPI container to a dedicated role, preserve its no-value-probe behavior where its text is the accessible name. Test shared snapshot pruning and role-based find with both leaf and static-text-child shapes, retaining native bounds and handles.

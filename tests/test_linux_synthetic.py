@@ -18515,3 +18515,40 @@ def test_chrome_native_popup_menu_snapshot(fake_atspi, monkeypatch, frame_showin
         assert observe.ax_handle_for(element.snapshot_id, element.ref) is native
     menu.states.clear()
     assert menu not in _atspi.snapshot_window_list(page)
+
+
+@pytest.mark.parametrize("with_text_child", [False, True], ids=["native-popup", "aria"])
+def test_tooltips_retain_native_role_in_find(fake_atspi, monkeypatch, with_text_child):
+    """#969: native tool tip nodes survive mapping and shared pruning."""
+    title = "Ships in 3–5 business days"
+    tip = _Acc("tool tip", name=title, width=175, height=24,
+               states=("SHOWING", "VISIBLE", "ENABLED", "SENSITIVE"))
+    _place_row(tip, 100, 100, 175, 24)
+    if with_text_child:
+        text = _Acc("static", name=title, width=175, height=24,
+                    states=("SHOWING", "VISIBLE"))
+        _place_row(text, 100, 100, 175, 24)
+        _adopt(tip, text)
+    group = _Acc("panel", name="Ordinary group", width=200, height=50,
+                 states=("SHOWING", "VISIBLE"))
+    frame = _adopt(_Acc("frame", name="Page", width=800, height=600,
+                       states=("SHOWING", "VISIBLE")), tip, group)
+    original_value_text = _atspi._value_text
+
+    def value_text(node, *args, **kwargs):
+        assert node is not tip, "Tooltips must not gain Text/Value probes"
+        return original_value_text(node, *args, **kwargs)
+
+    monkeypatch.setattr(_atspi, "_value_text", value_text)
+    snap = build_snapshot(frame, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    match, = observe.find_elements(snap, role="tooltip")
+    assert match.role == "AXTooltip"
+    assert match.title == title
+    assert match.value is None
+    assert match.bounds == Bounds(0, 100, 100, 175, 24)
+    assert not match.clickable
+    assert observe.ax_handle_for(snap.snapshot_id, match.ref) is tip
+    assert 'tooltip "Ships in 3–5 business days"' in observe.render_text(snap)
+    ordinary, = observe.find_elements(snap, role="group", text="Ordinary group")
+    assert ordinary.role == "AXGroup"
