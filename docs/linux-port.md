@@ -985,3 +985,13 @@ with that warning, including with `verify=true`: selection does not verify
 `row-activated` or an applied setting. AT-SPI does not expose GtkTreeView's
 `activate-on-single-click` property. The caller can explicitly request `count=2`
 and inspect the setting afterward; the driver does not add an activation.
+
+## GTK combo labels
+
+When a GTK combo's accessible name equals its displayed value, snapshots use
+its `LABELLED_BY` caption (without a trailing colon), or the existing measured
+same-row sibling-label fallback. The selected item remains the value, so
+`find(text="Hinting", clickable=true)` can identify the control even after its
+selection changes. Explicit names and combos without usable label evidence
+retain their native names. This naming behavior is covered by hermetic tests;
+live GTK verification remains a CI check.

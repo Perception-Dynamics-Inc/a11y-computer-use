@@ -1919,3 +1919,66 @@ def test_qt_focus_recovery_does_not_match_another_process(atspi, monkeypatch):
     monkeypatch.setattr(_linux_system, "request_input_activation",
                         lambda wid: pytest.fail("activated a different app"))
     _atspi._request_qt_focus_activation(field)
+
+
+def test_gtk_selected_item_names_use_labels_in_snapshot_and_find(atspi):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    states = {"ENABLED", "SENSITIVE", "SHOWING", "VISIBLE"}
+    combos, labels = [], []
+    for index, (caption, value) in enumerate([
+        ("Hinting", "None"), ("Sub-pixel order", "None"), ("Window Scaling", "1x"),
+    ]):
+        label = _Node("label", caption + ":", toolkit="gtk", x=10,
+                      y=50 + index * 40, w=120, states=states)
+        item = _Node("menu item", value, toolkit="gtk", states={"SELECTED"})
+        combo = _Node("combo box", value, toolkit="gtk", children=[item],
+                      x=150, y=50 + index * 40, states=states, actions=["press"])
+        if index == 2:
+            combo.relations = [_Relation("LABELLED_BY", [label])]
+            # The explicit relation must win even over a different row label.
+            label = _Node("label", "Wrong row label:", toolkit="gtk",
+                          x=10, y=130, w=120, states=states)
+        combos.append(combo)
+        labels.append(label)
+    panel = _Node("panel", children=[*reversed(combos), *reversed(labels)],
+                  toolkit="gtk", x=0, y=0, w=500, h=300, states=states)
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    for selected in ("None", "Full"):
+        combos[0].name = combos[0].children[0].name = selected
+        snap = observe.build_snapshot(
+            panel, ATSPIAccessor(), scope=Scope.WINDOW, app="ComboRepro", pid=None,
+            geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+        )
+        for index, caption in enumerate(("Hinting", "Sub-pixel order", "Window Scaling")):
+            matches = observe.find_elements(snap, text=caption, clickable=True)
+            assert len(matches) == 1
+            element = matches[0]
+            assert element.title == caption
+            assert element.value == combos[index].name
+            assert element.bounds.x == 150
+            assert element.bounds.y == 50 + index * 40
+            assert observe.ax_handle_for(snap.snapshot_id, element.ref) is combos[index]
+
+
+@pytest.mark.parametrize("case", ["explicit", "non_gtk", "unknown_value", "missing_bounds",
+                                  "other_row", "right_label", "ambiguous", "no_label"])
+def test_gtk_combo_names_preserve_names_without_matching_value_and_label(atspi, case):
+    toolkit = "other" if case == "non_gtk" else "gtk"
+    item = _Node("menu item", "None", toolkit=toolkit, states={"SELECTED"})
+    name = "Explicit name" if case == "explicit" else "None"
+    combo = _Node("combo box", name, toolkit=toolkit,
+                  children=[] if case == "unknown_value" else [item], x=150, y=50)
+    label = _Node("label", "Hinting:", toolkit=toolkit, x=10, y=50, w=120)
+    if case == "missing_bounds":
+        combo.get_component_iface = lambda: None
+    if case == "other_row":
+        label.rect.y = 100
+    if case == "right_label":
+        label.rect.x = 300
+    children = [combo] if case == "no_label" else [combo, label]
+    if case == "ambiguous":
+        children.append(_Node("label", "Other:", toolkit=toolkit, x=10, y=50, w=120))
+    _Node("panel", children=children, toolkit=toolkit)
+    assert _read(combo).title == name
