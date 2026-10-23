@@ -169,6 +169,13 @@ def _enabled(node: object) -> bool:
     return _has_state(node, "SENSITIVE")
 
 
+def _visible(node: object) -> bool:
+    """VISIBLE includes closed-menu rows; SHOWING would hide those rows."""
+    if _states(node) is None and not hasattr(node, "get_state_set"):
+        return True
+    return _has_state(node, "VISIBLE")
+
+
 def _sole_popup(raw: list[object]) -> object | None:
     """A single child menu that exists only to hold this menu's rows."""
     menus_found = [child for child in raw if _role(child) in _MENU_ROLES]
@@ -178,11 +185,12 @@ def _sole_popup(raw: list[object]) -> object | None:
     return menus_found[0]
 
 
-def entries_of(node: object, depth: int = 0) -> list[object]:
+def entries_of(node: object, depth: int = 0, *, include_hidden: bool = False) -> list[object]:
     """Titled rows inside ``node``. A menu bar is not descended into.
 
     One child menu and no menu items means the rows live in that popup, whether
-    the popup is untitled or repeats the parent's name.
+    the popup is untitled or repeats the parent's name. Hidden rows are
+    omitted unless requested for explicit-path refusal diagnostics.
     """
     if depth > 6:
         return []
@@ -190,8 +198,8 @@ def entries_of(node: object, depth: int = 0) -> list[object]:
     if _role(node) != "menu bar":
         popup = _sole_popup(raw)
         if popup is not None:
-            return entries_of(popup, depth + 1)
-    return [child for child in raw if _name(child).strip()]
+            return entries_of(popup, depth + 1, include_hidden=include_hidden)
+    return [child for child in raw if _name(child).strip() and (include_hidden or _visible(child))]
 
 
 def _strip_accelerator_suffix(title: str) -> str:
@@ -671,6 +679,18 @@ def _match(entries: list[object], wanted: str, depth: int) -> tuple[object, str]
     return entries[index], titles[index]
 
 
+def _match_path_entry(container: object, wanted: str, depth: int, path: str) -> tuple[object, str]:
+    # A hidden exact title must not resolve to another row by prefix matching.
+    node, title = _match(entries_of(container, include_hidden=True), wanted, depth)
+    if not _visible(node):
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"menu item {title!r} is hidden",
+            detail={"path": path, "component": wanted, "reason": "hidden", "level": depth},
+        )
+    return node, title
+
+
 def _contains(root: object, target: object) -> bool:
     """True when ``target`` is ``root`` or one of its descendants."""
     if root is None or target is None:
@@ -740,7 +760,7 @@ def _opened_menu(app: object, node: object) -> object:
     until it is pressed, and the popup is another window. A menu that still
     contains ``node`` is the parent popup, not the one this press opened.
     """
-    if entries_of(node):
+    if entries_of(node, include_hidden=True):
         return node
     if _quick_menu_entry(node):
         return _quick_popup(node) or node
@@ -757,7 +777,7 @@ def _walk(app: object, path: str) -> list[object]:
     container: object = _require_bar(app)
     nodes: list[object] = []
     for depth, wanted in enumerate(components):
-        node, _title = _match(entries_of(container), wanted, depth)
+        node, _title = _match_path_entry(container, wanted, depth, path)
         nodes.append(node)
         if depth < len(components) - 1 and not _has_submenu(node):
             raise ComputerUseError(
@@ -913,9 +933,9 @@ def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, 
                 f"{_name(target)!r} is an item, not a menu",
                 detail={"path": path, "hint": "list its parent, or press it"},
             )
-        rows = entries_of(_opened_menu(app, target))
-        if rows:
-            return [_describe(node).to_dict() for node in rows]
+        container = _opened_menu(app, target)
+        if entries_of(container, include_hidden=True):
+            return [_describe(node).to_dict() for node in entries_of(container)]
     top = _open_branch(app, path, settle)
     try:
         target = _walk(app, path)[-1]
@@ -940,7 +960,7 @@ def _open_branch(app: object, path: str, settle) -> object:
     top: object | None = None
     try:
         for depth, wanted in enumerate(components):
-            node, title = _match(entries_of(container), wanted, depth)
+            node, title = _match_path_entry(container, wanted, depth, path)
             if not _has_submenu(node):
                 if depth == len(components) - 1:
                     raise ComputerUseError(
@@ -1060,7 +1080,7 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
 
     for depth, wanted in enumerate(components):
         try:
-            node, title = _match(entries_of(container), wanted, depth)
+            node, title = _match_path_entry(container, wanted, depth, path)
         except ComputerUseError:
             abandon()
             raise
