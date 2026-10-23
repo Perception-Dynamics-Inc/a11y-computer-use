@@ -155,6 +155,7 @@ _CLICKABLE_ROLES = frozenset(
         "AXMenuItem",
         "AXPopUpButton",
         "AXRadioButton",
+        "AXTab",
     }
 )
 # A combo or select is not an editable entry. set_value writes it through the
