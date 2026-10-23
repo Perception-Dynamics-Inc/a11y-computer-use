@@ -3570,7 +3570,10 @@ class Runtime:
                 ("confirmed", "clipboard owner or targets changed") if changed else
                 ("unverifiable", "clipboard ownership change was not verified")
             )
-        no_retry = copy or (tool == "key" and judged == "unverifiable")
+        no_retry = (
+            copy or (tool == "key" and judged == "unverifiable")
+            or (tool == "type" and judged == "partial")
+        )
         browser = getattr(self.driver, "name", None) == "browser"
         return outcome.ActionResult(
             text,
@@ -6365,7 +6368,8 @@ class Runtime:
         return ComputerUseError(
             ErrorCode.UNSUPPORTED,
             f"{element.ref} ({element.role}{title}) is not editable",
-            detail={"ref": element.ref, "role": element.role, "reason": "not_editable"},
+            detail={"ref": element.ref, "role": element.role, "reason": "not_editable",
+                    "offset": None, "inserted_chars": 0},
         )
 
     def _focus_lost_type(self, element: Element) -> ComputerUseError:
@@ -6392,7 +6396,13 @@ class Runtime:
         """
         typer = getattr(self.driver, "type_into", None)
         if callable(typer):
-            typed = typer(element, text)
+            expected = {}
+            if getattr(self.driver, "name", None) == "linux":
+                if element.type_offset is not None:
+                    expected["expected_offset"] = element.type_offset
+                if element.type_text_hash is not None:
+                    expected["expected_text_hash"] = element.type_text_hash
+            typed = typer(element, text, **expected)
         else:
             focuser = getattr(self.driver, "focus_for_type", None)
             if not callable(focuser) or focuser(element) is not True:
@@ -6402,7 +6412,9 @@ class Runtime:
             return typed
         return len(text)
 
-    def _type_at_ref(self, text: str, ref: str, app: str | None) -> str:
+    def _type_at_ref(
+        self, text: str, ref: str, app: str | None, expected_offset: int | None = None,
+    ) -> str:
         """Type ``text`` into ``ref`` only after focus is confirmed on it.
 
         An issued secure ref is refused before resolution. Other refs use the
@@ -6412,6 +6424,10 @@ class Runtime:
         happened to be focused before the call.
         """
         snap, live = self._resolve(ref, "typetext")
+        anchor = next((el for el in snap.elements if el.ref == ref), live)
+        live = replace(live, type_offset=(expected_offset if expected_offset is not None
+                                         else anchor.type_offset),
+                       type_text_hash=anchor.type_text_hash)
         element_app = (snap.app or "").strip()
         if app is not None and element_app and not (
             _same_window_app(app, element_app) or _same_window_app(element_app, app)
@@ -6463,25 +6479,39 @@ class Runtime:
             self._refuse_vanished_target(live)
             return self._deliver_type_at_ref(live, text)
 
-        count = self._run_gated(action, gate, execute, input_target=live, secure=private)
+        try:
+            count = self._run_gated(action, gate, execute, input_target=live, secure=private)
+        except ComputerUseError as exc:
+            exc.detail.setdefault("offset", None)
+            raise
         if private:
             return self._conclude(
                 "typed into field (text redacted)", tool="type", app=gate,
                 had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
             )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        offset = getattr(count, "offset", None)
+        position = f"at native offset {offset}" if offset is not None else "(insertion offset unknown)"
         return self._conclude(
-            f"typed {shown} characters into {ref}{''.join(note)}",
+            f"typed {shown} characters into {ref} {position}{''.join(note)}",
             tool="type", app=gate, before=before, element=live, requested=text,
             had_ref=True, previous=previous,
         )
 
     @_serialized
-    def type_text(self, text: str, app: str | None = None, ref: str | None = None) -> str:
+    def type_text(
+        self, text: str, app: str | None = None, ref: str | None = None,
+        expected_offset: int | None = None,
+    ) -> str:
         app = _optional_app_arg(app, "type")
         ref = _optional_ref_arg(ref, "type")
+        if expected_offset is not None:
+            if type(expected_offset) is not int or expected_offset < 0:
+                raise ValueError("expected_offset must be a non-negative native text offset")
+            if ref is None or getattr(self.driver, "name", None) != "linux":
+                raise ValueError("expected_offset requires a Linux ref")
         if ref is not None:
-            return self._type_at_ref(text, ref, app)
+            return self._type_at_ref(text, ref, app, expected_offset)
         addressed = self._linux_addressed_app(app)
         if addressed is not None:
             return self._linux_type_text(text, addressed)
@@ -10366,6 +10396,7 @@ def build_server(
     @server.tool(name="type")
     async def type_text(
         text: str, app: str | None = None, ref: str | None = None,
+        expected_offset: int | None = None,
     ) -> CallToolResult:
         """Type literal text into the focused element (clipboard-paste path
         for long text). Optional ref is an element from the latest
@@ -10423,9 +10454,12 @@ def build_server(
         where paragraphs were requested are not confirmed. In a Chrome
         contenteditable a newline matches a paragraph or block boundary in
         the read-back. Missing or extra characters are still a mismatch.
+        Linux refs check the observed caret and buffer before typing. Optional
+        expected_offset supplies the intended native offset (Qt uses UTF-16).
+        Partial typing has no retry hints; inspect the buffer before continuing.
         Structured content adds outcome, next, and evidence."""
         return _publish(await run(
-            runtime.type_text, text, app, ref, _outcome=True, _tool="type",
+            runtime.type_text, text, app, ref, expected_offset, _outcome=True, _tool="type",
         ))
 
     @server.tool(name="key")

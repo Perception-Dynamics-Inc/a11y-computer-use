@@ -301,3 +301,48 @@ def test_linux_type_into_inserts_only_after_focus_is_confirmed(monkeypatch) -> N
     monkeypatch.setattr(_atspi, "_type_string", lambda text: order.append(f"key:{text}"))
     assert driver.type_into(element, "BBB") == 3
     assert order == ["focus", "confirm", "insert:BBB"]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_type_uses_issuing_snapshot_offset_and_hash(tmp_path, explicit):
+    """Resolution's fresh caret must not replace the caller's original anchor."""
+    from a11y_computer_use.drivers import _atspi
+
+    driver = _Driver()
+    driver.name = "linux"
+    driver.elements[2] = _replace(driver.elements[2], value="original",
+                                  type_offset=3, type_text_hash=_atspi._text_digest("original"))
+    runtime = _runtime(tmp_path, driver)
+    driver.resolve_ref = lambda snap, ref: _replace(snap.element(ref), type_offset=8,
+                                                    type_text_hash="fresh hash")
+
+    def type_into(element, text, **expected):
+        assert expected == {
+            "expected_offset": 2 if explicit else 3,
+            "expected_text_hash": _atspi._text_digest("original"),
+        }
+        assert element.type_offset == (2 if explicit else 3)
+        assert element.type_text_hash == _atspi._text_digest("original")
+        raise ComputerUseError(ErrorCode.STALE_REF, "state changed", detail={
+            "reason": "type_state_changed", "offset": None, "next": [],
+        })
+
+    driver.type_into = type_into
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.type_text("new", ref="e3", expected_offset=2 if explicit else None)
+    assert caught.value.code == ErrorCode.STALE_REF
+    assert not driver.calls
+
+
+def test_read_only_typing_has_no_retry_hint(tmp_path):
+    from a11y_computer_use import outcome
+
+    driver = _Driver()
+    driver.elements[2] = _replace(driver.elements[2], editable=False, role="AXStaticText")
+    runtime = _runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.type_text("new", ref="e3")
+    error = caught.value
+    assert error.detail["reason"] == "not_editable"
+    assert outcome.next_for_error(error.code.value, error.detail) == ()
+    assert not driver.calls

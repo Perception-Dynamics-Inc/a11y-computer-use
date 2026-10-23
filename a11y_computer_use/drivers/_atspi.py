@@ -4800,7 +4800,18 @@ class ATSPIAccessor:
         outline_note = outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else ""
         if outline_note and position is not None and size is not None:
             position, size = _outline_visible_bounds(node, position, size)
+        type_offset = None
+        type_text_hash = None
+        if focused and entry and isinstance(value, str) and not is_secure(node):
+            caret = _safe(lambda: _atspi().Text.get_caret_offset(node))
+            if type(caret) is int and caret >= 0:
+                type_offset = caret
+                observed = _read_full_text(node)
+                if isinstance(observed, str):
+                    type_text_hash = _text_digest(observed)
         return RawNode(
+            type_offset=type_offset,
+            type_text_hash=type_text_hash,
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
             subrole=(
@@ -6801,6 +6812,16 @@ class _PrivateTextCount(int):
     """A verified character count whose receipt and audit must stay redacted."""
 
     private_text_verified = True
+
+
+class _VerifiedInsertCount(int):
+    """Character count carrying the exact buffer verified after insertion."""
+
+    def __new__(cls, count: int, expected: str, offset: int | None = None):
+        result = super().__new__(cls, count)
+        result.expected = expected
+        result.offset = offset
+        return result
 
 
 def _write_unknown_entry(acc, text: str, *, insert: bool) -> bool:
@@ -9291,7 +9312,14 @@ def _refuse_chromium_tab_text(acc, text: str) -> None:
         )
 
 
-def insert_text(acc, text: str) -> int | None:
+def _text_digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def insert_text(acc, text: str, *, expected_offset: int | None = None,
+                expected_text_hash: str | None = None) -> int | None:
     """Insert ``text`` at the caret via AT-SPI EditableText.
 
     A selection is deleted first and the text replaces it. ``None`` means the
@@ -9319,7 +9347,7 @@ def insert_text(acc, text: str) -> int | None:
         raise _text_mismatch("text_mismatch", "private text write could not be verified",
                              private_text=True)
     eti = _editable_iface(acc)
-    if eti is None:
+    if eti is None and expected_offset is None and expected_text_hash is None:
         return None
     # A Writer document's own text stays empty. The paragraphs are the
     # read-back, captured before the insert so a later poll can see them
@@ -9341,6 +9369,17 @@ def insert_text(acc, text: str) -> int | None:
     qt = _qt_app(acc)
     nchars = _utf16_length(current) if qt else len(current)
     caret, start, end = _caret_and_selection(acc, nchars)
+    observed_caret = (_safe(lambda: _atspi().Text.get_caret_offset(acc))
+                      if expected_offset is not None else caret)
+    if ((expected_offset is not None and observed_caret != expected_offset)
+            or (expected_text_hash is not None and _text_digest(current) != expected_text_hash)):
+        raise ComputerUseError(
+            ErrorCode.STALE_REF, "caret or text changed since observation; nothing was inserted",
+            detail={"reason": "type_state_changed", "offset": None,
+                    "current_offset": caret, "next": [], "inserted_chars": 0},
+        )
+    if eti is None:
+        return None
     py_caret, py_start, py_end = (
         tuple(_qt_python_offset(current, offset) for offset in (caret, start, end))
         if qt else (caret, start, end)
@@ -9403,9 +9442,10 @@ def insert_text(acc, text: str) -> int | None:
                     "caret_not_advanced",
                     "the text was inserted but the caret could not be advanced",
                     inserted_chars=len(typed),
+                    offset=offset,
                     unchanged=False,
                 )
-        return len(typed)
+        return _VerifiedInsertCount(len(typed), expected, offset)
     # The raw string can still be U+FFFC, or spaces can come back as NBSP.
     # Compare the expanded read so a successful insert is not a mismatch.
     # Qt still has to report the character count of the string that was
@@ -9422,9 +9462,12 @@ def insert_text(acc, text: str) -> int | None:
         after_readable = _poll_typed_text(
             lambda: _readable_text(acc), before_readable, typed, chrome=True
         )
-    if _typed_visible(
-        before_readable, after_readable, typed, chrome=_chromium_contenteditable(acc)
-    ) and _qt_text_count_matches(acc, expected):
+    if (
+        (before_readable != current or _norm_nbsp(after_readable) == _norm_nbsp(expected))
+        and _typed_visible(
+            before_readable, after_readable, typed, chrome=_chromium_contenteditable(acc)
+        ) and _qt_text_count_matches(acc, expected)
+    ):
         return len(typed)
     actual = _full_text(acc)
     if writer_doc is not None:
@@ -9468,7 +9511,12 @@ def insert_text(acc, text: str) -> int | None:
         "the field text after type does not match what was inserted",
         expected=_excerpt(expected),
         actual=_excerpt(shown),
-        inserted_chars=len(typed),
+        requested_chars=len(typed),
+        offset=offset,
+        next=[],
+        outcome="partial" if not unchanged else "refused",
+        evidence=(f"insertion attempted at native offset {offset}; "
+                  f"observed buffer {_excerpt(shown)!r}; inspect before further typing"),
         unchanged=unchanged,
         before=_excerpt(before_readable if before_readable is not None else current),
     )

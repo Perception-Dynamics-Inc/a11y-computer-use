@@ -1093,7 +1093,10 @@ def test_mcp_server_exposes_console_and_network_only_on_browser(monkeypatch) -> 
     from a11y_computer_use import drivers, server
 
     async def names(srv):
-        return {t.name for t in await srv.list_tools()}
+        listed = await srv.list_tools()
+        typing = next(t for t in listed if t.name == "type")
+        assert "expected_offset" in typing.inputSchema["properties"]
+        return {t.name for t in listed}
 
     monkeypatch.setattr(drivers, "get_driver", lambda *a, **k: browser.BrowserDriver(endpoint="x"))
     browser_tools = asyncio.run(names(server.build_server()))

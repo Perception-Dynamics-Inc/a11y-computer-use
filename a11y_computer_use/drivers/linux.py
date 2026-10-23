@@ -1195,7 +1195,8 @@ def _not_editable(element: Element) -> ComputerUseError:
     return ComputerUseError(
         ErrorCode.UNSUPPORTED,
         f"{element.ref} ({element.role}{title}) is not editable",
-        detail={"ref": element.ref, "role": element.role, "reason": "not_editable"},
+        detail={"ref": element.ref, "role": element.role, "reason": "not_editable",
+                    "offset": None, "inserted_chars": 0},
     )
 
 
@@ -3252,6 +3253,14 @@ class LinuxDriver:
                 f"the value read back does not match {value!r}",
                 detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
             )
+        # Native EditableText replacement need not move keyboard focus.
+        # Establish the remembered typing target on the real widget too;
+        # otherwise a later ref to the old field appears already focused
+        # and retains its old caret instead of focusing it.
+        if self._run(lambda: _atspi._focus_on_target(handle)) is False:
+            self._run(lambda: _atspi.grab_focus(handle))
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                return success  # The value was verified, but focus was not.
         self._focused_editable = handle
         return success
 
@@ -4121,10 +4130,14 @@ class LinuxDriver:
             },
         )
 
-    def type_into(self, element: Element, text: str) -> int:
+    def type_into(
+        self, element: Element, text: str, *, expected_offset: int | None = None,
+        expected_text_hash: str | None = None,
+    ) -> int:
         """Type ``text`` into ``element`` only after focus is confirmed on it.
 
-        ``grab_focus`` runs first. A later read has to show keyboard focus on
+        Unless focus is already on the target, ``grab_focus`` runs first.
+        A later read has to show keyboard focus on
         that accessible, or on a descendant inside it. Anything else raises
         ``focus_lost`` and does not insert and does not send keystrokes, so
         the characters cannot land in a different field. A confirmed field
@@ -4136,6 +4149,7 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
+        self._type_expected = None
         self._focused_editable = None
         if element.secure:
             raise _secure_focus_error("the requested ref is a password field")
@@ -4165,12 +4179,11 @@ class LinuxDriver:
                     lambda: _atspi.place_drawing_caret_at_end(handle, ignore_focus=True)
                 )
         else:
-            # Math's grab_focus resets an already focused command caret to zero.
-            # Keep its native caret/selection when focus is already confirmed.
-            math_focused = self._run(lambda: (
-                _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
-            ))
-            if not math_focused:
+            # Re-grabbing an already focused GTK entry or Math command can
+            # reset its caret. Preserve the observed insertion point while
+            # retaining the independent focus confirmation below.
+            already_focused = self._run(lambda: _atspi._focus_on_target(handle))
+            if not already_focused:
                 self._run(lambda: _atspi.grab_focus(handle))
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
                 raise self._focus_lost_on(element)
@@ -4181,11 +4194,21 @@ class LinuxDriver:
         except Exception:
             peers = {}
         try:
-            count = self._type_confirmed_handle(handle, text)
+            expected = {}
+            if expected_offset is not None:
+                expected["expected_offset"] = expected_offset
+            if expected_text_hash is not None:
+                expected["expected_text_hash"] = expected_text_hash
+            count = self._type_confirmed_handle(handle, text, **expected)
         except ComputerUseError as exc:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
         self._raise_if_peers_changed(handle, peers, element)
+        if isinstance(count, _atspi._VerifiedInsertCount):
+            # Reuse the native pre-insert caret/selection and exact buffer
+            # verification, including Qt's UTF-16 offset conversion. Publish
+            # only after peer checks; Runtime still compares a fresh read-back.
+            self._type_expected = count.expected
         return count
 
     def _focus_lost_on(self, element: Element) -> ComputerUseError:
@@ -4228,7 +4251,10 @@ class LinuxDriver:
             },
         )
 
-    def _type_confirmed_handle(self, handle, text: str) -> int:
+    def _type_confirmed_handle(
+        self, handle, text: str, *, expected_offset: int | None = None,
+        expected_text_hash: str | None = None,
+    ) -> int:
         """Insert ``text`` into a handle whose focus was already confirmed."""
         from a11y_computer_use.drivers import _atspi
 
@@ -4244,7 +4270,12 @@ class LinuxDriver:
             writer_before = self._run(lambda: _atspi.writer_document_text(writer_doc)) or ""
         before = self._run(lambda: _atspi._readable_text(handle))
         try:
-            inserted = self._run(lambda: _atspi.insert_text(handle, text))
+            kwargs = {}
+            if expected_offset is not None:
+                kwargs["expected_offset"] = expected_offset
+            if expected_text_hash is not None:
+                kwargs["expected_text_hash"] = expected_text_hash
+            inserted = self._run(lambda: _atspi.insert_text(handle, text, **kwargs))
         except ComputerUseError as exc:
             detail = exc.detail or {}
             if detail.get("reason") == "text_mismatch" and detail.get("unchanged"):

@@ -436,6 +436,10 @@
 
 - 2026-10-18 (PR #905 main merge): Browser dialog gating and shaded-window input refusal protect different dispatch conditions. Preserve the approved dialog probe unchanged when importing the window visibility guard, and run both gate and Linux synthetic regressions.
 
+- 2026-10-19 (#916 repair): An exact insertion read-back proves only the call-time caret and buffer. Preserve the issuing snapshot's native offset and untruncated text digest across live ref resolution, then check them before mutation. A concurrent prefix edit can leave the token present while invalidating exact insertion; restrict expanded-text fallback to transformed accessibility text. Changed-buffer failures and partial outcomes must not invite duplicate retries. Explicitly distinguish verified insertion offsets from unavailable offsets. Preserve already confirmed focus: GTK Entry can reset its caret when focus is redundantly grabbed.
+
+- 2026-10-19 (PR #924 CI repair): EditableText.set_text_contents can replace FieldA while native keyboard focus stays on FieldB. Preserving an already-focused caret in type_into exposes that mismatch with the remembered set_value target. After a verified replacement, establish native focus before remembering the target; retain the caret if already focused, and do not cache a target whose focus cannot be confirmed. The unchanged two-entry GTK regression reproduces the old append and passes with this repair. An isolated Qt pass (including Qt 6.4.2/Openbox) does not establish the cause of a full-CI mismatch; retain offset/buffer diagnostics in the live assertion because --tb=line hides ComputerUseError.detail.
+
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
 
 - 2026-10-19 (#934): Shell-capable GUI surfaces need commit/paste gates as well as typing gates. Clipboard write plus context-menu Paste and Launch can execute without TypeText or KeyChord. Gate clicks/menu presses before dispatch and after rechecks; identify panel run dialogs by native metadata and app identity, and cover detached popup items conservatively. Live validation should independently prepopulate the command to prove Launch itself is refused, then verify marker absence and audited violations. Preserve the focused-terminal fallback even when an addressed ref is not a terminal.
@@ -451,6 +455,7 @@
 
 - 2026-10-23 (PR #939 repair): Notification implicit-activation bypass and Qt input-focus recovery use adjacent X11 helpers but serve different paths. Preserve both helpers and their regressions when merging; retain notification expiry checks immediately before dispatch.
 
+- 2026-10-23 (PR #924 merge): Exact ref-insert caret verification and Qt inactive-window focus recovery are complementary. Preserve both appended Qt regression groups when merging, including the native-focus requirement after activation and the no-input checks for observed caret/buffer drift.
 - 2026-10-23 (#944): GTK TreeView cell accessibles can retain their object path and cached name after the model replaces a row. Before cell input, invalidate both operation-local getters and native properties and compare the current label with the resolved snapshot label; repeat after window/feedback preparation. A successful ref rematch against cached names is insufficient.
 
 

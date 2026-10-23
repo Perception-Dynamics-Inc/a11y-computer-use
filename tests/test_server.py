@@ -170,6 +170,9 @@ async def test_tool_registry_matches_plan_surface(mcp_server) -> None:
         listed = (await client.list_tools()).tools
     assert {tool.name for tool in listed} == EXPECTED_TOOLS
     assert len(listed) == len(EXPECTED_TOOLS)
+    typing = next(tool for tool in listed if tool.name == "type")
+    assert "expected_offset" in typing.inputSchema["properties"]
+    assert "expected_offset" not in typing.inputSchema.get("required", [])
     for tool in listed:
         assert tool.description, f"{tool.name} has no description"
 

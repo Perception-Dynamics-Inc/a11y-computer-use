@@ -969,6 +969,32 @@ when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
 to restore the client before retrying. These checks do not change the window
 listing or snapshot visibility reporting tracked separately in #913.
 
+For native EditableText `type(ref=...)`, an exact insertion at the pre-type
+caret (or replacement of the active selection) carries its verified expected
+buffer into the outcome check. GTK uses code-point offsets and Qt uses UTF-16
+offsets. A matching fresh read-back confirms start and middle insertions as
+well as appends, with no retry hints. A differing read-back retains the existing
+partial/no-op handling. This has hermetic GTK/Qt coverage; the live GTK and Qt
+regressions are left to CI.
+
+For a focused editable ref, snapshots retain the native caret offset and a digest
+of the untruncated buffer. `type(ref=...)` checks that state before insertion;
+changed text or a moved caret returns `stale_ref` with `type_state_changed` and
+no input. An optional `expected_offset` overrides the observed caret when the
+caller has deliberately repositioned it (Qt offsets count UTF-16 units).
+Results name the native insertion offset when verified; unavailable offsets
+are unknown (`null` in error details). A partial or transformed insertion
+reports the observed buffer and does not suggest retrying the input. Inspect
+and reconcile the field before further typing. Read-only refusals also have
+no retry hint. These checks add no fixed waits.
+
+After a native `set_value` replacement, the driver establishes keyboard focus
+before remembering the field as the typing target. EditableText itself can
+leave focus on a different entry. An already focused field keeps its caret;
+if focus cannot be confirmed, the verified replacement still succeeds but the
+field is not remembered for subsequent typing.
+
+
 Ref-action preparation skips implicit activation for X11 clients reporting
 `_NET_WM_WINDOW_TYPE_NOTIFICATION`: these bubbles can accept pointer input
 without becoming the active window. Visibility checks and the requested action

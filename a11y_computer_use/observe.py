@@ -323,6 +323,9 @@ class RawNode:
     note: str = ""
     #: Native heading level, when reported; never inferred from text or geometry.
     heading_level: int | None = None
+    # Native caret and digest of the observed buffer; never populated for secrets.
+    type_offset: int | None = None
+    type_text_hash: str | None = None
 
 
 class TreeAccessor(Protocol):
@@ -2868,6 +2871,8 @@ def _flatten(
             path=path,
             enabled=node.raw.enabled,
             focused=node.raw.focused,
+            type_offset=None if secure else node.raw.type_offset,
+            type_text_hash=None if secure else node.raw.type_text_hash,
             default=node.raw.default,
             form_id=node.raw.form_id,
             clickable=clickable,
