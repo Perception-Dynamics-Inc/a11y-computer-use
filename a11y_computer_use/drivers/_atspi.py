@@ -4275,6 +4275,50 @@ def _cached_rows_for_snapshot(bounds: dict, accs: list) -> list:
     return _bands_for_snapshot(rows)
 
 
+def _list_item_subtrees(container, rows: list[tuple]) -> list[tuple]:
+    """Retain native list-item subtrees around sampled labels.
+
+    A CSS list item is not a clipping viewport: a showing dropdown can
+    extend outside both the item and the list. Publishing only its sampled
+    text discards that subtree. Keep native item bounds and let the ordinary
+    snapshot traversal apply each descendant's own visibility checks.
+    """
+    result = []
+    seen = set()
+    container_key = _ancestor_key(container)
+    for acc, pos, size in rows:
+        # Already sampled native rows retain their viewport-clipped bounds.
+        if _role_name(acc) == "list item":
+            key = _ancestor_key(acc)
+            if key not in seen:
+                seen.add(key)
+                result.append((acc, pos, size))
+            continue
+        item = None
+        for ancestor in _ancestor_chain(acc):
+            if _ancestor_key(ancestor) == container_key:
+                if item is not None:
+                    item_pos, item_size = _extents(item)
+                    # Plain marker/label rows keep the existing sampled
+                    # text and clipped geometry. Only structural/control
+                    # children need their native item restored.
+                    has_subtree = any(
+                        _role_name(_child_at(item, index)) not in
+                        {"static", "text", "list marker"}
+                        for index in range(min(_child_count(item), _MAX_CHILDREN_FETCH))
+                    )
+                    if has_subtree and item_pos is not None and item_size is not None:
+                        acc, pos, size = item, item_pos, item_size
+                break
+            if _role_name(ancestor) == "list item":
+                item = ancestor
+        key = _ancestor_key(acc)
+        if key not in seen:
+            seen.add(key)
+            result.append((acc, pos, size))
+    return result
+
+
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
@@ -4964,6 +5008,8 @@ class ATSPIAccessor:
             else:
                 live = _in_view_named_rows(node)
             if len(_row_names(live)) >= 2:
+                if role == "list":
+                    live = _list_item_subtrees(node, live)
                 for acc, pos, size in live:
                     self._visible_bounds[id(acc)] = (pos, size)
                 # The band is the on-screen rows only. The rest of a long

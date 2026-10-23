@@ -18565,3 +18565,75 @@ def test_chrome_native_popup_menu_snapshot(fake_atspi, monkeypatch, frame_showin
         assert observe.ax_handle_for(element.snapshot_id, element.ref) is native
     menu.states.clear()
     assert menu not in _atspi.snapshot_window_list(page)
+
+
+@pytest.mark.parametrize("showing", [True, False])
+@pytest.mark.parametrize("nested", [True, False])
+def test_chromium_multi_item_list_keeps_overflow_controls(
+    fake_atspi, monkeypatch, showing, nested,
+):
+    """Synthetic CSS dropdown: item bounds do not clip its painted children."""
+    app = _ChromeApp()
+    window = _Acc("frame", name="Dropdown", width=1280, height=800)
+    document = _Acc("document web", states=("SHOWING",), width=1200, height=680)
+    listing = _Acc("list", width=220, height=35)
+    plain = _Acc("list item", width=100, height=35)
+    parent = _Acc("list item", width=120, height=35)
+    plain_text = _Acc("static", name="Plain", width=80, height=16)
+    parent_text = _Acc("static", name="Products", width=90, height=16)
+    link = _Acc("link", name="Downloads", width=140, height=30,
+                states=("VISIBLE", "SHOWING") if showing else ("VISIBLE",))
+    submenu = _Acc("list", width=142, height=32)
+    item = _Acc("list item", width=140, height=30)
+    _adopt(window, document)
+    _adopt(document, listing)
+    _adopt(listing, plain, parent)
+    _adopt(plain, plain_text)
+    _adopt(parent, parent_text, submenu if nested else link)
+    _adopt(submenu, item)
+    if nested:
+        _adopt(item, link)
+    nodes = [window, document, listing, plain, parent, plain_text, parent_text,
+             submenu, item, link]
+    _own(app, *nodes)
+    for node, x, y, w, h in (
+        (document, 0, 90, 1200, 680), (listing, 24, 212, 220, 35),
+        (plain, 24, 212, 100, 35), (parent, 124, 212, 120, 35),
+        (plain_text, 30, 220, 80, 16), (parent_text, 130, 220, 90, 16),
+        (submenu, 124, 247, 142, 32), (item, 125, 248, 140, 30),
+        (link, 125, 248, 140, 30),
+    ):
+        _place_row(node, x, y, w, h)
+    _wire_chrome_list(monkeypatch, window, _ListHit([], []), stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    matches = observe.find_elements(snap, text="Downloads", role="link")
+    if not showing:
+        assert not matches
+        return
+    assert len(matches) == 1
+    assert matches[0].bounds == Bounds(0, 125, 248, 140, 30)
+    assert "Downloads" in observe.render_text(snap)
+    assert observe.ax_handle_for(snap.snapshot_id, matches[0].ref) is link
+    runtime = _runtime_for(LinuxDriver(), monkeypatch)
+    monkeypatch.setattr(runtime.driver, "ensure_trusted", lambda: None)
+    monkeypatch.setattr(_linux_input, "scroll", lambda *a, **k: pytest.fail("visible link must not scroll"))
+    assert "Downloads" in runtime.scroll_to_find("chrome", text="Downloads", role="link")
+
+
+def test_chromium_list_subtree_publication_keeps_clipping_and_deduplicates(fake_atspi):
+    listing = _Acc("list", width=220, height=35)
+    item = _Acc("list item", width=100, height=35)
+    first = _Acc("static", name="Products", width=80, height=16)
+    second = _Acc("static", name="Menu", width=20, height=16)
+    _adopt(listing, item)
+    dropdown = _Acc("link", name="Downloads", width=140, height=30)
+    _adopt(item, first, second, dropdown)
+    _place_row(item, 24, 212, 100, 35)
+    rows = [(first, (30, 220), (80, 16)), (second, (110, 220), (20, 16))]
+    assert _atspi._list_item_subtrees(listing, rows) == [
+        (item, (24, 212), (100, 35)),
+    ]
+    clipped = [(item, (24, 220), (100, 27))]
+    assert _atspi._list_item_subtrees(listing, clipped) == clipped
+    unrelated = _Acc("list", width=220, height=35)
+    assert _atspi._list_item_subtrees(unrelated, rows) == rows
