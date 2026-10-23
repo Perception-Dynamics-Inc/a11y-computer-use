@@ -1040,3 +1040,11 @@ screenshot, then visually verify the selected date. For `verify=true` clicks
 on an observed calendar or opaque region, an unchanged accessibility tree
 reports `effect unknown (opaque target)` rather than `(no change)`. This is
 uncertainty reporting, not pixel comparison or verified date selection.
+
+### GTK expander headers
+
+Ref clicks on GTK expandable toggle buttons exposing only `activate` are refused
+with `expander_target_ambiguous` before input. GTK can report the entire row as
+its bounds even though only the arrow and label receive clicks. The driver does
+not guess label geometry or substitute native activation. Use explicit screenshot
+coordinates on the arrow or label and verify that the expanded state changes.
