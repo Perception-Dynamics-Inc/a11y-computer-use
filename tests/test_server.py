@@ -5284,6 +5284,40 @@ def test_terminal_click_no_input_path_keeps_noop_and_dispatch_gate(
     assert not mocked_driver["click"]
 
 
+@pytest.mark.parametrize("tool", ["find", "scroll_to_find"])
+def test_palette_search_finds_later_swatch_without_input(monkeypatch, tool) -> None:
+    from tests.fixtures.trees import DictAccessor, GEOMETRY, ax, colour_palette
+
+    palette = colour_palette()
+    tree = ax("AXWindow", title="Pick a Colour", at=(0.0, 0.0),
+              size=(1400.0, 600.0), children=[palette])
+    snap = observe.build_snapshot(tree, DictAccessor(), scope=Scope.WINDOW,
+                                  app="com.a", pid=1, geometry=GEOMETRY)
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+        def scroll(self, *args, **kwargs):
+            pytest.fail("An already visible swatch must not cause scrolling")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    out = getattr(rt, tool)("app", text="Light Blue", role="radiobutton")
+    assert "Light Blue" in out
+    target, = observe.find_elements(rt._current, text="Light Blue", role="radiobutton")
+    assert target.ref in out
+    assert observe.ax_handle_for(rt._current.snapshot_id, target.ref) is palette["children"][30]
+    if tool == "scroll_to_find":
+        assert "found after 0 scroll(s)" in out
+
+
 @pytest.mark.parametrize("role", ["AXCalendar", "opaque_region", "AXButton"])
 @pytest.mark.parametrize("inside", [True, False])
 def test_opaque_coordinate_click_unchanged_tree_is_unknown(tmp_path, monkeypatch, role, inside):

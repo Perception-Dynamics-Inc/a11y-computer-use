@@ -469,4 +469,6 @@
 
 - 2026-10-23 (#954): GTK calendars can publish only a childless calendar role while pointer input changes a painted date. Preserve the native calendar identity, refuse whole-widget ref clicks before either semantic or pointer input, and do not interpret an unchanged accessibility tree as unchanged pixels. Explicit coordinates must remain the caller's point.
 
+- 2026-10-23 (#955): `find` and `scroll_to_find` consume the pruned snapshot, so ordinary child elision can hide visible named palette choices. Keep named leaf radio groups on the bounded sheet allowance; retain native handles, measured bounds, and ordinary caps for mixed or nested controls. Preserve independent calendar outcome regressions when merging appended Runtime tests.
+
 - 2026-10-23 (#956): GTK colour chooser hex entries can echo EditableText while retaining the old selected colour. Buffer equality is not commit evidence; keep activation explicit and verify the preview before Select.
