@@ -3599,7 +3599,7 @@ class Runtime:
 
     # -- target resolution ----------------------------------------------------
 
-    def _note_issued(self, snap: Snapshot) -> None:
+    def _note_issued(self, snap: Snapshot, refs: set[str] | None = None) -> None:
         """Remember which app issued the refs the agent was just given.
 
         Refs restart at ``e1`` in every snapshot, so after a snapshot of app
@@ -3612,6 +3612,16 @@ class Runtime:
         """
         app = getattr(snap, "app", None)
         last = getattr(self, "_last_issued", None)
+        # A filtered find must not rebind refs whose new meaning was never
+        # returned. Keep their original snapshots (including ancestry) for
+        # the ordinary live matcher. Full observations reset these bindings.
+        anchors = getattr(self, "_issued_anchors", {})
+        if refs is None or last is None or last.app != app:
+            anchors = {}
+        for element in snap.elements:
+            if refs is None or element.ref in refs:
+                anchors[element.ref] = snap
+        self._issued_anchors = anchors
         self._last_issued = snap
         if last is None or not app or not getattr(last, "app", None):
             self._foreign_issued = None
@@ -3671,9 +3681,14 @@ class Runtime:
         return self._current
 
     def _anchor(self, ref: str) -> tuple[Snapshot, Element]:
-        """Look up ``ref`` in the current snapshot; structured error when it
-        was never issued by that epoch (refs are snapshot-scoped)."""
+        """Look up the issuing anchor, retaining refs omitted by a later find.
+
+        Keep the original snapshot's ancestry and identity for live resolution.
+        Other observation paths continue to use their current snapshot epoch.
+        """
         snap = self._require_snapshot(ref)
+        if snap is getattr(self, "_last_issued", None):
+            snap = getattr(self, "_issued_anchors", {}).get(ref, snap)
         try:
             return snap, snap.element(ref)
         except KeyError:
@@ -4864,7 +4879,7 @@ class Runtime:
         """Snapshot ``app`` and return only the elements matching the filters.
 
         Takes a fresh snapshot (so the returned refs are live and actionable, and
-        this becomes the current ref epoch), then filters via
+        only returned refs acquire new bindings), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
         `desktop_snapshot`. On Linux, Chromium searches the whole document,
         including a table that starts below the viewport, and scrolls the
@@ -4929,7 +4944,7 @@ class Runtime:
                     if el.ref in replacements else el for el in snap.elements
                 ))
                 self._current = snap
-            self._note_issued(snap)
+            self._note_issued(snap, {el.ref for el in matches})
             rendered = observe.render_matches(snap, matches, text=text)
             if hidden_buffer and not matches:
                 rendered += (
@@ -10163,7 +10178,9 @@ def build_server(
         capability. Give at least one filter. Returns each match's ref, role,
         title, value, flags, and bounds. Takes a fresh snapshot, so the returned
         refs (e1..eN) are the current epoch — act on them promptly and re-observe
-        after the UI changes. scope='window'|'app'. Tier 'read'.
+        after the UI changes. Refs omitted from a later find keep their earlier
+        binding and must still resolve against the live tree before input.
+        scope='window'|'app'. Tier 'read'.
 
         ocr=true searches the TEXT ON SCREEN instead of the accessibility tree
         (fresh on-device OCR of the display): returns matching lines as refs
