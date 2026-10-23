@@ -1685,6 +1685,38 @@ def _hidden_page_tab(node) -> bool:
     return _negative_extent(size)
 
 
+def _terminal_page_frame_title(node) -> str:
+    """Borrow a frame title only for its single, terminal-content page."""
+    notebook = _call_first(node, ("get_parent", "getParent"))
+    if _role_name(notebook) != "page tab list" or _child_count(notebook) != 1:
+        return ""
+    # Reject detached popovers and nested notebooks. Only layout wrappers
+    # may separate the notebook from its own frame.
+    current = notebook
+    for _ in range(8):
+        current = _call_first(current, ("get_parent", "getParent"))
+        role = _role_name(current)
+        if role in {"frame", "window"}:
+            break
+        if role not in {"panel", "filler", "section"}:
+            return ""
+    else:
+        return ""
+    frame = current
+    current = node
+    for _ in range(8):
+        kids = _direct_children(current)
+        if len(kids) != 1:
+            return ""
+        current = kids[0]
+        role = _role_name(current)
+        if role == "terminal":
+            return _node_name(frame).strip()
+        if role not in {"panel", "filler", "section", "scroll pane", "viewport"}:
+            return ""
+    return ""
+
+
 def _claws_wizard_page_title(node) -> str:
     """Read the leading page label of Claws Mail's hidden wizard notebook."""
     if _application_name(node).casefold() not in {"claws-mail", "claws mail"}:
@@ -4483,9 +4515,10 @@ class ATSPIAccessor:
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
-            # allocation and, for a terminal, an empty name. The frame name
-            # is the page label. Inventing a box would put a click on the
-            # menu or the page, so this control stays hidden: named, with
+            # allocation and, for a terminal, an empty name. Only a main
+            # terminal page may borrow the frame title; unrelated pages
+            # retain their own label or remain unnamed. Inventing a box
+            # would put a click on the menu or page, so it stays hidden with
             # no bounds and no press action.
             label = str(name).strip()
             if not label and not str(description).strip():
@@ -4493,7 +4526,7 @@ class ATSPIAccessor:
                 if label:
                     role = "AXTab"
             if not label and not str(description).strip():
-                label = _frame_accessible_name(node)
+                label = _terminal_page_frame_title(node)
             name = label
             position, size = None, None
             unallocated = True

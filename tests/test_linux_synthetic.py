@@ -1122,6 +1122,42 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
         parent = by_ref[parent].parent
 
 
+@pytest.mark.parametrize("detached", [False, True])
+def test_hidden_playlist_tabs_do_not_borrow_track_title(monkeypatch, detached):
+    """Nested hidden playlist pages keep content without phantom track labels."""
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box or ((0., 0.), (300., 500.)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
+        True, False, None, True, None, False, False,
+    ))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *a, **kw: None)
+    titles = ["Playlist (3 items)", "Playlist (0 chapters)"]
+    pages = [_PageNode("table", children=[_PageNode("table column header", title)])
+             for title in titles]
+    tabs = [_PageNode("page tab", box=((-1., -1.), (-1., -1.)), children=[page])
+            for page in pages]
+    inner = _PageNode("page tab list", children=tabs)
+    outer = _PageNode("page tab", box=((-1., -1.), (-1., -1.)), children=[
+        _PageNode("panel", children=[inner]),
+    ])
+    popover = _PageNode("panel", children=[_PageNode("page tab list", children=[outer])])
+    frame = _PageNode("frame", "Tone A 330Hz", children=[] if detached else [popover])
+    _PageNode("application", "parole", children=[frame, popover] if detached else [frame])
+    accessor = _atspi.ATSPIAccessor()
+    for track in ["Tone A 330Hz", "Noise C", "Parole Media Player"]:
+        frame.name = track
+        for tab in [outer, *tabs]:
+            raw = accessor.read(tab)
+            assert not raw.title
+            assert raw.unallocated
+            assert raw.position is None and raw.size is None
+            assert raw.actions == ()
+        snap = build_snapshot(
+            popover, accessor, scope=Scope.WINDOW, app="parole", pid=1, geometry=_geometry(),
+        )
+        assert not any(el.title == track for el in snap.elements)
+        assert all(any(el.title == title for el in snap.elements) for title in titles)
+
+
 def test_hidden_page_tab_ref_click_is_not_a_pointer_click() -> None:
     """A ref click on a hidden tab is a typed no-op. The pointer is not called."""
     from a11y_computer_use import server
