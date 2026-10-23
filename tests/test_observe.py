@@ -2166,3 +2166,46 @@ def test_window_overflow_preserves_existing_content_note():
     snap = build_snapshot(ax("AXDialog", at=(0, 0), size=(600, 1034)), NotedAccessor(),
                           scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY)
     assert "Existing limitation; window extends beyond" in snap.element("e1").content_note
+
+
+def test_named_radio_palette_keeps_every_swatch_and_native_target() -> None:
+    from tests.fixtures.trees import colour_palette
+
+    palette = colour_palette()
+    snap = snap_of(palette)
+    matches = observe.find_elements(snap, role="radiobutton")
+    assert len(matches) == 45
+    target, = observe.find_elements(snap, text="Light Blue", role="radiobutton")
+    assert target.bounds == Bounds(1, 680, 200, 96, 64)
+    assert target.clickable
+    assert observe.ax_handle_for(snap.snapshot_id, target.ref) is palette["children"][30]
+    assert "… " not in render_text(snap)
+
+
+def test_named_radio_palette_retains_overflow_marker() -> None:
+    from tests.fixtures.trees import colour_palette
+
+    snap = snap_of(colour_palette(100))
+    assert len(observe.find_elements(snap, role="radiobutton")) == observe.SHEET_MAX_CHILDREN
+    assert "… 4 more" in render_text(snap)
+
+
+@pytest.mark.parametrize("exception", ["unnamed", "nested", "mixed", "table"])
+def test_radio_palette_allowance_does_not_expand_other_containers(exception) -> None:
+    from tests.fixtures.trees import colour_palette
+
+    palette = colour_palette()
+    first = palette["children"][0]
+    if exception == "unnamed":
+        first["title"] = ""
+    elif exception == "nested":
+        first["children"] = [button("Nested", (40.0, 100.0))]
+    elif exception == "mixed":
+        first["role"] = "AXButton"
+    else:
+        palette["role"] = "AXTable"
+    snap = snap_of(palette)
+    parent = by_title(snap, "Palette")
+    expected = observe.DENSE_MAX_CHILDREN if exception == "table" else MAX_CHILDREN
+    assert len([el for el in snap.elements if el.parent == parent.ref]) == expected
+    assert "… " in render_text(snap)

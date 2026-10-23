@@ -2370,7 +2370,7 @@ def _prune_inner(
             )
             if pruned is not None:
                 kept.append(pruned)
-        if _sheet_table(raw, kept):
+        if _sheet_table(raw, kept) or _named_radio_group(raw, kept):
             cap = SHEET_MAX_CHILDREN
         elif raw.role in _DENSE_CONTAINER_ROLES and len(kept) > MAX_CHILDREN:
             cap = DENSE_MAX_CHILDREN
@@ -2607,6 +2607,26 @@ def _union_bounds(rects: list[Bounds]) -> Bounds:
     x2 = max(r.x + r.width for r in same)
     y2 = max(r.y + r.height for r in same)
     return Bounds(display_id=first.display_id, x=x1, y=y1, width=x2 - x1, height=y2 - y1)
+
+
+def _named_radio_group(raw: RawNode, kept: list[_PNode]) -> bool:
+    """Keep compact named choices, including GTK colour chooser swatches.
+
+    Reuse the sheet allowance only for groups of leaf radio buttons. Mixed
+    containers and controls with nested content retain the ordinary cap.
+    The raw walk and snapshot token budgets still apply.
+    """
+    return (
+        raw.role in {"AXGroup", "AXRadioGroup"}
+        and bool(kept)
+        and all(
+            child.raw.role == "AXRadioButton"
+            and bool(child.raw.title.strip())
+            and not child.children
+            and not child.elided
+            for child in kept
+        )
+    )
 
 
 def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
