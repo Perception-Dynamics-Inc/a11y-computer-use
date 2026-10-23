@@ -482,3 +482,5 @@
 - 2026-10-23 (PR #958 colour-chooser merge): Window-overflow recovery notes and GTK colour-entry commit warnings describe independent limitations. Preserve both documentation sections when merging; retain colour-entry preflight refusal alongside shared snapshot overflow hints.
 
 - 2026-10-23 (PR #958 palette merge): Named radio-palette retention and window-overflow notes affect shared pruning independently. Preserve both appended observation test groups when merging and run the server regressions too, because find consumes the same pruned snapshots.
+
+- 2026-10-23 (#965): Chrome upload verification must compare file-input evidence before and after chooser confirmation. Another empty input is not failure, and a filename already present in a sibling input or address bar is not success. Keep counts scoped to the same app/snapshot scope and require both the empty-input decrease and matching-button increase.
