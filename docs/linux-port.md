@@ -1017,6 +1017,16 @@ checking immediate process liveness. Unchanged, hidden, defunct, or unreadable
 controls retain full outcome verification. Ref resolution still reads a fresh
 tree; this optimization does not change click dispatch or set_value verification.
 
+### Windows extending beyond the displays
+
+Snapshots flag windows and dialogs whose reported rectangle extends outside the
+attached displays. Off-screen controls can be pruned, including the bottom action
+buttons of a tall GTK dialog. Full and interactive snapshots, and empty `find`
+results, suggest `window list` followed by `window resize` or `window move`.
+This is a geometry-based hint: it does not assert that a particular missing
+control exists, count hidden controls, or automatically move or resize a window.
+Take a fresh snapshot or repeat `find` after adjusting the window.
+
 ### GTK colour chooser hex entry
 
 For GTK entries named “Color Name” (or “Colour Name”) containing a hex colour,

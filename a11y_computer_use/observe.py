@@ -1468,8 +1468,8 @@ def render_matches(
 
     ``text`` is the substring ``find`` searched for. A VTE match that sits only
     in the buffer, not in the on-screen value, is marked above the view or
-    off-screen. A snapshot whose canvas has no accessible content says so
-    when nothing matched, instead of a bare miss.
+    off-screen. Snapshot content notes (including window overflow and inaccessible
+    canvas content) appear when nothing matched, instead of a bare miss.
     """
     if not matches:
         notes = dict.fromkeys(el.content_note for el in snap.elements if el.content_note)
@@ -2098,6 +2098,43 @@ def _prune_root(
     return _PNode(raw=raw, bounds=bounds, children=[], elided=0, has_interactive=False, node=node)
 
 
+def _window_overflow_note(raw: RawNode, geometry: tuple[DisplayGeometry, ...]) -> str:
+    """Explain possible pruning when a measured window crosses display edges."""
+    if raw.role not in {"AXWindow", "AXDialog", "AXSheet"}:
+        return ""
+    if raw.position is None or raw.size is None or min(raw.size) <= 0:
+        return ""
+    x, y = raw.position
+    width, height = raw.size
+    # Subtract each display in global points, accounting for mixed scales,
+    # overlapping monitors and unused space between displays.
+    uncovered = [(x, y, x + width, y + height)]
+    for g in geometry:
+        dx, dy = g.origin
+        dr = dx + g.display.width / g.display.scale
+        db = dy + g.display.height / g.display.scale
+        remaining = []
+        for left, top, right, bottom in uncovered:
+            il, it = max(left, dx), max(top, dy)
+            ir, ib = min(right, dr), min(bottom, db)
+            if il >= ir or it >= ib:
+                remaining.append((left, top, right, bottom))
+                continue
+            remaining.extend(
+                rect for rect in (
+                    (left, top, right, it), (left, ib, right, bottom),
+                    (left, it, il, ib), (ir, it, right, ib),
+                ) if rect[0] < rect[2] and rect[1] < rect[3]
+            )
+        uncovered = remaining
+    if not uncovered:
+        return ""
+    return (
+        "window extends beyond the displays; off-screen controls may be omitted. "
+        "Use window list, then window resize or window move to bring them on screen"
+    )
+
+
 def _plain_zero_wrapper(raw: RawNode) -> bool:
     """Unnamed, valueless, non-focusable wrapper whose box has a zero side.
 
@@ -2216,6 +2253,11 @@ def _prune_inner(
     else:
         child_web_depth = 0
 
+    note = _window_overflow_note(raw, geometry)
+    if note:
+        raw = dataclasses.replace(
+            raw, content_note="; ".join(filter(None, (raw.content_note, note))),
+        )
     bounds = _to_bounds(raw.position, raw.size, geometry)
     if raw.unallocated:
         # A hidden notebook tab has a name and no box. Do not adopt the
