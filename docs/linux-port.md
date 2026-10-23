@@ -1009,3 +1009,10 @@ are `VISIBLE` but not `SHOWING` remain listable without opening the menu.
 Qt marks closed-popup rows invisible as well; listing those menus opens the
 requested branch and rechecks native visibility before returning its rows.
 Hidden actions remain omitted and cannot be pressed.
+
+GTK dialog tab, radio, and checkbox clicks can use fresh native selected/checked
+state changes on the exact clicked handle as outcome evidence. A verified change
+avoids the post-click full-window snapshot and process-exit grace, while still
+checking immediate process liveness. Unchanged, hidden, defunct, or unreadable
+controls retain full outcome verification. Ref resolution still reads a fresh
+tree; this optimization does not change click dispatch or set_value verification.
