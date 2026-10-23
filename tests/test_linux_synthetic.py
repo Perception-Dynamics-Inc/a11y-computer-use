@@ -18482,3 +18482,53 @@ def test_qt_legacy_tab_current_index_state(
     assert raw.focused is ("FOCUSED" in states)
     if role == "page tab":
         assert raw.role == "AXTab"
+
+
+@pytest.mark.parametrize("parent_role", ["document web", "section"])
+@pytest.mark.parametrize("change", ["append", "replace"])
+def test_chromium_snapshot_includes_children_added_after_list_probe(
+    fake_atspi, monkeypatch, parent_role, change,
+):
+    """A timer can publish a toast between list discovery and the main walk."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    button = _Acc("push button", name="Send", width=80, height=30,
+                  states={"SHOWING"})
+    old = _Acc("static", name="Old message", width=160, height=30,
+               states={"SHOWING"})
+    toast = _Acc("static", name="Toast shown", width=160, height=30,
+                 states={"SHOWING"})
+    parent = _adopt(_Acc(parent_role, width=1000, height=700,
+                         states={"SHOWING"}), button, old)
+    document = parent if parent_role == "document web" else _adopt(
+        _Acc("document web", width=1000, height=700, states={"SHOWING"}), parent,
+    )
+    document.name = "Ready"
+    window = _adopt(_Acc("frame", name="Chrome", width=1000, height=700), document)
+    app = _adopt(_Acc("application", name="chrome"), window)
+    app.get_toolkit_name = lambda: "Chrome"
+    for node in (app, window, document, parent, button, old, toast):
+        node.get_application = lambda: app
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    driver = _wire_gtk_tree(monkeypatch, window)
+    before = driver._snapshot_root("chrome", window, Scope.WINDOW)
+    discover = _atspi._list_containers
+
+    def discover_then_publish(root):
+        found = discover(root)
+        # The native tree changes without an AT-SPI mutator in this process.
+        if change == "append":
+            _adopt(parent, button, old, toast)
+        else:
+            _adopt(parent, button, toast)
+        document.name = "Shown"
+        return found
+
+    monkeypatch.setattr(_atspi, "_list_containers", discover_then_publish)
+    after = driver._snapshot_root("chrome", window, Scope.WINDOW)
+    assert "Shown" in {el.title for el in after.elements}
+    delta = observe.diff_snapshots(before, after)
+    assert "Toast shown" in {el.title for el in delta.added}
+    assert "Toast shown" in observe.render_diff(delta)
+    if change == "replace":
+        assert "Old message" in {el.title for el in delta.removed}

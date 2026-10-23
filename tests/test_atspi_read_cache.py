@@ -379,3 +379,21 @@ def test_application_lookup_retries_missing_owner_and_caches_binding_alias() -> 
         assert _atspi._call_first(node, ("get_application", "getApplication")) is node.owner
         assert _atspi._call_first(node, ("get_application", "getApplication")) is node.owner
     assert node.calls == 2
+
+
+def test_child_refresh_invalidates_nested_structure_but_retains_metadata() -> None:
+    node = _Node()
+    with _atspi.read_cache():
+        assert _atspi._call_first(node, ("get_role_name",)) == "push button"
+        assert _atspi._call_first(node, ("get_child_count",)) == 2
+        assert _atspi._call_first(node, ("get_child_at_index",), 0) == "child-0"
+        with _atspi.read_cache():
+            node.count = 3
+            _atspi._drop_child_read_cache()
+            assert _atspi._call_first(node, ("get_role_name",)) == "push button"
+            assert _atspi._call_first(node, ("get_child_count",)) == 3
+            assert _atspi._call_first(node, ("get_child_at_index",), 0) == "child-0"
+        assert _atspi._call_first(node, ("get_child_count",)) == 3
+    assert node.role_calls == 1
+    assert node.count_calls == 3
+    assert node.child_calls == [0, 0]
