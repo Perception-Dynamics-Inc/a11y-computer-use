@@ -18482,3 +18482,36 @@ def test_qt_legacy_tab_current_index_state(
     assert raw.focused is ("FOCUSED" in states)
     if role == "page tab":
         assert raw.role == "AXTab"
+
+
+@pytest.mark.parametrize("frame_showing", [False, True])
+@pytest.mark.parametrize("labels", [("Reload Ctrl+R",), ("New tab Ctrl+T", "New window Ctrl+N", "Help")])
+def test_chrome_native_popup_menu_snapshot(fake_atspi, monkeypatch, frame_showing, labels):
+    """#966: native menu geometry survives an empty top-level wrapper."""
+    page = _Acc("frame", name="Page - Google Chrome", width=800, height=600,
+                states=("SHOWING", "ACTIVE"))
+    popup = _Acc("frame", states=("SHOWING",) if frame_showing else ())
+    menu = _Acc("menu", width=240, height=120, states=("SHOWING", "VISIBLE"))
+    items = [_Acc("menu item", name=label, width=240, height=30,
+                  states=("SHOWING", "VISIBLE", "ENABLED", "SENSITIVE")) for label in labels]
+    for index, item in enumerate(items):
+        _place_row(item, 100, 100 + index * 30, 240, 30)
+    _place_row(menu, 100, 100, 240, 120)
+    _adopt(menu, *items)
+    _adopt(popup, menu)
+    cached = _Acc("frame", states=("SHOWING",))
+    app = _adopt(_Acc("application", name="Google Chrome"), page, cached, popup)
+    for node in (app, page, cached, popup, menu, *items):
+        node.get_application = lambda: app
+    driver = _wire_gtk_tree(monkeypatch, page)
+    assert _atspi.snapshot_window_list(page) == [page, menu]
+    assert _atspi.chromium_snapshot_root(menu) is menu
+    snap = driver.snapshot(Scope.WINDOW, "Google Chrome")
+    found = observe.find_elements(snap, role="menuitem")
+    assert [el.title for el in found] == list(labels)
+    for element, native in zip(found, items):
+        assert element.clickable and element.ref
+        assert element.bounds == Bounds(0, 100, 100 + items.index(native) * 30, 240, 30)
+        assert observe.ax_handle_for(element.snapshot_id, element.ref) is native
+    menu.states.clear()
+    assert menu not in _atspi.snapshot_window_list(page)
