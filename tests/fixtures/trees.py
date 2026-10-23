@@ -161,3 +161,19 @@ def deep_chain(levels: int) -> dict:
             children=[node],
         )
     return ax("AXWindow", title="Deep", at=(100.0, 50.0), size=(800.0, 600.0), children=[node])
+
+
+def colour_palette(count: int = 45) -> dict:
+    """Named leaf radio choices, with Light Blue beyond the ordinary cap."""
+    swatches = [
+        ax(
+            "AXRadioButton", title="Light Blue" if i == 30 else f"Colour {i}",
+            at=(40.0 + (i // 5) * 50.0, 100.0 + (i % 5) * 34.0),
+            size=(48.0, 32.0), actions=("AXPress",),
+        )
+        for i in range(count)
+    ]
+    return ax(
+        "AXGroup", title="Palette", at=(20.0, 80.0), size=(1300.0, 220.0),
+        children=swatches,
+    )

@@ -157,3 +157,11 @@ screenshot; the ways to pay less remain `interactive`, `find`, `diff`, and
   view mean the walk was capped, not that the rows do not exist.
 - A hard ceiling on context: `budget`. The trailing marker tells the agent how
   much it did not see.
+
+
+Groups containing only named leaf radio buttons, such as GTK colour chooser
+palettes, use the existing 96-child sheet allowance instead of the ordinary
+24-child cap. This keeps all 45 standard swatches available to snapshots,
+`find`, and `scroll_to_find` without scrolling an already visible palette.
+Mixed groups retain the ordinary cap; larger palettes still show an overflow
+marker, and the raw traversal and snapshot token budgets still apply.
