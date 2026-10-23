@@ -5174,8 +5174,9 @@ class LinuxDriver:
         stays on "No file chosen". The location entry is read back, the
         window is fitted on screen, and Open is clicked at the bottom-right.
         The key is not sent. Success is the dialog gone and the page input
-        showing the file. A filename in the address bar or the window title
-        does not count while the input still says no file was chosen.
+        showing a new selection. Other inputs may remain empty. A filename
+        already present in another input, the address bar, or the window
+        title does not count as a new selection.
         """
         from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
 
@@ -5213,13 +5214,16 @@ class LinuxDriver:
                 _linux_system.focus_window(window_id)
             except ComputerUseError:
                 pass
+        before = self._page_file_input_counts(str(active.get("app") or ""), base)
         _linux_input.click(
             int(bounds["x"]) + max(1, width - _CHOOSER_OPEN_FROM_RIGHT),
             int(bounds["y"]) + max(1, height - _CHOOSER_OPEN_FROM_BOTTOM),
         )
-        self._verify_browser_chooser(active, path)
+        self._verify_browser_chooser(active, path, before)
 
-    def _verify_browser_chooser(self, active: dict, path: str) -> None:
+    def _verify_browser_chooser(
+        self, active: dict, path: str, before: dict[tuple[Scope, str], tuple[int, int]],
+    ) -> None:
         """The chooser is gone and the page's file input shows ``path``."""
         from a11y_computer_use.drivers import _atspi
 
@@ -5232,7 +5236,7 @@ class LinuxDriver:
         while time.monotonic() < deadline:
             if not _chooser_window_open(window_id, title, app):
                 closed = True
-                if self._page_shows_chosen_file(app, base):
+                if self._page_shows_chosen_file(app, base, before):
                     return
             time.sleep(0.1)
         if not closed:
@@ -5258,31 +5262,49 @@ class LinuxDriver:
             },
         )
 
-    def _page_shows_chosen_file(self, app: str, base: str) -> bool:
-        """True when a page snapshot shows ``base`` and not an empty file input.
+    def _page_shows_chosen_file(
+        self, app: str, base: str, before: dict[tuple[Scope, str], tuple[int, int]],
+    ) -> bool:
+        """Require one fewer empty input and one more matching filename button.
 
-        A window title or an address bar that contains the filename is not
-        enough: an element that still says no file was chosen fails the check.
+        Compare the same scope before and after confirmation. Other empty
+        inputs are legitimate; a pre-existing filename, title, or address bar
+        alone does not establish selection.
         """
+        after = self._page_file_input_counts(app, base)
+        return any(
+            empty == before[key][0] - 1 and chosen == before[key][1] + 1
+            for key, (empty, chosen) in after.items()
+            if key in before
+        )
+
+    def _page_file_input_counts(
+        self, app: str, base: str,
+    ) -> dict[tuple[Scope, str], tuple[int, int]]:
+        """Count empty and matching filename buttons separately per scope."""
         if not base:
-            return False
+            return {}
         names = [app] if app else []
         if _browser_family(app) == "chrome" and "chrome" not in names:
             names.append("chrome")
-        saw_file = False
+        counts = {}
         for scope in (Scope.WINDOW, Scope.APP):
             for name in names:
                 try:
                     shot = self.snapshot(scope, name)
                 except ComputerUseError:
                     continue
-                texts = _snapshot_texts(shot)
-                folded = "\n".join(texts).casefold()
-                if any(phrase in folded for phrase in _FILE_INPUT_EMPTY):
-                    return False
-                if any(base in text for text in texts):
-                    saw_file = True
-        return saw_file
+                empty = chosen = 0
+                for element in shot.elements:
+                    if element.role != "AXButton":
+                        continue
+                    title = str(element.title or "")
+                    if any(phrase in title.casefold() for phrase in _FILE_INPUT_EMPTY):
+                        empty += 1
+                    elif base in title:
+                        chosen += 1
+                counts[scope, name] = (empty, chosen)
+        return counts
 
     def _verify_file_chooser(self, active: dict, path: str, app_root) -> None:
         """The chooser window is gone and the opener shows the file."""

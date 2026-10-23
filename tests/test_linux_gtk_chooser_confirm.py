@@ -471,3 +471,54 @@ def test_missing_chooser_frame_does_not_use_app_buttons() -> None:
     ])
     app.children.append(chooser)
     assert _atspi._chooser_in_apps([app], "open file", "Open File") is not None
+
+
+@pytest.mark.parametrize("other_title", ["Cover letter: No file chosen", "Cover letter: No file selected", "Cover letter: picked.txt"])
+def test_chrome_chooser_verifies_selection_with_another_file_input(monkeypatch, other_title):
+    found = _browser_chooser(monkeypatch)
+    driver = found["driver"]
+    snapshots = []
+
+    def snapshot(scope, app):
+        snapshots.append((scope, app, found["state"]["open"]))
+        other = Element(ref="e3", role="AXButton", title=other_title, value=None, bounds=None, snapshot_id="s")
+        return _page(found["state"]["title"], other)
+
+    driver.snapshot = snapshot
+    driver.key_chord("Return")
+
+    assert found["state"]["open"] is False
+    assert len(found["clicks"]) == 1
+    # One baseline and one verification pass, without polling to the deadline.
+    assert [opened for _, _, opened in snapshots] == [True, True, False, False]
+
+
+def test_chrome_chooser_rejects_an_unchanged_preexisting_selected_input(monkeypatch):
+    found = _browser_chooser(monkeypatch, show=False, address=True)
+    original = found["driver"].snapshot
+
+    def snapshot(scope, app):
+        shot = original(scope, app)
+        other = Element(ref="e4", role="AXButton", title="Cover letter: picked.txt", value=None, bounds=None, snapshot_id="s")
+        return _page(found["state"]["title"], *shot.elements[1:], other)
+
+    found["driver"].snapshot = snapshot
+    with pytest.raises(ComputerUseError) as exc:
+        found["driver"].key_chord("Return")
+    assert exc.value.detail["reason"] == "file_not_chosen"
+    assert len(found["clicks"]) == 1
+
+
+def test_chrome_chooser_rejects_disappearing_empty_input_without_new_selection(monkeypatch):
+    found = _browser_chooser(monkeypatch, show=False)
+
+    def snapshot(scope, app):
+        selected = Element(ref="e3", role="AXButton", title="Cover letter: picked.txt", value=None, bounds=None, snapshot_id="s")
+        if found["state"]["open"]:
+            return _page(found["state"]["title"], selected)
+        return _page(selected.title)
+
+    found["driver"].snapshot = snapshot
+    with pytest.raises(ComputerUseError) as exc:
+        found["driver"].key_chord("Return")
+    assert exc.value.detail["reason"] == "file_not_chosen"
