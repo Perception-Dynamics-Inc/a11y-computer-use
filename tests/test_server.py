@@ -5416,3 +5416,50 @@ def test_find_omitted_ref_still_rematches_live_target(
         else:
             runtime.desktop_snapshot(APP, mode="full")
             assert runtime._resolve("e6", "click")[1] is replacement
+
+
+@pytest.mark.parametrize("new_instance", ["process-new", "process-old", None])
+def test_find_omitted_bindings_reset_only_for_observed_new_instance(
+    monkeypatch, mocked_driver, store, audit_dir, new_instance,
+) -> None:
+    """A startup find must not retain a previous Firefox process's Name ref."""
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    name = Element(
+        ref="e34", role="AXTextField", title="Name", snapshot_id="old",
+        value="", bounds=None, editable=True, instance_id="process-old",
+    )
+    before = dataclasses.replace(base, snapshot_id="old", elements=(name,))
+    paragraph = dataclasses.replace(
+        name, role="AXStaticText", title="idle", editable=False,
+        snapshot_id="new", instance_id=new_instance,
+    )
+    new_name = dataclasses.replace(
+        name, ref="e35", snapshot_id="new", instance_id=new_instance,
+    )
+    after = dataclasses.replace(base, snapshot_id="new", elements=(paragraph, new_name))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: current[0])
+    monkeypatch.setattr(
+        observe, "resolve_ref", lambda snap, ref, **kw: observe.rematch_ref(snap, ref, current[0]),
+    )
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        assert "e34" in runtime.find(APP, text="Name")
+        current[0] = after
+        # Without a new observation, the old process binding must still refuse.
+        if new_instance == "process-new":
+            with pytest.raises(ComputerUseError) as caught:
+                runtime._resolve("e34", "set_value")
+            assert caught.value.detail["reason"] == "app_restarted"
+            assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+        assert "e35" in runtime.find(APP, editable=True)
+        anchor_snap, anchor = runtime._anchor("e34")
+        if new_instance == "process-new":
+            assert runtime._resolve("e34", "set_value")[1] is paragraph
+            assert anchor_snap is after
+            assert anchor is paragraph
+        else:
+            assert anchor_snap is before
+            assert anchor is name
+            assert runtime._resolve("e34", "set_value")[1] is new_name
+        assert mocked_driver["click"] == []

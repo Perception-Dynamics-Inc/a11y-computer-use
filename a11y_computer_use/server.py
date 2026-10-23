@@ -3616,7 +3616,18 @@ class Runtime:
         # returned. Keep their original snapshots (including ancestry) for
         # the ordinary live matcher. Full observations reset these bindings.
         anchors = getattr(self, "_issued_anchors", {})
-        if refs is None or last is None or last.app != app:
+        previous_instances = {
+            el.instance_id for el in last.elements if el.instance_id
+        } if last is not None else set()
+        current_instances = {el.instance_id for el in snap.elements if el.instance_id}
+        # App names survive a restart. A fresh observation of a different
+        # recorded process instance starts a new epoch, just as an app switch
+        # does. Missing identity alone is not evidence of a restart.
+        instance_changed = bool(
+            previous_instances and current_instances
+            and previous_instances.isdisjoint(current_instances)
+        )
+        if refs is None or last is None or last.app != app or instance_changed:
             anchors = {}
         for element in snap.elements:
             if refs is None or element.ref in refs:
@@ -10178,8 +10189,9 @@ def build_server(
         capability. Give at least one filter. Returns each match's ref, role,
         title, value, flags, and bounds. Takes a fresh snapshot, so the returned
         refs (e1..eN) are the current epoch — act on them promptly and re-observe
-        after the UI changes. Refs omitted from a later find keep their earlier
-        binding and must still resolve against the live tree before input.
+        after the UI changes. Refs omitted from a later find in the same observed
+        application instance keep their earlier binding and must still resolve
+        against the live tree before input.
         scope='window'|'app'. Tier 'read'.
 
         ocr=true searches the TEXT ON SCREEN instead of the accessibility tree
