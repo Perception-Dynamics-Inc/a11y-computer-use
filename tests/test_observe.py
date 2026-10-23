@@ -2101,3 +2101,68 @@ def test_unlisted_children_are_folded_on_the_parent() -> None:
     assert folded == ((by_title(snap, "Rows").ref, 93),)
     assert "… 93 more" in render_text(snap)
     assert "Row 001" in observe.render_subtree(snap, by_title(snap, "Rows").ref)
+
+
+@pytest.mark.parametrize("role", ["AXDialog", "AXWindow", "AXSheet"])
+def test_tall_window_explains_pruned_buttons_in_snapshot_and_find(role):
+    tree = ax(role, title="TallDialog", at=(0, 0), size=(600, 1034), children=[
+        ax("AXStaticText", title="tall body", at=(10, 20), size=(200, 30)),
+        button("CancelBtn", (100, 993)), button("SelectBtn", (499, 993)),
+    ])
+    snap = snap_of(tree)
+    assert not observe.find_elements(snap, text="SelectBtn", role="button")
+    assert all(el.title not in {"CancelBtn", "SelectBtn"} for el in snap.elements)
+    assert snap.element("e1").bounds == Bounds(1, 0, 0, 1200, 2068)
+    for rendered in (render_text(snap), render_text(snap, mode="interactive"),
+                     observe.render_matches(snap, []),
+                     render_text(observe.merge_snapshots([snap]))):
+        assert "window extends beyond the displays" in rendered
+        assert "off-screen controls may be omitted" in rendered
+        assert "window resize or window move" in rendered
+    tree["size"] = (600, 800)
+    for child in tree["children"][1:]:
+        child["at"] = (child["at"][0], 750)
+    resized = snap_of(tree)
+    assert observe.find_elements(resized, text="SelectBtn", role="button")
+    assert "window extends beyond" not in render_text(resized)
+
+
+@pytest.mark.parametrize("at,size,overflow", [
+    ((0, 0), (1440, 900), False),
+    ((-1, 0), (600, 600), True),
+    ((0, -1), (600, 600), True),
+    ((1400, 0), (600, 600), True),
+    ((0, 850), (600, 600), True),
+    ((0, 0), (0, 0), False),
+    (None, None, False),
+])
+def test_window_overflow_uses_reported_geometry(at, size, overflow):
+    snap = snap_of(ax("AXWindow", title="Window", at=at, size=size))
+    assert ("window extends beyond" in render_text(snap)) is overflow
+
+
+def test_window_overflow_accounts_for_multiple_scaled_displays_and_gaps():
+    from a11y_computer_use.schema import Display
+
+    tree = ax("AXWindow", title="Spanning", at=(1400, 20), size=(200, 600))
+    second = observe.DisplayGeometry(Display(2, 800, 900, 1.0, False), (1440, 0))
+
+    def build(extra):
+        return build_snapshot(tree, DictAccessor(), scope=Scope.WINDOW,
+                              app=FIXTURE_APP, pid=101, geometry=(*GEOMETRY, extra))
+
+    assert "window extends beyond" not in render_text(build(second))
+    assert "window extends beyond" in render_text(build(
+        dataclasses.replace(second, origin=(1500, 0))))
+    tree["role"] = "AXGroup"
+    assert "window extends beyond" not in render_text(snap_of(tree))
+
+
+def test_window_overflow_preserves_existing_content_note():
+    class NotedAccessor(DictAccessor):
+        def read(self, node):
+            return dataclasses.replace(super().read(node), content_note="Existing limitation")
+
+    snap = build_snapshot(ax("AXDialog", at=(0, 0), size=(600, 1034)), NotedAccessor(),
+                          scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY)
+    assert "Existing limitation; window extends beyond" in snap.element("e1").content_note

@@ -1003,3 +1003,14 @@ are `VISIBLE` but not `SHOWING` remain listable without opening the menu.
 Qt marks closed-popup rows invisible as well; listing those menus opens the
 requested branch and rechecks native visibility before returning its rows.
 Hidden actions remain omitted and cannot be pressed.
+
+
+### Windows extending beyond the displays
+
+Snapshots flag windows and dialogs whose reported rectangle extends outside the
+attached displays. Off-screen controls can be pruned, including the bottom action
+buttons of a tall GTK dialog. Full and interactive snapshots, and empty `find`
+results, suggest `window list` followed by `window resize` or `window move`.
+This is a geometry-based hint: it does not assert that a particular missing
+control exists, count hidden controls, or automatically move or resize a window.
+Take a fresh snapshot or repeat `find` after adjusting the window.
