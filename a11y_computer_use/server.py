@@ -2658,7 +2658,7 @@ class Runtime:
 
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
-        input_target=None,
+        input_target=None, no_input: bool = False,
     ):
         """check_action → confirm → recheck → execute → audit, for EVERY action.
 
@@ -2675,11 +2675,14 @@ class Runtime:
         raises `domain_blocked` before the grant check.
         ``input_target`` carries the addressed element for text actions,
         whose schema intentionally contains only the text, to the exec gate.
+        ``no_input`` is reserved for a known no-op that cannot dispatch input;
+        it retains permission checks and auditing without the exec refusal.
         """
         self._private_text_result = False
         if self._domain_applies(action):
             self._reject_domain(action, app=app)
-        self._reject_terminal(action, app, input_target=input_target)
+        if not no_input:
+            self._reject_terminal(action, app, input_target=input_target)
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
@@ -2718,7 +2721,8 @@ class Runtime:
                 if latest is not None and latest != prompt:
                     raise ComputerUseError(ErrorCode.CONFIRMATION_DECLINED,
                                            "The dialog changed before dispatch; " + latest)
-            self._reject_terminal(action, app, audit=False, input_target=input_target)
+            if not no_input:
+                self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             # Linux can discover an unknown focused entry during implicit type.
@@ -5648,7 +5652,10 @@ class Runtime:
         nav_before = None
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
-        self._run_gated(action, app, execute, confirm=confirm)
+        self._run_gated(
+            action, app, execute, confirm=confirm,
+            no_input=isinstance(target, Element) and target.bounds is None,
+        )
         if new_dialogs:
             names = ", ".join(json.dumps(name, ensure_ascii=False) for name in new_dialogs)
             return outcome.ActionResult(

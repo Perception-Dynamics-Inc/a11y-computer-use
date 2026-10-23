@@ -17980,3 +17980,87 @@ def test_launcher_gate_preserves_focused_terminal_fallback(fake_atspi, monkeypat
     monkeypatch.setattr(_atspi, "_focused_node", lambda app: (_Acc("terminal"), False))
     target = Element(ref="e1", role="AXTextArea", title="", value=None, bounds=None, snapshot_id="editor")
     assert driver.terminal_target("editor", target)
+
+
+@pytest.mark.parametrize("window_role,app_name", [("window", "xfce4-notifyd"),
+                                                 ("notification", "notification-daemon")])
+@pytest.mark.parametrize("phase", ["activation", "feedback"])
+@pytest.mark.parametrize("change", ["alive", "expired", "defunct", "detached", "moved",
+                                    "missing_state", "missing_hit", "replacement", "cached",
+                                    "missing_bounds", "bus_error"])
+def test_notification_ref_click_rechecks_after_preparation(
+    monkeypatch, window_role, app_name, phase, change,
+):
+    from contextlib import nullcontext
+    from a11y_computer_use.drivers import linux, _atspi_events
+    from a11y_computer_use.schema import MouseButton
+
+    target = _GeckoNode("push button", "Okay", ("SHOWING", "VISIBLE"))
+    window = _GeckoNode(window_role, "T", ("SHOWING", "VISIBLE"), (target,))
+    app = _GeckoNode("application", app_name)
+    app.toolkit = "GTK"
+    target.application = window.application = app
+    rect = _NS(x=10, y=10, width=100, height=40)
+    hit = [target]
+    window.get_component_iface = lambda: _NS(
+        get_extents=lambda coord: _NS(x=0, y=0, width=200, height=100),
+        get_accessible_at_point=lambda *a: hit[0],
+    )
+    target.get_component_iface = lambda: _NS(get_extents=lambda coord: rect)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    # Exercise native cache invalidation with cached SHOWING surviving expiry.
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    expired = []
+    target.clear_cache_single = lambda: target.states.clear() if expired else None
+    element = Element("e1", "AXButton", "Okay", None, Bounds(0, 10, 10, 100, 40),
+                      "notification-race", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: target})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(_linux_input, "held", lambda mods: nullcontext())
+    clicks = []
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+
+    def prepare(handle):
+        assert handle is target
+        if change == "expired":
+            window.states.clear()
+        elif change == "defunct":
+            target.states.add("DEFUNCT")
+        elif change == "detached":
+            target.parent = None
+        elif change == "moved":
+            rect.x = 300
+        elif change == "missing_state":
+            target.get_state_set = lambda: None
+        elif change == "missing_hit":
+            hit[0] = None
+        elif change == "replacement":
+            hit[0] = _GeckoNode("push button", "Okay", ("SHOWING", "VISIBLE"))
+        elif change == "cached":
+            expired.append(True)
+        elif change == "missing_bounds":
+            rect.width = 0
+        elif change == "bus_error":
+            def unavailable():
+                raise RuntimeError("notification service disappeared")
+            target.get_state_set = unavailable
+
+    monkeypatch.setattr(driver, "_raise_handle_window",
+                        prepare if phase == "activation" else lambda *a: None)
+    if phase == "feedback":
+        monkeypatch.setattr(driver, "_visible_action", lambda *a: prepare(target))
+    if change == "alive":
+        driver.click(element, button=MouseButton.RIGHT, count=2, modifiers=("shift",))
+        assert clicks == [((60, 30), {"button": "right", "count": 2})]
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.click(element)
+        assert exc.value.code == ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == "notification_target_unverified"
+        assert exc.value.detail["outcome"] == "refused"
+        assert clicks == []
+    assert not target.pressed

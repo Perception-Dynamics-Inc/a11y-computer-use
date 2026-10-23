@@ -6607,6 +6607,15 @@ def toplevel_raise_target(node):
     occlusion checks cannot mistake that window for a separate covering one.
     """
     top = _toplevel_of(node)
+    if top is None and _qt_app(node):
+        # A plain top-level QWidget is a filler, not a frame. Only accept
+        # the application's direct child; embedded layout fillers are not
+        # windows and must not supply guessed window geometry.
+        for candidate in _ancestor_chain(node):
+            if (_role_name(candidate) == "filler"
+                    and _role_name(_parent_of(candidate)) == "application"):
+                top = candidate
+                break
     if top is None:
         return None
     if not _node_name(top) and (
@@ -9668,10 +9677,39 @@ def _confirm_focus_on_target(acc) -> bool:
         if seen is None or seen is True:
             return True
         if attempt + 1 == _FOCUS_CONFIRM_REGRAB:
+            _request_qt_focus_activation(acc)
             grab_focus(acc)
         if attempt + 1 < _FOCUS_CONFIRM_POLLS:
             time.sleep(_FOCUS_CONFIRM_PAUSE_S)
     return False
+
+
+def _request_qt_focus_activation(acc) -> None:
+    """Request the missing window activation before retrying Qt child focus.
+
+    Qt's child-widget GrabFocus calls setFocus without activateWindow. An
+    inactive window therefore remembers the widget but cannot give it input
+    focus. Send one WM request; the existing FOCUSED polling remains the
+    success signal and the only wait. Do not restore hidden windows here.
+    """
+    if not _qt_app(acc) or not _x11_keys_available():
+        return
+    target = toplevel_raise_target(acc)
+    if target is None:
+        return
+    from a11y_computer_use.drivers import _linux_system
+
+    _active, title, pid, extents = target
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return
+    # The general matcher allows title/geometry fallbacks for clients without
+    # PID metadata. Focus recovery must stay within this target's process.
+    rows = [row for row in _linux_system.windows() if row.get("pid") == pid]
+    window_id = _linux_system.window_id_for_toplevel(
+        title=title, pid=pid, extents=extents, rows=rows,
+    )
+    if window_id is not None:
+        _linux_system.request_input_activation(window_id)
 
 
 def _type_into_target(acc, text: str) -> None:
@@ -19049,6 +19087,41 @@ def chromium_button_click_action(acc):
     return None
 
 
+def notification_window(acc):
+    """Capture the notification owner before activation can outlive the bubble."""
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role == "notification":
+            return node
+        if role in {"frame", "window", "dialog"}:
+            return node if _application_name(acc).casefold() == "xfce4-notifyd" else None
+    return None
+
+
+def notification_pointer_target(acc, window, x: int, y: int) -> bool:
+    """Require fresh visibility, geometry and identity for a bubble pointer click.
+
+    Keep the original window even if expiry severs the target's parent link.
+    Missing native replies are refusal, never evidence that old pixels are safe.
+    """
+    try:
+        for node in (window, acc):
+            _drop_cached_properties(node)
+            states = _call_first(node, ("get_state_set",))
+            if (states is None
+                    or _state_flag(node, "DEFUNCT", drop_cache=False, states=states)
+                    or not _state_flag(node, "SHOWING", drop_cache=False, states=states)):
+                return False
+            pos, size = _extents(node)
+            if (pos is None or size is None
+                    or not (pos[0] <= x < pos[0] + size[0]
+                            and pos[1] <= y < pos[1] + size[1])):
+                return False
+        return fallback_pointer_target(acc, x, y)
+    except Exception:
+        return False
+
+
 def fallback_pointer_target(acc, x: int, y: int) -> bool:
     """Hit-test a ref from its owning popup/window, never from the target itself.
 
@@ -19057,7 +19130,7 @@ def fallback_pointer_target(acc, x: int, y: int) -> bool:
     Missing hits and cycles are refusals, not evidence from overlapping bounds.
     """
     root = next((node for node in _ancestor_chain(acc)
-                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog"}), None)
+                 if _role_name(node) in {"popup menu", "menu", "frame", "window", "dialog", "notification"}), None)
     if root is None or root is acc or not _state_has(root, "SHOWING"):
         return False
     target_key = _ancestor_key(acc)

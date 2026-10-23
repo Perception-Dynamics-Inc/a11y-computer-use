@@ -439,3 +439,8 @@
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
 
 - 2026-10-19 (#934): Shell-capable GUI surfaces need commit/paste gates as well as typing gates. Clipboard write plus context-menu Paste and Launch can execute without TypeText or KeyChord. Gate clicks/menu presses before dispatch and after rechecks; identify panel run dialogs by native metadata and app identity, and cover detached popup items conservatively. Live validation should independently prepopulate the command to prove Launch itself is refused, then verify marker absence and audited violations. Preserve the focused-terminal fallback even when an addressed ref is not a terminal.
+
+
+- 2026-10-19 (#936): Notification activation and visual feedback can outlive a bubble. Retain its native window before preparation and check fresh visibility, bounds, and exact target hit immediately before pointer dispatch; classifying only after expiry can lose the parent chain. The activation-delay fix (#935) does not replace this guard.
+
+- 2026-10-23 (PR #938 repair): Runtime click returns a no-input not_actionable result for refs without bounds, including hidden xfce4-terminal tabs. An exec gate must preserve that known no-op while retaining permission/audit checks and blocking every potentially dispatched terminal/launcher click. The unchanged one-tab and two-tab live tests passed under private Xvfb/Openbox/D-Bus.
