@@ -492,3 +492,5 @@
 - 2026-10-23 (#965): Chrome upload verification must compare file-input evidence before and after chooser confirmation. Another empty input is not failure, and a filename already present in a sibling input or address bar is not success. Keep counts scoped to the same app/snapshot scope and require both the empty-input decrease and matching-button increase.
 
 - 2026-10-23 (PR #970 third repair): Reproduce Qt CI failures with the runner’s Qt version. Qt 6.4.2 reports QAccessibleTabButton currentIndex through FOCUSED only; Qt 6.7 adds SELECTED. The unchanged Tree-tab live assertion failed with 6.4.2 and passed with 6.11.0. Normalize the older native current-index state only for known affected Qt versions and page-tab/list roles; ordinary focus is not generic selection evidence. The unchanged Qt and terminal live tests pass after normalization.
+
+- 2026-10-24 (#966): Chromium native menus can live inside unnamed top-level frames with no usable wrapper geometry or SHOWING state. Snapshot the showing native menu handle directly; retaining only the wrapper can still prune every menu item. Keep empty cached frames and find-bar recovery separate.

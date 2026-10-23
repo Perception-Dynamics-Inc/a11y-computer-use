@@ -83,6 +83,13 @@ AT-SPI `level bar` maps to `AXProgressIndicator` and shows its current Value wit
 
 ## Chromium pages
 
+Window-scoped snapshots and `find` include showing native Chrome menus under
+unnamed popup frames. The menu itself supplies the snapshot root, preserving
+its items' native refs, labels (including accelerator suffixes), and reported
+bounds even when the wrapper frame has no geometry. Empty cached frames remain
+filtered. This path has synthetic regression coverage; live Chrome menu
+selection has not been verified for this change.
+
 A Chrome document can hide a whole form under one zero-height section. On the Figma login page the raw AT-SPI tree is `document web` "Login | Figma" (1279 by 812) → `section` with height 0 (1279 by 0) → `section` (1279 by 812) → `section` → `form` → entry "EMAIL", password text "PASSWORD", push buttons "Continue with Google" and "Log in", and links. The snapshot used to print only `group "Login | Figma"` with no children. The pruner dropped any node whose bounds were zero-size, and the zero-height section took the painted form with it. Chrome does expose those children.
 
 Under a `document web`, a `document frame`, or an `internal frame`, a zero-width or zero-height non-interactive wrapper is treated like GTK's negative-extent hollow node: it is kept only when a descendant with a real box survives, and its rect is the union of those descendants. On the live login page that wrapper is `section#react-page` at 1271 by 0 with AT-SPI actions `click` and `showContextMenu`. `click` maps to AXPress. `clickAncestor` and `showContextMenu` do not: a context menu is not activation, and clickAncestor would mark every container that holds a click listener. An unnamed, valueless, non-focusable zero-size wrapper is still hollow, and it is not a clickable target, so a ref click does not call `do_action` on it. A focusable node, a named node, or a real control (push button, link, check box, entry) with a zero box still drops. A zero-size node outside that web content, and a positive rect that lies off every display, still drop their subtrees. macOS and Windows nodes do not set the mark, so their snapshots and token budgets are unchanged. The snapshot read passes the zero size through (`_extents(..., keep_zero=True)`). Hit-testing and scrolling still treat a zero box as no box. `file_dialog` stays unsupported on Linux.
