@@ -438,4 +438,9 @@
 
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
 
+- 2026-10-19 (#935): Skip implicit ref-action activation only for a reported X11 notification type; explicit focus/raise must still verify activation. Input=False or SKIP_TASKBAR/SKIP_PAGER alone are not sufficient to bypass ordinary window activation. Preserve visibility refusal before the shortcut; shortening activation preparation does not resolve the separate expiring-target race (#936).
+
+
 - 2026-10-19 (#936): Notification activation and visual feedback can outlive a bubble. Retain its native window before preparation and check fresh visibility, bounds, and exact target hit immediately before pointer dispatch; classifying only after expiry can lose the parent chain. The activation-delay fix (#935) does not replace this guard.
+
+- 2026-10-23 (PR #939 repair): Notification implicit-activation bypass and Qt input-focus recovery use adjacent X11 helpers but serve different paths. Preserve both helpers and their regressions when merging; retain notification expiry checks immediately before dispatch.
