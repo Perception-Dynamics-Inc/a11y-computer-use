@@ -135,12 +135,13 @@ The requested button, count, and modifiers are preserved. This guard is covered 
 synthetic tests; it does not make the native check and XTEST delivery atomic or
 establish live notification-action verification.
 
-GTK cell clicks and accessibility presses re-read the native role and label after
-window preparation, invalidating both native and operation-local caches. A changed
+GTK TreeView cell clicks and accessibility presses re-read the native role and
+label after window preparation, invalidating both native and operation-local caches. A changed
 or unreadable cell label returns `stale_ref` with `reason=target_changed` before
 input. This guards against TreeView cells recycled for a different row under the
-same object path. Synthetic tests cover this check; it is not atomic with input
-delivery and has not been live-verified against xfce4-taskmanager.
+same object path. GTK4 list cells identified by their native `listitem.scroll-to`
+action retain their existing input path. Synthetic tests cover this check; it is
+not atomic with input delivery and has not been live-verified against xfce4-taskmanager.
 
 Chromium page checkbox, radio, and toggle-button clicks compare fresh native
 `CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
@@ -976,3 +977,11 @@ Qt application's direct child qualifies for that window lookup. Recovery sends
 one activation request without restoring hidden/shaded windows or adding a
 second wait. Keyboard input still requires the target's native `FOCUSED` state;
 an acknowledged activation or `GrabFocus` alone does not confirm success.
+
+GTK flat-table cells that advertise activation but only select through AT-SPI
+are marked `single click selects only; activation may require count=2` in
+snapshots and find results. A plain single ref click reports a partial outcome
+with that warning, including with `verify=true`: selection does not verify
+`row-activated` or an applied setting. AT-SPI does not expose GtkTreeView's
+`activate-on-single-click` property. The caller can explicitly request `count=2`
+and inspect the setting afterward; the driver does not add an activation.

@@ -2541,7 +2541,10 @@ class Runtime:
     def _reject_terminal(self, action, app: str, *, audit: bool = True, input_target=None) -> None:
         """Audit and refuse terminal actions when execution is disabled."""
         launch = isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH
-        if self.allow_exec or not (launch or isinstance(action, (TypeText, KeyChord))):
+        if self.allow_exec or not (
+            launch or isinstance(action, (TypeText, KeyChord, Click))
+            or (isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS)
+        ):
             return
         check = getattr(self.driver, "terminal_target", None)
         if check is None:
@@ -2655,7 +2658,7 @@ class Runtime:
 
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
-        input_target=None,
+        input_target=None, no_input: bool = False,
     ):
         """check_action → confirm → recheck → execute → audit, for EVERY action.
 
@@ -2672,11 +2675,14 @@ class Runtime:
         raises `domain_blocked` before the grant check.
         ``input_target`` carries the addressed element for text actions,
         whose schema intentionally contains only the text, to the exec gate.
+        ``no_input`` is reserved for a known no-op that cannot dispatch input;
+        it retains permission checks and auditing without the exec refusal.
         """
         self._private_text_result = False
         if self._domain_applies(action):
             self._reject_domain(action, app=app)
-        self._reject_terminal(action, app, input_target=input_target)
+        if not no_input:
+            self._reject_terminal(action, app, input_target=input_target)
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
@@ -2715,7 +2721,8 @@ class Runtime:
                 if latest is not None and latest != prompt:
                     raise ComputerUseError(ErrorCode.CONFIRMATION_DECLINED,
                                            "The dialog changed before dispatch; " + latest)
-            self._reject_terminal(action, app, audit=False, input_target=input_target)
+            if not no_input:
+                self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             # Linux can discover an unknown focused entry during implicit type.
@@ -5645,7 +5652,10 @@ class Runtime:
         nav_before = None
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
-        self._run_gated(action, app, execute, confirm=confirm)
+        self._run_gated(
+            action, app, execute, confirm=confirm,
+            no_input=isinstance(target, Element) and target.bounds is None,
+        )
         if new_dialogs:
             names = ", ".join(json.dumps(name, ensure_ascii=False) for name in new_dialogs)
             return outcome.ActionResult(
@@ -5686,6 +5696,16 @@ class Runtime:
         if outline_note:
             # The click stayed a single click. The row opens on a double-click.
             msg = f"{msg} (activates on double-click)"
+        table_selection_note = (
+            isinstance(target, Element)
+            and not activated
+            and count == 1
+            and parsed_button is MouseButton.LEFT
+            and not mods
+            and target.note == "single click selects only; activation may require count=2"
+        )
+        if table_selection_note:
+            msg = f"{msg} ({target.note})"
         paragraph_verdict = (
             self._paragraph_click_verdict(target)
             if isinstance(target, Element) and not activated else None
@@ -5719,6 +5739,8 @@ class Runtime:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:
             verdict = ("partial", "the row was selected and activates on double-click")
+        if verdict is None and table_selection_note:
+            verdict = ("partial", "row activation is not verified; single click selects only")
         toggle_evidence = getattr(self.driver, "toggle_click_evidence", None)
         if verdict is None and toggle_probe is not None and callable(toggle_evidence):
             evidence = toggle_evidence(toggle_probe)
@@ -10236,11 +10258,16 @@ def build_server(
         is not verified effect. Inspect a fresh snapshot before continuing.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
+        GTK table rows marked selection-only report a partial single-click
+        outcome: selection does not verify activation or an applied setting.
         Valid x is 0..width-1 and valid y is 0..height-1 on that display. A
         point outside it, including the display's own width and height, is
         invalid_arguments and sends no input. An unknown display_id is
         invalid_arguments and names the valid ids. button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
+        Linux terminals and command launchers require explicit execution
+        permission for clicks, including Paste and Launch/Run; refusals are
+        audited as exec_disabled even with a full app grant.
         Linux Chromium page push buttons use a node-bound AT-SPI click/press for
         plain left clicks and name that mechanism in the result. Unsupported
         variants or unavailable actions are refused rather than using stale

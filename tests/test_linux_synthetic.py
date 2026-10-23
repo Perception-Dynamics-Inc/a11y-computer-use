@@ -17879,6 +17879,109 @@ def test_calc_grid_mismatch_reports_actual_expected_and_timings(fake_atspi, monk
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("app", ["xfce4-appfinder", "xfce4-run", "krunner", "gmrun", "rofi"])
+@pytest.mark.parametrize("route", ["type", "set_value", "return", "ctrl_v", "paste_menu", "launch", "run", "middle", "right", "point", "menu_press"])
+def test_command_launcher_bypass_routes_are_audited(monkeypatch, tmp_path, app, route):
+    """FULL grants never authorize paste/commit; explicit exec still does."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import Click, KeyChord, MenuOp, MenuVerb, MouseButton, Point, TypeText
+
+    element = Element(ref="e1", role="AXButton", title={"paste_menu": "Paste", "run": "Run"}.get(route, "Launch"),
+                      value=None, bounds=None, snapshot_id="launcher")
+    action = {
+        "type": TypeText(text="touch /tmp/forbidden"),
+        "set_value": TypeText(text="touch /tmp/forbidden"),
+        "return": KeyChord(chord="Return"), "ctrl_v": KeyChord(chord="ctrl+v"),
+        "paste_menu": Click(element), "launch": Click(element), "run": Click(element),
+        "middle": Click(element, button=MouseButton.MIDDLE),
+        "right": Click(element, button=MouseButton.RIGHT),
+        "point": Click(Point(0, 10, 10)),
+        "menu_press": MenuOp(verb=MenuVerb.PRESS, app=app, path="Paste"),
+    }[route]
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(app, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(action, app, lambda: pytest.fail("input delivered"),
+                           input_target=element if route == "set_value" else None)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl") for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, app, lambda: "explicit grant") == "explicit grant"
+
+
+@pytest.mark.parametrize("app", ["xfce4-panel", "gnome-panel", "gnome-shell", "plasmashell"])
+def test_panel_run_dialog_ancestry(fake_atspi, monkeypatch, tmp_path, app):
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import Click
+
+    dialog = _Acc("dialog", name="Run a Command")
+    field = _Acc("text")
+    _adopt(dialog, field)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    monkeypatch.setattr(_linux_system, "command_launcher_open", lambda app: False)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (field, False))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_: field)
+    element = Element(ref="e1", role="AXButton", title="Run", value=None, bounds=None, snapshot_id="run")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(app, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(Click(element), app, lambda: pytest.fail("run clicked"))
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    assert not _atspi.command_launcher_ancestor(field, "mousepad")
+    dialog.role = "text"
+    assert not _atspi.command_launcher_ancestor(field, app)
+
+
+def test_launcher_click_rechecked_before_dispatch(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import Click, Point
+
+    state = {"launcher": False}
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "terminal_target", lambda *args, **kwargs: state["launcher"])
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xfce4-panel", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(Click(Point(0, 10, 10)), "xfce4-panel",
+                           lambda: pytest.fail("click delivered"),
+                           recheck=lambda app: state.update(launcher=True))
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl") for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+@pytest.mark.parametrize("attribute", ["id", "class", "window-role"])
+def test_panel_run_dialog_native_identity_survives_localized_title(fake_atspi, attribute):
+    dialog = _Acc("dialog", name="Localized command prompt")
+    dialog.get_attributes = lambda: {attribute: "panel_run_dialog"}
+    entry = _Acc("text")
+    _adopt(dialog, entry)
+    assert _atspi.command_launcher_ancestor(entry, "gnome-panel")
+    assert not _atspi.command_launcher_ancestor(entry, "mousepad")
+
+
+def test_launcher_gate_preserves_focused_terminal_fallback(fake_atspi, monkeypatch):
+    """A nonterminal ref must not suppress the existing focused-shell check."""
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_: _Acc("text"))
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (_Acc("terminal"), False))
+    target = Element(ref="e1", role="AXTextArea", title="", value=None, bounds=None, snapshot_id="editor")
+    assert driver.terminal_target("editor", target)
+
+
 @pytest.mark.parametrize("window_role,app_name", [("window", "xfce4-notifyd"),
                                                  ("notification", "notification-daemon")])
 @pytest.mark.parametrize("phase", ["activation", "feedback"])
@@ -18003,7 +18106,8 @@ def test_find_root_refreshes_registry_after_calc_restart(
 
 @pytest.mark.parametrize("action", ["click", "press"])
 @pytest.mark.parametrize("change", ["unchanged", "renamed", "unreadable", "role_changed"])
-def test_gtk_cell_rechecks_cached_label_after_preparation(monkeypatch, action, change):
+@pytest.mark.parametrize("version", ["", "2.24.33", "3.24.49", "4.18.6"])
+def test_gtk_cell_rechecks_cached_label_after_preparation(fake_atspi, monkeypatch, action, change, version):
     from contextlib import nullcontext
     from a11y_computer_use.drivers import linux, _atspi_events
     from a11y_computer_use.schema import MouseButton
@@ -18011,6 +18115,7 @@ def test_gtk_cell_rechecks_cached_label_after_preparation(monkeypatch, action, c
     cell = _GeckoNode("table cell", "A00GONE 7", ("SHOWING", "VISIBLE"))
     app = _GeckoNode("application", "xfce4-taskmanager")
     app.toolkit = "GTK"
+    app.get_toolkit_version = lambda: version
     cell.application = app
     cell.actions = ["activate"]
     element = Element("e1", "AXCell", "A00GONE 7", None, Bounds(0, 10, 10, 100, 40),
@@ -18062,3 +18167,79 @@ def test_gtk_cell_rechecks_cached_label_after_preparation(monkeypatch, action, c
             assert exc.value.detail["outcome"] == "refused"
             assert clicks == []
             assert not cell.pressed
+
+
+@pytest.mark.parametrize("verify", [False, True])
+def test_gtk_flat_table_click_reports_selection_only(
+    fake_atspi, monkeypatch, xtest_recorder, tmp_path, verify
+) -> None:
+    """A GTK theme-list selection is not evidence of row-activated (#929)."""
+    from a11y_computer_use import observe, safety, server
+
+    events, _display = xtest_recorder
+    cell = _outline_cell("Adwaita-dark", ["expand or contract", "edit", "activate"])
+    window = _outline_window(cell, role="table")
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    actions = []
+    cell.do_action = lambda index: actions.append(index) or True
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(shot.app or "outline", safety.Tier.FULL)
+    runtime = server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    runtime._current = shot
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    target = next(el for el in shot.elements if el.title == "Adwaita-dark")
+    note = "single click selects only; activation may require count=2"
+    assert target.note == note
+    assert note in observe.render_matches(shot, (target,))
+    events.clear()
+    result = runtime.click(target.ref, verify=verify)
+    assert note in result
+    assert result.outcome == "partial"
+    assert result.evidence == "row activation is not verified; single click selects only"
+    assert "SELECTED" in cell.states
+    assert actions == []
+    assert not [event for event in events if event[0] == _X_BPRESS]
+
+    runtime._current = driver.snapshot(Scope.WINDOW, "outline")
+    target = next(el for el in runtime._current.elements if el.title == "Adwaita-dark")
+    events.clear()
+    double = runtime.click(target.ref, count=2)
+    assert note not in double
+    assert len([event for event in events if event[0] == _X_BPRESS]) == 2
+    assert actions == []
+
+
+@pytest.mark.parametrize("actions,role,toolkit,expected", [
+    (["activate"], "table", "gtk", True),
+    (["click", "activate"], "table", "gtk", False),
+    ([], "table", "gtk", False),
+    (["activate"], "tree table", "gtk", False),
+    (["activate"], "table", "Qt", False),
+])
+def test_gtk_table_selection_note_scope(fake_atspi, actions, role, toolkit, expected) -> None:
+    cell = _outline_cell("row", actions)
+    _outline_window(cell, role=role)
+    cell.get_application().get_toolkit_name = lambda: toolkit
+    parent = cell.parent
+    parent.get_child_at_index = lambda index: pytest.fail("note must not scan table cells")
+    assert bool(_atspi.gtk_table_selection_note(cell)) is expected
+
+
+def test_gtk4_cell_does_not_use_treeview_label_guard():
+    """GTK4 list cells retain their existing input path, outside TreeView guards."""
+    cell = _GeckoNode("table cell", "list item")
+    cell.actions = ["listitem.scroll-to"]
+    app = _GeckoNode("application", "baobab")
+    app.toolkit = "GTK"
+    app.get_toolkit_version = lambda: "4.18.6"
+    cell.application = app
+    cell.clear_cache_single = lambda: pytest.fail("GTK4 is outside the TreeView guard")
+    element = Element("e1", "AXCell", "recorded label", None, None, "gtk4-cell")
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    driver._verify_gtk_cell_target(element, cell)
