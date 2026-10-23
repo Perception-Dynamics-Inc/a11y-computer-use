@@ -460,3 +460,5 @@
 - 2026-10-23 (PR #945 repair): GTK4 list cells share AXCell with TreeView cells; identify the list model by its native listitem.scroll-to action, not the toolkit version alone, when scoping the recycled TreeView label guard. Run tests/test_gtk4_bounds.py alongside Linux synthetic regressions to preserve recovered pointer clicks.
 
 - 2026-10-23 (#920): Hidden GTK notebook tabs can belong to detached popovers or nested playlist panes. A frame title is not a generic page label; restrict that fallback to a single terminal-content page, preserving hidden geometry/action refusal and page-content hoisting.
+
+- 2026-10-23 (PR #948 repair): A hidden xfce4-terminal page contains a scroll pane with both terminal content and native scrollbar siblings. Ignore only scrollbar children of that pane when recognizing the single terminal-content path; retain refusal for additional content or controls. The single-child synthetic fixture missed this layout; cover scrollbar siblings and run both unchanged live terminal tab regressions.

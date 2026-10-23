@@ -1122,6 +1122,35 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
         parent = by_ref[parent].parent
 
 
+@pytest.mark.parametrize("siblings, expected", [
+    (["scroll bar"], "Probe Title"),
+    (["scroll bar", "scroll bar"], "Probe Title"),
+    (["push button"], ""),
+    (["terminal"], ""),
+    (["table"], ""),
+])
+def test_hidden_terminal_page_with_scrollbar_siblings(monkeypatch, siblings, expected):
+    """A terminal scroll pane includes native scrollbars, not just its content."""
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box or ((0., 0.), (300., 500.)))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda node: (
+        True, False, None, True, None, False, False,
+    ))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *a, **kw: None)
+    content = _PageNode("scroll pane", children=[
+        _PageNode("terminal", "Terminal"), *[_PageNode(role) for role in siblings],
+    ])
+    tab = _PageNode("page tab", box=((-1., -1.), (-1., -1.)), children=[content])
+    notebook = _PageNode("page tab list", children=[tab])
+    _PageNode("frame", "Probe Title", children=[_PageNode("panel", children=[notebook])])
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(tab)
+    assert raw.title == expected
+    assert raw.unallocated
+    assert raw.position is None and raw.size is None
+    assert raw.actions == ()
+    assert accessor.children(notebook) == [tab, content]
+
+
 @pytest.mark.parametrize("detached", [False, True])
 def test_hidden_playlist_tabs_do_not_borrow_track_title(monkeypatch, detached):
     """Nested hidden playlist pages keep content without phantom track labels."""

@@ -1706,6 +1706,10 @@ def _terminal_page_frame_title(node) -> str:
     current = node
     for _ in range(8):
         kids = _direct_children(current)
+        if _role_name(current) == "scroll pane":
+            # GTK exposes the pane's scrollbars beside its terminal content.
+            # They do not make this a second content page.
+            kids = [child for child in kids if _role_name(child) != "scroll bar"]
         if len(kids) != 1:
             return ""
         current = kids[0]
