@@ -83,6 +83,12 @@ AT-SPI `level bar` maps to `AXProgressIndicator` and shows its current Value wit
 
 ## Chromium pages
 
+Visible-row sampling preserves native HTML list-item subtrees, including
+showing CSS dropdown links outside the item's bounds. Descendants retain
+their reported geometry and individual visibility checks; hidden links are
+still omitted. Synthetic tests cover snapshot/find discovery and an immediate
+`scroll_to_find` match without scrolling; this change has not been live-verified.
+
 Window-scoped snapshots and `find` include showing native Chrome menus under
 unnamed popup frames. The menu itself supplies the snapshot root, preserving
 its items' native refs, labels (including accelerator suffixes), and reported
