@@ -43,7 +43,7 @@ from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 _MENU_ROLES = frozenset({"menu", "popup menu"})
 _ITEM_ROLES = frozenset({"menu item", "check menu item", "radio menu item"})
-_PRESS_ACTIONS = frozenset({"click", "press", "activate", "do default", "open", "showmenu", "menu"})
+_PRESS_ACTIONS = frozenset({"click", "press", "activate", "do default", "open", "showmenu", "show menu", "menu"})
 _MOD_ORDER = ("ctrl", "alt", "shift", "super")
 _MOD_TAGS = {
     "control": "ctrl",
@@ -226,7 +226,7 @@ def _has_submenu(node: object) -> bool:
     """
     if _role(node) in _MENU_ROLES:
         return True
-    if entries_of(node):
+    if entries_of(node, include_hidden=True):
         return True
     if _has_state(node, "HAS_POPUP", "EXPANDABLE"):
         return True
@@ -915,6 +915,8 @@ def menu_mnemonic(app: object, letter: str) -> str | None:
 
 def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, object]]:
     """Items of the menu at ``path`` (top-level menus when ``path`` is empty)."""
+    from a11y_computer_use.drivers._atspi import _qt_app
+
     settle = settle or _settle
     bar = _require_bar(app)
     if not path or not str(path).strip():
@@ -922,7 +924,16 @@ def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, 
     try:
         nodes = _walk(app, path)
     except ComputerUseError as exc:
-        if exc.code is not ErrorCode.APP_NOT_FOUND or "not a menu" in exc.message:
+        # Qt clears VISIBLE on rows in a closed popup. Open the visible
+        # ancestors, then recheck each row before dispatching it.
+        closed_qt_path = (
+            exc.detail.get("reason") == "hidden"
+            and exc.detail.get("level", 0) > 0
+            and _qt_app(app)
+        )
+        if not closed_qt_path and (
+            exc.code is not ErrorCode.APP_NOT_FOUND or "not a menu" in exc.message
+        ):
             raise
         nodes = None
     if nodes is not None:
@@ -934,8 +945,11 @@ def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, 
                 detail={"path": path, "hint": "list its parent, or press it"},
             )
         container = _opened_menu(app, target)
-        if entries_of(container, include_hidden=True):
-            return [_describe(node).to_dict() for node in entries_of(container)]
+        rows = entries_of(container)
+        # Qt conflates a closed popup with hidden actions in its state set.
+        # Listing requires opening that popup and reading the real states.
+        if rows or (entries_of(container, include_hidden=True) and not _qt_app(app)):
+            return [_describe(node).to_dict() for node in rows]
     top = _open_branch(app, path, settle)
     try:
         target = _walk(app, path)[-1]

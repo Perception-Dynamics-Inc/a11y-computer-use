@@ -1502,3 +1502,58 @@ def test_menu_with_only_hidden_rows_lists_empty_without_opening():
     ])])
     assert _linux_menus.menu_items(app, "File") == []
     assert not file_menu.pressed and not hidden.pressed
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("operation", ["list", "press"])
+def test_qt_closed_popup_visibility_is_rechecked_after_open(nested, operation):
+    """Qt hides closed popup rows; opening reveals only available actions."""
+    visible = _item("Option X")
+    hidden = _item("Hidden")
+    visible.states.discard("visible")
+    hidden.states.discard("visible")
+    popup = _menu("Tools", visible, hidden)
+    entry = Acc(
+        "menu item", "Tools", [popup], states={"enabled", "sensitive"},
+        actions=("Show Menu",),
+    )
+    app = Acc("application", children=[Acc("menu bar", children=[entry])])
+    app.get_toolkit_name = lambda: "Qt"
+
+    class Open(_Action):
+        def do_action(self, index):
+            if "showing" in popup.states:
+                popup.states.discard("showing")
+                visible.states.discard("visible")
+            else:
+                popup.states.add("showing")
+                visible.states.add("visible")
+            return super().do_action(index)
+
+    entry.get_action_iface = lambda: Open(entry)
+    path = "Tools"
+    if nested:
+        child = _item("Child")
+        sub = _menu("Option X", child)
+        visible.children = [sub]
+        path += " > Option X"
+
+    if operation == "list":
+        rows = _linux_menus.menu_items(app, path, settle=lambda _: None)
+        assert [row["title"] for row in rows] == (["Child"] if nested else ["Option X"])
+    else:
+        path += " > Child" if nested else " > Option X"
+        assert _linux_menus.menu_press(
+            app, path, settle=lambda _: None,
+            dismiss=lambda: popup.states.discard("showing"),
+        ) == ("Child" if nested else "Option X")
+    assert entry.pressed
+    assert not hidden.pressed
+
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "Tools > Hidden", settle=lambda _: None,
+            dismiss=lambda: popup.states.discard("showing"),
+        )
+    assert exc.value.detail["reason"] == "hidden"
+    assert not hidden.pressed
