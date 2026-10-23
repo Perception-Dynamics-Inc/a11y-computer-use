@@ -1691,3 +1691,27 @@ def test_notification_preparation_preserves_visibility_refusal(monkeypatch, stat
     with pytest.raises(ComputerUseError) as exc:
         driver._raise_handle_window(object())
     assert exc.value.detail["reason"] == reason
+
+
+@pytest.mark.parametrize("blocker", [None, "window_unmapped", "window_shaded", "missing"])
+def test_input_activation_requests_once_without_restoring_or_waiting(monkeypatch, blocker):
+    from contextlib import contextmanager
+
+    display, window = object(), object()
+    calls = []
+
+    @contextmanager
+    def with_window(window_id):
+        assert window_id == 7
+        yield display, None if blocker == "missing" else window
+
+    monkeypatch.setattr(_linux_system, "_with_window", with_window)
+    monkeypatch.setattr(_linux_system, "_activation_blocker", lambda d, w: blocker)
+    monkeypatch.setattr(_linux_system, "_send_active_window",
+                        lambda d, w: calls.append((d, w)))
+    monkeypatch.setattr(_linux_system, "_restore_if_hidden",
+                        lambda *args: pytest.fail("must not restore hidden windows"))
+    monkeypatch.setattr(_linux_system.time, "sleep",
+                        lambda *args: pytest.fail("must not extend the focus wait"))
+    assert _linux_system.request_input_activation(7) is (blocker is None)
+    assert calls == ([(display, window)] if blocker is None else [])
