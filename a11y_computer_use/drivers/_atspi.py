@@ -14894,7 +14894,13 @@ def _selection_iface(acc):
 
 
 def _child_index(parent, child) -> int | None:
-    count = min(_child_count(parent), 500)
+    child_count = _child_count(parent)
+    index = _call_first(child, ("get_index_in_parent", "getIndexInParent"))
+    if type(index) is int and 0 <= index < child_count:
+        kid = _child_at(parent, index)
+        if kid is child or kid == child:
+            return index
+    count = min(child_count, 500)
     for index in range(count):
         kid = _child_at(parent, index)
         if kid is None:
@@ -14952,7 +14958,9 @@ def _selection_parent(acc):
         if _selection_iface(parent) is not None and parent_role in (
             _LIST_ROLES | {"tree", "tree table", "table"}
         ):
-            index = _child_index(parent, acc)
+            # node is the direct child reached through native parent links;
+            # acc may be several cells below it in a GTK TreeView.
+            index = _child_index(parent, node)
             if index is None:
                 index = _index_of_containing_child(parent, acc)
             return parent, index, acc
