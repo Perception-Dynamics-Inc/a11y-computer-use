@@ -451,6 +451,10 @@
 
 - 2026-10-23 (PR #939 repair): Notification implicit-activation bypass and Qt input-focus recovery use adjacent X11 helpers but serve different paths. Preserve both helpers and their regressions when merging; retain notification expiry checks immediately before dispatch.
 
+- 2026-10-23 (#944): GTK TreeView cell accessibles can retain their object path and cached name after the model replaces a row. Before cell input, invalidate both operation-local getters and native properties and compare the current label with the resolved snapshot label; repeat after window/feedback preparation. A successful ref rematch against cached names is insufficient.
+
+
 - 2026-10-23 (PR #938 main merge): Panel run-dialog identification and notification activation preparation have independent X11 regressions appended at the same location. Preserve both test groups on merge; the terminal no-bounds no-op repair remains necessary alongside the notification changes. Both unchanged xfce4-terminal live regressions passed on the combined code under private Xvfb/Openbox/D-Bus.
 
 - 2026-10-23 (#930): GTK combos can expose the selected item as a non-empty accessible name. Compare it with the existing choice-value read before using relation or measured row labels; preserve explicit names, native handles, and the independent selected value.
+- 2026-10-23 (PR #945 repair): GTK4 list cells share AXCell with TreeView cells; identify the list model by its native listitem.scroll-to action, not the toolkit version alone, when scoping the recycled TreeView label guard. Run tests/test_gtk4_bounds.py alongside Linux synthetic regressions to preserve recovered pointer clicks.
