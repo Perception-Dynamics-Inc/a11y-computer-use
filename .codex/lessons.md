@@ -474,3 +474,7 @@
 - 2026-10-23 (PR #958 CI review): Chrome large-table reload diagnostics can show an empty native application root with both cached and refreshed child reads. That failure precedes shared window-overflow note rendering and matches the tracked #591 flake; preserve its assertions and inspect native evidence before changing shared pruning.
 
 - 2026-10-23 (#954): GTK calendars can publish only a childless calendar role while pointer input changes a painted date. Preserve the native calendar identity, refuse whole-widget ref clicks before either semantic or pointer input, and do not interpret an unchanged accessibility tree as unchanged pixels. Explicit coordinates must remain the caller's point.
+
+- 2026-10-23 (#956): GTK colour chooser hex entries can echo EditableText while retaining the old selected colour. Buffer equality is not commit evidence; keep activation explicit and verify the preview before Select.
+
+- 2026-10-23 (PR #958 colour-chooser merge): Window-overflow recovery notes and GTK colour-entry commit warnings describe independent limitations. Preserve both documentation sections when merging; retain colour-entry preflight refusal alongside shared snapshot overflow hints.

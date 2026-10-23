@@ -1027,6 +1027,16 @@ This is a geometry-based hint: it does not assert that a particular missing
 control exists, count hidden controls, or automatically move or resize a window.
 Take a fresh snapshot or repeat `find` after adjusting the window.
 
+### GTK colour chooser hex entry
+
+For GTK entries named “Color Name” (or “Colour Name”) containing a hex colour,
+`set_value` refuses with `unsupported` / `commit_unverified` before replacing
+the text. GTK parses this entry on activation or focus-out; text read-back alone
+does not verify the chooser's selected colour. Focus the field, select all, type
+the colour, then send Return explicitly. Verify the preview colour before
+pressing Select. No activation key is sent implicitly. This recognition is
+limited to these accessible labels; translated labels are not covered.
+
 ### Calendars with painted day cells
 
 AT-SPI calendars retain the `calendar` role for `find role=calendar`. Their
