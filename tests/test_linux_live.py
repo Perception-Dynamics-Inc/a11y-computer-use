@@ -9938,9 +9938,12 @@ def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> N
             None if selected is None else (selected.role, selected.title, selected.selected)
         )
 
-        tree_tab = next(el for el in snap.elements if el.title == "Tree" and el.role == "AXButton")
+        tree_tab, = observe.find_elements(snap, text="Tree", role="tab")
+        assert tree_tab.role == "AXTab" and tree_tab.clickable, tree_tab
+        assert not observe.find_elements(snap, text="Tree", role="button")
         runtime._current = snap
-        runtime.click(tree_tab.ref)
+        clicked = runtime.click(tree_tab.ref)
+        assert "clicked" in clicked, clicked
         deadline = time.monotonic() + 8
         fruits = None
         while time.monotonic() < deadline:
@@ -9953,6 +9956,13 @@ def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> N
                 break
             time.sleep(0.3)
         assert fruits is not None and fruits.expanded is False, fruits
+        # The role filter is a substring search and also returns the now-visible
+        # Tree AXTable. Verify selection on the actual page tab.
+        selected_tab, = (
+            el for el in observe.find_elements(snap, text="Tree", role="tab")
+            if el.role == "AXTab"
+        )
+        assert selected_tab.selected, selected_tab
         runtime._current = snap
         clicked = runtime.click(fruits.ref)
         assert "clicked" in clicked, clicked
@@ -13032,9 +13042,10 @@ def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, hidden: bool) -> None:
     assert area is not None and area.bounds is not None, rendered[:1500]
     center_x = area.bounds.x + area.bounds.width / 2
     center_y = area.bounds.y + area.bounds.height / 2
-    buttons = [el for el in snap.elements if el.role == "AXButton"]
+    tabs = [el for el in snap.elements if el.role == "AXTab"]
+    controls = [el for el in snap.elements if el.role in {"AXButton", "AXTab"}]
     covering = [
-        el for el in buttons
+        el for el in controls
         if el.bounds is not None and _covers_point(el.bounds, center_x, center_y)
     ]
     assert not covering, rendered[:1500]
@@ -13045,12 +13056,12 @@ def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, hidden: bool) -> None:
         ancestors.append(by_ref[parent])
         parent = by_ref[parent].parent
     for title in titles:
-        matches = [el for el in buttons if el.title == title]
+        matches = [el for el in tabs if el.title == title]
         assert len(matches) == 1, (title, rendered[:1500])
         tab = matches[0]
         line = next(
             item for item in rendered.splitlines()
-            if "button" in item and f'"{title}"' in item
+            if "tab" in item and f'"{title}"' in item
         )
         if hidden:
             assert tab.bounds is None, tab.bounds
@@ -13067,7 +13078,7 @@ def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, hidden: bool) -> None:
             assert tab.bounds.width <= 200, tab.bounds
             assert tab.bounds.width * tab.bounds.height < area.bounds.width * area.bounds.height / 4
     for ancestor in ancestors:
-        if ancestor.role != "AXButton" or ancestor.bounds is None:
+        if ancestor.role not in {"AXButton", "AXTab"} or ancestor.bounds is None:
             continue
         assert ancestor.bounds.height <= 40, ancestor.bounds
         assert not _covers_point(ancestor.bounds, center_x, center_y)
@@ -13125,7 +13136,7 @@ def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
     )
     try:
         snap = _wait_xfce_tabs(driver, (title,), hidden=True)
-        tab = next(el for el in snap.elements if el.role == "AXButton" and el.title == title)
+        tab = next(el for el in snap.elements if el.role == "AXTab" and el.title == title)
         runtime = _runtime_for(tmp_path, driver, "xfce4-terminal")
         runtime._current = snap
         before = _pointer_xy()
@@ -13141,10 +13152,10 @@ def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
 
 
 def test_xfce4_terminal_two_tabs_keep_their_titles(tmp_path) -> None:
-    """Two xfce4-terminal pages are small buttons named with each terminal title.
+    """Two xfce4-terminal pages are small tabs named with each terminal title.
 
     A second page gives the tab bar a real allocation. Each tab keeps that
-    title, and neither button is the terminal.
+    title, and neither tab is the terminal.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 

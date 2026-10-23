@@ -479,8 +479,16 @@
 
 - 2026-10-23 (#956): GTK colour chooser hex entries can echo EditableText while retaining the old selected colour. Buffer equality is not commit evidence; keep activation explicit and verify the preview before Select.
 
+- 2026-10-23 (PR #970 repair): Native page tabs retain AXTab independently of GTK expander click refusal. Preserve both appended regression groups when merging; the tab role change must retain hidden-tab geometry refusal, selected state, native handles, and terminal page-content hoisting.
+
+- 2026-10-23 (#960 live repair): GTK notebook tabs need AXTab in the shared clickable-role set even when the native bridge exposes no press action. Role-only find coverage misses this regression; assert visible-tab clickability and run both live terminal tab tests, retaining all geometry and hidden-tab no-input checks. Keep AXTab in AT-SPI no-value roles to avoid unnecessary Text/Value probes.
+
+- 2026-10-23 (PR #970 Qt CI repair): Native page-tab role changes apply to Qt as well as GTK. The Qt table/tree live test still searched for the Tree tab as AXButton and failed before clicking it; require AXTab and verify tab selection while preserving all cell assertions. The shared find role filter uses substrings, so `tab` also matches AXTable once the Tree page is visible; disambiguate the exact tab role when checking its selected state.
 - 2026-10-23 (PR #958 colour-chooser merge): Window-overflow recovery notes and GTK colour-entry commit warnings describe independent limitations. Preserve both documentation sections when merging; retain colour-entry preflight refusal alongside shared snapshot overflow hints.
 
 - 2026-10-23 (PR #958 palette merge): Named radio-palette retention and window-overflow notes affect shared pruning independently. Preserve both appended observation test groups when merging and run the server regressions too, because find consumes the same pruned snapshots.
 
+- 2026-10-23 (PR #970 overflow merge): Native AXTab clickability and shared window-overflow notes are independent observation behaviors. Preserve both when merging and run the observation, Linux tab, and Runtime regressions together. A pending Linux job still installing system packages provides no test-failure evidence.
 - 2026-10-23 (#965): Chrome upload verification must compare file-input evidence before and after chooser confirmation. Another empty input is not failure, and a filename already present in a sibling input or address bar is not success. Keep counts scoped to the same app/snapshot scope and require both the empty-input decrease and matching-button increase.
+
+- 2026-10-23 (PR #970 third repair): Reproduce Qt CI failures with the runner’s Qt version. Qt 6.4.2 reports QAccessibleTabButton currentIndex through FOCUSED only; Qt 6.7 adds SELECTED. The unchanged Tree-tab live assertion failed with 6.4.2 and passed with 6.11.0. Normalize the older native current-index state only for known affected Qt versions and page-tab/list roles; ordinary focus is not generic selection evidence. The unchanged Qt and terminal live tests pass after normalization.
