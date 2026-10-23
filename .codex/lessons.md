@@ -444,3 +444,5 @@
 - 2026-10-19 (#936): Notification activation and visual feedback can outlive a bubble. Retain its native window before preparation and check fresh visibility, bounds, and exact target hit immediately before pointer dispatch; classifying only after expiry can lose the parent chain. The activation-delay fix (#935) does not replace this guard.
 
 - 2026-10-23 (PR #939 repair): Notification implicit-activation bypass and Qt input-focus recovery use adjacent X11 helpers but serve different paths. Preserve both helpers and their regressions when merging; retain notification expiry checks immediately before dispatch.
+
+- 2026-10-23 (#944): GTK TreeView cell accessibles can retain their object path and cached name after the model replaces a row. Before cell input, invalidate both operation-local getters and native properties and compare the current label with the resolved snapshot label; repeat after window/feedback preparation. A successful ref rematch against cached names is insufficient.

@@ -17999,3 +17999,66 @@ def test_find_root_refreshes_registry_after_calc_restart(
         )
     assert changes == [0, 1]
     assert mask["value"] == 1
+
+
+@pytest.mark.parametrize("action", ["click", "press"])
+@pytest.mark.parametrize("change", ["unchanged", "renamed", "unreadable", "role_changed"])
+def test_gtk_cell_rechecks_cached_label_after_preparation(monkeypatch, action, change):
+    from contextlib import nullcontext
+    from a11y_computer_use.drivers import linux, _atspi_events
+    from a11y_computer_use.schema import MouseButton
+
+    cell = _GeckoNode("table cell", "A00GONE 7", ("SHOWING", "VISIBLE"))
+    app = _GeckoNode("application", "xfce4-taskmanager")
+    app.toolkit = "GTK"
+    cell.application = app
+    cell.actions = ["activate"]
+    element = Element("e1", "AXCell", "A00GONE 7", None, Bounds(0, 10, 10, 100, 40),
+                      "recycled-gtk-cell", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: cell})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *a: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(_linux_input, "held", lambda mods: nullcontext())
+    clicks = []
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+    prepared = []
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *a: prepared.append(True))
+
+    def clear():
+        assert prepared
+        if change == "renamed":
+            cell.name = "A11YPROBE0640 3000"
+        elif change == "unreadable":
+            cell.get_name = lambda: None
+        elif change == "role_changed":
+            cell.role = "push button"
+
+    cell.clear_cache_single = clear
+    # Cache the issued label in both layers. Only native invalidation reveals
+    # the replacement, and operation-local invalidation must expose that read.
+    with _atspi.read_cache():
+        assert _atspi._call_first(cell, ("get_name",)) == element.title
+
+        def invoke():
+            if action == "press":
+                return driver.press_element(element)
+            return driver.click(element, button=MouseButton.RIGHT, count=2, modifiers=("shift",))
+
+        if change == "unchanged":
+            invoke()
+            if action == "click":
+                assert clicks == [((60, 30), {"button": "right", "count": 2})]
+            else:
+                assert cell.pressed
+        else:
+            with pytest.raises(ComputerUseError) as exc:
+                invoke()
+            assert exc.value.code == ErrorCode.STALE_REF
+            assert exc.value.detail["reason"] == "target_changed"
+            assert exc.value.detail["outcome"] == "refused"
+            assert clicks == []
+            assert not cell.pressed

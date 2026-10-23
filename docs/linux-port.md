@@ -135,6 +135,13 @@ The requested button, count, and modifiers are preserved. This guard is covered 
 synthetic tests; it does not make the native check and XTEST delivery atomic or
 establish live notification-action verification.
 
+GTK cell clicks and accessibility presses re-read the native role and label after
+window preparation, invalidating both native and operation-local caches. A changed
+or unreadable cell label returns `stale_ref` with `reason=target_changed` before
+input. This guards against TreeView cells recycled for a different row under the
+same object path. Synthetic tests cover this check; it is not atomic with input
+delivery and has not been live-verified against xfce4-taskmanager.
+
 Chromium page checkbox, radio, and toggle-button clicks compare fresh native
 `CHECKED`/`PRESSED` states before and after the existing input path. Coordinate
 clicks resolve the native window-owner PID and hit-test its showing AT-SPI frame
