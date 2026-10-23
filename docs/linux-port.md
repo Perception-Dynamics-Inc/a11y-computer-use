@@ -969,3 +969,13 @@ Qt application's direct child qualifies for that window lookup. Recovery sends
 one activation request without restoring hidden/shaded windows or adding a
 second wait. Keyboard input still requires the target's native `FOCUSED` state;
 an acknowledged activation or `GrabFocus` alone does not confirm success.
+
+## GTK combo labels
+
+When a GTK combo's accessible name equals its displayed value, snapshots use
+its `LABELLED_BY` caption (without a trailing colon), or the existing measured
+same-row sibling-label fallback. The selected item remains the value, so
+`find(text="Hinting", clickable=true)` can identify the control even after its
+selection changes. Explicit names and combos without usable label evidence
+retain their native names. This naming behavior is covered by hermetic tests;
+live GTK verification remains a CI check.
