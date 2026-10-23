@@ -7,6 +7,40 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.76] - 2026-10-23
+
+Fourteen commits since v0.4.75, through #962.
+
+### Safety
+
+- Clicks and menu presses on recognized terminals and command launchers require explicit execution permission, closing context-menu Paste, middle-click paste and Launch/Run bypasses. Panel run dialogs use native identity evidence; refusals are audited and explicit execution grants remain supported. Fixes #934 (#938) (99b979c, 2026-10-23).
+- Notification ref clicks retain the original native window and recheck fresh visibility, bounds and an exact target hit immediately before pointer dispatch; expired, moved, replaced or unreadable targets return stale_ref without input. Native checks and pointer delivery are not atomic, and live notification-action verification remains untested. Fixes #936 (#940) (ec6d685, 2026-10-22).
+- GTK TreeView cell input refreshes native role and label after preparation, refusing changed or unreadable recycled targets before semantic or pointer input while preserving the requested gesture. GTK4 list cells retain their separate path; the final check and delivery are not atomic. Fixes #944 (#945) (b75bee5, 2026-10-23).
+
+### Observation
+
+- Groups containing only named leaf radio buttons use the existing bounded sheet allowance, retaining the standard GTK colour palette for find and scroll_to_find with native handles and bounds. Mixed or nested controls keep ordinary caps, and larger palettes still report elision. Fixes #955 (#962) (fe6e3ad, 2026-10-23).
+
+### Linux drivers
+
+- Notification ref-action preparation skips implicit activation only for a reported X11 NOTIFICATION window, preserving visibility refusal and explicit focus/raise verification. This removes the activation wait independently of the expiry guard above; live latency was not measured. Fixes #935 (#939) (b387793, 2026-10-23).
+- Named app lookup refreshes the AT-SPI desktop application registry after process restarts, and Calc startup failures retain snapshot and window diagnostics without changing timing bounds. The stale-cache mechanism is reproduced hermetically but is not established as the historical CI failure's cause; the separate post-input read-back issue #927 remains open. Fixes #942 (#943) (9795abc, 2026-10-23).
+- GTK flat-table cells warn that a single ref click selects only and may require an explicit double-click for activation; single-click receipts report a partial outcome, including with verification. This implements the warning option, not pointer-based single-click activation, and preserves explicit double-clicks. Fixes #929 (#946) (63a44bc, 2026-10-23).
+- GTK combos whose accessible name equals their selected value prefer a relation caption or measured same-row label, preserving explicit names, native handles and bounds, Qt behavior and the independently reported value. Fixes #930 (#947) (d131167, 2026-10-23).
+- Hidden notebook tabs inherit a frame title only for a single terminal-content page, so nested or detached playlist tabs no longer inherit the playing track title. Native names, wizard titles, hidden-tab refusal and page-content exposure remain intact. Fixes #920 (#948) (e3093bf, 2026-10-23).
+- Menu listings omit hidden entries and explicit paths refuse hidden levels before dispatch. Closed GTK VISIBLE rows remain listable; Qt submenu structure is retained and the requested branch opens before visibility is rechecked, including the native Show Menu action spelling. Fixes #919 (#950) (0dfca88, 2026-10-23).
+- GTK calendars retain their native calendar identity and refuse ambiguous whole-widget ref clicks before input, without inventing day cells or geometry. Unchanged trees after verified calendar or opaque-region clicks report an unknown effect; explicit coordinates remain the caller's point, and date selection is not verified. Fixes #954 (#964) (3c5fd72, 2026-10-23).
+- GTK colour chooser hex-entry writes that only echo a buffer are refused with commit_unverified and guidance to type, explicitly activate and verify the preview before Select. Automatic colour commit is not implemented; recognition covers Color Name and Colour Name labels, not translations. Fixes #956 (#963) (e6c58d4, 2026-10-23).
+
+### Performance
+
+- Nested selection cells resolve through their direct ancestor's native index and verify the indexed identity, retaining bounded traversal fallbacks and the original target handle. Synthetic tests verify reduced child reads; live Thunar latency was not measured. Fixes #949 (#951) (bd18b27, 2026-10-23).
+- Visible GTK dialog tabs, radios and checkboxes use fresh selected/checked transitions on the exact clicked handle to avoid a redundant outcome snapshot and process-exit grace. Fresh ref resolution and liveness checks remain; missing or unchanged evidence retains full verification. Ref-resolution caching and set_value optimization are not implemented, and whole-flow print-to-PDF latency was not measured. Fixes #953 (#957) (673fa85, 2026-10-23).
+
+### Packaging
+
+- The package version is 0.4.76.
+
 ## [0.4.75] - 2026-10-19
 
 Twelve commits since v0.4.74, through #902.
