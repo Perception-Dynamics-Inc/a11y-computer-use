@@ -2412,6 +2412,10 @@ class LinuxDriver:
         if window_id is None:
             return
         _linux_system.refuse_unviewable_input(int(window_id))
+        # Notification bubbles cannot become _NET_ACTIVE_WINDOW. Do not
+        # spend the activation budget before dispatching the original action.
+        if _linux_system.is_notification_window(int(window_id)):
+            return
         if target[0]:
             return
         try:
