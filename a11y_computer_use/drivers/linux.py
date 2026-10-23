@@ -2585,6 +2585,49 @@ class LinuxDriver:
             },
         )
 
+    def _verify_gtk_cell_target(self, element: Element, handle) -> None:
+        """Reject recycled GTK cells even when a snapshot cached their old name."""
+        if element.role != "AXCell" or handle is None:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        def matches():
+            if _atspi._toolkit_name(handle) != "gtk":
+                return True
+            if (_atspi._gtk4_app(handle)
+                    and "listitem.scroll-to" in _atspi._raw_action_names(handle)):
+                return True
+            # GTK4 list-item actions identify list cells, not TreeView cells.
+            # An unchanged object path is not identity for a GTK TreeView cell.
+            # Invalidate both operation-local getters and native properties.
+            _atspi._drop_read_cache()
+            clear = getattr(handle, "clear_cache_single", None)
+            if clear is not None:
+                clear()
+            role = _atspi._role_name(handle)
+            name = _atspi._call_first(handle, ("get_name",), default=None)
+            if role != "table cell" or not isinstance(name, str):
+                return False
+            title = _atspi._strip_objects(_atspi._plain_accessible_name(name))
+            if not title:
+                description = _atspi._call_first(handle, ("get_description",), default=None)
+                if not isinstance(description, str):
+                    return False
+                title = _atspi._plain_accessible_name(description)
+            return title == (element.title or "")
+
+        try:
+            matched = self._run(matches)
+        except Exception:
+            matched = False
+        if not matched:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} GTK cell no longer matches its recorded label; no input was sent",
+                detail={"ref": element.ref, "reason": "target_changed", "outcome": "refused",
+                        "hint": "Take a fresh snapshot and select the intended row again."},
+            )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -2633,6 +2676,7 @@ class LinuxDriver:
             )
         self._visible_action(element, "Click", handle)
         self._raise_handle_window(handle)
+        self._verify_gtk_cell_target(element, handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
             sent = self._run(lambda: _atspi.click_gtk4_tree_expander(handle))
@@ -3322,6 +3366,8 @@ class LinuxDriver:
                         "outcome": "refused",
                         "hint": "Take a fresh snapshot; the notification may have expired."},
             )
+        if isinstance(target, Element):
+            self._verify_gtk_cell_target(target, handle)
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         if office_pointer:
