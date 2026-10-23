@@ -494,3 +494,8 @@
 - 2026-10-23 (PR #970 third repair): Reproduce Qt CI failures with the runner’s Qt version. Qt 6.4.2 reports QAccessibleTabButton currentIndex through FOCUSED only; Qt 6.7 adds SELECTED. The unchanged Tree-tab live assertion failed with 6.4.2 and passed with 6.11.0. Normalize the older native current-index state only for known affected Qt versions and page-tab/list roles; ordinary focus is not generic selection evidence. The unchanged Qt and terminal live tests pass after normalization.
 
 - 2026-10-24 (#967): Chromium list discovery and snapshot traversal share the operation-local getter cache. Native CHILDREN bypass does not refresh counts or indexed handles already cached by the discovery probe; timer-driven children can disappear from the effect diff while the document title is fresh. Invalidate structural getter entries between those phases while retaining role/interface metadata, and cover both appended children and same-count replacements.
+
+
+- 2026-10-24 (#966): Chromium native menus can live inside unnamed top-level frames with no usable wrapper geometry or SHOWING state. Snapshot the showing native menu handle directly; retaining only the wrapper can still prune every menu item. Keep empty cached frames and find-bar recovery separate.
+
+- 2026-10-24 (PR #985 repair): Native Chromium popup-menu root selection and post-discovery child-cache invalidation protect different snapshot phases. Preserve both implementations and both appended regression groups when merging; verify menu handles/geometry alongside timer-added and same-count-replaced children.
