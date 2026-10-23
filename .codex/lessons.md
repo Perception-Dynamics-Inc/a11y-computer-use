@@ -465,10 +465,20 @@
 
 - 2026-10-23 (PR #950 repair): Qt's AT-SPI bridge clears VISIBLE as well as SHOWING for actions inside a closed QMenu. Detect submenu structure from all native rows, then open the requested Qt branch and recheck visibility before listing or dispatching its entries. Qt also publishes the native action name "Show Menu" with a space. Do not exempt Qt from hidden-action refusal; GTK's closed VISIBLE rows and hidden-only menus must retain their input-free listing behavior.
 
+- 2026-10-23 (#952): Window overflow hints can use shared content_note rendering, which survives snapshot merges and appears in empty find results. Compare reported window geometry with the union of displays in global points; a display-qualified bound alone cannot distinguish overflow from a window spanning monitors. Do not infer hidden control counts from window size.
+
+- 2026-10-23 (PR #958 repair): The Impress multiline startup probe reads native roles, names, children, and extents before constructing a snapshot. Its missing PresentationSubtitle assertion does not exercise ATSPIAccessor hidden-tab frame-title fallback or shared window-overflow notes; inspect this call boundary before attributing a startup failure to either change. Preserve GTK click-outcome documentation alongside overflow recovery instructions when merging.
+
 - 2026-10-23 (PR #948 Impress investigation): The multiline live test discovers PresentationSubtitle through native find_root/name/children/extents calls before its first snapshot. Hidden notebook title fallback runs only in ATSPIAccessor.read for unallocated page tabs, so it cannot rename or hide that native panel during discovery. The unchanged Impress test passed after merging main under private Xvfb/Openbox/D-Bus; the CI startup/discovery failure is unrelated to this fallback, but its precise environmental cause is not established by an isolated pass.
+
+- 2026-10-23 (PR #958 CI review): Chrome large-table reload diagnostics can show an empty native application root with both cached and refreshed child reads. That failure precedes shared window-overflow note rendering and matches the tracked #591 flake; preserve its assertions and inspect native evidence before changing shared pruning.
 
 - 2026-10-23 (#954): GTK calendars can publish only a childless calendar role while pointer input changes a painted date. Preserve the native calendar identity, refuse whole-widget ref clicks before either semantic or pointer input, and do not interpret an unchanged accessibility tree as unchanged pixels. Explicit coordinates must remain the caller's point.
 
 - 2026-10-23 (#955): `find` and `scroll_to_find` consume the pruned snapshot, so ordinary child elision can hide visible named palette choices. Keep named leaf radio groups on the bounded sheet allowance; retain native handles, measured bounds, and ordinary caps for mixed or nested controls. Preserve independent calendar outcome regressions when merging appended Runtime tests.
 
 - 2026-10-23 (#956): GTK colour chooser hex entries can echo EditableText while retaining the old selected colour. Buffer equality is not commit evidence; keep activation explicit and verify the preview before Select.
+
+- 2026-10-23 (PR #958 colour-chooser merge): Window-overflow recovery notes and GTK colour-entry commit warnings describe independent limitations. Preserve both documentation sections when merging; retain colour-entry preflight refusal alongside shared snapshot overflow hints.
+
+- 2026-10-23 (PR #958 palette merge): Named radio-palette retention and window-overflow notes affect shared pruning independently. Preserve both appended observation test groups when merging and run the server regressions too, because find consumes the same pruned snapshots.
