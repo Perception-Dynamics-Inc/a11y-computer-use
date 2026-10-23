@@ -423,6 +423,7 @@
 
 - 2026-10-18 (PR #877 main merge): Math command editing and Scintilla stationary-caret correction share insert_text but retain separate eligibility checks. Preserve both when merging; the unchanged Impress frame multiline regression passed under private Xvfb/Openbox/D-Bus after this merge.
 
+- 2026-10-18 (#899): WINDOW snapshots merge separately walked native roots, so a Chrome permission bubble can be duplicated even when each individual walk has no repeated nodes. Collapse only proven identical native dialog subtrees (bus/object identity, measured bounds, state, and relative hierarchy); keep the shared ambiguous-ref refusal and #905 permission confirmation independent. Missing identity or differing subtree evidence must retain both exposures.
 - 2026-10-18 (PR #903 repair): Chromium coordinate-owner hit testing and LibreOffice Math command editing are independent AT-SPI paths. Preserve both on merge and run the toggle and Linux synthetic regressions together; append-only lesson conflicts must retain both branches’ entries.
 - 2026-10-18 (PR #889 Math merge): Preserve Math command-editing documentation and regressions alongside declined-press fallback safety and dispatched-dialog reporting. The failed Chrome large-table CI check reported no initial rows before scrolling or clicking; the unchanged four-pass live regression passed on the merged head under private Xvfb/Openbox/D-Bus. This isolated pass does not establish the loaded-CI failure cause; the related Chromium cache investigation is tracked separately in #898 / PR #902.
 
@@ -435,6 +436,8 @@
 - 2026-10-18 (PR #905 speed repair): A bounded Chrome toolbar walk still adds hundreds of milliseconds when no dialog is open. Query native dialog/window roles first, retain the bounded fallback on query failure, and share each button StateSet within the probe. Reuse the decision only within the immediate action; human approval still requires a fresh read. Alt access keys require reported bindings or mnemonics, never the first letter of a label. Pin probe and node-read counts in regressions.
 
 - 2026-10-18 (PR #905 main merge): Browser dialog gating and shaded-window input refusal protect different dispatch conditions. Preserve the approved dialog probe unchanged when importing the window visibility guard, and run both gate and Linux synthetic regressions.
+
+- 2026-10-19 (PR #911 repair): Chrome can expose the same native permission-dialog subtree under a titled frame and directly under the application. The frame exposure inherits a document_id while the application exposure has None on every node. Treat that absence as non-identifying only when native identity, measured bounds, all other element facts, and relative subtree agree; conflicting nonempty ids retain ambiguity. Re-resolve refs using fresh snapshot handles. Private Xvfb/D-Bus Chrome trials verified Never allow by ref reaches PERMISSION_DENIED 3/3 and Allow this time returns confirmation_declined 3/3, with no stale_ref.
 
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
 
