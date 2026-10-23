@@ -2413,6 +2413,10 @@ class LinuxDriver:
         if window_id is None:
             return
         _linux_system.refuse_unviewable_input(int(window_id))
+        # Notification bubbles cannot become _NET_ACTIVE_WINDOW. Do not
+        # spend the activation budget before dispatching the original action.
+        if _linux_system.is_notification_window(int(window_id)):
+            return
         if target[0]:
             return
         try:
@@ -3200,6 +3204,7 @@ class LinuxDriver:
 
         self._focused_editable = None
         handle = None
+        notification = None
         if isinstance(target, Element):
             from a11y_computer_use import observe
 
@@ -3207,6 +3212,7 @@ class LinuxDriver:
             self._refuse_gnumeric_go_jump(target, handle)
             self._refuse_unverified_pdf_thumbnail(target, handle)
             self._refuse_hidden(target, handle)
+            notification = self._run(lambda: _atspi.notification_window(handle))
             self._raise_handle_window(handle)
             if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
                 raise ComputerUseError(
@@ -3305,6 +3311,17 @@ class LinuxDriver:
         px, py = self._pointer(x, y) if office_pointer else (x, y)
         if isinstance(target, Element):
             self._verify_chromium_pointer_target(target, handle, x, y)
+        if notification is not None and not self._run(
+            lambda: _atspi.notification_pointer_target(handle, notification, px, py)
+        ):
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{target.ref} notification target could not be verified at the click point; "
+                "no pointer click was sent",
+                detail={"ref": target.ref, "reason": "notification_target_unverified",
+                        "outcome": "refused",
+                        "hint": "Take a fresh snapshot; the notification may have expired."},
+            )
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         if office_pointer:

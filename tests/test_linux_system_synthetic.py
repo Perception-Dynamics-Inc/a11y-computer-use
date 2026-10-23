@@ -1630,3 +1630,88 @@ def test_focus_cannot_confirm_when_shade_clears_without_visible_client(monkeypat
     assert exc.value.detail["reason"] == (
         "window_unmapped" if visibility == "unmapped" else "window_visibility_unverified"
     )
+
+
+@pytest.mark.parametrize("window_type", ["NOTIFICATION", "NORMAL", "DIALOG", None, "unreadable"])
+def test_ref_notification_preparation_does_not_wait_for_activation(monkeypatch, window_type):
+    """#935: a native notification type bypasses only implicit activation."""
+    from a11y_computer_use.drivers import linux, _atspi
+
+    target = _FakeXWin(7, 10, 20, 200, 100, pid=2)
+    _active_display(monkeypatch, [target], 4)
+    original = target.get_full_property
+
+    def property_value(atom, kind):
+        if atom == "_NET_WM_WINDOW_TYPE":
+            if window_type == "unreadable":
+                raise RuntimeError("property unavailable")
+            return None if window_type is None else _NS(value=[f"_NET_WM_WINDOW_TYPE_{window_type}"])
+        return original(atom, kind)
+
+    target.get_full_property = property_value
+    driver = linux.LinuxDriver()
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
+        False, "Bubble", 2, (10, 20, 200, 100),
+    ))
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kwargs: 7)
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {"window_id": 4})
+    activated = []
+    monkeypatch.setattr(_linux_system, "_activate_and_settle", lambda d, win, **kwargs: activated.append(win.id))
+    driver._raise_handle_window(object())
+    assert activated == ([] if window_type == "NOTIFICATION" else [7])
+
+    # Explicit focus still requires activation; the shortcut claims no focus.
+    activated.clear()
+    assert _linux_system.focus_window(7)
+    assert activated == [7]
+
+
+@pytest.mark.parametrize("state, reason", [
+    ("shaded", "window_shaded"), ("unmapped", "window_unmapped"),
+])
+def test_notification_preparation_preserves_visibility_refusal(monkeypatch, state, reason):
+    from a11y_computer_use.drivers import linux, _atspi
+
+    target = _FakeXWin(7, 10, 20, 200, 100, pid=2)
+    _active_display(monkeypatch, [target], 4)
+    target.get_full_property = lambda atom, kind: _NS(value={
+        "_NET_WM_WINDOW_TYPE": ["_NET_WM_WINDOW_TYPE_NOTIFICATION"],
+        "_NET_WM_STATE": ["_NET_WM_STATE_SHADED"] if state == "shaded" else [],
+    }.get(atom, []))
+    target.get_attributes = lambda: _NS(map_state=0 if state == "unmapped" else 2)
+    driver = linux.LinuxDriver()
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
+        False, "Bubble", 2, (10, 20, 200, 100),
+    ))
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kwargs: 7)
+    with pytest.raises(ComputerUseError) as exc:
+        driver._raise_handle_window(object())
+    assert exc.value.detail["reason"] == reason
+
+
+@pytest.mark.parametrize("blocker", [None, "window_unmapped", "window_shaded", "missing"])
+def test_input_activation_requests_once_without_restoring_or_waiting(monkeypatch, blocker):
+    from contextlib import contextmanager
+
+    display, window = object(), object()
+    calls = []
+
+    @contextmanager
+    def with_window(window_id):
+        assert window_id == 7
+        yield display, None if blocker == "missing" else window
+
+    monkeypatch.setattr(_linux_system, "_with_window", with_window)
+    monkeypatch.setattr(_linux_system, "_activation_blocker", lambda d, w: blocker)
+    monkeypatch.setattr(_linux_system, "_send_active_window",
+                        lambda d, w: calls.append((d, w)))
+    monkeypatch.setattr(_linux_system, "_restore_if_hidden",
+                        lambda *args: pytest.fail("must not restore hidden windows"))
+    monkeypatch.setattr(_linux_system.time, "sleep",
+                        lambda *args: pytest.fail("must not extend the focus wait"))
+    assert _linux_system.request_input_activation(7) is (blocker is None)
+    assert calls == ([(display, window)] if blocker is None else [])

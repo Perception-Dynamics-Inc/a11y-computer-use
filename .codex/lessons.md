@@ -441,3 +441,12 @@
 - 2026-10-19 (PR #924 CI repair): EditableText.set_text_contents can replace FieldA while native keyboard focus stays on FieldB. Preserving an already-focused caret in type_into exposes that mismatch with the remembered set_value target. After a verified replacement, establish native focus before remembering the target; retain the caret if already focused, and do not cache a target whose focus cannot be confirmed. The unchanged two-entry GTK regression reproduces the old append and passes with this repair. An isolated Qt pass (including Qt 6.4.2/Openbox) does not establish the cause of a full-CI mismatch; retain offset/buffer diagnostics in the live assertion because --tb=line hides ComputerUseError.detail.
 
 - 2026-10-19 (#921): Linux text roles also cover spin buttons and formula editors. Scope path-navigation advice to path-like input or field labels/placeholders, rather than the role or app alone; retain text-only verification and keyboard-focus caveats independently.
+
+- 2026-10-19 (#935): Skip implicit ref-action activation only for a reported X11 notification type; explicit focus/raise must still verify activation. Input=False or SKIP_TASKBAR/SKIP_PAGER alone are not sufficient to bypass ordinary window activation. Preserve visibility refusal before the shortcut; shortening activation preparation does not resolve the separate expiring-target race (#936).
+
+
+- 2026-10-19 (#936): Notification activation and visual feedback can outlive a bubble. Retain its native window before preparation and check fresh visibility, bounds, and exact target hit immediately before pointer dispatch; classifying only after expiry can lose the parent chain. The activation-delay fix (#935) does not replace this guard.
+
+- 2026-10-23 (PR #939 repair): Notification implicit-activation bypass and Qt input-focus recovery use adjacent X11 helpers but serve different paths. Preserve both helpers and their regressions when merging; retain notification expiry checks immediately before dispatch.
+
+- 2026-10-23 (PR #924 merge): Exact ref-insert caret verification and Qt inactive-window focus recovery are complementary. Preserve both appended Qt regression groups when merging, including the native-focus requirement after activation and the no-input checks for observed caret/buffer drift.

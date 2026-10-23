@@ -7111,17 +7111,29 @@ def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> N
     try:
         deadline = time.monotonic() + 90
         snap = None
+        last_error = None
+        last_snapshot = None
         while time.monotonic() < deadline:
             try:
                 shot = driver.snapshot(Scope.WINDOW, "soffice")
-            except ComputerUseError:
-                shot = None
+            except ComputerUseError as exc:
+                last_error = (exc.code.value, exc.message, exc.detail)
             else:
+                last_snapshot = [(el.role, el.title) for el in shot.elements[:20]]
                 if _cell(shot, "A1") is not None:
                     snap = shot
                     break
             time.sleep(0.4)
-        assert snap is not None, "Calc did not expose A1"
+        if snap is None:
+            try:
+                windows = driver.windows()
+            except Exception as exc:
+                windows = f"window enumeration failed: {exc!r}"
+            assert snap is not None, (
+                f"Calc did not expose A1; launcher_pid={proc.pid}; exit={proc.poll()}; "
+                f"last_snapshot_error={last_error!r}; windows={windows!r}; "
+                f"last_snapshot={last_snapshot!r}"
+            )
         a1 = _cell(snap, "A1")
         assert a1 is not None
 

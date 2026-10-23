@@ -1986,3 +1986,97 @@ def test_expected_offset_requires_native_caret_evidence(atspi, monkeypatch):
     assert caught.value.code == ErrorCode.STALE_REF
     assert field.text == "text"
     assert field.lengths == []
+
+
+@pytest.mark.parametrize("lands", [True, False])
+def test_qt_focus_retry_activates_window_and_requires_native_focus(atspi, monkeypatch, lands):
+    """GrabFocus on an inactive Qt child acknowledges without focusing it."""
+    from a11y_computer_use.drivers import _linux_system
+
+    field = _Node("text", "Name", toolkit="Qt", states={"EDITABLE"})
+    window = _Node("filler", "Qt form", toolkit="Qt", children=[field])
+    _Node("application", "qtapp", toolkit="Qt", children=[window])
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 42)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_refuse_chromium_tab_text", lambda *args: None)
+    clock = _WaitClock()
+    monkeypatch.setattr(_atspi, "time", clock)
+    calls = []
+    active = False
+    rows = [dict(window_id=7, pid=42)]
+    monkeypatch.setattr(_linux_system, "windows", lambda: rows + [dict(window_id=8, pid=43)])
+
+    def match(**kwargs):
+        assert kwargs == dict(title="Qt form", pid=42, extents=(10., 10., 120., 24.), rows=rows)
+        return 7
+
+    def activate(window_id):
+        nonlocal active
+        assert window_id == 7
+        calls.append("activate")
+        active = lands
+        return True  # An acknowledged request is not proof of focus.
+
+    def grab(acc):
+        assert acc is field
+        calls.append("grab")
+        if active:
+            field.states.add("FOCUSED")
+        return True
+
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", match)
+    monkeypatch.setattr(_linux_system, "request_input_activation", activate)
+    monkeypatch.setattr(_atspi, "grab_focus", grab)
+    monkeypatch.setattr(_atspi, "_type_string", lambda text: calls.append(text))
+    if lands:
+        _atspi._type_into_target(field, "OK")
+        assert calls == ["activate", "grab", "O", "K"]
+        assert len(clock.sleeps) == _atspi._FOCUS_CONFIRM_REGRAB
+    else:
+        with pytest.raises(ComputerUseError, match="nothing was typed") as exc:
+            _atspi._type_into_target(field, "OK")
+        assert exc.value.code is ErrorCode.FOCUS_LOST
+        assert calls == ["activate", "grab"]
+        assert len(clock.sleeps) == _atspi._FOCUS_CONFIRM_POLLS - 1
+    assert all(pause == _atspi._FOCUS_CONFIRM_PAUSE_S for pause in clock.sleeps)
+
+
+@pytest.mark.parametrize("toolkit,parent_role,expected", [
+    ("Qt", "application", True), ("gtk", "application", False),
+    ("Qt", "panel", False),
+])
+def test_qwidget_raise_target_requires_qt_application_child(atspi, toolkit, parent_role, expected):
+    field = _Node("text", toolkit=toolkit)
+    window = _Node("filler", "Form", toolkit=toolkit, children=[field])
+    _Node(parent_role, toolkit=toolkit, children=[window])
+    target = _atspi.toplevel_raise_target(field)
+    assert (target is not None) is expected
+    if expected:
+        assert target[1] == "Form"
+
+
+@pytest.mark.parametrize("toolkit,focused", [("Qt", True), ("gtk", False)])
+def test_focus_retry_does_not_activate_focused_or_non_qt_targets(atspi, monkeypatch, toolkit, focused):
+    from a11y_computer_use.drivers import _linux_system
+
+    field = _Node("text", toolkit=toolkit, states={"FOCUSED"} if focused else set())
+    monkeypatch.setattr(_linux_system, "windows", lambda: pytest.fail("unexpected activation lookup"))
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    assert _atspi._confirm_focus_on_target(field) is focused
+
+
+def test_qt_focus_recovery_does_not_match_another_process(atspi, monkeypatch):
+    from a11y_computer_use.drivers import _linux_system
+
+    field = _Node("text", toolkit="Qt")
+    window = _Node("filler", "Same title", toolkit="Qt", children=[field])
+    _Node("application", toolkit="Qt", children=[window])
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 42)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_system, "windows", lambda: [dict(
+        window_id=8, pid=43, title="Same title", on_screen=True,
+        bounds=dict(x=10, y=10, width=120, height=24),
+    )])
+    monkeypatch.setattr(_linux_system, "request_input_activation",
+                        lambda wid: pytest.fail("activated a different app"))
+    _atspi._request_qt_focus_activation(field)
