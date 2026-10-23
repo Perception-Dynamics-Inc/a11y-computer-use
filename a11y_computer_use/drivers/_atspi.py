@@ -16761,6 +16761,19 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
     if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
         app = _call_first(acc, ("get_application", "getApplication"))
         name = _call_first(app, ("get_name",), default="") or ""
+        # GtkColorChooser parses its hex entry on activation/focus-out,
+        # not EditableText replacement; the buffer is not the selected colour.
+        entry_name = _call_first(acc, ("get_name",), default="") or ""
+        if str(entry_name).strip().casefold() in {"color name", "colour name"} and re.fullmatch(
+            r"#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?", _full_text(acc) or ""
+        ):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "GTK colour entry text does not verify the selected colour; "
+                "focus the field, select all, type the colour, then key Return; "
+                "verify the preview colour before pressing Select",
+                detail={"reason": "commit_unverified"},
+            )
         if str(name).casefold() == "eog" and re.fullmatch(
             r"\s*\d+(?:[.,]\d+)?\s*%\s*", _full_text(acc) or ""
         ):

@@ -468,3 +468,5 @@
 - 2026-10-23 (PR #948 Impress investigation): The multiline live test discovers PresentationSubtitle through native find_root/name/children/extents calls before its first snapshot. Hidden notebook title fallback runs only in ATSPIAccessor.read for unallocated page tabs, so it cannot rename or hide that native panel during discovery. The unchanged Impress test passed after merging main under private Xvfb/Openbox/D-Bus; the CI startup/discovery failure is unrelated to this fallback, but its precise environmental cause is not established by an isolated pass.
 
 - 2026-10-23 (#954): GTK calendars can publish only a childless calendar role while pointer input changes a painted date. Preserve the native calendar identity, refuse whole-widget ref clicks before either semantic or pointer input, and do not interpret an unchanged accessibility tree as unchanged pixels. Explicit coordinates must remain the caller's point.
+
+- 2026-10-23 (#956): GTK colour chooser hex entries can echo EditableText while retaining the old selected colour. Buffer equality is not commit evidence; keep activation explicit and verify the preview before Select.

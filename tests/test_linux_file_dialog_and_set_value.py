@@ -415,3 +415,43 @@ def test_eog_zoom_refusal_preserves_other_entries(spies, monkeypatch, app, initi
     assert LinuxDriver().set_value(element, "replacement") is True
     assert field.text == "replacement"
     assert events == []
+
+
+@pytest.mark.parametrize("role", ["text", "entry"])
+@pytest.mark.parametrize("title", ["Color Name", "Colour Name"])
+def test_gtk_colour_entry_refuses_buffer_only_success(spies, monkeypatch, role, title):
+    events, _document = spies
+    field = _ReplacingField("#BF4040")
+    field.get_role_name = lambda: role
+    field.get_toolkit_name = lambda: "gtk"
+    field.get_name = lambda: title
+    field.selected_colour = "#BF4040"
+    element = _element("e3", "AXTextField", title, editable=True, value=field.text)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(element, "#3366CC")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "commit_unverified"
+    assert "focus the field, select all, type the colour, then key Return" in exc.value.message
+    assert "verify the preview colour before pressing Select" in exc.value.message
+    assert field.text == field.selected_colour == "#BF4040"
+    assert field.deletes == 0
+    assert events == []
+
+
+@pytest.mark.parametrize("toolkit,title,initial", [
+    ("gtk", "Name", "#BF4040"),
+    ("gtk", "Color Name", "ordinary text"),
+    ("Qt", "Color Name", "#BF4040"),
+])
+def test_colour_entry_refusal_preserves_other_fields(spies, monkeypatch, toolkit, title, initial):
+    events, _document = spies
+    field = _ReplacingField(initial)
+    field.get_role_name = lambda: "entry"
+    field.get_toolkit_name = lambda: toolkit
+    field.get_name = lambda: title
+    element = _element("e3", "AXTextField", title, editable=True, value=initial)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    assert LinuxDriver().set_value(element, "#3366CC") is True
+    assert field.text == "#3366CC"
+    assert events == []
