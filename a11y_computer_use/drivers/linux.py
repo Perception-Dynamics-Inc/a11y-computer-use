@@ -2922,6 +2922,11 @@ class LinuxDriver:
         # list. The row is gone, so it never becomes SELECTED. The combobox
         # value, its name, aria-selected, or the collapsed text is the
         # read-back. That reading is taken before the click.
+        if self._run(lambda: _atspi.chromium_select_option_parent(handle)) is not None:
+            # Preserve the pointer gesture and its selected-set verification.
+            # Do not swallow a refused hit or restore selection after failure.
+            self.click(element)
+            return True
         if self._run(lambda: _atspi.chromium_list_row(handle)):
             before = self._run(lambda: _atspi.selected_option_names(handle))
             choice = self._run(lambda: _atspi.combobox_option_context(handle))
@@ -3418,8 +3423,40 @@ class LinuxDriver:
             )
         if isinstance(target, Element):
             self._verify_gtk_cell_target(target, handle)
+        select_parent = None
+        if handle is not None and button is MouseButton.LEFT and count == 1:
+            select_parent = self._run(lambda: _atspi.chromium_select_option_parent(handle))
+        if select_parent is not None:
+            selection_before = self._run(lambda: _atspi.chromium_select_selection(select_parent))
+            if selection_before is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED, "The select's selected set could not be read; no click was sent",
+                    detail={"reason": "selection_unreadable", "outcome": "refused"},
+                )
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
+        if select_parent is not None:
+            target_key = self._run(lambda: _atspi._ancestor_key(handle))
+            previous = None
+            for attempt in range(8):
+                selected = self._run(lambda: _atspi.chromium_select_selection(select_parent))
+                if not modifiers:
+                    matched = selected == frozenset({target_key})
+                elif set(modifiers) <= {"ctrl", "control"}:
+                    matched = selected == selection_before.symmetric_difference({target_key})
+                else:
+                    # The browser owns the shift anchor; do not invent one.
+                    matched = selected is not None and target_key in selected
+                if (matched and selected != selection_before and selected == previous):
+                    break
+                previous = selected
+                if attempt + 1 < 8:
+                    time.sleep(0.05)
+            else:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED, "The click did not confirm the requested select selection",
+                    detail={"reason": "selection_unchanged", "outcome": "unconfirmed"},
+                )
         if office_pointer:
             self._note_pointer(x, y)
         if destination is not None:

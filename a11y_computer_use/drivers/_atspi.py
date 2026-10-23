@@ -15535,6 +15535,79 @@ def chromium_list_row(acc) -> bool:
         return False
 
 
+def chromium_select_option_parent(acc):
+    """Native HTML size/multiple select only; ARIA lists keep exact hit tests."""
+    if acc is None or not _chromium_app(acc):
+        return None
+    if _role_name(acc) != "list item" or _get_attributes(acc).get("tag") != "option":
+        return None
+    parent = _parent_of(acc)
+    if (parent is not None and _role_name(parent) == "list box"
+            and _get_attributes(parent).get("tag") == "select"):
+        return parent
+    return None
+
+
+def chromium_select_selection(parent):
+    """Complete native selected identities, or None for an unreadable set."""
+    _drop_read_cache()
+    _drop_cached_properties(parent)
+    iface = _selection_iface(parent)
+    count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+    if type(count) is not int or not 0 <= count <= _MAX_CHILDREN_FETCH:
+        return None
+    selected = set()
+    for index in range(count):
+        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), index)
+        if child is None:
+            return None
+        selected.add(_ancestor_key(child))
+    return frozenset(selected) if len(selected) == count else None
+
+
+def _chromium_select_option_at_point(acc, hit, x: int, y: int) -> bool:
+    """Resolve a native select hit using fresh, nonoverlapping option boxes.
+
+    Blink's settled hit test returns the select itself, not its option.
+    Require that exact parent hit first; never apply this to arbitrary web
+    containers, sibling hits, missing hits, or inferred row geometry.
+    """
+    parent = chromium_select_option_parent(acc)
+    if parent is None or _ancestor_key(hit) != _ancestor_key(parent):
+        return False
+    _drop_read_cache()
+    _drop_cached_properties(parent)
+    _drop_cached_properties(acc)
+
+    def contains(node):
+        pos, size = _extents(node)
+        return (pos is not None and size is not None
+                and pos[0] <= x < pos[0] + size[0]
+                and pos[1] <= y < pos[1] + size[1])
+
+    if not _state_has(parent, "SHOWING") or not contains(parent):
+        return False
+    if not _state_has(acc, "SHOWING") or not contains(acc):
+        return False
+    count = _child_count(parent)
+    if not 0 < count <= _MAX_CHILDREN_FETCH:
+        return False
+    matches = []
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None:
+            return False
+        _drop_cached_properties(child)
+        if _get_attributes(child).get("tag") != "option":
+            return False
+        pos, size = _extents(child)
+        if pos is None or size is None:
+            return False
+        if pos[0] <= x < pos[0] + size[0] and pos[1] <= y < pos[1] + size[1]:
+            matches.append(_ancestor_key(child))
+    return matches == [_ancestor_key(acc)]
+
+
 def selected_option_names(acc) -> list[str]:
     """Names of the selected options in ``acc``'s list, in child order."""
     parent, _index, _target = _selection_parent(acc)
@@ -19410,6 +19483,8 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
         if hit is None:
             return False
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
+            return True
+        if _chromium_select_option_at_point(acc, hit, x, y):
             return True
         node = hit
     return False

@@ -2291,3 +2291,145 @@ def test_chrome_aria_spinbutton_reports_role_and_value_not_an_edit_field(monkeyp
         _atspi.set_numeric_value(guests, "9")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert guests.value == 3.0
+
+
+def _native_chrome_select(monkeypatch):
+    """Chrome's settled renderer hit is the select, not an option."""
+    from a11y_computer_use.drivers import linux, _linux_input
+    from contextlib import contextmanager
+
+    box, apple, banana, cherry = _chrome_list()
+    box.attrs = {"tag": "select"}
+    box.states.update({"VISIBLE", "SHOWING"})
+    box.rect = _Rect(10, 10, 120, 72)
+    for index, row in enumerate(box.children):
+        row.attrs = {"tag": "option"}
+        row.toolkit = "Chromium"
+        row.states.update({"VISIBLE", "SHOWING"})
+        row.rect = _Rect(10, 10 + 24 * index, 120, 24)
+    document = _Node("document web", children=[box], states={"VISIBLE", "SHOWING"})
+    _Node("frame", children=[document], states={"VISIBLE", "SHOWING"})
+    document.get_accessible_at_point = lambda *args: box
+    box.get_accessible_at_point = lambda *args: box
+    selected = lambda: [row for row in box.children if "SELECTED" in row.states]
+    box.get_n_selected_children = lambda: len(selected())
+    box.get_selected_child = lambda index: selected()[index]
+    box.select_child = lambda index: pytest.fail("unrequested Selection mutation")
+    driver = _driver(monkeypatch, cherry)
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *args: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *args: None)
+    events = []
+
+    @contextmanager
+    def held(modifiers):
+        events.append(("held", modifiers))
+        yield
+
+    monkeypatch.setattr(_linux_input, "held", held)
+    element = _element("e987", "AXRow", "Cherry", clickable=True, y=58)
+    return driver, element, document, box, apple, banana, cherry, events
+
+
+@pytest.mark.parametrize("mods,initial,after", [
+    ((), {1}, {2}),
+    (("ctrl",), {1}, {1, 2}),
+    (("ctrl",), {1, 2}, {1}),
+    (("control",), {1, 2}, {1}),
+    (("shift",), {0}, {0, 1, 2}),
+])
+def test_native_chrome_select_click_preserves_gesture_and_checks_set(monkeypatch, mods, initial, after):
+    from a11y_computer_use.drivers import _linux_input
+
+    driver, element, document, box, apple, banana, cherry, events = _native_chrome_select(monkeypatch)
+    for index, row in enumerate(box.children):
+        row.states.discard("SELECTED")
+        if index in initial:
+            row.states.add("SELECTED")
+
+    def click(x, y, **kwargs):
+        events.append(("click", x, y, kwargs))
+        for index, row in enumerate(box.children):
+            row.states.discard("SELECTED")
+            if index in after:
+                row.states.add("SELECTED")
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if mods:
+        driver.click(element, modifiers=mods)
+    else:
+        assert driver.press_element(element) is True
+    assert events == [("held", mods), ("click", 70, 70, {"button": "left", "count": 1})]
+    assert {i for i, row in enumerate(box.children) if "SELECTED" in row.states} == after
+    assert all(not row.action_log for row in box.children)
+
+
+@pytest.mark.parametrize("fault", [
+    "other_hit", "missing_hit", "aria", "moved", "overlap", "hidden", "outside_list",
+    "missing_child", "too_many_children", "nested_options", "unknown_bounds",
+])
+def test_native_chrome_select_parent_hit_still_refuses_unsafe_points(monkeypatch, fault):
+    from a11y_computer_use.drivers import _linux_input
+
+    driver, element, document, box, apple, banana, cherry, events = _native_chrome_select(monkeypatch)
+    if fault == "other_hit":
+        document.get_accessible_at_point = lambda *args: banana
+    elif fault == "missing_hit":
+        document.get_accessible_at_point = lambda *args: None
+    elif fault == "aria":
+        box.attrs = {"tag": "div"}
+    elif fault == "moved":
+        cherry.rect.y += 100
+    elif fault == "overlap":
+        banana.rect = cherry.rect
+    elif fault == "hidden":
+        cherry.states.discard("SHOWING")
+    elif fault == "outside_list":
+        box.rect.height = 24  # native options can retain off-viewport rectangles
+    elif fault == "missing_child":
+        box.get_child_at_index = lambda index: None
+    elif fault == "too_many_children":
+        box.get_child_count = lambda: _atspi._MAX_CHILDREN_FETCH + 1
+    elif fault == "nested_options":
+        apple.attrs = {"tag": "optgroup"}
+    elif fault == "unknown_bounds":
+        apple.get_extents = lambda coord: None
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: pytest.fail("unsafe input"))
+    with pytest.raises(ComputerUseError) as exc:
+        if fault == "aria":
+            driver.click(element)
+        else:
+            driver.press_element(element)
+    assert exc.value.detail["reason"] in {"hit_test_unverified", "not_showing"}
+    assert not events
+    assert banana.states >= {"SELECTED"}
+
+
+@pytest.mark.parametrize("fault", ["unchanged", "wrong_set", "unreadable_before", "unreadable_after", "flicker"])
+def test_native_chrome_select_never_confirms_missing_selection_effect(monkeypatch, fault):
+    from a11y_computer_use.drivers import _linux_input
+
+    driver, element, document, box, apple, banana, cherry, events = _native_chrome_select(monkeypatch)
+    if fault == "unreadable_before":
+        box.get_n_selected_children = lambda: None
+
+    def click(*args, **kwargs):
+        events.append("click")
+        if fault == "wrong_set":
+            # Target selection alone must not confirm a plain replacement.
+            cherry.states.add("SELECTED")
+        elif fault == "unreadable_after":
+            box.get_n_selected_children = lambda: None
+        elif fault == "flicker":
+            reads = iter([frozenset({_atspi._ancestor_key(cherry)}), None] * 4)
+            monkeypatch.setattr(_atspi, "chromium_select_selection", lambda parent: next(reads))
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == (
+        "selection_unreadable" if fault == "unreadable_before" else "selection_unchanged"
+    )
+    assert events == ([] if fault == "unreadable_before" else [("held", ()), "click"])
+    assert "SELECTED" in banana.states  # no compensating Selection writes
+    assert all(not row.action_log for row in box.children)
