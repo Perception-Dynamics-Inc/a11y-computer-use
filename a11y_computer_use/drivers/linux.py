@@ -2435,6 +2435,29 @@ class LinuxDriver:
         except Exception:
             return
 
+    def _refuse_calendar_click(self, element: Element, handle) -> None:
+        """A whole-calendar ref does not identify a day or navigation arrow."""
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role != "AXCalendar" and not (
+            element.role in {"opaque_region", "AXGroup"}
+            and handle is not None
+            and self._run(lambda: _atspi._role_name(handle) == "calendar")
+        ):
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} is a whole calendar, not a date target; no click was sent",
+            detail={
+                "ref": element.ref, "reason": "calendar_target_ambiguous", "outcome": "refused",
+                "hint": (
+                    "Day cells may not be exposed. Use keyboard focus and arrows/space/ctrl+arrows, "
+                    "or explicit x/y chosen from a screenshot. Verify the selected date visually; "
+                    "an unchanged accessibility tree does not prove an unchanged date."
+                ),
+            },
+        )
+
     def _refuse_gnumeric_go_jump(self, element: Element, handle) -> None:
         """Refuse the name-box image whose activation crashes Gnumeric (#492)."""
         if element.role != "AXImage" or element.title != "go-jump" or handle is None:
@@ -2649,6 +2672,7 @@ class LinuxDriver:
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         self._refuse_hidden(element, handle)
+        self._refuse_calendar_click(element, handle)
         self._refuse_gnumeric_go_jump(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
         pressed = _cdp_forms.press_checkable(
@@ -3250,6 +3274,7 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_calendar_click(target, handle)
             self._refuse_gnumeric_go_jump(target, handle)
             self._refuse_unverified_pdf_thumbnail(target, handle)
             self._refuse_hidden(target, handle)
