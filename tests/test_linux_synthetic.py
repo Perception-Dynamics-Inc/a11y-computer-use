@@ -1068,7 +1068,7 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
 
     accessor = _atspi.ATSPIAccessor()
     raw = accessor.read(hidden)
-    assert raw.role == "AXButton"
+    assert raw.role == "AXTab"
     assert raw.title == "Probe Title"
     assert raw.selected is True
     assert raw.unallocated is True
@@ -1098,16 +1098,16 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
     snap = build_snapshot(
         frame, accessor, scope=Scope.WINDOW, app="xfce4-terminal", pid=1, geometry=_geometry(),
     )
-    buttons = [el for el in snap.elements if el.role == "AXButton" and el.title == "Probe Title"]
-    assert len(buttons) == 1
-    tab = buttons[0]
+    tabs = [el for el in snap.elements if el.role == "AXTab" and el.title == "Probe Title"]
+    assert len(tabs) == 1
+    tab = tabs[0]
     assert tab.bounds is None
     assert tab.clickable is False
     assert tab.actionable is False
     rendered = observe.render_text(snap, include_bounds=True)
     line = next(
         item for item in rendered.splitlines()
-        if "button" in item and "Probe Title" in item
+        if "tab" in item and "Probe Title" in item
     )
     assert "hidden" in line
     assert "@" not in line
@@ -18360,6 +18360,37 @@ def test_calendar_guard_preserves_day_children(fake_atspi, monkeypatch):
     driver._refuse_calendar_click(element, day)
 
 
+def test_notebook_tabs_retain_native_roles_in_find(monkeypatch) -> None:
+    """Visible notebook tabs remain findable as tabs, with their real bounds."""
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box)
+    monkeypatch.setattr(
+        _atspi, "_state_flags",
+        lambda node: (True, False, None, node.name == "General", None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args, **kw: None)
+    general = _PageNode("page tab", "General", ((10., 20.), (80., 30.)))
+    advanced = _PageNode("page tab", "Advanced", ((90., 20.), (90., 30.)))
+    notebook = _PageNode("page tab list", "Settings", ((10., 20.), (400., 250.)),
+                         children=[general, advanced])
+    frame = _PageNode("frame", "Preferences", ((0., 0.), (500., 400.)),
+                      children=[notebook])
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.read(notebook).role == "AXTabGroup"
+    snap = build_snapshot(frame, accessor, scope=Scope.WINDOW, app="probe", pid=1,
+                          geometry=_geometry())
+    match, = observe.find_elements(snap, text="Advanced", role="tab")
+    assert match.role == "AXTab"
+    assert match.clickable is True
+    assert match.actionable is True
+    assert match.selected is False
+    assert match.bounds.width == 90.
+    assert match.bounds.x == 90.
+    assert observe.ax_handle_for(snap.snapshot_id, match.ref) is advanced
+    assert observe.find_elements(snap, text="General", role="tab")[0].selected is True
+    assert not observe.find_elements(snap, text="Advanced", role="button")
+    assert 'tab "Advanced"' in observe.render_text(snap)
+
+
 @pytest.mark.parametrize("method", ["press_element", "click"])
 @pytest.mark.parametrize("expanded", [False, True])
 def test_gtk_expander_ref_click_refused_before_input(fake_atspi, monkeypatch, method, expanded):
@@ -18425,3 +18456,62 @@ def test_expander_guard_preserves_explicit_coordinate_click(monkeypatch):
     monkeypatch.setattr(_linux_input, "click", lambda x, y, **kw: clicks.append((x, y, kw)))
     driver.click(Point(0, 560, 712))
     assert clicks == [(560, 712, {"button": "left", "count": 1})]
+
+
+@pytest.mark.parametrize("toolkit,version,role,parent_role,states,selected", [
+    ("Qt", "6.4.2", "page tab", "page tab list", {"FOCUSED"}, True),
+    ("Qt", "6.6.3", "page tab", "page tab list", {"FOCUSED"}, True),
+    ("Qt", "6.4.2", "page tab", "page tab list", set(), False),
+    ("Qt", "6.7.0", "page tab", "page tab list", {"FOCUSED"}, False),
+    ("Qt", "6.7.0", "page tab", "page tab list", {"SELECTED"}, True),
+    ("Qt", "", "page tab", "page tab list", {"FOCUSED"}, False),
+    ("gtk", "6.4.2", "page tab", "page tab list", {"FOCUSED"}, False),
+    ("Qt", "6.4.2", "table cell", "table", {"FOCUSED"}, False),
+    ("Qt", "6.4.2", "page tab", "panel", {"FOCUSED"}, False),
+])
+def test_qt_legacy_tab_current_index_state(
+    fake_atspi, toolkit, version, role, parent_role, states, selected,
+):
+    """Older Qt uses FOCUSED for currentIndex, not keyboard focus on a tab."""
+    tab = _Acc(role, name="Tree", states=states, width=49, height=26)
+    tab.get_toolkit_name = lambda: toolkit
+    tab.get_toolkit_version = lambda: version
+    _adopt(_Acc(parent_role), tab)
+    raw = _atspi.ATSPIAccessor().read(tab)
+    assert raw.selected is selected
+    assert raw.focused is ("FOCUSED" in states)
+    if role == "page tab":
+        assert raw.role == "AXTab"
+
+
+@pytest.mark.parametrize("frame_showing", [False, True])
+@pytest.mark.parametrize("labels", [("Reload Ctrl+R",), ("New tab Ctrl+T", "New window Ctrl+N", "Help")])
+def test_chrome_native_popup_menu_snapshot(fake_atspi, monkeypatch, frame_showing, labels):
+    """#966: native menu geometry survives an empty top-level wrapper."""
+    page = _Acc("frame", name="Page - Google Chrome", width=800, height=600,
+                states=("SHOWING", "ACTIVE"))
+    popup = _Acc("frame", states=("SHOWING",) if frame_showing else ())
+    menu = _Acc("menu", width=240, height=120, states=("SHOWING", "VISIBLE"))
+    items = [_Acc("menu item", name=label, width=240, height=30,
+                  states=("SHOWING", "VISIBLE", "ENABLED", "SENSITIVE")) for label in labels]
+    for index, item in enumerate(items):
+        _place_row(item, 100, 100 + index * 30, 240, 30)
+    _place_row(menu, 100, 100, 240, 120)
+    _adopt(menu, *items)
+    _adopt(popup, menu)
+    cached = _Acc("frame", states=("SHOWING",))
+    app = _adopt(_Acc("application", name="Google Chrome"), page, cached, popup)
+    for node in (app, page, cached, popup, menu, *items):
+        node.get_application = lambda: app
+    driver = _wire_gtk_tree(monkeypatch, page)
+    assert _atspi.snapshot_window_list(page) == [page, menu]
+    assert _atspi.chromium_snapshot_root(menu) is menu
+    snap = driver.snapshot(Scope.WINDOW, "Google Chrome")
+    found = observe.find_elements(snap, role="menuitem")
+    assert [el.title for el in found] == list(labels)
+    for element, native in zip(found, items):
+        assert element.clickable and element.ref
+        assert element.bounds == Bounds(0, 100, 100 + items.index(native) * 30, 240, 30)
+        assert observe.ax_handle_for(element.snapshot_id, element.ref) is native
+    menu.states.clear()
+    assert menu not in _atspi.snapshot_window_list(page)

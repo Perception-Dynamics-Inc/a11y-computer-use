@@ -128,7 +128,7 @@ _ROLE = {
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
-    "page tab": "AXButton",
+    "page tab": "AXTab",
     "panel": "AXGroup",
     "filler": "AXGroup",
     "section": "AXGroup",
@@ -2218,7 +2218,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
-    "AXStatusBar", "AXPopover", "AXCalendar",
+    "AXStatusBar", "AXPopover", "AXCalendar", "AXTab",
 })
 
 
@@ -4051,6 +4051,17 @@ def _state_flags(acc):
     if checked is None and has("PRESSED"):
         checked = True
     selected = has("SELECTED")
+    if (not selected and focused and _role_name(acc) == "page tab"
+            and "qt" in _toolkit_name(acc)):
+        # Qt 6.0–6.6 QAccessibleTabButton::state encodes currentIndex in
+        # FOCUSED, independent of keyboard focus, and omits SELECTED.
+        # Qt 6.7 adds SELECTED. Do not infer selection from ordinary focus
+        # for other toolkits or versions with different tab semantics.
+        version = _toolkit_version(acc).split(".")
+        if (len(version) >= 2 and version[0] == "6"
+                and version[1].isdigit() and int(version[1]) < 7
+                and _role_name(_parent_of(acc)) == "page tab list"):
+            selected = True
     expanded = has("EXPANDED") if has("EXPANDABLE") else None
     focusable = has("FOCUSABLE")
     editable = has("EDITABLE")
@@ -6578,6 +6589,21 @@ def _fresh_application_children(app) -> list:
     return _without_child_cache(app, read_children)
 
 
+def _showing_chrome_frame_menus(frame) -> list:
+    """Native menus in an unnamed Chromium popup frame, with real handles.
+
+    The wrapper frame can lack SHOWING or usable geometry even while its
+    menu is on screen. Snapshot the menu itself, not that empty wrapper.
+    """
+    if (_role_name(frame) != "frame" or _node_name(frame)
+            or not _chromium_app(frame)):
+        return []
+    return [child for index in range(max(0, _child_count(frame)))
+            if (child := _child_at(frame, index)) is not None
+            if _role_name(child) in {"menu", "popup menu"}
+            and _state_has(child, "SHOWING")]
+
+
 def showing_toplevels(node) -> list:
     """Showing top-level windows of ``node``'s application, active first.
 
@@ -6603,7 +6629,7 @@ def showing_toplevels(node) -> list:
     for child in _fresh_application_children(app):
         if _role_name(child) not in _TOPLEVEL_ROLES:
             continue
-        if not _state_has(child, "SHOWING"):
+        if not _state_has(child, "SHOWING") and not _showing_chrome_frame_menus(child):
             continue
         if _combo_owning_popup(child) is not None:
             continue
@@ -6628,13 +6654,19 @@ def snapshot_window_list(node) -> list:
     showing siblings of the page. They are not windows. Merging one of
     them is the untitled group with no rows that stops ``scroll_to_find``
     before the wheel. A GTK dialog stays in the list. One real window is
-    a one-item list, so the snapshot stays a single tree.
+    a one-item list, so the snapshot stays a single tree. Showing native
+    Chromium menus are walked directly when their unnamed frame wrapper
+    has no usable geometry.
     """
     if node is None:
         return []
     chrome = _chromium_app(node)
     frames = []
     for item in showing_toplevels(node):
+        menus = _showing_chrome_frame_menus(item) if chrome else []
+        if menus:
+            frames.extend(menus)
+            continue
         if _is_browser_bar_frame(item):
             continue
         if chrome and _sparse_untitled_chrome_frame(item):
@@ -7225,6 +7257,8 @@ def _sparse_untitled_chrome_frame(frame) -> bool:
     frame that already holds a document are not this.
     """
     if frame is None or _is_browser_bar_frame(frame):
+        return False
+    if _role_name(frame) in {"menu", "popup menu"}:
         return False
     if (_node_name(frame) or "").strip():
         return False
