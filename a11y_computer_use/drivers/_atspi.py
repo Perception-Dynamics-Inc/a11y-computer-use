@@ -128,7 +128,7 @@ _ROLE = {
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
-    "page tab": "AXButton",
+    "page tab": "AXTab",
     "panel": "AXGroup",
     "filler": "AXGroup",
     "section": "AXGroup",

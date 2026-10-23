@@ -1068,7 +1068,7 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
 
     accessor = _atspi.ATSPIAccessor()
     raw = accessor.read(hidden)
-    assert raw.role == "AXButton"
+    assert raw.role == "AXTab"
     assert raw.title == "Probe Title"
     assert raw.selected is True
     assert raw.unallocated is True
@@ -1098,16 +1098,16 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
     snap = build_snapshot(
         frame, accessor, scope=Scope.WINDOW, app="xfce4-terminal", pid=1, geometry=_geometry(),
     )
-    buttons = [el for el in snap.elements if el.role == "AXButton" and el.title == "Probe Title"]
-    assert len(buttons) == 1
-    tab = buttons[0]
+    tabs = [el for el in snap.elements if el.role == "AXTab" and el.title == "Probe Title"]
+    assert len(tabs) == 1
+    tab = tabs[0]
     assert tab.bounds is None
     assert tab.clickable is False
     assert tab.actionable is False
     rendered = observe.render_text(snap, include_bounds=True)
     line = next(
         item for item in rendered.splitlines()
-        if "button" in item and "Probe Title" in item
+        if "tab" in item and "Probe Title" in item
     )
     assert "hidden" in line
     assert "@" not in line
@@ -18358,3 +18358,32 @@ def test_calendar_guard_preserves_day_children(fake_atspi, monkeypatch):
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     element = Element("e23", "AXButton", "23", None, Bounds(0, 20, 30, 20, 20), "snap954")
     driver._refuse_calendar_click(element, day)
+
+
+def test_notebook_tabs_retain_native_roles_in_find(monkeypatch) -> None:
+    """Visible notebook tabs remain findable as tabs, with their real bounds."""
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **kw: node.box)
+    monkeypatch.setattr(
+        _atspi, "_state_flags",
+        lambda node: (True, False, None, node.name == "General", None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args, **kw: None)
+    general = _PageNode("page tab", "General", ((10., 20.), (80., 30.)))
+    advanced = _PageNode("page tab", "Advanced", ((90., 20.), (90., 30.)))
+    notebook = _PageNode("page tab list", "Settings", ((10., 20.), (400., 250.)),
+                         children=[general, advanced])
+    frame = _PageNode("frame", "Preferences", ((0., 0.), (500., 400.)),
+                      children=[notebook])
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.read(notebook).role == "AXTabGroup"
+    snap = build_snapshot(frame, accessor, scope=Scope.WINDOW, app="probe", pid=1,
+                          geometry=_geometry())
+    match, = observe.find_elements(snap, text="Advanced", role="tab")
+    assert match.role == "AXTab"
+    assert match.selected is False
+    assert match.bounds.width == 90.
+    assert match.bounds.x == 90.
+    assert observe.ax_handle_for(snap.snapshot_id, match.ref) is advanced
+    assert observe.find_elements(snap, text="General", role="tab")[0].selected is True
+    assert not observe.find_elements(snap, text="Advanced", role="button")
+    assert 'tab "Advanced"' in observe.render_text(snap)
