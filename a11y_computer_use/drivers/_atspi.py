@@ -675,6 +675,16 @@ def _drop_read_cache() -> None:
         state.pinned.clear()
 
 
+def _drop_child_read_cache() -> None:
+    """Refresh structure between discovery and traversal, retaining metadata."""
+    getters = {"get_child_count", "get_childCount", "get_child_at_index", "getChildAtIndex"}
+    for state in _read_cache_stack():
+        for slot in state.store.values():
+            for key in list(slot):
+                if key[0] in getters:
+                    del slot[key]
+
+
 def _cache_key(name: str, args: tuple) -> tuple | None:
     key = (name, args)
     try:
@@ -4400,6 +4410,11 @@ class ATSPIAccessor:
             self._visible_children[id(container)] = [acc for acc, _pos, _size in rows]
             for acc, pos, size in rows:
                 self._visible_bounds[id(acc)] = (pos, size)
+        # List discovery reads document children before the snapshot walk.
+        # Timer-driven toasts can appear during that probe without a local
+        # mutator. Native CHILDREN bypass alone does not invalidate our own
+        # cached counts/handles; keep roles and interfaces, but re-read structure.
+        _drop_child_read_cache()
 
     def _drawing_paragraph(self, node: object, role_str: str, state_editable: bool) -> bool:
         """True for an editable Impress or Draw paragraph in this snapshot.

@@ -493,6 +493,13 @@
 
 - 2026-10-23 (PR #970 third repair): Reproduce Qt CI failures with the runner’s Qt version. Qt 6.4.2 reports QAccessibleTabButton currentIndex through FOCUSED only; Qt 6.7 adds SELECTED. The unchanged Tree-tab live assertion failed with 6.4.2 and passed with 6.11.0. Normalize the older native current-index state only for known affected Qt versions and page-tab/list roles; ordinary focus is not generic selection evidence. The unchanged Qt and terminal live tests pass after normalization.
 
+- 2026-10-24 (#967): Chromium list discovery and snapshot traversal share the operation-local getter cache. Native CHILDREN bypass does not refresh counts or indexed handles already cached by the discovery probe; timer-driven children can disappear from the effect diff while the document title is fresh. Invalidate structural getter entries between those phases while retaining role/interface metadata, and cover both appended children and same-count replacements.
+
+
 - 2026-10-24 (#966): Chromium native menus can live inside unnamed top-level frames with no usable wrapper geometry or SHOWING state. Snapshot the showing native menu handle directly; retaining only the wrapper can still prune every menu item. Keep empty cached frames and find-bar recovery separate.
 
+- 2026-10-24 (PR #985 repair): Native Chromium popup-menu root selection and post-discovery child-cache invalidation protect different snapshot phases. Preserve both implementations and both appended regression groups when merging; verify menu handles/geometry alongside timer-added and same-count-replaced children.
+
 - 2026-10-24 (PR #979 repair): Filtered-find anchor retention must be scoped to the observed process instance as well as the app name. Startup polling can first observe a departing Firefox process, then a new process whose omitted paragraph reuses the old Name field's ref. Reset retained anchors when both observations record disjoint instance identities; missing metadata is not restart evidence. Keep the ordinary audited app_restarted refusal when no new observation has occurred.
+
+- 2026-10-24 (PR #985 focus investigation): Chromium child-cache invalidation runs only after `refresh_visible` passes `_chromium_app`; Gecko returns before discovery. Pin that exclusion with a cache-call regression before attributing a Firefox typing refusal to snapshot invalidation. The b1ba6a1 merge brought only #979's filtered-find anchors, while the failing web-field test uses full snapshots. Isolated live passes on both main and the merged PR do not establish the cause of a CI mid-keystroke focus loss; preserve the guard and distinguish this unresolved failure from newer Firefox first-run terms dialogs that prevent reaching input at all.
