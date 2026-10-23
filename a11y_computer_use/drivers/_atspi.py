@@ -19080,6 +19080,30 @@ def chromium_toggle_state(acc) -> tuple[bool, bool] | None:
             return None
     else:
         return None
+    return _click_state_bits(acc, ("CHECKED", "PRESSED"))
+
+
+def gtk_dialog_toggle_state(acc) -> tuple[bool, bool] | None:
+    """Fresh selection/check state of a visible GTK dialog control only."""
+    role = _role_name(acc) if acc is not None else ""
+    if role not in {"page tab", "check box", "radio button"}:
+        return None
+    if _toolkit_name(acc) != "gtk":
+        return None
+    for node in _ancestor_chain(acc):
+        ancestor_role = _role_name(node)
+        if ancestor_role == "dialog":
+            break
+        if ancestor_role in {"frame", "window", "application", "document web", "document frame"}:
+            return None
+    else:
+        return None
+    bits = ("SELECTED", "CHECKED") if role == "page tab" else ("CHECKED", "PRESSED")
+    return _click_state_bits(acc, bits, require_showing=True)
+
+
+def _click_state_bits(acc, bits: tuple[str, str], *, require_showing: bool = False):
+    """Read native bits without treating a failed state read as False."""
     try:
         _drop_cached_properties(acc)
         states = acc.get_state_set()
@@ -19094,7 +19118,9 @@ def chromium_toggle_state(acc) -> tuple[bool, bool] | None:
             has = lambda name: bool(states.contains(getattr(state_type, name)))
         if has("DEFUNCT"):
             return None
-        return has("CHECKED"), has("PRESSED")
+        if require_showing and not has("SHOWING"):
+            return None
+        return tuple(has(bit) for bit in bits)
     except Exception:
         return None
 
