@@ -955,6 +955,12 @@ when it can be identified, even if AT-SPI reports ACTIVE. Use `window focus`
 to restore the client before retrying. These checks do not change the window
 listing or snapshot visibility reporting tracked separately in #913.
 
+Ref-action preparation skips implicit activation for X11 clients reporting
+`_NET_WM_WINDOW_TYPE_NOTIFICATION`: these bubbles can accept pointer input
+without becoming the active window. Visibility checks and the requested action
+remain unchanged. Explicit window focus/raise still require activation. This
+shortcut has synthetic coverage; live notification latency has not been measured.
+
 Qt child-widget `GrabFocus` does not activate an inactive window. When the
 existing target-focus wait needs to retry, the Linux backend also requests
 activation of the target's managed X11 window, restricted to the same PID.

@@ -18064,3 +18064,41 @@ def test_notification_ref_click_rechecks_after_preparation(
         assert exc.value.detail["outcome"] == "refused"
         assert clicks == []
     assert not target.pressed
+
+
+@pytest.mark.parametrize("cached_old_app", [False, True])
+@pytest.mark.parametrize("scope", [Scope.APP, Scope.WINDOW])
+def test_find_root_refreshes_registry_after_calc_restart(
+    fake_atspi, monkeypatch, cached_old_app, scope,
+) -> None:
+    """A stale desktop list must not hide the replacement Calc registrant."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    old = _WindowNode("application", "soffice")
+    sheet = _WindowNode("frame", "Untitled 1 - LibreOffice Calc")
+    replacement = _WindowNode("application", "soffice", children=[sheet])
+    desktop = _WindowNode("desktop")
+    fake_atspi.desktop = desktop
+    cached = [old] if cached_old_app else []
+    mask = {"value": 1}
+    changes = []
+
+    def set_mask(value):
+        changes.append(value)
+        mask["value"] = value
+
+    desktop.set_cache_mask = set_mask
+    desktop.get_child_count = lambda: len(cached) if mask["value"] else 1
+    desktop.get_child_at_index = lambda i: cached[i] if mask["value"] else replacement
+    monkeypatch.setattr(_atspi, "_cache_masks", lambda: (0, 1))
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    with _atspi.read_cache():
+        # Seed the operation cache too; native cache bypass alone is insufficient.
+        assert _atspi._child_count(desktop) == len(cached)
+        assert _atspi.find_root("soffice", scope) is (
+            replacement if scope is Scope.APP else sheet
+        )
+    assert changes == [0, 1]
+    assert mask["value"] == 1
