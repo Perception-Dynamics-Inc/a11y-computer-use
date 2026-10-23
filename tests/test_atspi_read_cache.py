@@ -397,3 +397,21 @@ def test_child_refresh_invalidates_nested_structure_but_retains_metadata() -> No
     assert node.role_calls == 1
     assert node.count_calls == 3
     assert node.child_calls == [0, 0]
+
+
+def test_firefox_visible_refresh_does_not_invalidate_child_cache(monkeypatch) -> None:
+    """Chromium effect discovery must not run while observing Gecko fields."""
+    node = _Node()
+    node.get_application = lambda: node
+    node.get_toolkit_name = lambda: "Gecko"
+    node.name = "Firefox"
+
+    def unexpected_discovery(_root):
+        raise AssertionError("Firefox must not enter Chromium list discovery")
+
+    monkeypatch.setattr(_atspi, "_list_containers", unexpected_discovery)
+    with _atspi.read_cache():
+        assert _atspi._call_first(node, ("get_child_count",)) == 2
+        _atspi.ATSPIAccessor().refresh_visible(node)
+        assert _atspi._call_first(node, ("get_child_count",)) == 2
+    assert node.count_calls == 1
