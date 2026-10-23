@@ -487,6 +487,42 @@ def active_window() -> dict | None:
         return None
 
 
+# Desktop shells also own harmless panels/settings. Only their identified run
+# surfaces require exec; a document merely titled "Run Program" is not one.
+_COMMAND_DIALOG_HOSTS = {"xfce4-panel", "gnome-panel", "mate-panel", "gnome-shell", "plasmashell"}
+_COMMAND_DIALOG_IDS = {
+    "run", "run-dialog", "run_dialog", "rundialog", "panel-run-dialog", "panel_run_dialog",
+    "gnome-panel-run-dialog", "xfce4-run-dialog", "run-command",
+    "xfce4-appfinder", "krunner",
+}
+_COMMAND_DIALOG_TITLES = {"run program", "run application", "run a command", "run command"}
+
+
+def command_launcher_open(app: str) -> bool:
+    """Recognize panel-owned run windows by owner and native class/role.
+
+    Conservatively gate the host while its run window is mapped: popup Paste
+    items can be outside that window's accessibility ancestry.
+    """
+    if app.casefold() not in _COMMAND_DIALOG_HOSTS:
+        return False
+    with _open_display() as d:
+        for win in _managed_windows(d):
+            if _app_id(win, d).casefold() != app.casefold() or _is_hidden(win, d):
+                continue
+            instance, klass = _wm_class_strings(win, d)
+            role = _prop(win, d, "WM_WINDOW_ROLE") or b""
+            if not isinstance(role, str):
+                role = bytes(role).decode("utf-8", "replace")
+            identities = {instance.casefold(), klass.casefold(), role.strip("\x00").casefold()}
+            if identities & _COMMAND_DIALOG_IDS:
+                return True
+            if (_is_dialog_window(win, d)
+                    and _win_title(win, d).strip().casefold() in _COMMAND_DIALOG_TITLES):
+                return True
+    return False
+
+
 def _window_at_point(d, x: float, y: float):
     """Topmost on-screen managed window containing a screen point, or None.
 

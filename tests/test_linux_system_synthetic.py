@@ -1632,6 +1632,26 @@ def test_focus_cannot_confirm_when_shade_clears_without_visible_client(monkeypat
     )
 
 
+@pytest.mark.parametrize("app", ["xfce4-panel", "gnome-panel", "gnome-shell", "plasmashell"])
+@pytest.mark.parametrize("identity", ["class", "role", "dialog_title", "title_only", "ordinary"])
+def test_command_launcher_window_identity(monkeypatch, app, identity):
+    class RunWindow(_ClassWin):
+        def get_full_property(self, atom, kind):
+            if atom == "WM_WINDOW_ROLE" and identity == "role":
+                return _NS(value=b"run-dialog\x00")
+            if atom == "_NET_WM_WINDOW_TYPE" and identity == "dialog_title":
+                return _NS(value=["_NET_WM_WINDOW_TYPE_DIALOG"])
+            return super().get_full_property(atom, kind)
+
+    win = RunWindow(20, 200, instance=app,
+                    klass="KRunner" if identity == "class" else app,
+                    title="Run Program" if identity in {"title_only", "dialog_title"} else "Localized title")
+    _active_display(monkeypatch, [win], 20)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: app)
+    assert _linux_system.command_launcher_open(app) is (identity in {"class", "role", "dialog_title"})
+    assert not _linux_system.command_launcher_open("mousepad")
+
+
 @pytest.mark.parametrize("window_type", ["NOTIFICATION", "NORMAL", "DIALOG", None, "unreadable"])
 def test_ref_notification_preparation_does_not_wait_for_activation(monkeypatch, window_type):
     """#935: a native notification type bypasses only implicit activation."""

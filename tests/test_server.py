@@ -5247,3 +5247,38 @@ async def test_declined_press_new_dialog_receipt(
         assert "not verified" in result.content[0].text
     else:
         assert "fallback_target_unverified" in result.content[0].text
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+@pytest.mark.parametrize("button", ["left", "right", "middle"])
+def test_terminal_click_no_input_path_keeps_noop_and_dispatch_gate(
+    monkeypatch, store, audit_dir, mocked_driver, bounded, button,
+):
+    """Hidden tabs send nothing; actionable terminal clicks remain audited refusals."""
+    store.set_tier(APP, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(audit_dir))
+    target = Element("e1", "AXButton", "Terminal tab", None,
+                     Bounds(0, 10, 10, 100, 20) if bounded else None, "terminal")
+    monkeypatch.setattr(runtime, "_target", lambda *a, **kw: (target, APP))
+    monkeypatch.setattr(runtime, "_capture", lambda: None)
+    monkeypatch.setattr(runtime.driver, "terminal_target", lambda *a, **kw: True, raising=False)
+    monkeypatch.setattr(runtime.driver, "press_element",
+                        lambda *a: pytest.fail("native press sent"))
+    if bounded:
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.click("e1", button=button)
+        assert exc.value.code is ErrorCode.EXEC_DISABLED
+        row, = [json.loads(line) for path in audit_dir.glob("*.jsonl")
+                for line in path.read_text().splitlines()]
+        assert row["result"] == "exec_disabled"
+        assert row["metrics"]["security_violation"] == "exec_disabled"
+    else:
+        result = runtime.click("e1", button=button)
+        assert result.outcome == "suspected_noop"
+        assert result.evidence == "not_actionable"
+        assert "no click was sent" in result
+        assert list(audit_dir.glob("*.jsonl"))
+        store.set_tier(APP, safety.Tier.READ)
+        with pytest.raises(server.ActionRefused):
+            runtime.click("e1", button=button)
+    assert not mocked_driver["click"]

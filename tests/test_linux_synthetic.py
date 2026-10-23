@@ -17879,6 +17879,109 @@ def test_calc_grid_mismatch_reports_actual_expected_and_timings(fake_atspi, monk
     assert sent == ["Item\tQ1"]
 
 
+@pytest.mark.parametrize("app", ["xfce4-appfinder", "xfce4-run", "krunner", "gmrun", "rofi"])
+@pytest.mark.parametrize("route", ["type", "set_value", "return", "ctrl_v", "paste_menu", "launch", "run", "middle", "right", "point", "menu_press"])
+def test_command_launcher_bypass_routes_are_audited(monkeypatch, tmp_path, app, route):
+    """FULL grants never authorize paste/commit; explicit exec still does."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import Click, KeyChord, MenuOp, MenuVerb, MouseButton, Point, TypeText
+
+    element = Element(ref="e1", role="AXButton", title={"paste_menu": "Paste", "run": "Run"}.get(route, "Launch"),
+                      value=None, bounds=None, snapshot_id="launcher")
+    action = {
+        "type": TypeText(text="touch /tmp/forbidden"),
+        "set_value": TypeText(text="touch /tmp/forbidden"),
+        "return": KeyChord(chord="Return"), "ctrl_v": KeyChord(chord="ctrl+v"),
+        "paste_menu": Click(element), "launch": Click(element), "run": Click(element),
+        "middle": Click(element, button=MouseButton.MIDDLE),
+        "right": Click(element, button=MouseButton.RIGHT),
+        "point": Click(Point(0, 10, 10)),
+        "menu_press": MenuOp(verb=MenuVerb.PRESS, app=app, path="Paste"),
+    }[route]
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(app, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(action, app, lambda: pytest.fail("input delivered"),
+                           input_target=element if route == "set_value" else None)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl") for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, app, lambda: "explicit grant") == "explicit grant"
+
+
+@pytest.mark.parametrize("app", ["xfce4-panel", "gnome-panel", "gnome-shell", "plasmashell"])
+def test_panel_run_dialog_ancestry(fake_atspi, monkeypatch, tmp_path, app):
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import Click
+
+    dialog = _Acc("dialog", name="Run a Command")
+    field = _Acc("text")
+    _adopt(dialog, field)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    monkeypatch.setattr(_linux_system, "command_launcher_open", lambda app: False)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (field, False))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_: field)
+    element = Element(ref="e1", role="AXButton", title="Run", value=None, bounds=None, snapshot_id="run")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(app, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(Click(element), app, lambda: pytest.fail("run clicked"))
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    assert not _atspi.command_launcher_ancestor(field, "mousepad")
+    dialog.role = "text"
+    assert not _atspi.command_launcher_ancestor(field, app)
+
+
+def test_launcher_click_rechecked_before_dispatch(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import Click, Point
+
+    state = {"launcher": False}
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "terminal_target", lambda *args, **kwargs: state["launcher"])
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xfce4-panel", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(Click(Point(0, 10, 10)), "xfce4-panel",
+                           lambda: pytest.fail("click delivered"),
+                           recheck=lambda app: state.update(launcher=True))
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl") for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+@pytest.mark.parametrize("attribute", ["id", "class", "window-role"])
+def test_panel_run_dialog_native_identity_survives_localized_title(fake_atspi, attribute):
+    dialog = _Acc("dialog", name="Localized command prompt")
+    dialog.get_attributes = lambda: {attribute: "panel_run_dialog"}
+    entry = _Acc("text")
+    _adopt(dialog, entry)
+    assert _atspi.command_launcher_ancestor(entry, "gnome-panel")
+    assert not _atspi.command_launcher_ancestor(entry, "mousepad")
+
+
+def test_launcher_gate_preserves_focused_terminal_fallback(fake_atspi, monkeypatch):
+    """A nonterminal ref must not suppress the existing focused-shell check."""
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_: _Acc("text"))
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (_Acc("terminal"), False))
+    target = Element(ref="e1", role="AXTextArea", title="", value=None, bounds=None, snapshot_id="editor")
+    assert driver.terminal_target("editor", target)
+
+
 @pytest.mark.parametrize("window_role,app_name", [("window", "xfce4-notifyd"),
                                                  ("notification", "notification-daemon")])
 @pytest.mark.parametrize("phase", ["activation", "feedback"])
