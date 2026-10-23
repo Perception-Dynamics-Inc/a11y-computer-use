@@ -4802,7 +4802,7 @@ class ATSPIAccessor:
             content_note=content_note,
             hint=hint,
             shortcut=shortcut,
-            note=outline_note if role_str in _ROW_ROLE_NAMES else panel_note,
+            note=(outline_note or gtk_table_selection_note(node)) if role_str in _ROW_ROLE_NAMES else panel_note,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -16082,6 +16082,35 @@ def geany_symbol_arrived(destination: tuple[int, list], *, evidence: dict | None
     return False
 
 
+def gtk_table_selection_note(acc) -> str:
+    """Warn about selection-only GTK table cells without assuming activation.
+
+    GtkTreeView's activate-on-single-click property is not exposed over
+    AT-SPI. An advertised activate action does not mean Selection emits
+    row-activated. Inspect ancestors only; never enumerate table cells.
+    """
+    if acc is None or _role_name(acc) not in {"table cell", "tree cell"}:
+        return ""
+    if "gtk" not in _toolkit_name(acc) or _qt_app(acc) or _chromium_app(acc) or _gecko_app(acc):
+        return ""
+    if "activate" not in _raw_action_names(acc) or _first_press_action(acc) in _SELECTING_ACTION_NAMES:
+        return ""
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"tree", "tree table", "menu", "popup menu", "menu bar"}:
+            break
+        if role == "table":
+            if _selection_iface(parent) is not None:
+                return "single click selects only; activation may require count=2"
+            break
+        node = parent
+    return ""
+
+
 def outline_double_click_note(acc) -> str:
     """``activates on double-click`` when a single click only selects the row.
 
@@ -18529,6 +18558,28 @@ def terminal_ancestor(acc) -> bool:
         seen.add(id(acc))
         if _role_name(acc) == "terminal":
             return True
+        acc = _parent_of(acc)
+    return False
+
+
+def command_launcher_ancestor(acc, app: str) -> bool:
+    """Identify desktop-shell run prompts, including GNOME's Alt+F2 dialog."""
+    from a11y_computer_use.drivers import _linux_system
+
+    if app.casefold() not in _linux_system._COMMAND_DIALOG_HOSTS:
+        return False
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) in {"dialog", "frame", "window"}:
+            attrs = _get_attributes(acc)
+            identities = {str(attrs.get(key, "")).casefold()
+                          for key in ("id", "class", "window-role", "xml-roles")}
+            if (identities & _linux_system._COMMAND_DIALOG_IDS
+                    or _node_name(acc).casefold() in _linux_system._COMMAND_DIALOG_TITLES):
+                return True
         acc = _parent_of(acc)
     return False
 
