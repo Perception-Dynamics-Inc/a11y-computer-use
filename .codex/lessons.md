@@ -458,3 +458,5 @@
 
 - 2026-10-23 (#930): GTK combos can expose the selected item as a non-empty accessible name. Compare it with the existing choice-value read before using relation or measured row labels; preserve explicit names, native handles, and the independent selected value.
 - 2026-10-23 (PR #945 repair): GTK4 list cells share AXCell with TreeView cells; identify the list model by its native listitem.scroll-to action, not the toolkit version alone, when scoping the recycled TreeView label guard. Run tests/test_gtk4_bounds.py alongside Linux synthetic regressions to preserve recovered pointer clicks.
+
+- 2026-10-23 (PR #950 repair): Qt's AT-SPI bridge clears VISIBLE as well as SHOWING for actions inside a closed QMenu. Detect submenu structure from all native rows, then open the requested Qt branch and recheck visibility before listing or dispatching its entries. Qt also publishes the native action name "Show Menu" with a space. Do not exempt Qt from hidden-action refusal; GTK's closed VISIBLE rows and hidden-only menus must retain their input-free listing behavior.
