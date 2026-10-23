@@ -18456,3 +18456,29 @@ def test_expander_guard_preserves_explicit_coordinate_click(monkeypatch):
     monkeypatch.setattr(_linux_input, "click", lambda x, y, **kw: clicks.append((x, y, kw)))
     driver.click(Point(0, 560, 712))
     assert clicks == [(560, 712, {"button": "left", "count": 1})]
+
+
+@pytest.mark.parametrize("toolkit,version,role,parent_role,states,selected", [
+    ("Qt", "6.4.2", "page tab", "page tab list", {"FOCUSED"}, True),
+    ("Qt", "6.6.3", "page tab", "page tab list", {"FOCUSED"}, True),
+    ("Qt", "6.4.2", "page tab", "page tab list", set(), False),
+    ("Qt", "6.7.0", "page tab", "page tab list", {"FOCUSED"}, False),
+    ("Qt", "6.7.0", "page tab", "page tab list", {"SELECTED"}, True),
+    ("Qt", "", "page tab", "page tab list", {"FOCUSED"}, False),
+    ("gtk", "6.4.2", "page tab", "page tab list", {"FOCUSED"}, False),
+    ("Qt", "6.4.2", "table cell", "table", {"FOCUSED"}, False),
+    ("Qt", "6.4.2", "page tab", "panel", {"FOCUSED"}, False),
+])
+def test_qt_legacy_tab_current_index_state(
+    fake_atspi, toolkit, version, role, parent_role, states, selected,
+):
+    """Older Qt uses FOCUSED for currentIndex, not keyboard focus on a tab."""
+    tab = _Acc(role, name="Tree", states=states, width=49, height=26)
+    tab.get_toolkit_name = lambda: toolkit
+    tab.get_toolkit_version = lambda: version
+    _adopt(_Acc(parent_role), tab)
+    raw = _atspi.ATSPIAccessor().read(tab)
+    assert raw.selected is selected
+    assert raw.focused is ("FOCUSED" in states)
+    if role == "page tab":
+        assert raw.role == "AXTab"

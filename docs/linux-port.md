@@ -1053,7 +1053,9 @@ uncertainty reporting, not pixel comparison or verified date selection.
 
 Native AT-SPI `page tab` controls retain the `AXTab` role (rendered as `tab`),
 with `page tab list` retained as `AXTabGroup`. Use `find(text="Advanced",
-role="tab")` to identify a notebook tab. Selection state and measured bounds
+role="tab")` to identify a notebook tab. Qt 6.0–6.6 reports its current tab
+through native FOCUSED rather than SELECTED; the driver normalizes that
+current-index state to selection for those versions. Selection state and measured bounds
 are preserved; an unallocated hidden tab still has no clickable bounds.
 This does not reveal content on inactive pages or add hidden-content hints.
 

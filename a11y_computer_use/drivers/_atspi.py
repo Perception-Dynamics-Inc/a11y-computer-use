@@ -4051,6 +4051,17 @@ def _state_flags(acc):
     if checked is None and has("PRESSED"):
         checked = True
     selected = has("SELECTED")
+    if (not selected and focused and _role_name(acc) == "page tab"
+            and "qt" in _toolkit_name(acc)):
+        # Qt 6.0–6.6 QAccessibleTabButton::state encodes currentIndex in
+        # FOCUSED, independent of keyboard focus, and omits SELECTED.
+        # Qt 6.7 adds SELECTED. Do not infer selection from ordinary focus
+        # for other toolkits or versions with different tab semantics.
+        version = _toolkit_version(acc).split(".")
+        if (len(version) >= 2 and version[0] == "6"
+                and version[1].isdigit() and int(version[1]) < 7
+                and _role_name(_parent_of(acc)) == "page tab list"):
+            selected = True
     expanded = has("EXPANDED") if has("EXPANDABLE") else None
     focusable = has("FOCUSABLE")
     editable = has("EDITABLE")
