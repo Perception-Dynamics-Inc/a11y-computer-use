@@ -476,3 +476,5 @@
 - 2026-10-23 (PR #970 repair): Native page tabs retain AXTab independently of GTK expander click refusal. Preserve both appended regression groups when merging; the tab role change must retain hidden-tab geometry refusal, selected state, native handles, and terminal page-content hoisting.
 
 - 2026-10-23 (#960 live repair): GTK notebook tabs need AXTab in the shared clickable-role set even when the native bridge exposes no press action. Role-only find coverage misses this regression; assert visible-tab clickability and run both live terminal tab tests, retaining all geometry and hidden-tab no-input checks. Keep AXTab in AT-SPI no-value roles to avoid unnecessary Text/Value probes.
+
+- 2026-10-23 (PR #970 Qt CI repair): Native page-tab role changes apply to Qt as well as GTK. The Qt table/tree live test still searched for the Tree tab as AXButton and failed before clicking it; require AXTab and verify tab selection while preserving all cell assertions. The shared find role filter uses substrings, so `tab` also matches AXTable once the Tree page is visible; disambiguate the exact tab role when checking its selected state.

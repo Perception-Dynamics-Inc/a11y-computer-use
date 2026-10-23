@@ -9938,9 +9938,12 @@ def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> N
             None if selected is None else (selected.role, selected.title, selected.selected)
         )
 
-        tree_tab = next(el for el in snap.elements if el.title == "Tree" and el.role == "AXButton")
+        tree_tab, = observe.find_elements(snap, text="Tree", role="tab")
+        assert tree_tab.role == "AXTab" and tree_tab.clickable, tree_tab
+        assert not observe.find_elements(snap, text="Tree", role="button")
         runtime._current = snap
-        runtime.click(tree_tab.ref)
+        clicked = runtime.click(tree_tab.ref)
+        assert "clicked" in clicked, clicked
         deadline = time.monotonic() + 8
         fruits = None
         while time.monotonic() < deadline:
@@ -9953,6 +9956,13 @@ def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> N
                 break
             time.sleep(0.3)
         assert fruits is not None and fruits.expanded is False, fruits
+        # The role filter is a substring search and also returns the now-visible
+        # Tree AXTable. Verify selection on the actual page tab.
+        selected_tab, = (
+            el for el in observe.find_elements(snap, text="Tree", role="tab")
+            if el.role == "AXTab"
+        )
+        assert selected_tab.selected, selected_tab
         runtime._current = snap
         clicked = runtime.click(fruits.ref)
         assert "clicked" in clicked, clicked
