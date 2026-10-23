@@ -2218,7 +2218,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
-    "AXStatusBar", "AXPopover", "AXCalendar",
+    "AXStatusBar", "AXPopover", "AXCalendar", "AXTab",
 })
 
 

@@ -2435,6 +2435,32 @@ class LinuxDriver:
         except Exception:
             return
 
+    def _refuse_expander_click(self, element: Element, handle) -> None:
+        """GTK expander row bounds do not identify the clickable header label."""
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role != "AXButton" or handle is None:
+            return
+        if not self._run(lambda: (
+            _atspi._role_name(handle) == "toggle button"
+            and _atspi._state_has(handle, "EXPANDABLE")
+            and "gtk" in _atspi._toolkit_name(handle)
+            and set(_atspi._raw_action_names(handle)) == {"activate"}
+        )):
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} expander bounds do not identify its clickable label; no click was sent",
+            detail={
+                "ref": element.ref, "reason": "expander_target_ambiguous", "outcome": "refused",
+                "hint": (
+                    "Use a screenshot and explicit coordinates on the expander arrow or label, "
+                    "then verify the expanded state. The full-row center may be empty space; "
+                    "the native activate action is not substituted for a click."
+                ),
+            },
+        )
+
     def _refuse_calendar_click(self, element: Element, handle) -> None:
         """A whole-calendar ref does not identify a day or navigation arrow."""
         from a11y_computer_use.drivers import _atspi
@@ -2673,6 +2699,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         self._refuse_hidden(element, handle)
         self._refuse_calendar_click(element, handle)
+        self._refuse_expander_click(element, handle)
         self._refuse_gnumeric_go_jump(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
         pressed = _cdp_forms.press_checkable(
@@ -3275,6 +3302,7 @@ class LinuxDriver:
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_calendar_click(target, handle)
+            self._refuse_expander_click(target, handle)
             self._refuse_gnumeric_go_jump(target, handle)
             self._refuse_unverified_pdf_thumbnail(target, handle)
             self._refuse_hidden(target, handle)

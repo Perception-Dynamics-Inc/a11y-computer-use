@@ -18380,6 +18380,8 @@ def test_notebook_tabs_retain_native_roles_in_find(monkeypatch) -> None:
                           geometry=_geometry())
     match, = observe.find_elements(snap, text="Advanced", role="tab")
     assert match.role == "AXTab"
+    assert match.clickable is True
+    assert match.actionable is True
     assert match.selected is False
     assert match.bounds.width == 90.
     assert match.bounds.x == 90.
@@ -18387,3 +18389,70 @@ def test_notebook_tabs_retain_native_roles_in_find(monkeypatch) -> None:
     assert observe.find_elements(snap, text="General", role="tab")[0].selected is True
     assert not observe.find_elements(snap, text="Advanced", role="button")
     assert 'tab "Advanced"' in observe.render_text(snap)
+
+
+@pytest.mark.parametrize("method", ["press_element", "click"])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_gtk_expander_ref_click_refused_before_input(fake_atspi, monkeypatch, method, expanded):
+    """A full-row GtkExpander box cannot establish a label click (#959)."""
+    node = _Acc("toggle button", name="Details", width=744, height=19,
+                states={"SHOWING", "EXPANDABLE"} | ({"EXPANDED"} if expanded else set()))
+    node.get_toolkit_name = lambda: "gtk"
+    node.get_action_iface = lambda: _NS(
+        get_n_actions=lambda: 1, get_action_name=lambda _i: "activate",
+        do_action=lambda _i: pytest.fail("activation substituted"),
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: node)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "do_press", lambda *_args, **_kw: pytest.fail("press sent"))
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kw: pytest.fail("pointer sent"))
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: pytest.fail("window raised"))
+    element = Element("e959", "AXButton", "Details", None,
+                      Bounds(0, 523, 703, 744, 19), "snap959", clickable=True, expanded=expanded)
+    with pytest.raises(ComputerUseError) as exc:
+        getattr(driver, method)(element)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "expander_target_ambiguous"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "screenshot" in exc.value.detail["hint"]
+    assert ("EXPANDED" in node.states) is expanded
+
+
+@pytest.mark.parametrize("toolkit,role,expandable,actions", [
+    ("qt", "toggle button", True, ("activate",)),
+    ("gtk", "push button", True, ("activate",)),
+    ("gtk", "toggle button", False, ("activate",)),
+    ("gtk", "toggle button", True, ("click",)),
+    ("gtk", "toggle button", True, ("activate", "click")),
+])
+def test_expander_click_guard_is_scoped(fake_atspi, monkeypatch, toolkit, role, expandable, actions):
+    node = _Acc(role, states={"EXPANDABLE"} if expandable else set())
+    node.get_toolkit_name = lambda: toolkit
+    node.get_action_iface = lambda: _NS(
+        get_n_actions=lambda: len(actions), get_action_name=lambda i: actions[i],
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e959", "AXButton", "Details", None, None, "snap959")
+    driver._refuse_expander_click(element, node)
+
+
+def test_expander_guard_preserves_explicit_coordinate_click(monkeypatch):
+    from contextlib import nullcontext
+    from a11y_computer_use.drivers import linux
+    from a11y_computer_use.schema import Point
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_refuse_expander_click",
+                        lambda *_a: pytest.fail("coordinate treated as an expander ref"))
+    monkeypatch.setattr(driver, "_visible_action", lambda *_a: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda *_a: None)
+    monkeypatch.setattr(_linux_input, "held", lambda _mods: nullcontext())
+    clicks = []
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **kw: clicks.append((x, y, kw)))
+    driver.click(Point(0, 560, 712))
+    assert clicks == [(560, 712, {"button": "left", "count": 1})]

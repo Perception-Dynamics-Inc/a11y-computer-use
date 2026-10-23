@@ -1046,3 +1046,11 @@ with `page tab list` retained as `AXTabGroup`. Use `find(text="Advanced",
 role="tab")` to identify a notebook tab. Selection state and measured bounds
 are preserved; an unallocated hidden tab still has no clickable bounds.
 This does not reveal content on inactive pages or add hidden-content hints.
+
+### GTK expander headers
+
+Ref clicks on GTK expandable toggle buttons exposing only `activate` are refused
+with `expander_target_ambiguous` before input. GTK can report the entire row as
+its bounds even though only the arrow and label receive clicks. The driver does
+not guess label geometry or substitute native activation. Use explicit screenshot
+coordinates on the arrow or label and verify that the expanded state changes.

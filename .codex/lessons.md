@@ -472,3 +472,7 @@
 - 2026-10-23 (#955): `find` and `scroll_to_find` consume the pruned snapshot, so ordinary child elision can hide visible named palette choices. Keep named leaf radio groups on the bounded sheet allowance; retain native handles, measured bounds, and ordinary caps for mixed or nested controls. Preserve independent calendar outcome regressions when merging appended Runtime tests.
 
 - 2026-10-23 (#956): GTK colour chooser hex entries can echo EditableText while retaining the old selected colour. Buffer equality is not commit evidence; keep activation explicit and verify the preview before Select.
+
+- 2026-10-23 (PR #970 repair): Native page tabs retain AXTab independently of GTK expander click refusal. Preserve both appended regression groups when merging; the tab role change must retain hidden-tab geometry refusal, selected state, native handles, and terminal page-content hoisting.
+
+- 2026-10-23 (#960 live repair): GTK notebook tabs need AXTab in the shared clickable-role set even when the native bridge exposes no press action. Role-only find coverage misses this regression; assert visible-tab clickability and run both live terminal tab tests, retaining all geometry and hidden-tab no-input checks. Keep AXTab in AT-SPI no-value roles to avoid unnecessary Text/Value probes.
