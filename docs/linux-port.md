@@ -1026,3 +1026,17 @@ does not verify the chooser's selected colour. Focus the field, select all, type
 the colour, then send Return explicitly. Verify the preview colour before
 pressing Select. No activation key is sent implicitly. This recognition is
 limited to these accessible labels; translated labels are not covered.
+
+### Calendars with painted day cells
+
+AT-SPI calendars retain the `calendar` role for `find role=calendar`. Their
+accessible name or relation label is preserved, with `Calendar` as the unnamed
+fallback. Childless calendars explicitly note that day cells and the selected
+date are unavailable. No month, date, or day-cell geometry is inferred.
+
+A whole-calendar ref click is refused before input: its center can select an
+arbitrary date. Use keyboard focus and navigation, or explicit x/y from a
+screenshot, then visually verify the selected date. For `verify=true` clicks
+on an observed calendar or opaque region, an unchanged accessibility tree
+reports `effect unknown (opaque target)` rather than `(no change)`. This is
+uncertainty reporting, not pixel comparison or verified date selection.

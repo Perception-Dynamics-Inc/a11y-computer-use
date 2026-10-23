@@ -18308,3 +18308,53 @@ def test_gtk4_cell_does_not_use_treeview_label_guard():
     driver = LinuxDriver()
     driver._run = lambda fn: fn()
     driver._verify_gtk_cell_target(element, cell)
+
+
+@pytest.mark.parametrize("name,label,expected", [
+    ("", "", "Calendar"), ("Appointment", "Date", "Appointment"), ("", "Date", "Date"),
+])
+def test_calendar_identity_survives_pruning(fake_atspi, monkeypatch, name, label, expected):
+    calendar = _Acc("calendar", name=name, width=420, height=172,
+                    states={"SHOWING", "VISIBLE", "ENABLED", "FOCUSABLE"})
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: label)
+    snap = build_snapshot(calendar, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="orage", pid=954, geometry=_geometry())
+    matches = observe.find_elements(snap, role="calendar")
+    assert len(matches) == 1
+    element = matches[0]
+    assert element.title == expected
+    assert element.value is None
+    assert element.bounds.width == 420
+    assert "day cells and selected date are not exposed" in element.note
+    assert "calendar" in observe.render_text(snap, mode="interactive")
+    assert len(snap.elements) == 1  # no synthesized day cells
+
+
+@pytest.mark.parametrize("method", ["press_element", "click"])
+@pytest.mark.parametrize("role", ["AXCalendar", "opaque_region"])
+def test_calendar_ref_click_refused_before_input(fake_atspi, monkeypatch, method, role):
+    calendar = _Acc("calendar", width=420, height=172)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: calendar)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "do_press", lambda *_args: pytest.fail("action sent"))
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("click sent"))
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: pytest.fail("window raised"))
+    element = Element("e954", role, "Calendar", None,
+                      Bounds(0, 20, 30, 420, 172), "snap954", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        getattr(driver, method)(element)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "calendar_target_ambiguous"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "screenshot" in exc.value.detail["hint"]
+
+
+def test_calendar_guard_preserves_day_children(fake_atspi, monkeypatch):
+    day = _Acc("push button", name="23")
+    _adopt(_Acc("calendar"), day)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e23", "AXButton", "23", None, Bounds(0, 20, 30, 20, 20), "snap954")
+    driver._refuse_calendar_click(element, day)
