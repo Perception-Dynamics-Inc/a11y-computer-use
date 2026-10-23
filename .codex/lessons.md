@@ -462,3 +462,5 @@
 - 2026-10-23 (#920): Hidden GTK notebook tabs can belong to detached popovers or nested playlist panes. A frame title is not a generic page label; restrict that fallback to a single terminal-content page, preserving hidden geometry/action refusal and page-content hoisting.
 
 - 2026-10-23 (PR #948 repair): A hidden xfce4-terminal page contains a scroll pane with both terminal content and native scrollbar siblings. Ignore only scrollbar children of that pane when recognizing the single terminal-content path; retain refusal for additional content or controls. The single-child synthetic fixture missed this layout; cover scrollbar siblings and run both unchanged live terminal tab regressions.
+
+- 2026-10-23 (PR #950 repair): Qt's AT-SPI bridge clears VISIBLE as well as SHOWING for actions inside a closed QMenu. Detect submenu structure from all native rows, then open the requested Qt branch and recheck visibility before listing or dispatching its entries. Qt also publishes the native action name "Show Menu" with a space. Do not exempt Qt from hidden-action refusal; GTK's closed VISIBLE rows and hidden-only menus must retain their input-free listing behavior.

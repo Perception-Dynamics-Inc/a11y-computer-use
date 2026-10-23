@@ -19,7 +19,8 @@ class Acc:
         self.role = role
         self.name = name
         self.children = list(children)
-        self.states = None if states is None else set(states)
+        # These fixtures model available entries, including closed popup rows.
+        self.states = None if states is None else set(states) | {"visible"}
         self.actions = list(actions)
         self.key = key
         self.pressed: list[str] = []
@@ -518,7 +519,7 @@ class _Fresh:
         self.role = role
         self.name = name
         self.spec = tuple(spec)
-        self.states = set(states)
+        self.states = set(states) | {"visible"}
         self.actions = ["click"]
         self.key = ""
         self.pressed = []
@@ -621,7 +622,7 @@ def test_same_bus_path_is_not_a_new_node(monkeypatch) -> None:
             self.role = role
             self.name = name
             self.atspi_key = atspi_key
-            self.states = set(states)
+            self.states = set(states) | {"visible"}
             self.actions = ["click"]
             self.key = ""
 
@@ -1450,3 +1451,109 @@ def test_nonchromium_menu_discovery_retains_walk(monkeypatch):
     )
     monkeypatch.setattr(_atspi, "_chromium_app", lambda root: False)
     assert _linux_menus.find_menu_bar(root) is root.children[0].children[0]
+
+
+@pytest.mark.parametrize("operation", ["list", "press"])
+@pytest.mark.parametrize("path", ["DVD", "DVD > DVD Menu"])
+def test_hidden_menu_parent_refuses_before_any_input(operation, path):
+    leaf = _item("DVD Menu")
+    dvd = _menu("DVD", leaf)
+    dvd.states.discard("visible")
+    dvd.actions = []
+    media = _menu("Media", _item("Open"))
+    app = Acc("application", "parole", [Acc("frame", "Parole", [
+        Acc("menu bar", children=[media, dvd]),
+    ])])
+    assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["Media"]
+    with pytest.raises(ComputerUseError) as exc:
+        if operation == "list":
+            _linux_menus.menu_items(app, path)
+        else:
+            _linux_menus.menu_press(app, path)
+    assert exc.value.detail["reason"] == "hidden"
+    assert exc.value.detail["level"] == 0
+    assert not dvd.pressed and not leaf.pressed and not media.pressed
+
+
+def test_hidden_leaf_is_omitted_but_closed_visible_rows_remain_listable():
+    hidden = _item("Hidden")
+    hidden.states.discard("visible")
+    visible = _item("Open")  # VISIBLE without SHOWING: the popup is closed.
+    file_menu = _menu("File", hidden, visible)
+    app = Acc("application", children=[Acc("frame", children=[
+        Acc("menu bar", children=[file_menu]),
+    ])])
+    assert [row["title"] for row in _linux_menus.menu_items(app, "File")] == ["Open"]
+    assert not file_menu.pressed and not visible.pressed
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(app, "File > Hidden", settle=lambda _: None,
+                                dismiss=lambda: None)
+    assert exc.value.detail["reason"] == "hidden"
+    assert exc.value.detail["level"] == 1
+    assert not hidden.pressed
+
+
+def test_menu_with_only_hidden_rows_lists_empty_without_opening():
+    hidden = _item("Hidden")
+    hidden.states.discard("visible")
+    file_menu = _menu("File", hidden)
+    app = Acc("application", children=[Acc("frame", children=[
+        Acc("menu bar", children=[file_menu]),
+    ])])
+    assert _linux_menus.menu_items(app, "File") == []
+    assert not file_menu.pressed and not hidden.pressed
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("operation", ["list", "press"])
+def test_qt_closed_popup_visibility_is_rechecked_after_open(nested, operation):
+    """Qt hides closed popup rows; opening reveals only available actions."""
+    visible = _item("Option X")
+    hidden = _item("Hidden")
+    visible.states.discard("visible")
+    hidden.states.discard("visible")
+    popup = _menu("Tools", visible, hidden)
+    entry = Acc(
+        "menu item", "Tools", [popup], states={"enabled", "sensitive"},
+        actions=("Show Menu",),
+    )
+    app = Acc("application", children=[Acc("menu bar", children=[entry])])
+    app.get_toolkit_name = lambda: "Qt"
+
+    class Open(_Action):
+        def do_action(self, index):
+            if "showing" in popup.states:
+                popup.states.discard("showing")
+                visible.states.discard("visible")
+            else:
+                popup.states.add("showing")
+                visible.states.add("visible")
+            return super().do_action(index)
+
+    entry.get_action_iface = lambda: Open(entry)
+    path = "Tools"
+    if nested:
+        child = _item("Child")
+        sub = _menu("Option X", child)
+        visible.children = [sub]
+        path += " > Option X"
+
+    if operation == "list":
+        rows = _linux_menus.menu_items(app, path, settle=lambda _: None)
+        assert [row["title"] for row in rows] == (["Child"] if nested else ["Option X"])
+    else:
+        path += " > Child" if nested else " > Option X"
+        assert _linux_menus.menu_press(
+            app, path, settle=lambda _: None,
+            dismiss=lambda: popup.states.discard("showing"),
+        ) == ("Child" if nested else "Option X")
+    assert entry.pressed
+    assert not hidden.pressed
+
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "Tools > Hidden", settle=lambda _: None,
+            dismiss=lambda: popup.states.discard("showing"),
+        )
+    assert exc.value.detail["reason"] == "hidden"
+    assert not hidden.pressed

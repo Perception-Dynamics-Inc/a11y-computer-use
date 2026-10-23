@@ -1001,3 +1001,11 @@ same-row sibling-label fallback. The selected item remains the value, so
 selection changes. Explicit names and combos without usable label evidence
 retain their native names. This naming behavior is covered by hermetic tests;
 live GTK verification remains a CI check.
+
+Linux `menu list` omits menu entries without AT-SPI `VISIBLE`, including
+subtrees below hidden parents. Explicit list/press paths through those entries
+return `reason: "hidden"` before activating that entry. Closed popup rows that
+are `VISIBLE` but not `SHOWING` remain listable without opening the menu.
+Qt marks closed-popup rows invisible as well; listing those menus opens the
+requested branch and rechecks native visibility before returning its rows.
+Hidden actions remain omitted and cannot be pressed.
