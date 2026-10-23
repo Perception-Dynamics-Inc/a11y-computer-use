@@ -1016,3 +1016,13 @@ avoids the post-click full-window snapshot and process-exit grace, while still
 checking immediate process liveness. Unchanged, hidden, defunct, or unreadable
 controls retain full outcome verification. Ref resolution still reads a fresh
 tree; this optimization does not change click dispatch or set_value verification.
+
+### GTK colour chooser hex entry
+
+For GTK entries named “Color Name” (or “Colour Name”) containing a hex colour,
+`set_value` refuses with `unsupported` / `commit_unverified` before replacing
+the text. GTK parses this entry on activation or focus-out; text read-back alone
+does not verify the chooser's selected colour. Focus the field, select all, type
+the colour, then send Return explicitly. Verify the preview colour before
+pressing Select. No activation key is sent implicitly. This recognition is
+limited to these accessible labels; translated labels are not covered.
