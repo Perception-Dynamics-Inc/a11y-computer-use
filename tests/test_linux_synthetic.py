@@ -18637,3 +18637,44 @@ def test_chromium_list_subtree_publication_keeps_clipping_and_deduplicates(fake_
     assert _atspi._list_item_subtrees(listing, clipped) == clipped
     unrelated = _Acc("list", width=220, height=35)
     assert _atspi._list_item_subtrees(unrelated, rows) == rows
+
+
+@pytest.mark.parametrize("menu_role", ["menu", "popup menu"])
+@pytest.mark.parametrize("popup", ["hidden", "collapsed", "open"])
+def test_chrome_select_popup_does_not_displace_horizontal_scroll_anchor(
+    fake_atspi, menu_role, popup,
+):
+    """#991: closed select models must not win over an overflow strip."""
+    from a11y_computer_use import server
+
+    button = _Acc("push button", name="First", width=150, height=38,
+                  states={"SHOWING", "VISIBLE"})
+    # Non-showing sections can still contain painted children in Chromium.
+    strip = _adopt(_Acc("section", name="strip", width=502, height=62), button)
+    option = _Acc("menu item", name="one", width=100, height=25,
+                  states={"SHOWING", "VISIBLE"})
+    menu = _adopt(_Acc(menu_role, width=100, height=75,
+                       states={"VISIBLE"} if popup == "hidden" else {"SHOWING", "VISIBLE"}), option)
+    combo = _adopt(_Acc("combo box", name="Filter", width=100, height=30,
+                        states={"SHOWING", "VISIBLE", "EXPANDABLE"}
+                        | ({"EXPANDED"} if popup != "collapsed" else set())), menu)
+    document = _adopt(_Acc("document web", name="Page", width=1000, height=700,
+                           states={"SHOWING"}), strip, combo)
+    window = _adopt(_Acc("frame", name="Chrome", width=1000, height=700), document)
+    app = _adopt(_Acc("application", name="chrome"), window)
+    app.get_toolkit_name = lambda: "Chrome"
+    for node in (app, window, document, strip, button, combo, menu, option):
+        node.get_application = lambda: app
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.children(document) == [strip, combo]
+    assert accessor.children(combo) == ([menu] if popup == "open" else [])
+    shot = build_snapshot(window, accessor, scope=Scope.WINDOW,
+                          app="chrome", pid=510, geometry=_geometry())
+    anchor = server._scroll_anchor(shot)
+    assert anchor is not None
+    if popup == "open":
+        assert anchor.role == "AXMenu"
+    else:
+        assert anchor.title == "strip"
+        assert not any(el.role == "AXMenu" for el in shot.elements)
+    assert "First" in {el.title for el in shot.elements}

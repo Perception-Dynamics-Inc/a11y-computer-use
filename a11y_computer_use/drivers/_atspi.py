@@ -5073,6 +5073,16 @@ class ATSPIAccessor:
         # Only a Chromium tree has these. Asking each child walked its
         # parents to the application on every node of a Calc sheet.
         if self._tree_is_chromium(node):
+            # Closed select menus retain children and sometimes on-screen
+            # bounds. They are popup models, not overflow containers; exposing
+            # them lets scroll_to_find choose the menu over the real strip.
+            collapsed_combo = (
+                role == "combo box" and _state_has(node, "EXPANDABLE")
+                and not _state_has(node, "EXPANDED")
+            )
+            kids = [child for child in kids
+                    if _role_name(child) not in {"menu", "popup menu"}
+                    or (_state_has(child, "SHOWING") and not collapsed_combo)]
             kids = [child for child in kids
                     if not chromium_clipped_target(child) or _child_count(child) > 0]
         if self._tree_is_gecko(node):
