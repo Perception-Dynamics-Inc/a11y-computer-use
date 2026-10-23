@@ -5719,6 +5719,22 @@ class Runtime:
             if self._process_died(before):
                 paragraph_verdict = ("partial", "the target process exited after the action")
         effect = "" if paragraph_verdict is not None else self._effect_after(pre)
+        # A stable tree cannot establish that pixels inside an opaque widget
+        # stayed unchanged. Coordinates remain the caller's point; this only
+        # qualifies the receipt, without deriving a day or another target.
+        opaque_roles = {"opaque_region", "AXCalendar"}
+        opaque_target = isinstance(target, Element) and target.role in opaque_roles
+        if isinstance(target, Point) and pre is not None and pre.app == app:
+            opaque_target = any(
+                el.role in opaque_roles and el.bounds is not None
+                and el.bounds.display_id == target.display_id
+                and el.bounds.x <= target.x < el.bounds.x + el.bounds.width
+                and el.bounds.y <= target.y < el.bounds.y + el.bounds.height
+                for el in pre.elements
+            )
+        opaque_unchanged = opaque_target and effect.endswith("\n  (no change)")
+        if opaque_unchanged:
+            effect = "effect unknown (opaque target); accessibility tree unchanged; verify with a screenshot"
         text = f"{msg}\n\neffect: {effect}" if effect else msg
         judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
         verdict = None
@@ -5757,6 +5773,8 @@ class Runtime:
                             and not outcome.pid_alive(process["pid"]))
                 verdict = (("partial", "the target process exited after the action")
                            if died else ("confirmed", evidence))
+        if opaque_unchanged and verdict is None:
+            verdict = ("unverifiable", "effect unknown (opaque target); verify with a screenshot")
         result = self._conclude(
             text, tool="click", app=app, before=before,
             element=judged_element,
@@ -10110,8 +10128,9 @@ def build_server(
         use mode='full' or `find` when you need the text. mode='diff' returns
         ONLY what changed since your last snapshot of this app (added / removed /
         changed elements), rendered in the view you last asked for; use it to
-        re-observe after an action, and read '(no change)' as 'the action had no
-        visible effect'. budget=N caps the reply at about N tokens. One window
+        re-observe after an action. '(no change)' means the accessibility tree
+        is unchanged; it does not establish that opaque pixels are unchanged.
+        budget=N caps the reply at about N tokens. One window
         replaces the tail with a marker counting the omitted element lines.
         Several windows share that budget, and a window past its share ends
         with '… N more'. include_bounds=true
@@ -10256,6 +10275,10 @@ def build_server(
         returns fallback_target_unverified with no fallback click sent. A newly
         visible native dialog is named in a dispatched receipt; this
         is not verified effect. Inspect a fresh snapshot before continuing.
+        Linux whole-calendar refs are refused because their centers do not
+        identify a day. Use keyboard navigation or screenshot-chosen x/y.
+        With verify=true, an unchanged tree at an opaque target reports effect
+        unknown; verify its pixels with a screenshot.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
         GTK table rows marked selection-only report a partial single-click

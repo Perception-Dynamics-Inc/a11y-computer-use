@@ -5282,3 +5282,32 @@ def test_terminal_click_no_input_path_keeps_noop_and_dispatch_gate(
         with pytest.raises(server.ActionRefused):
             runtime.click("e1", button=button)
     assert not mocked_driver["click"]
+
+
+@pytest.mark.parametrize("role", ["AXCalendar", "opaque_region", "AXButton"])
+@pytest.mark.parametrize("inside", [True, False])
+def test_opaque_coordinate_click_unchanged_tree_is_unknown(tmp_path, monkeypatch, role, inside):
+    """An unchanged calendar tree cannot prove that its selected day stayed put."""
+    from dataclasses import replace
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    snap = build_synthetic_snapshot(app="editor")
+    snap = replace(snap, elements=[
+        Element("calendar", role, "Calendar", None, Bounds(1, 240, 140, 120, 56), snap.snapshot_id),
+    ])
+    driver.snapshot = lambda *args, **kwargs: snap
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = snap
+    point = Point(1, 250 if inside else 400, 150)
+    result = rt.click(x=point.x, y=point.y, display_id=1, verify=True)
+    assert driver.clicked == [point]
+    if inside and role != "AXButton":
+        assert "effect unknown (opaque target)" in result
+        assert "(no change)" not in result
+        assert result.outcome == "unverifiable"
+    else:
+        assert "effect unknown (opaque target)" not in result
+        assert "(no change)" in result

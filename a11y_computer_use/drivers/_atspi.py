@@ -95,6 +95,7 @@ _ROLE = {
     # Value interface is not the chosen path, so the value probe stays off.
     "file chooser": "AXDialog",
     "color chooser": "AXWindow",
+    "calendar": "AXCalendar",
     "menu item": "AXMenuItem",
     "menu bar": "AXMenuBar",
     "menu": "AXMenu",
@@ -2217,7 +2218,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
-    "AXStatusBar", "AXPopover",
+    "AXStatusBar", "AXPopover", "AXCalendar",
 })
 
 
@@ -4464,6 +4465,9 @@ class ATSPIAccessor:
             name = _strip_label_colon(label)
             if not name and not description.strip() and role == "AXTextField":
                 name = _gtk_entry_row_name(node)
+        if role_str == "calendar" and not name.strip():
+            name = (_plain_accessible_name(_labelled_by_name(node))
+                    or description or "Calendar")
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if (role_str in {"slider", "spin button"} and not name.strip()
@@ -4790,6 +4794,9 @@ class ATSPIAccessor:
             labels = [label for label in labels if label]
             if labels:
                 panel_note += "; opened by " + ", ".join(repr(label) for label in labels)
+        if role_str == "calendar" and _child_count(node) == 0:
+            panel_note = ("day cells and selected date are not exposed; ref clicks are refused; "
+                          "use keyboard navigation or screenshot-chosen coordinates")
         outline_note = outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else ""
         if outline_note and position is not None and size is not None:
             position, size = _outline_visible_bounds(node, position, size)
