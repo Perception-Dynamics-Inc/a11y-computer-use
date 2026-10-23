@@ -489,3 +489,4 @@
 - 2026-10-23 (PR #958 palette merge): Named radio-palette retention and window-overflow notes affect shared pruning independently. Preserve both appended observation test groups when merging and run the server regressions too, because find consumes the same pruned snapshots.
 
 - 2026-10-23 (PR #970 overflow merge): Native AXTab clickability and shared window-overflow notes are independent observation behaviors. Preserve both when merging and run the observation, Linux tab, and Runtime regressions together. A pending Linux job still installing system packages provides no test-failure evidence.
+- 2026-10-23 (#965): Chrome upload verification must compare file-input evidence before and after chooser confirmation. Another empty input is not failure, and a filename already present in a sibling input or address bar is not success. Keep counts scoped to the same app/snapshot scope and require both the empty-input decrease and matching-button increase.
