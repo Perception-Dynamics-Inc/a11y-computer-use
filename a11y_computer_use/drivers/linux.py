@@ -1928,6 +1928,7 @@ class LinuxDriver:
         from a11y_computer_use import observe
 
         anchor = snap.element(ref)
+        self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref))
         if anchor.text_range is not None:
             # Preserve process/document/epoch checks, then re-read the exact
             # offsets and geometry on the live native node.
@@ -2606,6 +2607,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if not self._run(lambda: _atspi.chromium_page_button(handle)):
             return None
+        self._verify_chromium_row_target(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
         plain = allow_action and button is MouseButton.LEFT and count == 1 and not modifiers
@@ -2614,6 +2616,7 @@ class LinuxDriver:
         if plain:
             self._raise_handle_window(handle)
             self._visible_action(element, "Click", handle)
+            self._verify_chromium_row_target(element, handle)
             # Select one advertised action, then send it once. A failed
             # acknowledgement must not cause another action or pointer input.
             action = self._run(lambda: _atspi.chromium_button_click_action(handle))
@@ -2638,6 +2641,24 @@ class LinuxDriver:
                 "Use a screenshot and explicit coordinates for pointer-specific clicks.",
             },
         )
+
+    def _verify_chromium_row_target(self, element: Element, handle) -> None:
+        """Refuse a recycled row before dispatching any input."""
+        if not element.row_identity:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            current = self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
+        except Exception:
+            current = ()
+        if current != element.row_identity:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.title!r}) row identity changed; no input was sent",
+                detail={"ref": element.ref, "reason": "target_changed", "outcome": "refused",
+                        "hint": "Re-observe and find the intended row again."},
+            )
 
     def _verify_gtk_cell_target(self, element: Element, handle) -> None:
         """Reject recycled GTK cells even when a snapshot cached their old name."""
@@ -2688,6 +2709,7 @@ class LinuxDriver:
 
         self._focused_editable = None
         self._click_without_press = None
+        self._verify_chromium_row_target(element, observe.ax_handle_for(element.snapshot_id, element.ref))
         if element.secure:
             return False
         # A checkbox or radio in a Chrome/Electron window that already
@@ -2732,6 +2754,7 @@ class LinuxDriver:
             )
         self._visible_action(element, "Click", handle)
         self._raise_handle_window(handle)
+        self._verify_chromium_row_target(element, handle)
         self._verify_gtk_cell_target(element, handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
             before = self._run(lambda: _atspi._state_has(handle, "EXPANDED"))
@@ -3306,6 +3329,7 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._verify_chromium_row_target(target, handle)
             self._refuse_calendar_click(target, handle)
             self._refuse_expander_click(target, handle)
             self._refuse_gnumeric_go_jump(target, handle)
@@ -3422,6 +3446,7 @@ class LinuxDriver:
                         "hint": "Take a fresh snapshot; the notification may have expired."},
             )
         if isinstance(target, Element):
+            self._verify_chromium_row_target(target, handle)
             self._verify_gtk_cell_target(target, handle)
         select_parent = None
         if handle is not None and button is MouseButton.LEFT and count == 1:
