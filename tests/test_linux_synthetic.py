@@ -19979,3 +19979,61 @@ def test_gtk_model_modal_guard_checks_sibling_without_reading_rows(fake_atspi, m
         assert _atspi.refuse_outside_modal(modal, application)
     else:
         assert _atspi.refuse_outside_modal(button, window) is False
+
+
+@pytest.mark.parametrize("points", [0, 18, 40])
+def test_drag_modal_probe_latency_is_independent_of_path(
+    modal_boundary_tree, monkeypatch, points,
+):
+    """#1053: model the reported 150 ms native probe, without clock jitter."""
+    from a11y_computer_use.schema import Drag
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    elapsed = 0.0
+    discoveries = []
+    original = _atspi.active_modals
+    def discover(root, **kwargs):
+        nonlocal elapsed
+        elapsed += 0.15
+        discoveries.append(root)
+        return original(root, **kwargs)
+    monkeypatch.setattr(_atspi, "active_modals", discover)
+    hits = []
+    def hit(x, y):
+        hits.append((x, y))
+        return bg
+    monkeypatch.setattr(_atspi, "_accessible_at_point", hit)
+    start, end = Point(0, 100, 110), Point(0, 200, 110)
+    path = tuple(Point(0, 101 + i, 110) for i in range(points))
+    driver.check_modal_input(Drag(start, end, path=path), "modal-test")
+    # The remaining 1.2 s stroke/readback budget must still fit 1.5 s.
+    assert 1.2 + elapsed <= 1.5
+    assert len(discoveries) == 2
+    assert hits == [(100, 110), (200, 110)]
+
+
+@pytest.mark.parametrize("outside", ["source", "target"])
+@pytest.mark.parametrize("by_ref", [False, True])
+def test_drag_modal_endpoints_still_refuse_background(
+    modal_boundary_tree, monkeypatch, outside, by_ref,
+):
+    from a11y_computer_use.schema import Drag
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    modal.states.remove("MODAL")
+    modal.get_attributes = lambda: {"aria-modal": "true"}
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    if by_ref:
+        background = next(el for el in snap.elements if el.title == bg.name)
+        foreground = next(el for el in snap.elements if el.title == inside.name)
+    else:
+        background, foreground = Point(0, 100, 110), Point(0, 350, 225)
+        monkeypatch.setattr(_atspi, "_accessible_at_point",
+                            lambda x, y: bg if x == 100 else inside)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    start, end = ((background, foreground) if outside == "source"
+                  else (foreground, background))
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Drag(start, end), "modal-test")
+    assert calls == []
+    frame.children.remove(modal)
+    driver.check_modal_input(Drag(start, end), "modal-test")

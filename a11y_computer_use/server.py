@@ -3872,13 +3872,16 @@ class Runtime:
             self._audit_stale(kind, ref, exc)
             raise
 
-    def _resolve(self, ref: str, kind: str) -> tuple[Snapshot, Element]:
+    def _resolve(
+        self, ref: str, kind: str, *, live_snapshot: Snapshot | None = None,
+    ) -> tuple[Snapshot, Element]:
         """Resolve a ref against the live tree, auditing any failure.
 
         Text writes to an issued secure ref are refused before live resolution:
         a rebuilt native child must not turn a secure refusal into stale_ref.
         No old handle is reused to perform an action. Other targets still need
-        ordinary live resolution and the act-time security checks.
+        ordinary live resolution and the act-time security checks. A drag may
+        share its source's live tree with the destination before any input.
         """
         snap, anchor = self._anchor_audited(ref, kind)
         if kind == "typetext" and anchor.secure:
@@ -3908,7 +3911,8 @@ class Runtime:
                     return snap, cell
         self._gate_anchor = None
         try:
-            live = self.driver.resolve_ref(snap, ref)
+            live = (self.driver.resolve_ref(snap, ref, live=live_snapshot)
+                    if live_snapshot is not None else self.driver.resolve_ref(snap, ref))
         except ComputerUseError as exc:
             self._audit_stale(kind, ref, exc)
             raise
@@ -3994,6 +3998,7 @@ class Runtime:
         display_id: int | None,
         *,
         kind: str = "click",
+        live_snapshot: Snapshot | None = None,
     ) -> tuple[Target, str]:
         """Resolve (ref | x,y) into an actionable target plus the gating app.
 
@@ -4010,7 +4015,8 @@ class Runtime:
             line = self._resolve_ocr(ref, kind)
             return line.center, self._frontmost()
         if ref is not None:
-            snap, live = self._resolve(ref, kind)
+            snap, live = (self._resolve(ref, kind, live_snapshot=live_snapshot)
+                          if live_snapshot is not None else self._resolve(ref, kind))
             return live, snap.app or self._frontmost()
         if x is None or y is None:
             raise ValueError("target an element ref, or both x and y coordinates")
@@ -6904,7 +6910,18 @@ class Runtime:
                     self._audit_stale("drag", ref, err)
                     raise err
         start, start_app = self._target(start_ref, start_x, start_y, display_id, kind="drag")
-        end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
+        # Linux retains the full tree used to resolve this exact source.
+        # No input intervenes: match the destination against that same live
+        # tree, retaining its issuing-anchor and native row-identity checks.
+        take_snapshot = getattr(self.driver, "take_click_snapshot", None)
+        resolution = (take_snapshot(start) if isinstance(start, Element)
+                      and end_ref is not None and not ocr.is_ocr_ref(end_ref)
+                      and callable(take_snapshot) else None)
+        if resolution is not None:
+            end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag",
+                                  live_snapshot=resolution)
+        else:
+            end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
         waypoints = self._drag_path(path, start, display_id)
         action = Drag(start=start, end=end, path=waypoints)
         overlay_reader = getattr(self.driver, "drag_overlay", None)
