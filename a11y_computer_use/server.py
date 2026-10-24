@@ -3687,15 +3687,22 @@ class Runtime:
         """Target semantics and ancestry, excluding ancestor UI state.
 
         Firefox label ancestors can echo the value of their child input.
-        Window titles also change with edits. Neither identifies that child;
-        the addressed element's own name and every captured row identity do.
+        Window/document titles also change with edits. Native context identity
+        replaces those names, including documents exposed as AXGroup. Neither
+        mutable title identifies a child; control names, semantic container
+        names and every captured row identity still do.
         """
         chain = []
         seen = set()
         while ref in elements and ref not in seen:
             seen.add(ref)
             el = elements[ref]
-            chain.append((el.role, "" if chain and el.role in {"AXWindow", "AXStaticText"} else el.title, el.row_identity))
+            mutable_title = (
+                el.role == "AXWindow" or bool(el.context_identity)
+                or (bool(chain) and el.role == "AXStaticText")
+            )
+            chain.append((el.role, "" if mutable_title else el.title,
+                          el.row_identity, el.context_identity, el.instance_id, el.stable_id))
             ref = el.parent
         return tuple(chain)
 

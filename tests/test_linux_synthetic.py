@@ -19078,3 +19078,24 @@ def test_drag_overlay_discards_closed_dialog_controls(monkeypatch):
     start = outcome.element_at_point(before, a)
     assert outcome.drag_drop_verdict(before, options, start)[0] == 'confirmed'
     assert outcome.drag_drop_verdict(before, before, start)[0] == 'unverifiable'
+
+
+@pytest.mark.parametrize("role", ["frame", "window", "document web", "document frame", "panel", "internal frame", "dialog"])
+@pytest.mark.parametrize("native_key", [(":1.2", "/accessible/42"), None])
+def test_context_identity_survives_snapshot_without_using_title(monkeypatch, role, native_key):
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0., 0.), (800., 600.)))
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda acc: native_key)
+    node = _Acc(role, name="Notes Lab")
+    raw = _atspi.ATSPIAccessor().read(node)
+    expected = ((role, *native_key) if native_key and role in {
+        "frame", "window", "document web", "document frame"
+    } else ())
+    assert raw.context_identity == expected
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    assert snap.elements[0].context_identity == expected
+    node.name = "Notes Lab - saved"
+    fresh = _atspi.ATSPIAccessor().read(node)
+    assert fresh.title == "Notes Lab - saved"
+    assert fresh.context_identity == expected

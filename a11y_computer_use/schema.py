@@ -286,6 +286,8 @@ class Element:
     stable_id: str | None = None
     # Native row identity captured at observation; excludes values and geometry.
     row_identity: tuple = ()
+    # Native window/document identity, independent of its mutable title.
+    context_identity: tuple = ()
     instance_id: str | None = None
     document_id: str | None = None
     #: ``terminal`` for a VTE screen. The snapshot value is the on-screen

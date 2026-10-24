@@ -251,6 +251,8 @@ class RawNode:
     stable_id: str | None = None
     # Native row identity captured at observation; excludes values and geometry.
     row_identity: tuple = ()
+    # Native window/document identity, independent of its mutable title.
+    context_identity: tuple = ()
     #: Linux AT-SPI only. Empty on macOS, Windows, and the browser, so those
     #: trees keep today's walk and token budget. ``"page"`` is a Chromium
     #: ``document web``, ``"docframe"`` a ``document frame``, ``"iframe"`` an
@@ -2885,6 +2887,7 @@ def _flatten(
             placeholder=node.raw.placeholder,
             stable_id=node.raw.stable_id or None,
             row_identity=node.raw.row_identity,
+            context_identity=node.raw.context_identity,
             instance_id=instance_id,
             document_id=document_id,
             subrole=(
