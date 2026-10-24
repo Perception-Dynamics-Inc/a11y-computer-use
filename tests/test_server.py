@@ -5862,3 +5862,34 @@ def test_drag_reads_overlay_instead_of_previous_click_baseline(tmp_path, readabl
         assert out.evidence == "a new window or dialog appeared"
     else:
         assert "could not be read" in out.evidence
+
+
+@pytest.mark.parametrize('dialog', [True, False])
+def test_drag_group_only_overlay_never_invites_retry(tmp_path, dialog):
+    from dataclasses import replace
+    overlay = _drag_rows('overlay', [])
+    overlay = replace(overlay, elements=(replace(overlay.elements[0], role='AXGroup',
+        title='xfce4-screenshooter', enabled=False, bounds=None),))
+    after = _drag_rows('result', [('Preview', 20, 40)]) if dialog else overlay
+    rt = _drag_runtime(tmp_path, overlay, after)
+    result = rt.drag(start_x=200, start_y=150, end_x=800, end_y=350)
+    assert result.outcome == ('confirmed' if dialog else 'unverifiable')
+    assert result.next == ()
+    assert result.evidence
+
+
+def test_drag_uses_scoped_probe_without_full_pre_stroke_tree(tmp_path):
+    before = _drag_rows('before', [('Alpha', 20, 40), ('Delta', 20, 80)])
+    rt = _drag_runtime(tmp_path, before, before)
+    probes = []
+    rt.driver.drag_snapshot = lambda *args: probes.append(args) or before
+    reads = []
+    original = rt.driver.snapshot
+    def snapshot(*args):
+        reads.append(rt.driver.i)
+        return original(*args)
+    rt.driver.snapshot = snapshot
+    result = rt.drag(start_ref='e2', end_ref='e3')
+    assert result.outcome == 'suspected_noop'
+    assert len(probes) == 1
+    assert reads == [1]  # Only the mandatory post-stroke tree.

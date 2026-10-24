@@ -1380,6 +1380,89 @@ class LinuxDriver:
             return _dbus_guard.call_with_reconnect(self._snapshot_desktop)
         return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
 
+    def drag_snapshot(self, scope: Scope, app: str, baseline: Snapshot | None,
+                      start: Target, end: Target) -> Snapshot | None:
+        """Refresh windows and addressed elements without walking descendants.
+
+        Retain observed sibling order for movement checks, but replace stale
+        windows: an asynchronous overlay may have closed the previous dialog.
+        """
+        from a11y_computer_use import observe, outcome
+        from a11y_computer_use.drivers import _atspi, _actionable
+
+        if baseline is None:
+            return None
+
+        def read():
+            root = _atspi.find_root(app, Scope.APP)
+            if root is None:
+                return None
+            _actionable.refresh_cached_tree(root)
+            native = _atspi.ATSPIAccessor()
+
+            class Shallow:
+                def read(self, node):
+                    return native.read(node)
+
+                def children(self, node):
+                    return ()
+
+            geometry = _atspi.primary_geometry()
+
+            def one(handle):
+                return observe.build_snapshot(
+                    handle, Shallow(), scope=scope, app=app,
+                    pid=baseline.pid, geometry=geometry,
+                ).elements
+
+            windows = []
+            for handle in _atspi.snapshot_window_list(root):
+                windows.extend(one(handle))
+            window_roles = {"AXWindow", "AXDialog", "AXSheet"}
+            old_windows = [el for el in baseline.elements if el.role in window_roles]
+            retained = {
+                el.ref for el in old_windows if any(
+                    (el.stable_id == new.stable_id if el.stable_id and new.stable_id
+                     else (el.role, el.title, el.bounds) == (new.role, new.title, new.bounds))
+                    for new in windows
+                )
+            }
+            by_ref = {el.ref: el for el in baseline.elements}
+
+            def still_present(el):
+                seen = set()
+                while el is not None and el.ref not in seen:
+                    seen.add(el.ref)
+                    if el.role in window_roles:
+                        return el.ref in retained
+                    el = by_ref.get(el.parent)
+                return not old_windows
+
+            elements = [el for el in baseline.elements
+                        if el.role not in window_roles and still_present(el)]
+            for target in (start, end):
+                el = target if isinstance(target, Element) else outcome.element_at_point(baseline, target)
+                if el is None or not still_present(el) or el.role in {"AXWindow", "AXDialog", "AXSheet", "AXGroup"}:
+                    continue
+                handle = observe.ax_handle_for(el.snapshot_id, el.ref)
+                if handle is None:
+                    return None
+                _actionable.refresh_cached_tree(handle)
+                fresh = one(handle)
+                if not fresh:
+                    return None
+                updated = replace(fresh[0], ref=el.ref, parent=el.parent,
+                                  snapshot_id=el.snapshot_id)
+                elements = [updated if item.ref == el.ref else item for item in elements]
+            # These refs are evidence only and never installed for input.
+            windows = [replace(el, ref=f"drag-window-{i}") for i, el in enumerate(windows)]
+            return replace(baseline, elements=tuple(windows + elements))
+
+        try:
+            return self._run(read)
+        finally:
+            observe.touch_epoch(baseline.snapshot_id)
+
     def _not_responding(self, app: str, exc: ComputerUseError) -> ComputerUseError:
         """The caller's app name, with the pid the bus actually timed out on."""
         pid = exc.detail.get("pid")
