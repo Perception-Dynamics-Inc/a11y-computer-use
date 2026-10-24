@@ -1735,3 +1735,49 @@ def test_input_activation_requests_once_without_restoring_or_waiting(monkeypatch
                         lambda *args: pytest.fail("must not extend the focus wait"))
     assert _linux_system.request_input_activation(7) is (blocker is None)
     assert calls == ([(display, window)] if blocker is None else [])
+
+
+@pytest.mark.parametrize('cover', ['overlay', 'managed', 'hidden', 'input_only', 'unknown'])
+def test_drag_overlay_uses_root_stacking_not_managed_clients(monkeypatch, cover):
+    """Observed Xfwm sequence: Mousepad below two screenshooter OR windows."""
+    import sys
+    monkeypatch.setitem(sys.modules, 'Xlib', _NS(X=_NS(IsViewable=2, InputOutput=1)))
+    background = _FakeXWin(1, 0, 0, 1280, 800, 10)
+    overlay = _FakeXWin(2, 0, 0, 1280, 800, 20)
+    utility = _FakeXWin(3, 0, 0, 100, 50, 20)
+    background.get_attributes = lambda: _NS(map_state=2, win_class=1, override_redirect=False)
+    overlay.get_attributes = lambda: _NS(
+        map_state=0 if cover == 'hidden' else 2,
+        win_class=2 if cover == 'input_only' else 1,
+        override_redirect=cover != 'managed')
+    utility.get_attributes = lambda: _NS(map_state=2, win_class=1, override_redirect=True)
+    children = [background, overlay, utility]
+    root = _FakeXRoot([background])  # EWMH omits both overlay windows.
+    root.get_geometry = lambda: _NS(width=1280, height=800)
+    root.query_tree = lambda: _NS(children=children)
+    display = _NS(screen=lambda: _NS(root=root))
+    monkeypatch.setattr(_linux_system, '_display', lambda: display)
+    monkeypatch.setattr(_linux_system, '_app_id', lambda win, d:
+                        '' if cover == 'unknown' else 'screenshooter')
+    expected = (2, 'unknown' if cover == 'unknown' else 'screenshooter')
+    assert _linux_system.drag_overlay_at_point(200, 150) == (
+        expected if cover in {'overlay', 'unknown'} else None)
+    assert _linux_system.drag_overlay_at_point(20, 20) == (
+        expected if cover in {'overlay', 'unknown'} else None)  # inside the utility
+    # After release the overlay is unmapped; do not infer another owner.
+    children[:] = [background]
+    assert _linux_system.drag_overlay_at_point(200, 150) is None
+
+
+def test_drag_overlay_unreadable_window_does_not_use_background(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, 'Xlib', _NS(X=_NS(IsViewable=2, InputOutput=1)))
+    def gone():
+        raise RuntimeError('window disappeared')
+    root = _NS(get_geometry=lambda: _NS(width=1280, height=800),
+               query_tree=lambda: _NS(children=[_NS(get_attributes=gone)]))
+    monkeypatch.setattr(_linux_system, '_display', lambda: _NS(screen=lambda: _NS(root=root)))
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.drag_overlay_at_point(200, 150)
+    assert exc.value.code is ErrorCode.FOCUS_CHANGED
+    assert exc.value.detail['reason'] == 'drag_overlay_unreadable'

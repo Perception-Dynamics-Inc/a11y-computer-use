@@ -6018,3 +6018,56 @@ def test_snapshot_identity_ignores_ancestor_text_value_echo(
         with pytest.raises(ComputerUseError) as caught:
             runtime._anchor("e1")
         assert caught.value.detail["reason"] == "target_changed"
+
+
+@pytest.mark.parametrize('readable', [True, False])
+def test_coordinate_drag_observes_overlay_not_unchanged_foreground(tmp_path, readable):
+    """Xfwm keeps Mousepad active while screenshooter owns the region overlay."""
+    from dataclasses import replace
+    background = _drag_rows('background', [])
+    options = replace(background, app='screenshooter')
+    overlay = replace(options, elements=(replace(
+        options.elements[0], role='AXDialog', title='',
+        bounds=Bounds(0, 0, 0, 1280, 800)),))
+    result = replace(options, snapshot_id='result', elements=(replace(
+        options.elements[0], role='AXDialog', title='Screenshot',
+        bounds=Bounds(0, 325, 284, 640, 265)),))
+    sent, reads = [], []
+    rt = _drag_runtime(tmp_path, options, result, on_drag=lambda: sent.append(True))
+    rt.store.set_tier('screenshooter', safety.Tier.CLICK)
+    rt.driver.drag_overlay = lambda point: (8389677, 'screenshooter')
+
+    def pre(scope, app, baseline, start, end):
+        reads.append(('pre', app))
+        assert baseline.app == 'screenshooter'
+        return overlay if readable else None
+
+    def post(scope, app):
+        reads.append(('post', app))
+        return result if app == 'screenshooter' else background
+
+    rt.driver.drag_snapshot = pre
+    rt.driver.snapshot = post
+    out = rt.drag(start_x=200, start_y=150, end_x=800, end_y=350)
+    assert out.outcome == ('confirmed' if readable else 'unverifiable')
+    assert out.next == ()
+    assert out.evidence
+    assert reads == [('pre', 'screenshooter'), ('post', 'screenshooter')]
+    assert sent == [True]
+
+
+@pytest.mark.parametrize('granted, changed', [(False, False), (True, True)])
+def test_coordinate_drag_overlay_requires_grant_and_same_window(tmp_path, granted, changed):
+    before = _drag_rows('before', [])
+    sent = []
+    rt = _drag_runtime(tmp_path, before, before, on_drag=lambda: sent.append(True))
+    if granted:
+        rt.store.set_tier('screenshooter', safety.Tier.CLICK)
+    overlays = iter([(42, 'screenshooter'), None if changed else (42, 'screenshooter')])
+    rt.driver.drag_overlay = lambda point: next(overlays)
+    with pytest.raises((server.ActionRefused, ComputerUseError)) as exc:
+        rt.drag(start_x=200, start_y=150, end_x=800, end_y=350)
+    if changed:
+        assert exc.value.code is ErrorCode.FOCUS_CHANGED
+        assert exc.value.detail['reason'] == 'drag_overlay_changed'
+    assert sent == []
