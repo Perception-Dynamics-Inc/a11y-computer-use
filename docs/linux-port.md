@@ -1171,11 +1171,19 @@ offsets. Unreadable selections report `unverifiable` with `next: []`, so a calle
 does not repeat a click that may already have selected the word. Readable
 unchanged selections retain `suspected_noop`. No alternate input is substituted.
 
-Drag verification reads a fresh pre-stroke tree rather than reusing the previous
-action's read-back. This matters when a region-selection overlay appears after
+Drag verification refreshes pre-stroke evidence rather than relying only on the
+previous action's read-back. This matters when a region-selection overlay appears after
 the preceding click has returned, and both capture dialogs share a title. A
 failed pre-stroke read leaves the outcome unverifiable with no retry hints;
 it does not treat an older dialog snapshot as evidence for repeating the stroke.
+
+On Linux the pre-stroke drag read is restricted to top-level window evidence
+and the source/target elements; it does not traverse their descendants. The
+post-stroke snapshot still verifies the result. A group-only selection overlay
+can confirm a new dialog; without readable transition/effect evidence the result
+is `unverifiable` with `next: []`, never a coordinate retry. Previously observed
+controls in a closed window are excluded from the pre-stroke evidence.
+
 
 Snapshot ref identity (#1014): later `desktop_snapshot` calls in both full and
 interactive modes retain an existing ref's role, name, row identity and reported

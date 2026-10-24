@@ -1146,6 +1146,10 @@ def drag_drop_verdict(
         return "unverifiable", "the text selection could not be read; re-observe before further action"
     if getattr(start, "role", "") in {"opaque_region", "AXCanvas", "AXImage"}:
         return "unverifiable", "the painted drag effect could not be read; re-observe before further action"
+    if (getattr(start, "role", "") == "AXGroup"
+            or (getattr(start, "role", "") in {"AXWindow", "AXDialog", "AXSheet"}
+                and not _drag_label(start))):
+        return "unverifiable", "no window transition or readable drag effect was observed; re-observe"
     comparable = before is not None and after is not None and start is not None
     if comparable:
         return "suspected_noop", "the drop was not confirmed"
