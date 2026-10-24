@@ -35,6 +35,12 @@ a new window/dialog, a newly arrived file, or a changed native text-selection
 range confirms the action. Selecting a row alone and scrolling the whole list
 are not drop evidence. The selection reader does not touch the clipboard.
 
+For coordinate drags starting on an X11 override-redirect selection overlay,
+the native root-window stacking list identifies the overlay owner. Permission
+and verification use that app, even when EWMH still names an underlying editor
+as foreground. The same overlay identity is rechecked before input. This read
+uses native window rectangles only, without another accessibility tree walk.
+
 When the source disappears without readable destination evidence, text selection
 cannot be read, or the target is an opaque painted surface, the result is
 `unverifiable` with `next: []`. Re-observe before another action: repeating old

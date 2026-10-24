@@ -557,6 +557,53 @@ def _top_window_pid(x: float, y: float) -> int | None:
     return None
 
 
+def drag_overlay_at_point(x: float, y: float) -> tuple[int, str] | None:
+    """Identity of a full-screen unmanaged window at a drag's start.
+
+    Region selectors are override-redirect windows: neither EWMH's active
+    window nor its managed client list identifies their owner. Read only the
+    root's stacking list and native rectangles, never accessibility subtrees.
+    A managed window above an overlay prevents using that covered overlay.
+    """
+    from Xlib import X
+
+    with _open_display() as d:
+        root = d.screen().root
+        screen = root.get_geometry()
+        for win in reversed(root.query_tree().children):
+            try:
+                attrs = win.get_attributes()
+                if attrs.map_state != X.IsViewable or attrs.win_class != X.InputOutput:
+                    continue
+                bounds = _geometry_on_root(win, d)
+                if bounds is None:
+                    continue
+                left, top, width, height = bounds
+                if not (left <= x < left + width and top <= y < top + height):
+                    continue
+                if not attrs.override_redirect:
+                    return None
+                # Limit this ownership path to full-screen selectors. Menus,
+                # tooltips and small utility windows do not establish a
+                # region-selection owner (and may be input-transparent).
+                if bounds != (0, 0, screen.width, screen.height):
+                    continue
+                # Missing ownership must not fall through to a granted app
+                # underneath the overlay.
+                return int(win.id), _app_id(win, d) or "unknown"
+            except Exception as exc:
+                # Never replace unreadable ownership with the granted app
+                # underneath it.
+                from a11y_computer_use.schema import ErrorCode
+
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_CHANGED,
+                    "the drag window owner could not be read; re-observe",
+                    detail={"reason": "drag_overlay_unreadable"},
+                ) from exc
+    return None
+
+
 def app_at_point_id(x: float, y: float) -> str | None:
     """App id of the topmost window containing a screen point.
 
