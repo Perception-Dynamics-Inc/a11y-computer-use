@@ -3712,7 +3712,27 @@ class Runtime:
                         normalized = dict(identity_indexes[snap.snapshot_id])
                         normalized[element.ref] = replace(element, title=prior.title)
                         same_node_rename = old_identity == self._issued_identity(normalized, element.ref)
-                    if old_identity != new_identity and not (verified_rename or same_node_rename):
+                    # A newly opened menu inserts items into slots formerly
+                    # occupied by unrelated controls. Rebind only a new item
+                    # under a menu whose semantic identity was already issued;
+                    # changed existing items retain the stale-target guard.
+                    newly_exposed_item = (
+                        element.role == "AXMenuItem" and prior.role != "AXMenuItem"
+                        and len(new_identity) > 1 and new_identity[1][0] == "AXMenu"
+                        and any(
+                            self._issued_identity(identity_indexes[old.snapshot_id], el.ref)
+                            == new_identity[1:]
+                            for el in old.elements if el.role == "AXMenu"
+                        )
+                        and not any(
+                            self._issued_identity(identity_indexes[old.snapshot_id], el.ref)
+                            == new_identity
+                            for el in old.elements if el.role == "AXMenuItem"
+                        )
+                    )
+                    if old_identity != new_identity and not (
+                        verified_rename or same_node_rename or newly_exposed_item
+                    ):
                         changed[element.ref] = snap
                         continue
                 changed.pop(element.ref, None)
