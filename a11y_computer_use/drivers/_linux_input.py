@@ -418,12 +418,28 @@ def press_chord(chord: str) -> None:
     bit is inverted while the lock is down, and Caps Lock itself is not
     pressed, so the lock stays where the user left it. Keypad digits follow
     Num Lock the same way and are never sent with Shift.
+
+    Ctrl+Latin-letter shortcuts retain a real keycode when the letter is
+    mapped in another layout group, preserving Chromium's physical-key
+    accelerator identity without changing the selected layout.
     """
     from Xlib import X
 
     msyms, ksym = _parse_chord(chord)
     mod_kcs = [_disp().keysym_to_keycode(s) for s in msyms]
     key_kc, needs_shift = _keycode_and_shift(ksym)
+    if (key_kc is None and _KEYSYM_MODS["ctrl"] in msyms
+            and (ord("a") <= ksym <= ord("z") or ord("A") <= ksym <= ord("Z"))):
+        # Chromium resolves non-Latin Ctrl accelerators using the real key's
+        # Latin identity in another XKB group. A spare keycode has no matching
+        # physical identity. Keep this separate from text/AltGr translation.
+        candidate = _disp().keysym_to_keycode(ksym)
+        if candidate:
+            symbols = _disp().get_keyboard_mapping(candidate, 1)[0]
+            for level, symbol in enumerate(symbols):
+                if symbol == ksym:
+                    key_kc, needs_shift = candidate, bool(level % 2)
+                    break
     pool = None
     if key_kc is None:  # e.g. "ctrl+ü" on a US layout: bind it for this chord
         pool = _TempKeymap()

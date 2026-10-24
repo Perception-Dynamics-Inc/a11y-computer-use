@@ -2933,6 +2933,36 @@ def test_altgr_only_keysym_is_typed_through_a_spare_keycode(xtest_recorder, monk
     assert display.remapped[-1] == (spare, 0)  # the keymap is restored after the chord
 
 
+@pytest.mark.parametrize("letter,keycode", [("a", 38), ("c", 54), ("z", 52)])
+@pytest.mark.parametrize("shift", [False, True])
+def test_ctrl_letter_uses_real_key_in_second_layout_group(
+    xtest_recorder, monkeypatch, letter, keycode, shift,
+) -> None:
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    # ru,us: Cyrillic base/Shift, Latin base/Shift in the second group.
+    display.keymap[keycode] = [0x6C6, 0x6E6, ord(letter), ord(letter.upper()), 0, 0]
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+
+    _linux_input.press_chord("ctrl+" + ("shift+" if shift else "") + letter)
+
+    modifiers = [37, 50] if shift else [37]
+    assert [(kind, detail) for kind, detail, _x, _y in events] == [
+        *[(2, modifier) for modifier in modifiers],
+        (2, keycode), (3, keycode),
+        *[(3, modifier) for modifier in reversed(modifiers)],
+    ]
+    assert display.remapped == []
+
+    # Plain typing must still emit the requested Latin character, not Cyrillic.
+    events.clear()
+    _linux_input.type_string(letter)
+    spare = display.remapped[0][0]
+    assert display.remapped == [(spare, ord(letter)), (spare, 0)]
+    assert [(kind, detail) for kind, detail, _x, _y in events] == [(2, spare), (3, spare)]
+
+
 def test_text_binds_complete_keymap_before_first_keystroke(xtest_recorder, monkeypatch) -> None:
     """A mixed string must not change key translation while text is in flight."""
     import time
