@@ -115,6 +115,10 @@ _ROLE = {
     "table cell": "AXCell",
     "table column header": "AXColumn",
     "table row header": "AXRow",
+    # Chromium <th> exposes these native header roles, which are distinct
+    # from TABLE_*_HEADER. Its static-text child is not always published.
+    "column header": "AXColumn",
+    "row header": "AXRow",
     "table row": "AXRow",
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",

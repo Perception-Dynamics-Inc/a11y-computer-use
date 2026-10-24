@@ -3269,6 +3269,33 @@ def test_kate_gutter_label_uses_native_editor_context(monkeypatch, case):
         assert raw.surface_name == ""
 
 
+@pytest.mark.parametrize("native_role,expected", [
+    ("row header", "AXRow"),
+    ("column header", "AXColumn"),
+])
+def test_chromium_childless_table_header_keeps_native_role(
+    fake_atspi, native_role, expected,
+):
+    """A header remains findable when Chromium omits its static-text child."""
+    app = _Acc("application", name="chrome")
+    app.get_toolkit_name = lambda: "Chromium"
+    header = _Acc(native_role, name="Elevation", width=88, height=37,
+                  states=("SHOWING", "VISIBLE", "ENABLED"))
+    table = _adopt(_Acc("table", width=166, height=400,
+                        states=("SHOWING", "VISIBLE", "ENABLED")), header)
+    _adopt(app, table)
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(header)
+    assert raw.role == expected
+    assert raw.title == "Elevation"
+    snap = build_snapshot(table, accessor, scope=Scope.WINDOW, app="chrome", pid=1,
+                          geometry=_geometry())
+    matches = [el for el in snap.elements if el.title == "Elevation"]
+    assert len(matches) == 1
+    assert matches[0].role == expected
+    assert observe.ax_handle_for(snap.snapshot_id, matches[0].ref) is header
+
+
 class _ValueApi:
     @staticmethod
     def get_current_value(acc):
