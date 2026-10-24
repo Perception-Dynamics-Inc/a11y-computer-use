@@ -3570,7 +3570,9 @@ class Runtime:
                 ("confirmed", "clipboard owner or targets changed") if changed else
                 ("unverifiable", "clipboard ownership change was not verified")
             )
-        no_retry = copy or (tool in {"key", "drag"} and judged == "unverifiable")
+        no_retry = copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+            tool == "click" and judged == "unverifiable" and "text selection" in evidence
+        )
         browser = getattr(self.driver, "name", None) == "browser"
         return outcome.ActionResult(
             text,
@@ -5501,11 +5503,15 @@ class Runtime:
             resolved_tree = take_tree(target)
         before = self._freeze(resolved_tree) if isinstance(resolved_tree, Snapshot) else self._capture()
 
-        selection_reader = getattr(self.driver, "text_selection", None)
+        selection_reader = getattr(self.driver, "selection_details", None)
+        detailed_selection = callable(selection_reader)
+        if not detailed_selection:
+            selection_reader = getattr(self.driver, "text_selection", None)
         verify_selection = (count == 2 and isinstance(target, Element)
                             and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
                             and callable(selection_reader))
         selection_before = None
+        selection_target = target
         toggle_probe = None
         probe_toggle = getattr(self.driver, "toggle_click_probe", None)
 
@@ -5524,7 +5530,7 @@ class Runtime:
         raised: list[Element] = []
 
         def execute() -> None:
-            nonlocal before, selection_before, toggle_probe
+            nonlocal before, selection_before, selection_target, toggle_probe
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
@@ -5667,6 +5673,7 @@ class Runtime:
                 self._refuse_secure(act)
                 self._recheck_target(app, act)
             if verify_selection:
+                selection_target = act
                 selection_before = selection_reader(act)
             if callable(probe_toggle):
                 toggle_probe = probe_toggle(act)
@@ -5771,12 +5778,24 @@ class Runtime:
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
         if verify_selection and not activated:
-            selection_after = selection_reader(target)
-            verdict = (
-                ("confirmed", "the text selection changed")
-                if selection_before is not None and selection_after and selection_after != selection_before
-                else ("suspected_noop", "the text selection did not change or could not be read")
-            )
+            selection_after = selection_reader(selection_target)
+            if detailed_selection:
+                deadline = time.monotonic() + 0.3
+                while (not selection_after or selection_after == selection_before) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                    selection_after = selection_reader(selection_target)
+                if selection_after and selection_after != selection_before and selection_before is not None:
+                    verdict = ("confirmed", f"the text selection changed: {selection_after!r}")
+                elif selection_after is None or selection_before is None:
+                    verdict = ("unverifiable", "the text selection could not be read; do not repeat the click")
+                else:
+                    verdict = ("suspected_noop", "the text selection did not change")
+            else:
+                verdict = (
+                    ("confirmed", "the text selection changed")
+                    if selection_before is not None and selection_after and selection_after != selection_before
+                    else ("suspected_noop", "the text selection did not change or could not be read")
+                )
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:
@@ -10178,7 +10197,9 @@ def build_server(
         window. On Linux it also includes every other showing top-level
         window of that app: the active window is first and its root line is
         marked (active), and a ref in another window raises that window
-        before the action. scope='app' is the application tree.
+        before the action. scope='app' is the application tree. Linux adds
+        selection=[start, end) and selected text on readable selection owners
+        within the focused document, without using the clipboard.
 
         mode='full' (default) returns the complete pruned tree. mode='interactive'
         returns the same snapshot cut down to what you can act on (buttons,
@@ -10334,6 +10355,8 @@ def build_server(
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
+        On Linux text-field double clicks verify exact selected text and offsets;
+        unreadable selection outcomes are unverifiable with no retry hints.
         On Linux a declined accessibility press permits pointer fallback only
         after fresh ref, visibility, and exact target hit checks; otherwise it
         returns fallback_target_unverified with no fallback click sent. A newly

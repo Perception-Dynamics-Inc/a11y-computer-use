@@ -1455,7 +1455,7 @@ class LinuxDriver:
         # built them. Windows, menus, and native dialogs are untouched.
         from a11y_computer_use.drivers import _cdp_forms
 
-        return _cdp_forms.overlay_snapshot(snap)
+        return self._snapshot_selections(_cdp_forms.overlay_snapshot(snap))
 
     def _snapshot_resolved(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use.drivers import _atspi
@@ -1877,7 +1877,63 @@ class LinuxDriver:
             )
         bounds = replace(element.bounds, x=x, y=y, width=width, height=height)
         return replace(element, bounds=bounds, text_range=span,
-                       note=f"text range [{span[0]}, {span[1]})")
+                       note="; ".join(filter(None, (element.note, f"text range [{span[0]}, {span[1]})"))))
+
+    def selection_details(self, element: Element) -> tuple[tuple[int, int, str], ...] | None:
+        """Read text and offsets on this ref and its descendants, on AT-SPI."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None or element.secure:
+            return None
+        rows = self._run(lambda: _atspi.read_text_selections(handle))
+        if rows is None:
+            return None
+        return tuple(dict.fromkeys((start, end, text) for _, start, end, text in rows))
+
+    def _snapshot_selections(self, snap: Snapshot) -> Snapshot:
+        """Annotate selection owners within the focused document only."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        focused = next((el for el in snap.elements if el.focused), None)
+        if focused is None or focused.secure:
+            return snap
+        handle = observe.ax_handle_for(snap.snapshot_id, focused.ref)
+        if handle is None:
+            return snap
+
+        def read():
+            root = handle
+            for _ in range(32):
+                role = _atspi._role_name(root)
+                if role.startswith("document"):
+                    break
+                parent = _atspi._parent_of(root)
+                if parent is None or _atspi._role_name(parent) in {"frame", "window", "application"}:
+                    root = handle
+                    break
+                if _atspi.is_secure(parent):
+                    return None
+                root = parent
+            return _atspi.read_text_selections(root)
+
+        rows = self._run(read)
+        if not rows:
+            return snap
+        notes = {}
+        for owner, start, end, text in rows:
+            notes.setdefault(_atspi._frame_cache_key(owner), []).append(
+                f"selection=[{start}, {end}) {text!r}")
+        elements = []
+        for el in snap.elements:
+            native = observe.ax_handle_for(snap.snapshot_id, el.ref)
+            selected = notes.get(_atspi._frame_cache_key(native)) if native is not None else None
+            elements.append(
+                replace(el, note="; ".join(filter(None, (el.note, *selected)))) if selected else el
+            )
+        return replace(snap, elements=tuple(elements))
 
     def text_selection(self, element: Element) -> tuple[tuple[int, int], ...] | None:
         """Read selection offsets; a caret or unavailable read is not selection."""

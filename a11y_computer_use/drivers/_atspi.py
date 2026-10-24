@@ -21417,3 +21417,89 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
         if cache is not None:
             cache[key] = (tail, has_row)
     return tail if has_row else ()
+
+
+def read_text_selections(
+    root: object, *, budget: float = 0.15,
+) -> tuple[tuple[object, int, int, str], ...] | None:
+    """Read native ranges and text in a caller-scoped subtree, without input.
+
+    Return (native owner, start, end, text) rows, an empty tuple for a
+    readable empty selection, or None for incomplete/unavailable reads.
+    The deadline bounds traversal between D-Bus calls, not a hung call.
+    Secure subtrees and masked text sentinels are never read at offsets.
+    """
+    deadline = time.monotonic() + budget
+    try:
+        api = _atspi().Text
+    except Exception:
+        return None
+    # A ref may address static text inside a protected editor. Recheck
+    # its native ancestors rather than trusting only the issued ref flag.
+    ancestor = root
+    ancestors = set()
+    for _ in range(32):
+        if ancestor is None:
+            break
+        if time.monotonic() >= deadline:
+            return None
+        key = _frame_cache_key(ancestor)
+        if key in ancestors or is_secure(ancestor):
+            return None
+        ancestors.add(key)
+        if _role_name(ancestor).startswith("document"):
+            break
+        ancestor = _parent_of(ancestor)
+    else:
+        return None
+    pending = [root]
+    seen = set()
+    rows = []
+    readable = False
+    while pending:
+        if time.monotonic() >= deadline:
+            return None
+        node = pending.pop()
+        key = _frame_cache_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        if is_secure(node):
+            continue
+        count = None
+        try:
+            count = api.get_n_selections(node)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError("invalid selection count")
+            readable = True
+            for index in range(count):
+                if time.monotonic() >= deadline:
+                    return None
+                span = _selection_bounds(api.get_selection(node, index))
+                if span is None or span[0] < 0 or span[1] < span[0]:
+                    return None
+                start, end = span
+                if end == start:
+                    continue
+                # An empty full-text sentinel is also used by masked GTK4
+                # entries; never bypass it using positive-offset reads.
+                if not api.get_text(node, 0, -1):
+                    return None
+                text = api.get_text(node, start, end)
+                if not isinstance(text, str) or len(text) != end - start:
+                    return None
+                rows.append((node, start, end, text))
+        except Exception:
+            # Containers need not implement Text. A Text implementation
+            # failing after reporting selections is not an empty selection.
+            if isinstance(count, int) and count > 0:
+                return None
+        count = None
+        n = _call_first(node, ("get_child_count",), default=0) or 0
+        for index in range(n):
+            if time.monotonic() >= deadline:
+                return None
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                pending.append(child)
+    return tuple(rows) if readable else None
