@@ -1928,7 +1928,8 @@ class LinuxDriver:
         from a11y_computer_use import observe
 
         anchor = snap.element(ref)
-        self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref))
+        if anchor.row_identity:
+            self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref))
         if anchor.text_range is not None:
             # Preserve process/document/epoch checks, then re-read the exact
             # offsets and geometry on the live native node.

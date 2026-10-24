@@ -81,8 +81,6 @@ def main() -> None:
                 evaluate("document.querySelector('#list').scrollTop = 1200")
                 time.sleep(.5)
                 assert key == driver._run(lambda: _atspi._atspi_wrapper_key(handle))
-                current = driver._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
-                assert current[0][1] == "Row 00050", current
                 for action in (lambda: driver.resolve_ref(shot, target.ref), lambda: driver.click(target)):
                     try:
                         action()
@@ -91,6 +89,8 @@ def main() -> None:
                         assert exc.detail["reason"] == "target_changed"
                     else:
                         raise AssertionError("Recycled row accepted")
+                current = driver._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
+                assert current[0][1] == "Row 00050", current
                 assert evaluate("window.clicks || 0") == 0
                 print("PASS: Row 00010 -> Row 00050 on the same native object; "
                       "resolve/click return stale_ref target_changed; zero DOM clicks")
