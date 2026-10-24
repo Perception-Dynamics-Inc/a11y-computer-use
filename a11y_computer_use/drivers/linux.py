@@ -1704,8 +1704,15 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
-                    accessor._active_modals = (_atspi.active_modals(node, fallback=False) if seek else
-                                               _atspi.snapshot_top_level_modals(node))
+                    # Only Chromium needs pre-reveal descendant discovery.
+                    # A GTK find uses the same pruned walk as a snapshot;
+                    # querying Collection here materializes the entire model
+                    # on the first find and exhausts the snapshot budget.
+                    accessor._active_modals = (
+                        _atspi.active_modals(node, fallback=False)
+                        if seek and _atspi._chromium_app(node)
+                        else _atspi.snapshot_top_level_modals(node)
+                    )
                     # Discovery/search must not scroll the inert background.
                     blocked = _atspi.outside_modals(node, accessor._active_modals)
                     accessor._table_seek = None if blocked else self._table_seek
@@ -5279,6 +5286,24 @@ class LinuxDriver:
                     _linux_system.write_clipboard(saved or "")
                 except ComputerUseError:
                     pass
+
+    def type_outcome_text(self, element: Element) -> str | None:
+        """Read the exact outcome target without the snapshot preview cap."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.secure:
+            return None
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+
+        def read() -> str | None:
+            if _atspi._text_security(handle)[0]:
+                return None
+            return _atspi._readable_text(handle)
+
+        return self._run(read)
 
     def _typed_readback(self, app_id: str | None) -> str | None:
         """Text used to verify a keystroke type.

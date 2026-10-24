@@ -21711,6 +21711,15 @@ def active_modals(root, *, fallback: bool = True) -> list:
                 # content. Walking Writer paragraphs adds a whole-document
                 # scan to every scoped key, just as Calc materializes cells.
                 continue
+            if (_role_name(node) in {"table", "tree table"}
+                    and "gtk" in _toolkit_name(node)
+                    and not _chromium_app(node) and not _gecko_app(node)):
+                # Native GTK TreeView cells are model data, not containers
+                # for modal windows. GTK dialogs are structural siblings
+                # checked by this walk and the application-child probe.
+                # Collection here materializes the cold model; split queries
+                # are not supported by all GTK bridges either.
+                continue
             count = _child_count(node)
             # Amortize remote child/role reads before reaching the safety
             # budget. Even a 200-row web list otherwise adds hundreds of

@@ -19868,3 +19868,114 @@ def test_snapshot_50k_rows_never_queries_collection(fake_atspi, monkeypatch):
         assert "ROW-00000" in _gtk_row_titles(snap)
         assert "ROW-00019" in _gtk_row_titles(snap)
         assert len(reads) <= 10 * len(snap.elements)
+
+
+@pytest.mark.parametrize("length", [199, 200, 201, 1000])
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_type_outcome_compares_full_target_text(monkeypatch, length, mismatch):
+    """A clipped preview cannot turn a verified long write into partial."""
+    from a11y_computer_use import server
+
+    requested = "α" * (length - 1) + "Z"
+    actual = requested[:-1] + "X" if mismatch else requested
+    snap = build_snapshot(
+        _node("AXTextArea", "Editor", value=actual, actions=("set_value",)),
+        _FakeAccessor(), scope=Scope.WINDOW, app="editor", pid=1,
+        geometry=_geometry(),
+    )
+    element = snap.elements[0]
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_text_security", lambda handle: (False,))
+    reads = []
+
+    def read(handle):
+        assert handle is observe.ax_handle_for(element.snapshot_id, element.ref)
+        reads.append(handle)
+        return actual
+
+    monkeypatch.setattr(_atspi, "_readable_text", read)
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    monkeypatch.setattr(runtime, "_reread", lambda *args: snap)
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_remember_baseline", lambda after: None)
+    verdict, evidence = runtime._judge_mutation(
+        "editor", None, element, requested, previous="",
+    )
+    assert verdict == ("partial" if mismatch else "confirmed"), evidence
+    assert bool(reads) == (length > 200)
+    assert element.value == (actual[:199] + "…" if length > 200 else actual)
+
+
+@pytest.mark.parametrize("secure,missing,native_secure", [
+    (True, False, False), (False, True, False), (False, False, True),
+])
+def test_type_outcome_full_read_preserves_security(monkeypatch, secure, missing, native_secure):
+    """Unavailable handles and protected targets never expose full text."""
+    element = Element(ref="e1", role="AXTextArea", title="", value=None, bounds=None, secure=secure, snapshot_id="secure")
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None if missing else object())
+    monkeypatch.setattr(_atspi, "_text_security", lambda handle: (native_secure,))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda handle: pytest.fail("protected Text read"))
+    assert driver.type_outcome_text(element) is None
+
+
+def test_type_outcome_clipped_unreadable_target_is_not_confirmed(monkeypatch):
+    """An unavailable full read is not evidence that the requested tail landed."""
+    from a11y_computer_use import server
+
+    snap = build_snapshot(
+        _node("AXTextArea", "Editor", value="x" * 1000), _FakeAccessor(),
+        scope=Scope.WINDOW, app="editor", pid=1, geometry=_geometry(),
+    )
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = LinuxDriver()
+    monkeypatch.setattr(runtime.driver, "type_outcome_text", lambda element: None)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: snap)
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_remember_baseline", lambda after: None)
+    assert runtime._judge_mutation(
+        "editor", None, snap.elements[0], "x" * 1000, previous="",
+    )[0] == "unverifiable"
+
+
+@pytest.mark.parametrize("needle", ["ROW-00012", "ROW-00019"])
+def test_first_gtk_find_after_snapshot_never_queries_collection(fake_atspi, monkeypatch, needle):
+    """A cold find must retain visible rows without materializing the model."""
+    window, _, _, _ = _large_gtk_tree(rows=20000)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        _Acc, "get_collection_iface",
+        lambda node: pytest.fail("GTK find must not query recursive Collection"),
+        raising=False,
+    )
+    snap = driver.snapshot(Scope.WINDOW, "treeprobe")
+    assert needle in _gtk_row_titles(snap)
+    driver._table_seek = needle
+    found = driver.snapshot(Scope.WINDOW, "treeprobe")
+    assert observe.find_elements(found, text=needle)
+    assert needle in _gtk_row_titles(found)
+
+
+@pytest.mark.parametrize("modal_open", [False, True])
+def test_gtk_model_modal_guard_checks_sibling_without_reading_rows(fake_atspi, monkeypatch, modal_open):
+    """A cold GTK TreeView must remain clickable without querying its model."""
+    window, table, _, _ = _large_gtk_tree(rows=20000)
+    button = _Acc("push button", name="Apply selection")
+    button.parent = window
+    window.children.append(button)
+    modal = _Acc("dialog", name="Confirm", states=("SHOWING", "MODAL"))
+    application = _adopt(_Acc("application", name="treeprobe"), window,
+                         *([modal] if modal_open else []))
+    table.get_child_count = lambda: pytest.fail("modal discovery read virtual GTK rows")
+    table.get_collection_iface = lambda: pytest.fail("modal discovery queried virtual GTK rows")
+    assert _atspi.active_modals(window) == ([modal] if modal_open else [])
+    if modal_open:
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            _atspi.refuse_outside_modal(button, window)
+        assert _atspi.refuse_outside_modal(modal, application)
+    else:
+        assert _atspi.refuse_outside_modal(button, window) is False

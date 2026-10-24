@@ -1207,15 +1207,17 @@ does not retry a modal refusal through another input method. If the bounded
 native fallback cannot establish the modal boundary, input is refused with
 `modal_boundary_unavailable`.
 
-Ordinary snapshots inspect application top-level children and collect modal
+Snapshots and GTK table finds inspect application top-level children and collect modal
 candidates from nodes the pruned walk already reads. They apply background
 blocking after the walk, without a recursive Collection query or a separate
-search through table, tree, or list rows. Search operations that scroll content
-retain the input-time modal check before revealing a match.
+search through table, tree, or list rows. Chromium document searches retain
+pre-reveal descendant modal discovery. Input-time modal checks remain in effect.
 
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
 and queries subtrees with more than 64 children before walking their rows.
+Native GTK table/tree-table model cells are excluded: their modal dialogs are
+structural or application siblings, which are still checked before input.
 This query threshold is independent of the unchanged 4,096-node fallback
 safety budget: ordinary web lists must not add hundreds of remote reads to
 every input. Failed queries still use the bounded walk or refuse. LibreOffice uses
@@ -1280,3 +1282,9 @@ can leave focus in another field. The click uses the reported bounds and
 requires observed target focus; unreliable geometry is refused and a missed
 click returns an unconfirmed focus error. Typing still requires confirmed focus.
 This routing has synthetic regression coverage; it has not been live-verified.
+
+When a typed target's snapshot value is clipped, Linux outcome verification
+reads the full text from that exact snapshot handle on the AT-SPI thread.
+The model-facing preview stays capped; its ellipsis is never compared with the
+requested text. Missing handles and protected native fields do not supply
+full-text evidence.
