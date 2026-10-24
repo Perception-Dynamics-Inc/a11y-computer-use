@@ -19746,3 +19746,74 @@ def test_native_control_identity_survives_rename_and_flattening(fake_atspi, monk
         assert raw.node_identity == expected
         assert snap.elements[0].node_identity == expected
         assert snap.elements[0].title == name
+
+
+@pytest.mark.parametrize("length", [199, 200, 201, 1000])
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_type_outcome_compares_full_target_text(monkeypatch, length, mismatch):
+    """A clipped preview cannot turn a verified long write into partial."""
+    from a11y_computer_use import server
+
+    requested = "α" * (length - 1) + "Z"
+    actual = requested[:-1] + "X" if mismatch else requested
+    snap = build_snapshot(
+        _node("AXTextArea", "Editor", value=actual, actions=("set_value",)),
+        _FakeAccessor(), scope=Scope.WINDOW, app="editor", pid=1,
+        geometry=_geometry(),
+    )
+    element = snap.elements[0]
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_text_security", lambda handle: (False,))
+    reads = []
+
+    def read(handle):
+        assert handle is observe.ax_handle_for(element.snapshot_id, element.ref)
+        reads.append(handle)
+        return actual
+
+    monkeypatch.setattr(_atspi, "_readable_text", read)
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    monkeypatch.setattr(runtime, "_reread", lambda *args: snap)
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_remember_baseline", lambda after: None)
+    verdict, evidence = runtime._judge_mutation(
+        "editor", None, element, requested, previous="",
+    )
+    assert verdict == ("partial" if mismatch else "confirmed"), evidence
+    assert bool(reads) == (length > 200)
+    assert element.value == (actual[:199] + "…" if length > 200 else actual)
+
+
+@pytest.mark.parametrize("secure,missing,native_secure", [
+    (True, False, False), (False, True, False), (False, False, True),
+])
+def test_type_outcome_full_read_preserves_security(monkeypatch, secure, missing, native_secure):
+    """Unavailable handles and protected targets never expose full text."""
+    element = Element(ref="e1", role="AXTextArea", title="", value=None, bounds=None, secure=secure, snapshot_id="secure")
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None if missing else object())
+    monkeypatch.setattr(_atspi, "_text_security", lambda handle: (native_secure,))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda handle: pytest.fail("protected Text read"))
+    assert driver.type_outcome_text(element) is None
+
+
+def test_type_outcome_clipped_unreadable_target_is_not_confirmed(monkeypatch):
+    """An unavailable full read is not evidence that the requested tail landed."""
+    from a11y_computer_use import server
+
+    snap = build_snapshot(
+        _node("AXTextArea", "Editor", value="x" * 1000), _FakeAccessor(),
+        scope=Scope.WINDOW, app="editor", pid=1, geometry=_geometry(),
+    )
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = LinuxDriver()
+    monkeypatch.setattr(runtime.driver, "type_outcome_text", lambda element: None)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: snap)
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_remember_baseline", lambda after: None)
+    assert runtime._judge_mutation(
+        "editor", None, snap.elements[0], "x" * 1000, previous="",
+    )[0] == "unverifiable"
