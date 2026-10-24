@@ -517,3 +517,5 @@
 - 2026-10-24 (PR #997 repair): GTK 3 viewport traversal recovery and Chromium scroll-anchor popup filtering are independent. Preserve both appended regression groups when merging; use only the showing scroll pane’s measured bounds for viewport traversal and retain native descendant geometry.
 
 - 2026-10-24 (#975/#976): Text selection offsets alone miss asynchronous Chrome word selections and hide the selected text. Share a scoped read-only Text reader between observations and verification, preserve masked full-text sentinels before offset reads, and suppress retry hints for unreadable double-click outcomes.
+
+- 2026-10-24 (#975 main integration): Preserve drag unreadable-outcome retry suppression (#1006) alongside text-selection double-click suppression when joining the shared Runtime conclusion path; retain both appended server regression groups.
