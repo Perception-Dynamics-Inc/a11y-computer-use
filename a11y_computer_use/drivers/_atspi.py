@@ -4368,6 +4368,7 @@ class ATSPIAccessor:
     """
 
     def __init__(self) -> None:
+        self._active_modals: list = []
         self._visible_children: dict[int, list] = {}
         self._defer_row_identity = False
         self._visible_bounds: dict[int, tuple] = {}
@@ -4936,6 +4937,8 @@ class ATSPIAccessor:
             title=str(name),
             description=str(description),
             enabled=enabled,
+            modal=is_modal(node, attrs=attrs),
+            blocked_by_modal=outside_modals(node, self._active_modals),
             scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
             default=role == "AXButton" and _has_default_state(node),
@@ -21574,3 +21577,178 @@ def read_text_selections(
             if child is not None:
                 pending.append(child)
     return tuple(rows) if readable else None
+
+
+# Modal boundaries are independent of pointer occlusion: semantic AT-SPI actions
+# bypass the overlay, so a successful doAction is not evidence of reachability.
+def is_modal(acc, *, attrs: dict | None = None) -> bool:
+    """A showing ARIA or native modal, using reported state only."""
+    if _role_name(acc) not in {"dialog", "alert", "window", "frame", "file chooser"}:
+        return False
+    if not _state_has(acc, "SHOWING"):
+        return False
+    attrs = _get_attributes(acc) if attrs is None else attrs
+    return (_state_has(acc, "MODAL") or
+            str(attrs.get("modal", attrs.get("aria-modal", ""))).lower() == "true")
+
+
+def _modal_collection(root, *, split: bool = False):
+    """Reported dialog descendants, or None when this Collection cannot reply."""
+    coll = _call_first(root, ("get_collection_iface", "get_collection"))
+    if coll is not None:
+        try:
+            Atspi = _atspi()
+            mt = Atspi.CollectionMatchType
+            roles = [getattr(Atspi.Role, name) for name in
+                     ("DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER")
+                     if hasattr(Atspi.Role, name)]
+            rule = Atspi.MatchRule.new(Atspi.StateSet.new([]), mt.NONE,
+                                      {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False)
+            if not split:
+                return list(coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 0, True))
+            # Split a wide native collection at a reported child handle. Each
+            # query covers one half, including the pivot's descendants; no
+            # row sampling, truncated result, or longer D-Bus timeout is used.
+            count = _child_count(root)
+            if count < 2:
+                return None
+            pivot = _child_at(root, count // 2)
+            if pivot is None:
+                return None
+            tree = Atspi.CollectionTreeTraversalType
+            before = coll.get_matches_to(
+                pivot, rule, Atspi.CollectionSortOrder.CANONICAL,
+                tree.RESTRICT_CHILDREN, True, 0, True,
+            )
+            after = coll.get_matches_from(
+                pivot, rule, Atspi.CollectionSortOrder.CANONICAL,
+                tree.RESTRICT_SIBLING, 0, True,
+            )
+            return [*before, pivot, *after]
+        except Exception:
+            return None
+    return None
+
+
+def active_modals(root, *, fallback: bool = True) -> list:
+    """Fresh modal descendants before pruning, including native modal windows.
+
+    Collection avoids walking whole web pages merely to discover dialogs. The
+    fallback is bounded and refuses input when it cannot establish a boundary.
+    """
+    if root is None:
+        return []
+    application = next((node for node in _ancestor_chain(root)
+                        if _role_name(node) == "application"), None)
+    # Calc's Collection materializes its virtual sheet and wedges later reads.
+    # Native dialogs are structural descendants/siblings, never sheet cells.
+    libreoffice = _libreoffice_accessible(root)
+    # At input time, inspect structural containers first. A recursive window
+    # query can overload Chromium on a wide page before its reply times out.
+    # Delegate wide subtrees to two complete native queries instead.
+    candidates = None if libreoffice or fallback else _modal_collection(root)
+    if candidates is None and not fallback and not libreoffice:
+        candidates = []
+    if candidates is None:
+        candidates = []
+        queue = deque([root])
+        seen = set()
+        pinned = []
+        while queue:
+            node = queue.popleft()
+            key = _ancestor_key(node)
+            if key in seen:
+                continue
+            seen.add(key)
+            pinned.append(node)
+            if len(seen) > 4096:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                    "Cannot establish the active modal boundary; no input was sent",
+                    detail={"reason": "modal_boundary_unavailable"})
+            candidates.append(node)
+            if libreoffice and _role_name(node) in {
+                "table", "document spreadsheet", "document text",
+                "tool bar", "menu bar", "status bar",
+            }:
+                # Native Office dialogs are structural siblings of document
+                # content. Walking Writer paragraphs adds a whole-document
+                # scan to every scoped key, just as Calc materializes cells.
+                continue
+            count = _child_count(node)
+            # Amortize remote child/role reads before reaching the safety
+            # budget. Even a 200-row web list otherwise adds hundreds of
+            # synchronous D-Bus calls to each input. Query only this subtree,
+            # in complete halves, so a modal in its final row is not missed.
+            if not libreoffice and count > min(64, 4096 - len(seen) - len(queue)):
+                descendants = _modal_collection(node, split=True)
+                if descendants is not None:
+                    candidates.extend(descendants)
+                    continue
+            if count < 0 or count > 4096 - len(seen) - len(queue):
+                raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                    "Cannot establish the active modal boundary; no input was sent",
+                    detail={"reason": "modal_boundary_unavailable"})
+            queue.extend(child for i in range(max(0, count))
+                         if (child := _child_at(node, i)) is not None)
+    if (application is not None
+            and _ancestor_key(application) != _ancestor_key(root)):
+        if not fallback and _chromium_app(root):
+            # The Chromium snapshot already bypasses CHILDREN for this app.
+            # A nested mask bypass would restore DEFAULT mid-traversal (#967).
+            candidates.extend(child for i in range(max(0, _child_count(application)))
+                              if (child := _child_at(application, i)) is not None)
+        else:
+            candidates.extend(_fresh_application_children(application))
+    candidates.insert(0, root)
+    found = {}
+    for node in candidates:
+        key = _ancestor_key(node)
+        if key not in found and is_modal(node):
+            found[key] = node
+    return list(found.values())
+
+
+def outside_modals(acc, modals: list) -> bool:
+    """True unless acc belongs to every applicable modal (nested modals included)."""
+    if not modals:
+        return False
+    chain = list(_ancestor_chain(acc))
+    parents = {_ancestor_key(node) for node in chain}
+    frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
+    for modal in modals:
+        owner = next((node for node in _ancestor_chain(modal)
+                      if _role_name(node) in {"frame", "window"}), None)
+        if (owner is not None and frame is not None
+                and _ancestor_key(owner) != _ancestor_key(modal)
+                and _ancestor_key(owner) != _ancestor_key(frame)):
+            continue
+        if _ancestor_key(modal) not in parents:
+            return True
+    return False
+
+
+def refuse_outside_modal(acc, root=None) -> bool:
+    """Refuse before input when the addressed accessible is outside a modal."""
+    if root is None:
+        chain = list(_ancestor_chain(acc))
+        if chain and _parent_of(chain[-1]) is not None:
+            raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                "Cannot establish the target window's modal boundary; no input was sent",
+                detail={"reason": "modal_boundary_unavailable"})
+        # Include sibling native dialogs in the application, but no other apps.
+        # Native top-level dialogs (including LibreOffice startup tips) can
+        # belong directly to the application, without a frame ancestor. The
+        # desktop is above that application and must never become our scope.
+        application = next((node for node in chain
+                            if _role_name(node) == "application"), None)
+        root = next((node for node in chain if _role_name(node) in {"frame", "window"}),
+                    application if application is not None else chain[-1] if chain else None)
+    modals = active_modals(root)
+    if outside_modals(acc, modals):
+        names = ", ".join(repr(_node_name(node)) for node in modals)
+        raise ComputerUseError(ErrorCode.UNSUPPORTED,
+            f"outside_active_modal: target is outside {names}; no input was sent",
+            detail={"reason": "outside_active_modal", "outcome": "refused",
+                    "hint": "Use controls inside the active modal, or close it before acting on the background."})
+
+    return bool(modals)

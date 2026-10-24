@@ -5283,9 +5283,11 @@ def _action_label(action: Action, snap: Snapshot | None) -> str | None:
 
 
 def _final_click_error(error: str | None) -> bool:
-    """A declined press may have acted; never retry its stale target this step."""
+    """Modal refusals and possibly dispatched presses must not trigger retries."""
     return bool(error and (
-        "fallback_target_unverified" in error
+        "outside_active_modal" in error
+        or "modal_boundary_unavailable" in error
+        or "fallback_target_unverified" in error
         or ("stale_ref" in error and "after the accessibility press" in error)
     ))
 

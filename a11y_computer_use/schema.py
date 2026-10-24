@@ -227,6 +227,8 @@ class Element:
         path: Role path from the root to this node inclusive, e.g.
             ``("AXWindow", "AXToolbar", "AXButton")``. Re-resolution anchor.
         enabled: False for greyed-out/disabled controls.
+        modal: True for a reported active modal boundary.
+        blocked_by_modal: True when outside that boundary. Its input is refused.
         focused: True if the element currently has keyboard focus.
         default: Explicit native default/HTML submit button; a discovery hint only.
         form_id: Owning HTML form identity when reported by the backend.
@@ -316,11 +318,13 @@ class Element:
 
     #: Native character offsets and exact text bound by a text search.
     text_range: tuple[int, int, str] | None = None
+    modal: bool = False
+    blocked_by_modal: bool = False
 
     @property
     def actionable(self) -> bool:
         """Whether the element can meaningfully receive an action right now."""
-        return self.enabled and (self.clickable or self.editable)
+        return not self.blocked_by_modal and self.enabled and (self.clickable or self.editable)
 
 
 @dataclass(frozen=True, slots=True)
