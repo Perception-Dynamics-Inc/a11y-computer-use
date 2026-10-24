@@ -4320,6 +4320,18 @@ def _list_item_subtrees(container, rows: list[tuple]) -> list[tuple]:
     return result
 
 
+def chromium_closed_menu_model(node) -> bool:
+    """Exclude stale select models only from automatic scroll discovery."""
+    if _role_name(node) not in {"menu", "popup menu"} or not _chromium_app(node):
+        return False
+    if not _state_has(node, "SHOWING"):
+        return True
+    parent = _parent_of(node)
+    return (parent is not None and _role_name(parent) == "combo box"
+            and _state_has(parent, "EXPANDABLE")
+            and not _state_has(parent, "EXPANDED"))
+
+
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
@@ -4882,6 +4894,7 @@ class ATSPIAccessor:
             title=str(name),
             description=str(description),
             enabled=enabled,
+            scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
             default=role == "AXButton" and _has_default_state(node),
             focusable=focusable,
