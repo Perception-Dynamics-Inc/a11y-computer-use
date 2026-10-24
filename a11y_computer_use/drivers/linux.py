@@ -1380,6 +1380,14 @@ class LinuxDriver:
             return _dbus_guard.call_with_reconnect(self._snapshot_desktop)
         return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
 
+    def drag_overlay(self, point: Point) -> tuple[int, str] | None:
+        """Read the native overlay receiving a coordinate drag, if any."""
+        if _on_wayland():
+            return None
+        from a11y_computer_use.drivers import _linux_system
+
+        return _linux_system.drag_overlay_at_point(point.x, point.y)
+
     def drag_snapshot(self, scope: Scope, app: str, baseline: Snapshot | None,
                       start: Target, end: Target) -> Snapshot | None:
         """Refresh windows and addressed elements without walking descendants.
