@@ -3652,11 +3652,17 @@ class Runtime:
         )
         # A newly observed document starts a new ref namespace. A title is
         # mutable UI state, so use a reported URL rather than window labels.
-        document_url = (
-            self.current_document_url()
-            if any(el.instance_id or el.document_id for el in snap.elements) or self._resolves_apps()
-            else None
-        )
+        snapshot_url = getattr(self.driver, "snapshot_document_url", None)
+        if callable(snapshot_url):
+            # Issuing refs must not start another native tree/Collection walk.
+            # Linux reads only the handles already retained by this snapshot.
+            document_url = snapshot_url(snap)
+        else:
+            document_url = (
+                self.current_document_url()
+                if any(el.instance_id or el.document_id for el in snap.elements) or self._resolves_apps()
+                else None
+            )
         previous_url = getattr(self, "_issued_document_url", None)
         document_changed = bool(previous_url and document_url and previous_url != document_url)
         self._issued_document_url = document_url or (

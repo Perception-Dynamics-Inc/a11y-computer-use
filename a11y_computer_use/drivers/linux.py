@@ -1839,6 +1839,37 @@ class LinuxDriver:
             elements.append(el)
         return replace(snap, elements=tuple(elements))
 
+    def snapshot_document_url(self, snap: Snapshot) -> str | None:
+        """Content URL from emitted handles, without discovering unseen rows.
+
+        Missing documents leave the previous issuing namespace intact. This
+        observation-only lookup must not use Collection or walk descendants:
+        either can materialize a large native virtual table just to issue refs.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.untrusted import is_browser_chrome_url
+
+        def read():
+            for element in snap.elements:
+                handle = observe.ax_handle_for(snap.snapshot_id, element.ref)
+                if handle is None:
+                    continue
+                url = _atspi._doc_url(handle)
+                if (url and not is_browser_chrome_url(url)
+                        and not _atspi._nested_in_document(handle)
+                        and _atspi._frame_hierarchy_showing(handle)):
+                    # Snapshot pruning already excludes hidden Firefox tabs.
+                    # Re-running the general URL picker would rediscover tabs
+                    # through native descendants outside this snapshot.
+                    return url
+            return None
+
+        try:
+            return self._run(read)
+        except Exception:  # best-effort metadata; absence is not navigation
+            return None
+
     def document_url(self, app: str | None = None) -> str | None:
         """AT-SPI DocURL for ``app``'s document, or None when the tree has none."""
         from a11y_computer_use.drivers import _atspi

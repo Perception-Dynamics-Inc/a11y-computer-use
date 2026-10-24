@@ -1232,7 +1232,11 @@ and do not identify a child control. An unnamed, non-actionable layout placehold
 refresh to a newly populated control; previously actionable controls retain
 the changed-target refusal. A fresh observation with a different reported
 document URL starts a new ref namespace, as does an observed process restart.
-A missing URL does not clear the refusal. This does not change modal input policy.
+A missing URL does not clear the refusal. Issuing-ref bookkeeping reads URL
+metadata only from handles already emitted by the pruned snapshot; it does not
+run another Collection query or traverse unseen table rows (#1045). An iframe
+URL alone does not establish top-document navigation. This does not change
+modal input policy.
 
 A standalone Chrome/AT-SPI check (not a pytest live file) opens a native modal
 from an iframe and verifies both snapshot modes send no input for the old ref:

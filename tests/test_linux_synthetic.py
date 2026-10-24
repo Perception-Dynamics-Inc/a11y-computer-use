@@ -19703,3 +19703,89 @@ def test_chromium_snapshot_binds_only_emitted_refs_and_keeps_row_guard(fake_atsp
         driver.resolve_ref(snap, target.ref)
     assert exc.value.code is ErrorCode.STALE_REF
     assert exc.value.detail["reason"] == "target_changed"
+
+
+@pytest.mark.parametrize("rows", [1000, 50000])
+@pytest.mark.parametrize("web", [False, True])
+def test_issuing_snapshot_url_reads_only_emitted_handles(monkeypatch, rows, web):
+    """Ref bookkeeping must not materialize a pruned GTK/Chrome table."""
+    from dataclasses import replace
+    from a11y_computer_use.server import Runtime
+
+    class CountedNode(_GeckoNode):
+        reads = 0
+
+        def get_role_name(self):
+            CountedNode.reads += 1
+            return super().get_role_name()
+
+        def get_child_count(self):
+            pytest.fail("issuing refs must not discover descendants")
+
+        def get_child_at_index(self, index):
+            pytest.fail("issuing refs must not discover descendants")
+
+        def get_collection_iface(self):
+            pytest.fail("Collection can materialize every virtual table row")
+
+    table = CountedNode("table", children=[CountedNode("table row") for _ in range(rows)])
+    document = CountedNode("document web" if web else "frame", states=("SHOWING",), children=[table])
+    document.description = "https://example.test/first" if web else ""
+    handles = {"e1": document, "e2": table, "e3": table.children[0]}
+    snap = Snapshot("first", Scope.WINDOW, "fixture", 123, 0, (), tuple(
+        Element(ref, "AXGroup", "Table" if ref == "e2" else "", None, None,
+                "first", parent=None if ref == "e1" else "e1",
+                instance_id="123:start", document_id="title:fixture")
+        for ref in handles
+    ))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda epoch, ref: handles[ref])
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    # The former path starts here and performs Collection/descendant discovery.
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: document)
+    runtime = Runtime.__new__(Runtime)
+    runtime.driver = driver
+    runtime._current = snap
+    for epoch in ("first", "second"):
+        current = replace(snap, snapshot_id=epoch)
+        runtime._current = current
+        CountedNode.reads = 0
+        runtime._note_issued(current, preserve_identity=True)
+        assert CountedNode.reads <= 10 * len(snap.elements)
+        assert len(runtime._issued_anchors) == len(snap.elements)
+        assert runtime._issued_document_url == (document.description or None)
+
+    # A real observed URL change still starts a fresh namespace; missing URLs
+    # do not erase the old identity, and explicit find can issue fresh refs.
+    replacement = replace(snap, snapshot_id="replacement", elements=tuple(
+        replace(el, title="Replacement", snapshot_id="replacement") for el in snap.elements
+    ))
+    runtime._note_issued(replacement, preserve_identity=True)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._anchor("e2")
+    assert caught.value.code is ErrorCode.STALE_REF
+    runtime._note_issued(replacement, refs={"e2"})
+    assert runtime._anchor("e2")[0] is replacement
+    if web:
+        document.description = "https://example.test/next"
+        runtime._note_issued(replacement, preserve_identity=True)
+        assert not runtime._changed_snapshot_refs
+
+
+def test_snapshot_document_url_does_not_promote_iframe_or_chrome(monkeypatch):
+    """A filtered observation is not evidence of top-document navigation."""
+    outer = _GeckoNode("document web", states=("SHOWING",))
+    outer.description = "https://example.test/outer"
+    inner = _GeckoNode("document web", states=("SHOWING",))
+    inner.description = "https://example.test/frame"
+    inner.parent = outer
+    chrome = _GeckoNode("document web", states=("SHOWING",))
+    chrome.description = "chrome://omnibox-popup.top-chrome/"
+    handles = {"e1": inner, "e2": chrome}
+    snap = Snapshot("filtered", Scope.WINDOW, "fixture", 123, 0, (), tuple(
+        Element(ref, "AXGroup", "", None, None, "filtered") for ref in handles
+    ))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda epoch, ref: handles[ref])
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert driver.snapshot_document_url(snap) is None
