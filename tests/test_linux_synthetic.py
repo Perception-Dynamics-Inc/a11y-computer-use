@@ -18676,6 +18676,77 @@ def test_chromium_list_subtree_publication_keeps_clipping_and_deduplicates(fake_
     assert _atspi._list_item_subtrees(unrelated, rows) == rows
 
 
+@pytest.mark.parametrize("axis", ["vertical", "horizontal-rtl"])
+@pytest.mark.parametrize("viewport_showing", [False, True])
+def test_gtk3_scrolled_viewport_keeps_visible_button_refs(
+    fake_atspi, monkeypatch, axis, viewport_showing,
+):
+    """#994: a sentinel viewport must not hide its measured visible children."""
+    app = _Acc("application", name="viewport-fixture")
+    app.get_toolkit_name = lambda: "gtk"
+    app.get_toolkit_version = lambda: "3.24.38"
+    visible = _place_row(_Acc("push button", name="Option 25 opt-25",
+                             states={"SHOWING", "VISIBLE", "ENABLED", "SENSITIVE"}),
+                         205, 301, 100, 30)
+    visible.get_action_iface = lambda: _NS(
+        get_n_actions=lambda: 1, get_action_name=lambda index: "click",
+    )
+    hidden = _place_row(_Acc("push button", name="Option 1 opt-1"),
+                        -2147483648, -2147483648, 100, 30)
+    filler = _adopt(_place_row(_Acc("filler", states={"SHOWING"}),
+                              205 if axis == "vertical" else -1449,
+                              -1449 if axis == "vertical" else 179,
+                              400 if axis == "vertical" else 2276,
+                              2276 if axis == "vertical" else 400), visible, hidden)
+    viewport = _adopt(_place_row(_Acc("viewport", states={"SHOWING"} if viewport_showing else ()),
+                                -2147483648, -2147483648, 400, 400), filler)
+    pane = _adopt(_place_row(_Acc("scroll pane", states={"SHOWING"}),
+                            205, 179, 400, 400), viewport)
+    frame = _adopt(_Acc("frame", name="VFIX", width=800, height=700), pane)
+    _adopt(app, frame)
+    for node in (frame, pane, viewport, filler, visible, hidden):
+        node.get_application = lambda: app
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(viewport)
+    assert (raw.position, raw.size) == ((205, 179), (400, 400))
+    assert _atspi._extents(viewport)[0] == (-2147483648, -2147483648)
+    snap = build_snapshot(frame, accessor, scope=Scope.WINDOW,
+                          app="viewport-fixture", pid=1, geometry=_geometry())
+    found, = observe.find_elements(snap, text="opt-25")
+    assert found.bounds == Bounds(0, 205, 301, 100, 30)
+    assert found.clickable
+    assert observe.ax_handle_for(snap.snapshot_id, found.ref) is visible
+    assert not observe.find_elements(snap, text="opt-1")
+    from a11y_computer_use import server
+
+    driver = _wire_gtk_tree(monkeypatch, frame)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(_linux_input, "scroll", lambda *a, **k: pytest.fail("visible button must not scroll"))
+    runtime = _bare_runtime(driver)
+    assert "opt-25" in runtime.find("viewport-fixture", text="opt-25")
+    result = runtime.scroll_to_find("viewport-fixture", text="opt-25", max_scrolls=0)
+    assert result.startswith("found after 0 scroll")
+    assert "opt-25" in result
+
+
+@pytest.mark.parametrize("case", ["gtk4", "qt", "panel", "hidden-parent", "missing-parent-box"])
+def test_viewport_recovery_requires_gtk3_and_measured_showing_scroll_pane(
+    fake_atspi, monkeypatch, case,
+):
+    app = _Acc("application")
+    app.get_toolkit_name = lambda: "Qt" if case == "qt" else "gtk"
+    app.get_toolkit_version = lambda: "4.0" if case == "gtk4" else "3.24"
+    viewport = _place_row(_Acc("panel" if case == "panel" else "viewport"),
+                          -2147483648, -2147483648, 400, 400)
+    pane = _adopt(_Acc("scroll pane", width=0 if case == "missing-parent-box" else 400,
+                       height=0 if case == "missing-parent-box" else 400,
+                       states=() if case == "hidden-parent" else {"SHOWING"}), viewport)
+    for node in (pane, viewport):
+        node.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(viewport)
+    assert raw.position == (-2147483648, -2147483648)
+
+
 @pytest.mark.parametrize("menu_role", ["menu", "popup menu"])
 @pytest.mark.parametrize("popup", ["hidden", "collapsed", "open"])
 def test_chrome_select_popup_does_not_displace_horizontal_scroll_anchor(
