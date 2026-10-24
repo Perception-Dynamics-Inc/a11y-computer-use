@@ -979,8 +979,16 @@ def _share_parent_application(parent, kids) -> None:
             continue
         if _lookup_read_cache(kid, key) is not _CACHE_MISS:
             continue
-        if _call_first(kid, ("get_parent",)) is not parent:
-            continue
+        native_parent = _call_first(kid, ("get_parent",))
+        if native_parent is not parent:
+            # GI may return another wrapper for the same native parent.
+            # Require exact bus/path identity, and never inherit ownership
+            # across an embedded application's bus boundary.
+            parent_key = _atspi_wrapper_key(parent)
+            kid_key = _atspi_wrapper_key(kid)
+            if (parent_key is None or kid_key is None or kid_key[0] != parent_key[0]
+                    or _atspi_wrapper_key(native_parent) != parent_key):
+                continue
         _store_read_cache(kid, key, app)
 
 
@@ -4357,6 +4365,7 @@ class ATSPIAccessor:
 
     def __init__(self) -> None:
         self._visible_children: dict[int, list] = {}
+        self._defer_row_identity = False
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
         # Whether this walk's application is Chromium. One walk reads one
@@ -4912,7 +4921,7 @@ class ATSPIAccessor:
             position, size = _outline_visible_bounds(node, position, size)
         return RawNode(
             row_identity=(chromium_row_identity(node, cache=self._row_identity_cache)
-                          if self._tree_is_chromium(node) else ()),
+                          if not self._defer_row_identity and self._tree_is_chromium(node) else ()),
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
             subrole=(
@@ -5104,6 +5113,10 @@ class ATSPIAccessor:
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
             if child is not None:
                 kids.append(child)
+        # Toolkit/visibility guards below also ask for the child's owner.
+        # Share proven ownership before those checks, not after they have
+        # already climbed the same native ancestry for every child.
+        _share_parent_application(node, kids)
         role = _role_name(node)
         # Evince's hidden pages can have on-screen rectangles, and its
         # painted page can have an off-screen rectangle. Trust SHOWING.
@@ -19595,7 +19608,28 @@ def hidden_web_target(acc) -> bool:
 
 
 def _list_containers(root, limit: int = _MAX_LIST_CONTAINERS) -> list:
-    """List, table, and tree nodes under ``root``, nearest first, bounded."""
+    """List, table, and tree nodes under ``root``, bounded."""
+    # Discovery precedes the snapshot walk. Chromium can answer this role
+    # query in one call instead of fetching every toolbar/document child
+    # twice. Keep the walk for bridges without Collection (or failed reads).
+    try:
+        coll = _call_first(root, ("get_collection_iface", "get_collection"))
+        if coll is not None:
+            Atspi = _atspi()
+            mt = Atspi.CollectionMatchType
+            rule = Atspi.MatchRule.new(
+                Atspi.StateSet.new([]), mt.NONE, {}, mt.NONE,
+                [Atspi.Role.LIST, Atspi.Role.LIST_BOX, Atspi.Role.TABLE,
+                 Atspi.Role.TREE, Atspi.Role.TREE_TABLE],
+                mt.ANY, [], mt.NONE, False,
+            )
+            hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, limit, True)
+            if hits is not None:
+                roots = ([root] if _role_name(root) in _LIST_ROLES
+                         and _extents(root)[0] is not None else [])
+                return (roots + [hit for hit in hits if _extents(hit)[0] is not None])[:limit]
+    except Exception:
+        pass
     found: list = []
     queue = [root]
     seen: set[int] = set()
@@ -21389,34 +21423,67 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
         return ()
     if fresh:
         _drop_read_cache()
+    refresh = fresh or cache is None
     pending = []
     tail, has_row = (), False
-    for node in _ancestor_chain(acc):
-        key = _ancestor_key(node)
+    # Snapshot reads already share a getter cache. The ordinary ancestry
+    # helpers refresh native properties on every name/parent lookup, undoing
+    # that sharing for every node in the window. Only act-time checks need
+    # those invalidations; walk the same target ancestry without them here.
+    def ancestors():
+        node = acc
+        pinned = []
+        seen = set()
+        for _ in range(32):
+            if node is None:
+                break
+            key = _ancestor_key(node)
+            if key in seen:
+                break
+            seen.add(key)
+            pinned.append(node)
+            yield node, key
+            node = (_parent_of(node) if refresh else
+                    _call_first(node, ("get_parent", "getParent")))
+
+    for node, key in ancestors():
         if cache is not None and key in cache:
             tail, has_row = cache[key]
             break
-        if fresh:
+        if refresh:
             _drop_cached_properties(node)
         role = _role_name(node)
         if role in {"document web", "document frame", "application", "frame"}:
             break
-        attrs = _get_attributes(node)
         is_row = role in {"list item", "list box item", "table row", "tree item"}
-        # Never read a slider's drawn value or an editor's current text.
-        name = (_node_name(node) if is_row or role in {
-            "static", "label", "push button", "link"
-        } else "")
-        part = (role, name, tuple((attr, attrs.get(attr)) for attr in (
-            "rowindex", "aria-rowindex", "posinset", "aria-posinset"
-        )), key)
-        pending.append((key, part, is_row))
-    for key, part, is_row in reversed(pending):
-        tail = (part,) + tail
+        pending.append((key, node, role, is_row))
+    for key, node, role, is_row in reversed(pending):
+        tail = ((key, node, role),) + tail
         has_row = has_row or is_row
         if cache is not None:
             cache[key] = (tail, has_row)
-    return tail if has_row else ()
+    if not has_row:
+        return ()
+    parts = []
+    for key, node, role in tail:
+        part_key = ("row-part", key)
+        if cache is not None and part_key in cache:
+            parts.append(cache[part_key])
+            continue
+        attrs = _get_attributes(node)
+        # Never read a slider's drawn value or an editor's current text.
+        named = role in {"list item", "list box item", "table row", "tree item",
+                         "static", "label", "push button", "link"}
+        name = ((_node_name(node) if refresh else
+                 (_call_first(node, ("get_name", "getName"), default="") or "").strip())
+                if named else "")
+        part = (role, name, tuple((attr, attrs.get(attr)) for attr in (
+            "rowindex", "aria-rowindex", "posinset", "aria-posinset"
+        )), key)
+        parts.append(part)
+        if cache is not None:
+            cache[part_key] = part
+    return tuple(parts)
 
 
 def read_text_selections(

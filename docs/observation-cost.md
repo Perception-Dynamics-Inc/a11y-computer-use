@@ -165,3 +165,76 @@ palettes, use the existing 96-child sheet allowance instead of the ordinary
 `find`, and `scroll_to_find` without scrolling an already visible palette.
 Mixed groups retain the ordinary cap; larger palettes still show an overflow
 marker, and the raw traversal and snapshot token budgets still apply.
+
+## Linux Chromium ref-click reads (#1019)
+
+A ref click still uses a fresh window snapshot for resolution and a second
+snapshot when whole-tree effect verification is necessary. List discovery
+uses Chromium's native Collection role query, with the existing bounded walk
+as a fallback when the query is unavailable or fails. The structural getter
+cache is still invalidated between discovery and the snapshot walk, so a
+same-count replacement or timer-added child can appear in the effect diff.
+
+Issuing row identity is attached to the refs retained after pruning, including
+offscreen matches. Each ref's actual native ancestors still participate;
+pruning a layout wrapper does not remove it from row identity. Snapshot-local
+ancestry and semantic parts are shared. Nodes outside rows do not need row
+names or index attributes. Internal resolution probes bind only the requested target and its ancestors;
+outcome-only probes do not issue row identities. Act-time checks still invalidate native and getter
+caches and compare the target and its ancestors before input, including after
+window preparation. Modal/occlusion policy and effect verification are
+unchanged.
+
+`scripts/box/profile_chrome_ref_click.py` compares checkouts in one Chrome
+session against a page with twenty form controls, including popovers, details,
+select, datalist, date and color inputs. It prints per-click native invocation
+counts/times, discovery/identity step times, snapshot times, outcomes and
+medians. Native getter invocations can themselves hit libatspi's cache; these
+are not claimed to be D-Bus message counts. The script verifies an independent
+counter read after each confirmed click. Run it outside pytest under private
+Xvfb, a window manager and D-Bus, and interleave revisions to expose host drift.
+
+Child ownership is shared before toolkit/visibility checks. Recreated GI
+wrappers must report the same native parent bus/path, and the child must be
+on that parent's bus; unknown identity or an embedded application's different
+bus keeps the ordinary lookup. This sharing lasts only for the current getter
+cache operation and is invalidated by mutations.
+
+Measured on 2026-10-24 with Python 3.13.5, Chrome 155.0.8059.84 and
+Xvfb 1280×800/Xfwm4: two interleaved batches of six clicks per revision in
+one Chrome session. All 36 clicks confirmed and passed the independent
+counter check. Baseline is source tag v0.4.76 (`5db4a7d8`); main is
+`fd41931e`. These are instrumented native Linux measurements, not CDP.
+
+| Per-click median | v0.4.76 | main | Fix |
+|---|---:|---:|---:|
+| Total time (s) | 1.493 | 1.753 | 1.281 |
+| Resolution snapshot (s) | 0.551 | 0.665 | 0.430 |
+| Verification snapshot (s) | 0.547 | 0.688 | 0.433 |
+| Native application lookups | 407 | 411 | 33 |
+| Application lookup time (s) | 0.305 | 0.295 | 0.011 |
+| Native child-count reads | 388 | 584 | 424 |
+| Native indexed-child reads | 623 | 973 | 643 |
+| Row-identity calls | 0 | 382 | 1 |
+| Row-identity time (s) | 0 | 0.129 | 0.001 |
+| List-discovery time (s) | 0.084 | 0.078 | 0.002 |
+
+Step times overlap and are not additive. Each revision still used two full
+snapshots for this plain-button effect. Batch medians were 1.522/1.490 s for
+v0.4.76, 1.753/1.752 s for main and 1.257/1.281 s for the fix. This reduces
+the shared read overhead in #983; it does not add composite-state-only
+verification for that issue.
+
+Measurement command, with the baseline and main archives extracted at the
+paths shown (the interpreter also needs the Linux dependencies):
+
+```bash
+PYTHONPATH=/tmp/ship1019-deps XDG_CACHE_HOME=/tmp/cache1019 \
+GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 \
+dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' bash -c '
+  xfwm4 >/tmp/w1019shipping.log 2>&1 &
+  /workspace/a11y-venv-codex/bin/python scripts/box/profile_chrome_ref_click.py \
+    /tmp/ship1019-baseline /tmp/ship1019-main /tmp/ship-1019 \
+    /tmp/ship1019-baseline /tmp/ship1019-main /tmp/ship-1019 --runs 6
+'
+```
