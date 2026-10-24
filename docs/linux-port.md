@@ -1111,3 +1111,8 @@ AT-SPI `tool tip` nodes retain the `tooltip` role in snapshots and
 children. Names and bounds come from AT-SPI; ordinary groups are not inferred
 to be tooltips. This mapping is covered by synthetic tests, not a live Chrome
 run.
+
+Horizontal strips can be searched with `scroll_to_find(direction="right")`
+or `direction="left"`, optionally pinning the strip with `ref`. These send
+horizontal wheel steps. The default direction remains `down`; horizontal
+scroll position is reported as unknown when no axis-aware read is available.

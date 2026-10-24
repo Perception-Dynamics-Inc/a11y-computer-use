@@ -7164,6 +7164,10 @@ class Runtime:
         is the match. A label counts only when its own title is the text,
         so a label that merely mentions the name does not stop the search.
 
+        Use ``direction="right"`` or ``"left"`` for horizontal strips;
+        these send horizontal wheel steps and do not invoke vertical table
+        paging or in-page Find. The default remains ``"down"``.
+
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
         body-scroll page, not the window's tab strip. Kate's editor is preferred
@@ -7260,8 +7264,8 @@ class Runtime:
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
-        if direction not in ("down", "up"):
-            raise ValueError("direction must be 'down' or 'up'")
+        if direction not in ("down", "up", "left", "right"):
+            raise ValueError("direction must be 'down', 'up', 'left' or 'right'")
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app'")
         if isinstance(max_scrolls, bool) or not isinstance(max_scrolls, int) or not 0 <= max_scrolls <= MAX_SCROLLS:
@@ -7278,12 +7282,20 @@ class Runtime:
         self.driver.ensure_trusted()
         _running, bundle = self._resolve_app(app)
         pinned = self._anchor_audited(ref, "scroll") if ref is not None else None
-        dy = 5 if direction == "down" else -5
-        self._require_permission(Scroll(target=Point(0, 0, 0), dy=dy), bundle)
+        horizontal = direction in ("left", "right")
+        dy = 5 if direction in ("down", "right") else -5
+
+        def scroll_action(anchor: Element | Point, step: int) -> Scroll:
+            return Scroll(target=anchor, dx=step, dy=0) if horizontal else Scroll(target=anchor, dy=step)
+
+        self._require_permission(scroll_action(Point(0, 0, 0), dy), bundle)
 
         def inject_scroll(anchor: Element, step: int) -> None:
             self._refuse_secure(anchor)
-            self.driver.scroll(anchor, dy=step)
+            if horizontal:
+                self.driver.scroll(anchor, dx=step, dy=0)
+            else:
+                self.driver.scroll(anchor, dy=step)
 
         def page_unchanged(exc: ComputerUseError) -> bool:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "page_unchanged"
@@ -7409,8 +7421,11 @@ class Runtime:
             box = viewport_box(snap)
             if box is None:
                 return "visible"
-            _left, top, _right, bottom = box
-            center_y = min(el.bounds.y + el.bounds.height / 2 for el in located)
+            left, top, right, bottom = box
+            if horizontal:
+                top, bottom = left, right
+            center_y = min((el.bounds.x + el.bounds.width / 2) if horizontal else
+                           (el.bounds.y + el.bounds.height / 2) for el in located)
             if center_y < top:
                 return "above"
             if center_y >= bottom:
@@ -7450,7 +7465,7 @@ class Runtime:
             line is the track click, and the walk back to an early row
             does not fit in the budget.
             """
-            return anchor is not None and anchor.role in ("AXGroup", "AXWebArea")
+            return not horizontal and anchor is not None and anchor.role in ("AXGroup", "AXWebArea")
 
         def match_is_far(snap: Snapshot) -> bool:
             """True when the named row sits more than one window away.
@@ -7541,7 +7556,8 @@ class Runtime:
                         anchor is not None
                         and el.ref in under
                         and el.ref != anchor.ref
-                        and el.role == "AXStaticText"
+                        and el.role in (("AXStaticText", "AXButton", "AXTab", "AXRadioButton")
+                                       if horizontal else ("AXStaticText",))
                     )
                     if not listed and not in_list:
                         continue
@@ -7659,7 +7675,7 @@ class Runtime:
 
             def table_runs_past(shot: Snapshot, anchor: Element | None) -> bool:
                 """True when a table's box still extends below the window."""
-                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                if horizontal or anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
                     return False
                 box = viewport_box(shot)
                 if box is None:
@@ -7675,7 +7691,7 @@ class Runtime:
                 is a document scroll: the wheel brings the last rows up.
                 A body-scroll list is neither, and keeps the wheel.
                 """
-                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                if horizontal or anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
                     return False
                 if not callable(getattr(self.driver, "key_chord", None)):
                     return False
@@ -7714,7 +7730,7 @@ class Runtime:
                 budget. A miss falls through to the wheel. A tall list, the
                 document group, or a scroll area is the same find.
                 """
-                if not chromium_find or not text or "\n" in text or len(text) > 80 or anchor is None:
+                if horizontal or not chromium_find or not text or "\n" in text or len(text) > 80 or anchor is None:
                     return False
                 if not callable(getattr(self.driver, "key_chord", None)):
                     return False
@@ -7728,7 +7744,8 @@ class Runtime:
 
             def read_offset(anchor: Element | None) -> str:
                 fn = getattr(self.driver, "scroll_offset", None)
-                if anchor is None or not callable(fn):
+                # The optional offset hook currently reports the vertical axis.
+                if horizontal or anchor is None or not callable(fn):
                     return "unknown"
                 try:
                     value = fn(anchor)
@@ -7740,7 +7757,7 @@ class Runtime:
 
             def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
                            budget_cap: float | None = None, unreadable: bool = False) -> str:
-                names = () if header_only(shot, anchor) else row_names(shot, anchor)
+                names = () if not horizontal and header_only(shot, anchor) else row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
                     container = "unknown"
@@ -7964,7 +7981,7 @@ class Runtime:
                 tree is read again until that page frame is back. A miss
                 does not count as a scroll.
                 """
-                if not chromium_find or not text or "\n" in text or len(text) > 80:
+                if horizontal or not chromium_find or not text or "\n" in text or len(text) > 80:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
@@ -8102,6 +8119,7 @@ class Runtime:
                 matches = search_matches(snap)
                 if (
                     matches
+                    and not horizontal
                     and issued == 0
                     and text
                     and not buffer_tried
@@ -8170,7 +8188,7 @@ class Runtime:
                             step = recover
                             try:
                                 self._run_gated(
-                                    Scroll(target=anchor, dy=recover), bundle,
+                                    scroll_action(anchor, recover), bundle,
                                     partial(inject_scroll, anchor, recover),
                                     recheck=partial(self._recheck_target, target=anchor),
                                 )
@@ -8240,7 +8258,7 @@ class Runtime:
                         step = recover
                         try:
                             self._run_gated(
-                                Scroll(target=anchor, dy=recover), bundle,
+                                scroll_action(anchor, recover), bundle,
                                 partial(inject_scroll, anchor, recover),
                                 recheck=partial(self._recheck_target, target=anchor),
                             )
@@ -8255,7 +8273,7 @@ class Runtime:
                         issued += 1
                         stalls = 0
                         continue
-                if header_only(snap, anchor_now):
+                if not horizontal and header_only(snap, anchor_now):
                     return (
                         unfinished(issued, snap, anchor_now, budget_hit=False)
                         + "\ncontainer exposes no rows; only headers and a scrollbar are accessible. "
@@ -8288,7 +8306,8 @@ class Runtime:
                     wheel = 1 if step > 0 else -1
                 last_anchor = anchor
                 if (
-                    not table_jumped
+                    not horizontal
+                    and not table_jumped
                     and text
                     and callable(getattr(self.driver, "reveal_table_match", None))
                 ):
@@ -8316,7 +8335,7 @@ class Runtime:
                     snap = self._current
                     anchor = ready
                     last_anchor = ready
-                if page_mode and prefers_page_step(snap, anchor):
+                if not horizontal and page_mode and prefers_page_step(snap, anchor):
                     if not find_tried:
                         find_tried = True
                         found = try_in_page_find(anchor)
@@ -8371,7 +8390,7 @@ class Runtime:
                 # A large GTK table pages its own bar. The five-line wheel
                 # stays for Chromium and for a table this driver cannot page.
                 page_scroll = getattr(self.driver, "scroll_viewport_page", None)
-                if callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
+                if not horizontal and callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
                     issued += 1
                     stalls = 0
                     continue
@@ -8379,7 +8398,7 @@ class Runtime:
                 # disappear, become secure or be covered between iterations.
                 try:
                     self._run_gated(
-                        Scroll(target=anchor, dy=wheel), bundle,
+                        scroll_action(anchor, wheel), bundle,
                         partial(inject_scroll, anchor, wheel),
                         recheck=partial(self._recheck_target, target=anchor),
                     )
@@ -10681,7 +10700,7 @@ def build_server(
         text past the 200 characters a snapshot keeps) and/or role. When a
         cell, row, or other control has that exact name, the match is that
         control. A label counts only when its own title is the text. Scrolls `direction`
-        ('down'|'up') up to max_scrolls times, re-observing each step; returns the
+        ('down'|'up'|'left'|'right') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. Automatic selection prefers an
         Kate editor or an editor with unavailable visible text over sibling
         lists. Kate uses native character visibility; unavailable text returns

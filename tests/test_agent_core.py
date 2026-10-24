@@ -5217,3 +5217,13 @@ def test_declined_press_during_recovery_stops_remaining_strategies(monkeypatch):
     assert attempted == [retry]
     assert recovered[2] == error
     assert recovered[3] is marker
+
+
+@pytest.mark.parametrize("direction", ["down", "up", "left", "right"])
+def test_scroll_find_accepts_each_wheel_direction(direction) -> None:
+    from a11y_computer_use.agent.actions import Action, validate_action
+
+    assert validate_action(Action("scroll_to_find", {"text": "item-30", "direction": direction})) is None
+    assert validate_action(Action("scroll_to_find", {"text": "item-30", "direction": "diagonal"})) == (
+        "scroll_to_find direction must be down, up, left or right"
+    )
