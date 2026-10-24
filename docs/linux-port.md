@@ -1079,3 +1079,9 @@ with `expander_target_ambiguous` before input. GTK can report the entire row as
 its bounds even though only the arrow and label receive clicks. The driver does
 not guess label geometry or substitute native activation. Use explicit screenshot
 coordinates on the arrow or label and verify that the expanded state changes.
+
+AT-SPI `tool tip` nodes retain the `tooltip` role in snapshots and
+`find(role="tooltip")`, including named leaves and containers with static-text
+children. Names and bounds come from AT-SPI; ordinary groups are not inferred
+to be tooltips. This mapping is covered by synthetic tests, not a live Chrome
+run.
