@@ -5415,7 +5415,13 @@ def test_find_omitted_ref_still_rematches_live_target(
             assert runtime._resolve("e6", "click")[1] is moved
         else:
             runtime.desktop_snapshot(APP, mode="full")
-            assert runtime._resolve("e6", "click")[1] is replacement
+            with pytest.raises(ComputerUseError) as caught:
+                runtime._resolve("e6", "click")
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert caught.value.detail["reason"] == "target_changed"
+            assert caught.value.detail["outcome"] == "refused"
+            assert mocked_driver["click"] == []
+            assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
 
 
 @pytest.mark.parametrize("new_instance", ["process-new", "process-old", None])
@@ -5862,3 +5868,54 @@ def test_drag_reads_overlay_instead_of_previous_click_baseline(tmp_path, readabl
         assert out.evidence == "a new window or dialog appeared"
     else:
         assert "could not be read" in out.evidence
+
+
+@pytest.mark.parametrize("mode", ["interactive", "full"])
+@pytest.mark.parametrize("change", ["role", "name", "parent", "index", "unchanged"])
+def test_snapshot_preserves_issued_target_identity(
+    monkeypatch, mocked_driver, store, audit_dir, mode, change,
+):
+    """A snapshot cannot authorize input to a replacement under an old ref."""
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    parent = Element("e39", "AXGroup", "Embedded frame", None, None, "before")
+    button = Element("e40", "AXButton", "Open dialog from iframe", None,
+                     Bounds(1, 10, 40, 150, 25), "before", parent="e39", clickable=True,
+                     row_identity=(("button", "Open dialog from iframe", (("posinset", "1"),)),))
+    before = dataclasses.replace(base, snapshot_id="before", elements=(parent, button))
+    replacement = dataclasses.replace(button, snapshot_id="after", value="mutable value")
+    if change == "role":
+        replacement = dataclasses.replace(replacement, role="AXGroup", title="", clickable=False)
+    elif change == "name":
+        replacement = dataclasses.replace(replacement, title="Close")
+    elif change == "parent":
+        parent = dataclasses.replace(parent, title="Different frame")
+    elif change == "index":
+        replacement = dataclasses.replace(replacement, row_identity=(("button", button.title, (("posinset", "2"),)),))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(parent, replacement))
+    pressed = []
+    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el) or False)
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        assert "e40" in runtime.find(APP, text=button.title)
+        current[0] = after
+        rendered = runtime.desktop_snapshot(APP, mode=mode)
+        if change == "role" and mode == "interactive":
+            assert not any(line.lstrip().startswith("e40 ") for line in rendered.splitlines())
+        if change == "unchanged":
+            assert runtime._anchor("e40") == (after, replacement)
+            runtime.click(ref="e40", verify=True)
+            assert len(mocked_driver["click"]) == 1
+        else:
+            for _ in range(2):
+                with pytest.raises(ComputerUseError) as caught:
+                    runtime.click(ref="e40", verify=True)
+                assert caught.value.code is ErrorCode.STALE_REF
+                assert caught.value.detail["reason"] == "target_changed"
+                assert caught.value.detail["outcome"] == "refused"
+                assert caught.value.detail["anchor"]["title"] == button.title
+                assert mocked_driver["click"] == []
+                assert pressed == []
+                assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+                runtime.desktop_snapshot(APP, mode=mode)

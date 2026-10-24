@@ -1176,3 +1176,18 @@ action's read-back. This matters when a region-selection overlay appears after
 the preceding click has returned, and both capture dialogs share a title. A
 failed pre-stroke read leaves the outcome unverifiable with no retry hints;
 it does not treat an older dialog snapshot as evidence for repeating the stroke.
+
+Snapshot ref identity (#1014): later `desktop_snapshot` calls in both full and
+interactive modes retain an existing ref's role, name, row identity and reported
+parent chain. If that ref number now identifies a different target, input is
+refused with `stale_ref`, reason `target_changed`, even when full mode prints the
+replacement. Re-observing the same control refreshes its binding; mutable values
+and bounds are excluded. This does not change modal input policy.
+
+A standalone Chrome/AT-SPI check (not a pytest live file) opens a native modal
+from an iframe and verifies both snapshot modes send no input for the old ref:
+
+```sh
+XDG_CACHE_HOME=/tmp/1014-live-cache xvfb-run -a dbus-run-session -- sh -c \
+  'xfwm4 --compositor=off >/tmp/1014-wm.log 2>&1 & wm=$!; trap "kill $wm" EXIT; python scripts/check_chromium_iframe_modal.py'
+```

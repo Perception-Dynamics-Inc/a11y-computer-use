@@ -3601,7 +3601,8 @@ class Runtime:
 
     # -- target resolution ----------------------------------------------------
 
-    def _note_issued(self, snap: Snapshot, refs: set[str] | None = None) -> None:
+    def _note_issued(self, snap: Snapshot, refs: set[str] | None = None,
+                     *, preserve_identity: bool = False) -> None:
         """Remember which app issued the refs the agent was just given.
 
         Refs restart at ``e1`` in every snapshot, so after a snapshot of app
@@ -3616,7 +3617,7 @@ class Runtime:
         last = getattr(self, "_last_issued", None)
         # A filtered observation must not rebind refs whose meaning was never
         # returned. Keep their original snapshots (including ancestry) for
-        # the ordinary live matcher. Full observations reset these bindings.
+        # the ordinary live matcher. Explicit snapshots retain changed identities.
         anchors = getattr(self, "_issued_anchors", {})
         previous_instances = {
             el.instance_id for el in last.elements if el.instance_id
@@ -3629,11 +3630,26 @@ class Runtime:
             previous_instances and current_instances
             and previous_instances.isdisjoint(current_instances)
         )
-        if refs is None or last is None or last.app != app or instance_changed:
+        changed = getattr(self, "_changed_snapshot_refs", {}).copy()
+        if last is None or last.app != app or instance_changed:
             anchors = {}
+            changed = {}
+        identity_indexes = {}
         for element in snap.elements:
             if refs is None or element.ref in refs:
+                old = anchors.get(element.ref)
+                if preserve_identity and old is not None:
+                    for source in (old, snap):
+                        if source.snapshot_id not in identity_indexes:
+                            identity_indexes[source.snapshot_id] = {el.ref: el for el in source.elements}
+                    old_identity = self._issued_identity(identity_indexes[old.snapshot_id], element.ref)
+                    new_identity = self._issued_identity(identity_indexes[snap.snapshot_id], element.ref)
+                    if old_identity != new_identity:
+                        changed[element.ref] = snap
+                        continue
+                changed.pop(element.ref, None)
                 anchors[element.ref] = snap
+        self._changed_snapshot_refs = changed
         self._issued_anchors = anchors
         self._last_issued = snap
         if last is None or not app or not getattr(last, "app", None):
@@ -3642,6 +3658,18 @@ class Runtime:
             self._foreign_issued = last
         else:
             self._foreign_issued = None
+
+    @staticmethod
+    def _issued_identity(elements: dict[str, Element], ref: str) -> tuple:
+        """Stable semantics of the target and its reported parent chain."""
+        chain = []
+        seen = set()
+        while ref in elements and ref not in seen:
+            seen.add(ref)
+            el = elements[ref]
+            chain.append((el.role, el.title, el.row_identity))
+            ref = el.parent
+        return tuple(chain)
 
     def _other_app_snapshot(self, ref: str | None) -> Snapshot | None:
         """The other app's snapshot that also issued ``ref``, or None."""
@@ -3703,6 +3731,17 @@ class Runtime:
         issued = getattr(self, "_last_issued", None)
         if issued is not None and snap.app == issued.app:
             snap = getattr(self, "_issued_anchors", {}).get(ref, snap)
+        changed = getattr(self, "_changed_snapshot_refs", {}).get(ref)
+        if changed is not None:
+            anchor = snap.element(ref)
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{ref} no longer identifies {anchor.role} {anchor.title!r}; target changed",
+                detail={"ref": ref, "reason": "target_changed", "outcome": "refused",
+                        "snapshot_id": snap.snapshot_id, "live_snapshot_id": changed.snapshot_id,
+                        "anchor": {"role": anchor.role, "title": anchor.title},
+                        "hint": "Call find to obtain a fresh ref for the intended control."},
+            )
         try:
             return snap, snap.element(ref)
         except KeyError:
@@ -4780,7 +4819,7 @@ class Runtime:
             prev = self._current if mode == "diff" else None
             snap = self.driver.snapshot(Scope(scope), bundle)
             self._current = snap
-            self._note_issued(snap)
+            self._note_issued(snap, preserve_identity=True)
             if mode != "diff":
                 self._view = mode  # diffs and Effect Receipts follow the view last asked for
             # diff only against a prior snapshot of the SAME app (else the agent
