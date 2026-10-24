@@ -1189,6 +1189,10 @@ post-stroke snapshot still verifies the result. A group-only selection overlay
 can confirm a new dialog; without readable transition/effect evidence the result
 is `unverifiable` with `next: []`, never a coordinate retry. Previously observed
 controls in a closed window are excluded from the pre-stroke evidence.
+Ref drags resolve both endpoints against one fresh tree, retaining each
+endpoint's issuing-anchor and native row-identity checks. Modal boundaries
+are checked at the source and target of each pressed stroke, including settled
+coordinate hit tests when a modal is open; waypoints do not repeat discovery.
 
 ### Modal input boundary
 

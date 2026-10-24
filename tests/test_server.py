@@ -6279,3 +6279,65 @@ def test_public_snapshot_native_rename_does_not_authorize_replacement(
                                          elements=(before.element("e1"), restored))
         runtime.desktop_snapshot(APP)
         assert runtime._anchor("e2") == (current[0], restored)
+
+
+def test_ref_drag_shares_resolution_tree_within_timing_budget(tmp_path, monkeypatch):
+    """#1053: two endpoints need one live tree, plus mandatory effect readback."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    before = _drag_rows("before", [("Alpha", 20, 40), ("Delta", 20, 80)])
+    after = _drag_rows("after", [("Alpha", 200, 40), ("Delta", 20, 80)])
+    rt = _drag_runtime(tmp_path, before, after)
+    native = LinuxDriver()
+    monkeypatch.setattr(native, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    reads = []
+    elapsed = 0.0
+    def snapshot(scope, app):
+        nonlocal elapsed
+        elapsed += 0.65
+        reads.append(rt.driver.i)
+        return after if rt.driver.i else before
+    native.effect_snapshot = snapshot
+    rt.driver.snapshot = snapshot
+    resolved = []
+    def resolve(snap, ref, *, live=None):
+        resolved.append((ref, live))
+        return native.resolve_ref(snap, ref, live=live)
+    rt.driver.resolve_ref = resolve
+    rt.driver.take_click_snapshot = native.take_click_snapshot
+    rt.driver.drag_snapshot = lambda *args: before
+    result = rt.drag(start_ref="e2", end_ref="e3")
+    assert result.outcome == "confirmed"
+    assert result.evidence == "the item moved"
+    assert reads == [0, 1]
+    assert resolved == [("e2", None), ("e3", before)]
+    # 0.9 s for the remaining stroke/gates + two 650 ms tree reads.
+    assert elapsed + 0.9 <= 2.2
+    assert native.take_click_snapshot(before.elements[0]) is None
+
+
+@pytest.mark.parametrize("changed", ["live", "retained"])
+def test_shared_drag_tree_does_not_rebind_changed_destination(tmp_path, monkeypatch, changed):
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    before = _drag_rows("before", [("Alpha", 20, 40), ("Delta", 20, 80)])
+    replacement = dataclasses.replace(before, snapshot_id="replacement", elements=tuple(
+        dataclasses.replace(el, title="Replacement") if el.ref == "e3" else el
+        for el in before.elements
+    ))
+    rt = _drag_runtime(tmp_path, before, before)
+    native = LinuxDriver()
+    monkeypatch.setattr(native, "_run", lambda fn: fn())
+    monkeypatch.setattr(native, "_raise_if_hidden_alive", lambda *args: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    native.effect_snapshot = lambda *args: replacement
+    rt.driver.resolve_ref = native.resolve_ref
+    rt.driver.take_click_snapshot = native.take_click_snapshot
+    if changed == "retained":
+        rt._current = replacement
+        rt._last_issued = before
+        rt._issued_anchors = {"e3": before}
+    with pytest.raises(ComputerUseError) as caught:
+        rt.drag(start_ref="e2", end_ref="e3")
+    assert caught.value.code is ErrorCode.STALE_REF
+    assert rt.driver.i == 0
+    assert audit_entries(tmp_path / "audit")[-1]["result"] == "stale_ref"
