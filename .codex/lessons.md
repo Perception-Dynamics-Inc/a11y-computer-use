@@ -512,3 +512,5 @@
 - 2026-10-24 (#987): Chromium's settled native hit test for HTML size/multiple selects can return the select itself instead of its option. Scope any measured-option fallback to that exact native select parent, refresh option geometry, require an unambiguous in-viewport target, and retain refusal for ARIA lists and missing/other hits. Verify the selected identity set for plain/Ctrl/Shift clicks; do not mask hit-test refusal as selection_unchanged or perform compensating Selection writes on this path.
 
 - 2026-10-24 (PR #992 repair): Chromium popup SHOWING and combo EXPANDED can disagree with painted menu items. Keep popup descendants in snapshots/find; closed-model exclusions belong only to automatic scroll-container selection.
+
+- 2026-10-24 (PR #997 repair): GTK 3 viewport traversal recovery and Chromium scroll-anchor popup filtering are independent. Preserve both appended regression groups when merging; use only the showing scroll pane’s measured bounds for viewport traversal and retain native descendant geometry.

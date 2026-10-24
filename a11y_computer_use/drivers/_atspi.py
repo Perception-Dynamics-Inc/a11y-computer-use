@@ -4499,6 +4499,24 @@ class ATSPIAccessor:
                 if recovered is not None:
                     position, size = recovered
         enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
+        if role_str == "viewport" and _gtk_major(node) == 3:
+            # GTK 3 applies the scroll offset to the viewport's own
+            # visibility check. Its children can still be SHOWING with
+            # correct screen coordinates while it sits at G_MININT.
+            # Use only the enclosing scroll pane's measured box; child
+            # geometry remains untouched and is pruned independently.
+            if not _state_has(node, "SHOWING") or (
+                position is not None and -2147483648.0 in position
+            ):
+                parent = _parent_of(node)
+                if (_role_name(parent) == "scroll pane"
+                        and _state_has(parent, "SHOWING")):
+                    parent_pos, parent_size = _extents(parent)
+                    if (parent_pos is not None and parent_size is not None
+                            and all(math.isfinite(v) for v in (*parent_pos, *parent_size))
+                            and min(parent_size) > 0
+                            and -2147483648.0 not in parent_pos):
+                        position, size = parent_pos, parent_size
         # A GTK combo does not set EXPANDABLE, so the shared flag stays unset
         # while its menu is on screen. The open popup is that menu becoming
         # SHOWING. expanded follows the menu, including after it closes.
