@@ -1903,14 +1903,30 @@ def _tip_of_the_day(snap) -> object | None:
 
 
 def _tip_ok_button(snap) -> object | None:
-    """The OK or Close button of a snapshot that contains the tip dialog."""
+    """An OK or Close button inside the observed tip dialog's subtree."""
+    dialog = _tip_of_the_day(snap)
+    if dialog is None or not getattr(dialog, "ref", None):
+        return None
+    by_ref = {el.ref: el for el in snap.elements}
+
+    def inside_dialog(el):
+        seen = set()
+        parent = getattr(el, "parent", None)
+        while parent and parent not in seen:
+            if parent == dialog.ref:
+                return True
+            seen.add(parent)
+            parent = getattr(by_ref.get(parent), "parent", None)
+        return False
+
     buttons = []
     for el in getattr(snap, "elements", None) or []:
         if getattr(el, "role", "") != "AXButton":
             continue
         if str(getattr(el, "title", "") or "").strip().lower() not in {"ok", "close"}:
             continue
-        buttons.append(el)
+        if inside_dialog(el):
+            buttons.append(el)
     for el in buttons:
         if getattr(el, "focused", False):
             return el
@@ -2723,6 +2739,9 @@ class Runtime:
                                            "The dialog changed before dispatch; " + latest)
             if not no_input:
                 self._reject_terminal(action, app, audit=False, input_target=input_target)
+            modal_check = getattr(self.driver, "check_modal_input", None)
+            if not no_input and callable(modal_check):
+                modal_check(action, app, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             # Linux can discover an unknown focused entry during implicit type.
@@ -8969,15 +8988,12 @@ class Runtime:
                     pressed = self.driver.press_element(button)
                 except ComputerUseError:
                     return dismissed
-                if not pressed and callable(getattr(self.driver, "key_chord", None)):
-                    try:
-                        self.driver.key_chord("return")
-                    except ComputerUseError:
-                        return dismissed
+                if not pressed:
+                    return dismissed
                 dismissed = str(getattr(dialog, "title", "") or "Tip of the Day")
                 time.sleep(0.4)
                 snap = self._office_snapshot(launch_name or name)
-                if _tip_of_the_day(snap) is None:
+                if snap is not None and _tip_of_the_day(snap) is None:
                     return dismissed
                 return None
             if dismissed is not None or not document or looked:
@@ -10468,6 +10484,8 @@ def build_server(
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
+        Linux refuses ref and coordinate input outside a showing native or ARIA
+        modal with outside_active_modal; close it or use controls inside it.
         On Linux text-field double clicks verify exact selected text and offsets;
         unreadable selection outcomes are unverifiable with no retry hints.
         On Linux a declined accessibility press permits pointer fallback only
