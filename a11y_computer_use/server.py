@@ -2723,6 +2723,9 @@ class Runtime:
                                            "The dialog changed before dispatch; " + latest)
             if not no_input:
                 self._reject_terminal(action, app, audit=False, input_target=input_target)
+            modal_check = getattr(self.driver, "check_modal_input", None)
+            if not no_input and callable(modal_check):
+                modal_check(action, app, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             # Linux can discover an unknown focused entry during implicit type.
@@ -10367,6 +10370,8 @@ def build_server(
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
+        Linux refuses ref and coordinate input outside a showing native or ARIA
+        modal with outside_active_modal; close it or use controls inside it.
         On Linux text-field double clicks verify exact selected text and offsets;
         unreadable selection outcomes are unverifiable with no retry hints.
         On Linux a declined accessibility press permits pointer fallback only

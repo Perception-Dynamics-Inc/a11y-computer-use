@@ -19001,3 +19001,193 @@ def test_chromium_pooled_button_rechecks_after_window_preparation(fake_atspi, mo
     assert exc.value.code is ErrorCode.STALE_REF
     assert exc.value.detail["reason"] == "target_changed"
     assert sent == []
+
+
+@pytest.fixture
+def modal_boundary_tree(fake_atspi, monkeypatch):
+    """A showing modal over background controls; all native writes are recorded."""
+    frame = _Acc("frame", name="Modal test", width=800, height=600,
+                 states=("SHOWING", "VISIBLE", "ENABLED"))
+    bg = _outline_cell("Background Action", ["press"])
+    bg.role = "push button"
+    inside = _outline_cell("Inside Action", ["press"])
+    inside.role = "push button"
+    _place_row(inside, 320, 220, 120, 25)
+    modal = _Acc("dialog", name="ARIA Modal", width=300, height=200,
+                 states=("SHOWING", "VISIBLE", "ENABLED", "MODAL"))
+    _place_row(modal, 300, 200, 300, 200)
+    _adopt(modal, inside)
+    _adopt(frame, bg, modal)
+    driver = _wire_gtk_tree(monkeypatch, frame)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *args: None)
+    calls = []
+    def press(node, **kwargs):
+        calls.append(node.name)
+        node.states.add("SELECTED")
+        return True
+    monkeypatch.setattr(_atspi, "do_press", press)
+    return driver, frame, bg, modal, inside, calls
+
+
+@pytest.mark.parametrize("signal", ["native", "aria-modal", "modal"])
+def test_modal_snapshot_and_ref_boundary_restores_after_close(modal_boundary_tree, signal):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    if signal != "native":
+        modal.states.remove("MODAL")
+        modal.get_attributes = lambda: {signal: "true"}
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in snap.elements if el.title == bg.name)
+    foreground = next(el for el in snap.elements if el.title == inside.name)
+    dialog = next(el for el in snap.elements if el.title == modal.name)
+    assert dialog.modal and foreground.clickable
+    assert background.blocked_by_modal and not background.clickable and not background.editable
+    assert "outside_active_modal" in observe.render_matches(snap, (background,))
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.press_element(background)
+    assert calls == []
+    assert driver.press_element(foreground)
+    assert calls == ["Inside Action"]
+    # Closing the modal must also unblock a ref issued while it was open.
+    frame.children.remove(modal)
+    modal.parent = None
+    restored = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in restored.elements if el.title == bg.name)
+    assert background.clickable and not background.blocked_by_modal
+    assert driver.press_element(background)
+    assert calls == ["Inside Action", "Background Action"]
+
+
+def test_modal_boundary_coordinate_and_cached_ref_no_input(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.schema import Click, Drag, Scroll, TypeText
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    # A ref cached before the modal opens must be checked against live ancestry.
+    frame.children.remove(modal)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    cached = next(el for el in snap.elements if el.title == bg.name)
+    frame.children.append(modal)
+    hit = {"node": bg}
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *_args: hit["node"])
+    point = Point(0, 100, 110)
+    for action, addressed in ((Click(cached), None), (Click(point), None),
+                              (Scroll(point), None), (Drag(point, point), None),
+                              (TypeText("blocked"), cached)):
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            driver.check_modal_input(action, "modal-test", input_target=addressed)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.click(point)
+    assert calls == []
+    hit["node"] = inside
+    driver.check_modal_input(Click(point), "modal-test")
+
+
+def test_modal_runtime_gate_is_audited_and_shared_by_agent(modal_boundary_tree, monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.agent import Agent
+    from a11y_computer_use.agent.actions import Action
+    from a11y_computer_use.agent.core import _final_click_error
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in snap.elements if el.title == bg.name)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("modal-test", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(runtime, "_reject_terminal", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "_dialog_confirmation", lambda *args: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    runtime._current = snap
+    monkeypatch.setattr(runtime, "_target", lambda *args, **kwargs: (background, "modal-test"))
+    monkeypatch.setattr(runtime, "_capture", lambda: None)
+    monkeypatch.setattr(runtime, "_recheck_target", lambda *args, **kwargs: None)
+    batch = json.loads(runtime.act_batch([
+        {"do": "click", "ref": background.ref},
+        {"do": "click", "ref": background.ref},
+    ]))
+    assert len(batch) == 1 and batch[0]["ok"] is False
+    assert "outside_active_modal" in batch[0]["error"]
+    agent = Agent("scripted", runtime=runtime)
+    agent.runtime = runtime
+    agent._app = "modal-test"
+    agent._run_bounded = lambda fn, **kwargs: fn()
+    _, error, marker = agent._invoke(Action("click", {"ref": background.ref}))
+    assert "outside_active_modal" in error
+    assert marker.outcome == "refused" and _final_click_error(error)
+    assert calls == []
+    rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert rows[-1]["result"] == "unsupported"
+
+
+def test_modal_boundary_nested_dialog_and_other_window(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    other = _adopt(_Acc("frame", name="Other window"), _Acc("push button", name="Other"))
+    app = _adopt(_Acc("application"), frame, other)
+    assert _atspi.outside_modals(other.children[0], [modal]) is False
+    nested_button = _Acc("push button", name="Nested control")
+    nested = _adopt(_Acc("dialog", name="Nested modal",
+                        states=("SHOWING", "MODAL")), nested_button)
+    modal.children.append(nested)
+    nested.parent = modal
+    assert _atspi.outside_modals(inside, _atspi.active_modals(app))
+    assert not _atspi.outside_modals(nested_button, _atspi.active_modals(app))
+    assert not _atspi.outside_modals(other.children[0], _atspi.active_modals(app))
+
+
+def test_modal_boundary_discovery_does_not_silently_truncate(fake_atspi):
+    root = _Acc("frame", states=("SHOWING",))
+    root.get_child_count = lambda: 5000
+    root.get_child_at_index = lambda i: pytest.fail("must refuse before materializing a virtual model")
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.refuse_outside_modal(root)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+
+
+def test_native_modal_sibling_blocks_background_snapshot(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    app = _adopt(_Acc("application"), frame, modal)
+    # Native dialogs can be top-level siblings rather than frame descendants.
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in snap.elements if el.title == bg.name)
+    assert background.blocked_by_modal and not background.actionable
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.press_element(background)
+    assert calls == []
+    app.children.remove(modal)
+    restored = driver.snapshot(Scope.WINDOW, "modal-test")
+    assert next(el for el in restored.elements if el.title == bg.name).actionable
+
+
+def test_modal_boundary_refuses_truncated_target_ancestry(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    wrapper = bg
+    for _ in range(40):
+        wrapper = _adopt(_Acc("panel"), wrapper)
+    frame.children[0] = wrapper
+    wrapper.parent = frame
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.refuse_outside_modal(bg)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+    assert calls == []
+
+
+@pytest.mark.parametrize("settled_inside", [True, False])
+def test_modal_coordinates_use_settled_native_hit(modal_boundary_tree, monkeypatch, settled_inside):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    hits = iter([bg, inside, inside] if settled_inside else [inside, inside, bg])
+    read = []
+    def hit(*args):
+        read.append(args)
+        return next(hits)
+    monkeypatch.setattr(_atspi, "_accessible_at_point", hit)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    if settled_inside:
+        driver._check_modal_target(Point(0, 350, 225))
+    else:
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            driver._check_modal_target(Point(0, 350, 225))
+    assert len(read) == _atspi._HIT_TRIES
+    assert calls == []

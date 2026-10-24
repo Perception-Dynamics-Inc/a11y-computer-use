@@ -1593,8 +1593,12 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
+                    accessor._active_modals = _atspi.active_modals(node, fallback=False)
+                    # Discovery/search must not scroll the inert background.
+                    blocked = _atspi.outside_modals(node, accessor._active_modals)
+                    accessor._table_seek = None if blocked else self._table_seek
                     document_matches: list = []
-                    if seek and _atspi._chromium_app(node):
+                    if seek and not blocked and _atspi._chromium_app(node):
                         _atspi.reveal_text_in_document(node, seek, offscreen=document_matches)
                     accessor.refresh_visible(node)
                     snap = observe.build_snapshot(
@@ -2591,6 +2595,59 @@ class LinuxDriver:
             },
         )
 
+    def _check_modal_target(self, target, *, app: str | None = None) -> None:
+        """Check live native ancestry before any ref or pointer input."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        def check():
+            handle = (observe.ax_handle_for(target.snapshot_id, target.ref)
+                      if isinstance(target, Element) else None)
+            root = None
+            if isinstance(target, Element) and handle is None and app is None:
+                return  # press_element cannot dispatch without a native handle.
+            if isinstance(target, Point):
+                x, y = _point_of(target)
+                handle = _atspi._accessible_at_point(int(x), int(y))
+            if handle is None:
+                owner = app or _linux_system.frontmost_app_id()
+                root = _atspi.find_root(owner, Scope.WINDOW)
+            return _atspi.refuse_outside_modal(handle, root)
+
+        if not isinstance(target, Point):
+            self._run(check)
+            return
+        # Chromium's first hit is approximate and starts an asynchronous
+        # renderer hit test. Read its settled answer before allowing input.
+        # Wait on the caller so the AT-SPI event thread remains available.
+        for attempt in range(_atspi._HIT_TRIES):
+            try:
+                modal_open = self._run(check)
+                if not modal_open or attempt + 1 == _atspi._HIT_TRIES:
+                    return
+            except ComputerUseError as exc:
+                if (exc.detail.get("reason") != "outside_active_modal"
+                        or attempt + 1 == _atspi._HIT_TRIES):
+                    raise
+            time.sleep(_atspi._HIT_PAUSE_S)
+
+    def check_modal_input(self, action, app: str, *, input_target=None) -> None:
+        """Common Runtime/agent/batch guard, after permission and focus rechecks."""
+        from a11y_computer_use.schema import Click, Hover, Drag, Scroll, TypeText, KeyChord
+        from a11y_computer_use.drivers import _atspi
+
+        if isinstance(action, (Click, Hover, Scroll)):
+            self._check_modal_target(action.target, app=app)
+        elif isinstance(action, Drag):
+            for target in (action.start, *action.path, action.end):
+                self._check_modal_target(target, app=app)
+        elif input_target is not None:
+            self._check_modal_target(input_target, app=app)
+        elif isinstance(action, (TypeText, KeyChord)):
+            focused, _ = self._run(lambda: _atspi._focused_node(app))
+            root = self._run(lambda: _atspi.find_root(app, Scope.WINDOW))
+            self._run(lambda: _atspi.refuse_outside_modal(focused, root))
+
     def _visible_action(self, target, action: str, handle=None) -> None:
         """Schedule cosmetic feedback without influencing dispatch or outcome.
 
@@ -2766,6 +2823,7 @@ class LinuxDriver:
 
         self._focused_editable = None
         self._click_without_press = None
+        self._check_modal_target(element)
         self._verify_chromium_row_target(element, observe.ax_handle_for(element.snapshot_id, element.ref))
         if element.secure:
             return False
@@ -2811,6 +2869,7 @@ class LinuxDriver:
             )
         self._visible_action(element, "Click", handle)
         self._raise_handle_window(handle)
+        self._check_modal_target(element)
         self._verify_chromium_row_target(element, handle)
         self._verify_gtk_cell_target(element, handle)
         if self._run(lambda: _atspi.gtk4_tree_expander(handle)):
@@ -3181,6 +3240,7 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         self._writer_cell_verified = None
+        self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None:
             self._raise_handle_window(handle)
@@ -3379,6 +3439,7 @@ class LinuxDriver:
             raise _wayland_input_error("click")
         from a11y_computer_use.drivers import _atspi, _linux_input
 
+        self._check_modal_target(target)
         self._focused_editable = None
         handle = None
         notification = None
@@ -3515,6 +3576,9 @@ class LinuxDriver:
                     ErrorCode.UNSUPPORTED, "The select's selected set could not be read; no click was sent",
                     detail={"reason": "selection_unreadable", "outcome": "refused"},
                 )
+        modal_target = (target.bounds.center if isinstance(target, Element)
+                        and handle is None and target.bounds is not None else target)
+        self._check_modal_target(modal_target)
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         if select_parent is not None:

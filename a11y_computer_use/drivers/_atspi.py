@@ -4356,6 +4356,7 @@ class ATSPIAccessor:
     """
 
     def __init__(self) -> None:
+        self._active_modals: list = []
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
@@ -4923,6 +4924,8 @@ class ATSPIAccessor:
             title=str(name),
             description=str(description),
             enabled=enabled,
+            modal=is_modal(node, attrs=attrs),
+            blocked_by_modal=outside_modals(node, self._active_modals),
             scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
             default=role == "AXButton" and _has_default_state(node),
@@ -21503,3 +21506,127 @@ def read_text_selections(
             if child is not None:
                 pending.append(child)
     return tuple(rows) if readable else None
+
+
+# Modal boundaries are independent of pointer occlusion: semantic AT-SPI actions
+# bypass the overlay, so a successful doAction is not evidence of reachability.
+def is_modal(acc, *, attrs: dict | None = None) -> bool:
+    """A showing ARIA or native modal, using reported state only."""
+    if _role_name(acc) not in {"dialog", "alert", "window", "frame", "file chooser"}:
+        return False
+    if not _state_has(acc, "SHOWING"):
+        return False
+    attrs = _get_attributes(acc) if attrs is None else attrs
+    return (_state_has(acc, "MODAL") or
+            str(attrs.get("modal", attrs.get("aria-modal", ""))).lower() == "true")
+
+
+def active_modals(root, *, fallback: bool = True) -> list:
+    """Fresh modal descendants before pruning, including native modal windows.
+
+    Collection avoids walking whole web pages merely to discover dialogs. The
+    fallback is bounded and refuses input when it cannot establish a boundary.
+    """
+    if root is None:
+        return []
+    application = next((node for node in _ancestor_chain(root)
+                        if _role_name(node) == "application"), None)
+    collection_root = application if application is not None else root
+    candidates = None
+    coll = _call_first(collection_root, ("get_collection_iface", "get_collection"))
+    if coll is not None:
+        try:
+            Atspi = _atspi()
+            mt = Atspi.CollectionMatchType
+            roles = [getattr(Atspi.Role, name) for name in
+                     ("DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER")
+                     if hasattr(Atspi.Role, name)]
+            rule = Atspi.MatchRule.new(Atspi.StateSet.new([]), mt.NONE,
+                                      {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False)
+            candidates = list(coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 0, True))
+        except Exception:
+            candidates = None
+    collection_available = candidates is not None
+    if candidates is None and not fallback:
+        candidates = []
+    if candidates is None:
+        candidates = []
+        queue = deque([root])
+        seen = set()
+        pinned = []
+        while queue:
+            node = queue.popleft()
+            key = _ancestor_key(node)
+            if key in seen:
+                continue
+            seen.add(key)
+            pinned.append(node)
+            if len(seen) > 4096:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                    "Cannot establish the active modal boundary; no input was sent",
+                    detail={"reason": "modal_boundary_unavailable"})
+            candidates.append(node)
+            count = _child_count(node)
+            if count < 0 or count > 4096 - len(seen) - len(queue):
+                raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                    "Cannot establish the active modal boundary; no input was sent",
+                    detail={"reason": "modal_boundary_unavailable"})
+            queue.extend(child for i in range(max(0, count))
+                         if (child := _child_at(node, i)) is not None)
+    if (not collection_available and application is not None
+            and _ancestor_key(application) != _ancestor_key(root)):
+        if not fallback and _chromium_app(root):
+            # The Chromium snapshot already bypasses CHILDREN for this app.
+            # A nested mask bypass would restore DEFAULT mid-traversal (#967).
+            candidates.extend(child for i in range(max(0, _child_count(application)))
+                              if (child := _child_at(application, i)) is not None)
+        else:
+            candidates.extend(_fresh_application_children(application))
+    candidates.insert(0, root)
+    found = {}
+    for node in candidates:
+        key = _ancestor_key(node)
+        if key not in found and is_modal(node):
+            found[key] = node
+    return list(found.values())
+
+
+def outside_modals(acc, modals: list) -> bool:
+    """True unless acc belongs to every applicable modal (nested modals included)."""
+    if not modals:
+        return False
+    chain = list(_ancestor_chain(acc))
+    parents = {_ancestor_key(node) for node in chain}
+    frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
+    for modal in modals:
+        owner = next((node for node in _ancestor_chain(modal)
+                      if _role_name(node) in {"frame", "window"}), None)
+        if (owner is not None and frame is not None
+                and _ancestor_key(owner) != _ancestor_key(modal)
+                and _ancestor_key(owner) != _ancestor_key(frame)):
+            continue
+        if _ancestor_key(modal) not in parents:
+            return True
+    return False
+
+
+def refuse_outside_modal(acc, root=None) -> bool:
+    """Refuse before input when the addressed accessible is outside a modal."""
+    if root is None:
+        chain = list(_ancestor_chain(acc))
+        if chain and _parent_of(chain[-1]) is not None:
+            raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                "Cannot establish the target window's modal boundary; no input was sent",
+                detail={"reason": "modal_boundary_unavailable"})
+        # Include sibling native dialogs in the application, but no other apps.
+        root = next((node for node in reversed(chain) if _role_name(node) == "application"),
+                    chain[-1] if chain else None)
+    modals = active_modals(root)
+    if outside_modals(acc, modals):
+        names = ", ".join(repr(_node_name(node)) for node in modals)
+        raise ComputerUseError(ErrorCode.UNSUPPORTED,
+            f"outside_active_modal: target is outside {names}; no input was sent",
+            detail={"reason": "outside_active_modal", "outcome": "refused",
+                    "hint": "Use controls inside the active modal, or close it before acting on the background."})
+
+    return bool(modals)

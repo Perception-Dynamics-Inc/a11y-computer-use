@@ -521,3 +521,7 @@
 - 2026-10-24 (#975 main integration): Preserve drag unreadable-outcome retry suppression (#1006) alongside text-selection double-click suppression when joining the shared Runtime conclusion path; retain both appended server regression groups.
 
 - 2026-10-24 (#977 follow-up): Internal scroll-search snapshots must not replace the issuing snapshot's row identity. Resolve retained anchors independently of the current probe snapshot, and bind only refs actually returned by scroll_to_find (matches or its reported container). Exercise find -> scroll_to_find -> click with a pooled node; a direct external scroll misses this cross-fix interaction between #979 and #1005. Keep mutable values excluded as in #1001/#996.
+
+- 2026-10-24 (#1013): AT-SPI doAction bypasses ARIA overlay hit testing. Discover showing MODAL/aria-modal boundaries before input, suppress background actionability, and refuse agent recovery as well as Runtime/batch dispatch. Use Collection for discovery before snapshot pruning; walking native virtual table children can materialize huge models.
+
+- 2026-10-24 (#1013 validation): Modal discovery inside Chromium’s CHILDREN-cache bypass must not nest another mask bypass that restores DEFAULT before traversal finishes. Query Collection at the application for native sibling modals; preserve the outer mask on the fallback. The existing stale-child-cache regressions cover this interaction.

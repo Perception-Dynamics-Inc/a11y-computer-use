@@ -5227,3 +5227,29 @@ def test_scroll_find_accepts_each_wheel_direction(direction) -> None:
     assert validate_action(Action("scroll_to_find", {"text": "item-30", "direction": "diagonal"})) == (
         "scroll_to_find direction must be down, up, left or right"
     )
+
+
+@pytest.mark.parametrize("reason", ["outside_active_modal", "modal_boundary_unavailable"])
+def test_modal_refusal_stops_batch_without_input_recovery(reason):
+    """A modal refusal must never become Return, a pointer retry, or a later batch call."""
+    elements = window(
+        el("e2", "AXButton", "Background Action", parent="e1", clickable=True),
+        el("e3", "AXDialog", "Modal", parent="e1", modal=True),
+        el("e4", "AXButton", "Inside Action", parent="e3", clickable=True),
+    )
+    runtime = FakeRuntime(elements)
+    runtime.fail["e2"] = ComputerUseError(
+        ErrorCode.UNSUPPORTED, f"{reason}: no input was sent", detail={"reason": reason},
+    )
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"}), ToolCall("click", {"ref": "e4"})),
+            turn(done("stopped", [{"element": {"role": "AXDialog", "name": "Modal"}}])),
+        ]), elements, runtime=runtime,
+    )
+    assert runtime.calls == [("click", {"ref": "e2"})]
+    assert result.step_log[0].status == "failed"
+    assert result.step_log[0].verified is False
+    assert reason in result.step_log[0].error
+    assert result.step_log[0].turn_stop == "failure"
+    assert result.step_log[0].skipped[0]["name"] == "click"

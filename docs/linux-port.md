@@ -1176,3 +1176,20 @@ action's read-back. This matters when a region-selection overlay appears after
 the preceding click has returned, and both capture dialogs share a title. A
 failed pre-stroke read leaves the outcome unverifiable with no retry hints;
 it does not treat an older dialog snapshot as evidence for repeating the stroke.
+
+### Modal input boundary
+
+Showing dialogs with AT-SPI `MODAL` state or a reported `modal=true` /
+`aria-modal=true` attribute block input to controls outside their subtree.
+Snapshots label the dialog `(modal)` and background controls
+`(outside_active_modal)` without click/edit actionability; `find` uses the
+same flags. Closing the dialog restores background actionability.
+
+The Runtime checks native modal ancestry after permission and focus checks,
+including agent and `act` batch calls. Ref presses, value writes, and pointer
+clicks also check at the Linux driver boundary. An outside target returns
+`unsupported` with reason `outside_active_modal` before input. Coordinates
+must hit a descendant of the modal; they are never moved inside it. The agent
+does not retry a modal refusal through another input method. If the bounded
+native fallback cannot establish the modal boundary, input is refused with
+`modal_boundary_unavailable`.
