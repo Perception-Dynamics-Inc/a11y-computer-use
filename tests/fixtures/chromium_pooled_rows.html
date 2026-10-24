@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pooled row identity regression</title>
+<h1 id="selection">Nothing selected</h1>
+<div id="list" role="list" style="height:600px;overflow:auto;position:relative">
+  <div style="height:300000px"></div>
+</div>
+<script>
+const list = document.querySelector('#list');
+const pool = Array.from({length:30}, () => {
+  const row = document.createElement('div');
+  row.setAttribute('role', 'listitem');
+  row.append(document.createTextNode(''));
+  row.style.cssText = 'position:absolute;height:30px;left:0;right:0';
+  row.addEventListener('click', () => {
+    window.clicks = (window.clicks || 0) + 1;
+    document.querySelector('#selection').textContent = 'Selected ' + row.textContent;
+  });
+  list.append(row);
+  return row;
+});
+function render() {
+  const start = Math.floor(list.scrollTop / 30);
+  pool.forEach((row, i) => {
+    const index = start + i;
+    row.firstChild.nodeValue = 'Row ' + String(index).padStart(5, '0');
+    row.setAttribute('aria-posinset', index + 1);
+    row.setAttribute('aria-setsize', 10000);
+    row.style.top = (index * 30) + 'px';
+  });
+}
+list.addEventListener('scroll', render);
+render();
+</script>

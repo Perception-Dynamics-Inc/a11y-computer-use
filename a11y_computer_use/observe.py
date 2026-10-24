@@ -249,6 +249,8 @@ class RawNode:
     expanded: bool | None = None
     placeholder: str = ""
     stable_id: str | None = None
+    # Native row identity captured at observation; excludes values and geometry.
+    row_identity: tuple = ()
     #: Linux AT-SPI only. Empty on macOS, Windows, and the browser, so those
     #: trees keep today's walk and token budget. ``"page"`` is a Chromium
     #: ``document web``, ``"docframe"`` a ``document frame``, ``"iframe"`` an
@@ -2882,6 +2884,7 @@ def _flatten(
             expanded=node.raw.expanded,
             placeholder=node.raw.placeholder,
             stable_id=node.raw.stable_id or None,
+            row_identity=node.raw.row_identity,
             instance_id=instance_id,
             document_id=document_id,
             subrole=(
@@ -3238,6 +3241,7 @@ def attach_offscreen_matches(
                 selected=raw.selected,
                 expanded=raw.expanded,
                 stable_id=raw.stable_id or None,
+                row_identity=raw.row_identity,
                 instance_id=(parent.instance_id if parent is not None else raw.instance_id),
                 document_id=(parent.document_id if parent is not None else raw.document_id),
                 note=raw.note or None,

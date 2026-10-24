@@ -18880,3 +18880,124 @@ def test_scale_description_filter_preserves_labels(
     target, = snap.elements
     assert target.title == expected
     assert float(target.value) == 75
+
+
+@pytest.mark.parametrize("action", ["resolve", "click", "press"])
+@pytest.mark.parametrize("change", ["name", "index", "parent", "role", "unchanged", "value"])
+def test_chromium_pooled_row_ref_identity(fake_atspi, monkeypatch, change, action):
+    """The same native object must not silently become another logical row."""
+    from dataclasses import replace
+    from tests.conftest import build_synthetic_snapshot
+    from a11y_computer_use.drivers import _atspi
+
+    text = _GeckoNode("static", "Row 00010")
+    row = _GeckoNode("list item", "Row 00010", children=[text])
+    row.attributes = {"posinset": "11"}
+    parent = _GeckoNode("list", children=[row])
+    doc = _GeckoNode("document web", children=[parent])
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_drop_cached_properties", lambda node: None)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    identity = _atspi.chromium_row_identity(text)
+    assert identity
+    element = Element("e1", "AXStaticText", "Row 00010", None, None, "pooled-row",
+                      row_identity=identity)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: text})
+    if change == "name":
+        row.name = text.name = "Row 00050"
+    elif change == "index":
+        row.attributes["posinset"] = "51"
+    elif change == "parent":
+        row.parent = _GeckoNode("list")
+    elif change == "role":
+        row.role = "push button"
+    elif change == "value":
+        row.value = "50"
+        parent.name = "50 rows loaded"
+        doc.name = "Selection changed"
+    if change in {"unchanged", "value"}:
+        driver._verify_chromium_row_target(element, text)
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            # Must fail before taking a fresh snapshot or dispatching input.
+            if action == "resolve":
+                driver.resolve_ref(replace(build_synthetic_snapshot(), elements=(element,)), element.ref)
+            elif action == "click":
+                driver.click(element)
+            else:
+                driver.press_element(element)
+        assert exc.value.code is ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == "target_changed"
+        assert exc.value.detail["outcome"] == "refused"
+        assert not row.pressed
+
+
+def test_chromium_row_identity_ignores_slider_drawn_value(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    slider = _GeckoNode("slider", "12")
+    row = _GeckoNode("list item", "Volume", children=[slider])
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    identity = _atspi.chromium_row_identity(slider)
+    slider.name = "30"
+    assert _atspi.chromium_row_identity(slider) == identity
+
+
+def test_chromium_row_identity_snapshot_and_fresh_cache(fake_atspi, monkeypatch):
+    """Issued identity is immutable even when getters and native labels cache."""
+    from a11y_computer_use.drivers import _atspi
+
+    text = _GeckoNode("static", "Row 00010")
+    row = _GeckoNode("list item", children=[text])
+    row.attributes = {"posinset": "11"}
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    cache = {}
+    with _atspi.read_cache():
+        identity = _atspi.chromium_row_identity(text, cache=cache)
+        raw = RawNode(role="AXStaticText", title="Row 00010", row_identity=identity,
+                      position=(10, 10), size=(100, 30))
+        shot = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.APP, app="chrome",
+                              pid=1, geometry=_geometry())
+        issued = next(el for el in shot.elements if el.title == "Row 00010")
+        assert issued.row_identity == identity
+
+        def refresh(node):
+            if node is text:
+                text.name = "Row 00050"
+            if node is row:
+                row.attributes = {"posinset": "51"}
+
+        monkeypatch.setattr(_atspi, "_drop_cached_properties", refresh)
+        current = _atspi.chromium_row_identity(text, fresh=True)
+        assert current != issued.row_identity
+        assert current[0][1] == "Row 00050"
+        assert dict(current[1][2])["posinset"] == "51"
+        assert issued.row_identity[0][1] == "Row 00010"
+
+
+def test_chromium_pooled_button_rechecks_after_window_preparation(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.schema import MouseButton
+
+    button = _GeckoNode("push button", "Open")
+    row = _GeckoNode("list item", "Row 00010", children=[button])
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    identity = _atspi.chromium_row_identity(button)
+    element = Element("e1", "AXButton", "Open", None, None, "pooled-button",
+                      row_identity=identity)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: button})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "chromium_page_button", lambda node: True)
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *args: None)
+    monkeypatch.setattr(driver, "_refuse_unverified_pdf_thumbnail", lambda *args: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *args: None)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *args: setattr(row, "name", "Row 00050"))
+    sent = []
+    monkeypatch.setattr(_atspi, "chromium_button_click_action", lambda node: sent.append(node))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click_button_action(element, button=MouseButton.LEFT, count=1, modifiers=())
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "target_changed"
+    assert sent == []

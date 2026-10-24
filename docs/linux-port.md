@@ -116,6 +116,23 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 
 For Chrome/Electron processes that advertise a DevTools port, the Linux form overlay uses the optional `[browser]` extra to read and write matching DOM controls. Without `websocket-client`, snapshots and form writes retain the native AT-SPI path, including selection and numeric value writes. Native verification still determines success. Other CDP connection, script, and read-back failures remain errors; they do not retry a potentially completed write through AT-SPI. Selecting the standalone browser backend still requires the extra.
 
+### Recycled Chromium row refs
+
+Chromium row refs and refs to their descendants retain the observed native
+role, stable name, published `rowindex`/`posinset`, and parent chain. Ref
+resolution and click dispatch refresh native properties and reject a changed
+identity with `stale_ref` / `target_changed` before sending input. Control
+values, slider labels drawn from values, geometry and list summaries do not
+identify a row. Re-observe and find the intended row after this refusal.
+
+A manual Chrome/AT-SPI check uses the pooled DOM fixture and verifies that
+recycling `Row 00010` into `Row 00050` sends no DOM click:
+
+```bash
+XDG_CACHE_HOME=/tmp/a11y-row-cache PYTHONPATH=. xvfb-run -a dbus-run-session -- sh -c \
+  'xfwm4 --compositor=off >/tmp/a11y-row-wm.log 2>&1 & /workspace/a11y-venv-codex/bin/python scripts/check_chromium_pooled_rows.py'
+```
+
 ### Native Chromium select option clicks
 
 For native HTML `<select multiple>` and size-based listboxes, ref clicks keep

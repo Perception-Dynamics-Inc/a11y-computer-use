@@ -4361,6 +4361,7 @@ class ATSPIAccessor:
         self._gecko: bool | None = None
         # Whether this walk's application is Chromium. One walk reads one
         # application, so this is asked once instead of for every child.
+        self._row_identity_cache: dict = {}
         self._chromium: bool | None = None
         # id(node) -> (node, its frame or None) for LibreOffice placement.
         self._frames: dict[int, tuple[object, object]] = {}
@@ -4910,6 +4911,8 @@ class ATSPIAccessor:
         if outline_note and position is not None and size is not None:
             position, size = _outline_visible_bounds(node, position, size)
         return RawNode(
+            row_identity=(chromium_row_identity(node, cache=self._row_identity_cache)
+                          if self._tree_is_chromium(node) else ()),
             role=role,
             heading_level=_heading_level(attrs) if role == "AXHeading" else None,
             subrole=(
@@ -21373,3 +21376,44 @@ def text_range_rect(acc, start: int, end: int, expected: str):
         return rect.x, rect.y, rect.width, rect.height
     except Exception:
         return None
+
+
+def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None) -> tuple:
+    """Bind pooled Chromium rows and descendants to observed semantics.
+
+    Cache ancestry only within one snapshot walk. Action-time reads invalidate
+    both getter and native caches. Values, geometry and container summaries
+    are mutable state and do not identify a row.
+    """
+    if acc is None or (cache is None and not _chromium_app(acc)):
+        return ()
+    if fresh:
+        _drop_read_cache()
+    pending = []
+    tail, has_row = (), False
+    for node in _ancestor_chain(acc):
+        key = _ancestor_key(node)
+        if cache is not None and key in cache:
+            tail, has_row = cache[key]
+            break
+        if fresh:
+            _drop_cached_properties(node)
+        role = _role_name(node)
+        if role in {"document web", "document frame", "application", "frame"}:
+            break
+        attrs = _get_attributes(node)
+        is_row = role in {"list item", "list box item", "table row", "tree item"}
+        # Never read a slider's drawn value or an editor's current text.
+        name = (_node_name(node) if is_row or role in {
+            "static", "label", "push button", "link"
+        } else "")
+        part = (role, name, tuple((attr, attrs.get(attr)) for attr in (
+            "rowindex", "aria-rowindex", "posinset", "aria-posinset"
+        )), key)
+        pending.append((key, part, is_row))
+    for key, part, is_row in reversed(pending):
+        tail = (part,) + tail
+        has_row = has_row or is_row
+        if cache is not None:
+            cache[key] = (tail, has_row)
+    return tail if has_row else ()
