@@ -1203,7 +1203,10 @@ native fallback cannot establish the modal boundary, input is refused with
 
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
-and queries wide subtrees before walking their virtual rows. LibreOffice uses
+and queries subtrees with more than 64 children before walking their rows.
+This query threshold is independent of the unchanged 4,096-node fallback
+safety budget: ordinary web lists must not add hundreds of remote reads to
+every input. Failed queries still use the bounded walk or refuse. LibreOffice uses
 structural discovery that excludes Writer document content and virtual
 spreadsheet cells, since walking document content adds a full scan to scoped
 keys and a Collection scan can materialize the entire grid. Wide collections can be queried in two complete halves using a reported

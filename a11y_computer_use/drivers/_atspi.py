@@ -21604,7 +21604,11 @@ def active_modals(root, *, fallback: bool = True) -> list:
                 # scan to every scoped key, just as Calc materializes cells.
                 continue
             count = _child_count(node)
-            if not libreoffice and count > 4096 - len(seen) - len(queue):
+            # Amortize remote child/role reads before reaching the safety
+            # budget. Even a 200-row web list otherwise adds hundreds of
+            # synchronous D-Bus calls to each input. Query only this subtree,
+            # in complete halves, so a modal in its final row is not missed.
+            if not libreoffice and count > min(64, 4096 - len(seen) - len(queue)):
                 descendants = _modal_collection(node, split=True)
                 if descendants is not None:
                     candidates.extend(descendants)

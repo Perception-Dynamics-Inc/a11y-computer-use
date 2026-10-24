@@ -19438,3 +19438,30 @@ def test_modal_office_discovery_does_not_walk_writer_content(fake_atspi, monkeyp
     with pytest.raises(ComputerUseError, match="outside_active_modal"):
         _atspi.refuse_outside_modal(document, frame)
     assert _atspi.refuse_outside_modal(modal, frame)
+
+
+@pytest.mark.parametrize("collection_available", [True, False])
+def test_modal_discovery_queries_moderate_lists_before_remote_row_walk(
+    fake_atspi, monkeypatch, collection_available,
+):
+    """The input check must not enumerate an ordinary 200-row web list."""
+    modal = _Acc("dialog", name="Last row modal", states=("SHOWING", "MODAL"))
+    rows = [_Acc("list item") for _ in range(200)]
+    _adopt(rows[-1], modal)
+    listing = _adopt(_Acc("list"), *rows)
+    document = _adopt(_Acc("document web"), listing)
+    frame = _adopt(_Acc("frame"), document)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    queried = []
+    def collection(node, *, split=False):
+        assert node is listing and split
+        queried.append(node)
+        return [modal] if collection_available else None
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    if collection_available:
+        listing.get_child_at_index = lambda index: pytest.fail("enumerated remote rows")
+    assert _atspi.active_modals(frame) == [modal]
+    assert queried == [listing]
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(document, frame)
+    assert _atspi.refuse_outside_modal(modal, frame)
