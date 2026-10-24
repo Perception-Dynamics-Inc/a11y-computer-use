@@ -1781,3 +1781,40 @@ def test_drag_overlay_unreadable_window_does_not_use_background(monkeypatch):
         _linux_system.drag_overlay_at_point(200, 150)
     assert exc.value.code is ErrorCode.FOCUS_CHANGED
     assert exc.value.detail['reason'] == 'drag_overlay_unreadable'
+
+
+@pytest.mark.parametrize("exit_kind", ["normal", "SIGTERM", "SIGKILL", "SIGSEGV"])
+def test_launched_child_is_reaped_without_another_launch(exit_kind) -> None:
+    """Real child processes need no desktop or native accessibility service."""
+    import os
+    import signal
+    import sys
+    import time
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux child reaping regression")
+
+    script = (
+        "import resource, time; "
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); "
+        + ("time.sleep(0.1); raise SystemExit(7)" if exit_kind == "normal"
+           else "time.sleep(60)")
+    )
+    handle = _linux_system.launch_app(sys.executable, argv=(sys.executable, "-c", script))
+    proc = handle["proc"]
+    try:
+        if exit_kind != "normal":
+            os.kill(proc.pid, getattr(signal, exit_kind))
+        deadline = time.monotonic() + 5
+        # Do not call poll/wait: either would hide the original zombie bug.
+        while proc.returncode is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        expected = 7 if exit_kind == "normal" else -getattr(signal, exit_kind)
+        assert proc.returncode == expected
+        with pytest.raises(ProcessLookupError):
+            os.kill(proc.pid, 0)
+        assert proc.poll() == expected
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        proc.wait()
