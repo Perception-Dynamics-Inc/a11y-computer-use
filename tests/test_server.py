@@ -5753,3 +5753,75 @@ def test_selection_verification_reads_the_dispatched_target(tmp_path, monkeypatc
     assert result.outcome == 'confirmed'
     assert d.clicked == [refreshed]
     assert reads == [refreshed, refreshed]
+
+
+@pytest.mark.parametrize("issuer", ["find", "snapshot", "scroll_to_find", "wait_for"])
+@pytest.mark.parametrize("found", [False, True])
+@pytest.mark.parametrize("change", ["name", "role", "index", "parent"])
+def test_pooled_row_find_scroll_find_click_keeps_issued_identity(
+    monkeypatch, mocked_driver, store, audit_dir, issuer, found, change,
+):
+    """Hidden scroll-search reads must not rebind an earlier pooled-row ref."""
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    identity = (("static", "Row 00010", (), "text-object"),
+                ("list item", "", (("posinset", "11"),), "row-object"),
+                ("list", "", (), "list-object"))
+    container = Element("e29", "AXList", "rows", None, Bounds(1, 0, 0, 500, 500), "before")
+    row = Element("e40", "AXStaticText", "Row 00010", None,
+                  Bounds(1, 10, 40, 300, 30), "before", parent="e29",
+                  stable_id="text-object", row_identity=identity)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(container, row))
+    changed = list(identity)
+    part = list(changed[1 if change == "index" else 0 if change != "parent" else 2])
+    field = {"name": 1, "role": 0, "index": 2, "parent": 3}[change]
+    part[field] = {"name": "Row 00122", "role": "link",
+                   "index": (("posinset", "123"),), "parent": "new-list-object"}[change]
+    changed[1 if change == "index" else 0 if change != "parent" else 2] = tuple(part)
+    recycled = dataclasses.replace(row, snapshot_id="after", row_identity=tuple(changed),
+                                   title="Row 00122" if change == "name" else row.title)
+    target = dataclasses.replace(row, ref="e41", title="Row 00300", snapshot_id="after")
+    after = dataclasses.replace(before, snapshot_id="after", elements=(container, recycled, *((target,) if found else ())))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: object())
+    monkeypatch.setattr(_atspi, "chromium_row_identity", lambda *args, **kw: current[0].element("e40").row_identity)
+    native = LinuxDriver.__new__(LinuxDriver)
+    native._run = lambda fn: fn()
+
+    def resolve(snap, ref, **kwargs):
+        anchor = snap.element(ref)
+        native._verify_chromium_row_target(anchor, object())
+        return observe.rematch_ref(snap, ref, kwargs.get("live") or current[0])
+
+    monkeypatch.setattr(observe, "resolve_ref", resolve)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        if issuer == "snapshot":
+            result = runtime.desktop_snapshot(APP)
+        elif issuer == "scroll_to_find":
+            result = runtime.scroll_to_find(APP, text="Row 00010", max_scrolls=0)
+        else:
+            result = runtime.find(APP, text="Row 00010")
+            if issuer == "wait_for":
+                assert "satisfied" in runtime.wait_for("e40", timeout_s=0)
+        assert "e40" in result
+        # Recycle the same object during the search's explicit wheel action.
+        monkeypatch.setattr(runtime.driver, "scroll", lambda *args, **kw: current.__setitem__(0, after))
+        monkeypatch.setattr(runtime, "_recheck_target", lambda *args, **kw: None)
+        result = runtime.scroll_to_find(APP, text="Row 00300", max_scrolls=1)
+        assert ("found after" if found else "not found after") in result
+        assert runtime._anchor("e40")[0] is before
+        if found:
+            assert runtime._anchor("e41")[0] is after
+        else:
+            assert runtime._anchor("e29")[0] is after
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e40", verify=True)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert caught.value.detail["outcome"] == "refused"
+        assert mocked_driver["click"] == []
+        assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"

@@ -3614,7 +3614,7 @@ class Runtime:
         """
         app = getattr(snap, "app", None)
         last = getattr(self, "_last_issued", None)
-        # A filtered find must not rebind refs whose new meaning was never
+        # A filtered observation must not rebind refs whose meaning was never
         # returned. Keep their original snapshots (including ancestry) for
         # the ordinary live matcher. Full observations reset these bindings.
         anchors = getattr(self, "_issued_anchors", {})
@@ -3697,10 +3697,11 @@ class Runtime:
         """Look up the issuing anchor, retaining refs omitted by a later find.
 
         Keep the original snapshot's ancestry and identity for live resolution.
-        Other observation paths continue to use their current snapshot epoch.
+        Internal snapshots do not issue refs or replace their observed identity.
         """
         snap = self._require_snapshot(ref)
-        if snap is getattr(self, "_last_issued", None):
+        issued = getattr(self, "_last_issued", None)
+        if issued is not None and snap.app == issued.app:
             snap = getattr(self, "_issued_anchors", {}).get(ref, snap)
         try:
             return snap, snap.element(ref)
@@ -7242,7 +7243,9 @@ class Runtime:
         snapshot still shows that match and its center lies inside the
         window. Otherwise the search scrolls back toward the row and
         checks again. The ref and the bounds are from that confirming
-        snapshot, not from the pre-scroll one.
+        snapshot, not from the pre-scroll one. Only returned matches (or the
+        container ref in a miss report) acquire new bindings; internal reads
+        preserve the identity of previously issued row refs.
 
         In-app find is refused before input for containers with opaque
         regions, whose matches cannot be verified and could leave document
@@ -7487,6 +7490,7 @@ class Runtime:
             if kind != "visible":
                 return kind, None
             visible = visible_matches(later)
+            self._note_issued(later, {el.ref for el in visible})
             return "found", (
                 f"found after {scrolls_issued} scroll(s):\n"
                 f"{observe.render_matches(later, visible)}"
@@ -7799,6 +7803,7 @@ class Runtime:
                 else:
                     title = f" {(anchor.title or '').strip()!r}" if (anchor.title or "").strip() else ""
                     container = f"{anchor.role}{title} ref={anchor.ref}"
+                self._note_issued(shot, {anchor.ref} if anchor is not None else set())
                 shown_budget = budget_s if budget_cap is None else budget_cap
                 why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
                 canvas = next((el.content_note for el in shot.elements if el.content_note), "")
@@ -8192,6 +8197,7 @@ class Runtime:
                         # The report is still one step, not a row that was
                         # already on screen.
                         count = 1 if find_tried else 0
+                        self._note_issued(snap, {el.ref for el in shown})
                         return (
                             f"found after {count} scroll(s):\n"
                             f"{observe.render_matches(snap, shown)}"

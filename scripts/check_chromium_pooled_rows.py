@@ -14,7 +14,8 @@ import urllib.request
 
 import websocket
 
-from a11y_computer_use import observe
+from a11y_computer_use import observe, safety
+from a11y_computer_use.server import Runtime
 from a11y_computer_use.drivers import _atspi
 from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
@@ -92,6 +93,33 @@ def main() -> None:
                 current = driver._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
                 assert current[0][1] == "Row 00050", current
                 assert evaluate("window.clicks || 0") == 0
+                evaluate("document.querySelector('#list').scrollTop = 0")
+                time.sleep(.5)
+                store = safety.PermissionStore(Path(profile) / "permissions.json")
+                store.set_tier("chrome", safety.Tier.FULL)
+                with Runtime(driver=driver, store=store,
+                             audit=safety.AuditLog(Path(profile) / "audit")) as runtime:
+                    result = runtime.find("chrome", text="Row 00010")
+                    issued = runtime._last_issued
+                    row = next(el for el in issued.elements
+                               if el.title == "Row 00010" and el.role == "AXStaticText")
+                    assert row.ref in result
+                    result = runtime.scroll_to_find("chrome", text="Row 00300", max_scrolls=8)
+                    print(result)
+                    assert runtime._anchor(row.ref)[0] is issued
+                    assert evaluate("document.querySelector('#list').scrollTop") > 0
+                    try:
+                        runtime.click(ref=row.ref, verify=True)
+                    except ComputerUseError as exc:
+                        assert exc.code is ErrorCode.STALE_REF
+                        assert exc.detail["reason"] == "target_changed"
+                        assert exc.detail["outcome"] == "refused"
+                    else:
+                        raise AssertionError("find -> scroll_to_find -> click accepted recycled row")
+                    assert evaluate("window.clicks || 0") == 0
+                    assert evaluate("document.querySelector('h1').textContent") == "Nothing selected"
+                    print("PASS: Runtime find -> scroll_to_find -> click refuses original ref; "
+                          "zero DOM clicks and Nothing selected")
                 print("PASS: Row 00010 -> Row 00050 on the same native object; "
                       "resolve/click return stale_ref target_changed; zero DOM clicks")
             finally:
