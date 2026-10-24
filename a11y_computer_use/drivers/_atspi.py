@@ -4472,6 +4472,8 @@ class ATSPIAccessor:
         if role_str == "text" and _state_has(node, "SINGLE_LINE") and not _state_has(node, "MULTI_LINE"):
             role = "AXTextField"
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
+        if is_modal(node, attrs=attrs):
+            self._active_modals.append(node)
         # Chromium maps <input> and <textarea> both to entry. MULTI_LINE,
         # or a multiline attribute, is the textarea.
         if role_str == "entry" and _entry_is_multiline(node, attrs):
@@ -21643,6 +21645,26 @@ def _modal_collection(root, *, split: bool = False):
         except Exception:
             return None
     return None
+
+
+def snapshot_top_level_modals(root) -> list:
+    """Inspect only the root and its application's immediate children.
+
+    Recursive Collection queries materialize virtual GTK rows. Descendant
+    modals are collected by ATSPIAccessor.read during the existing pruned walk.
+    Never run an additional subtree search for snapshot modal discovery.
+    """
+    application = next((node for node in _ancestor_chain(root)
+                        if _role_name(node) == "application"), None)
+    candidates = [root]
+    if application is not None and _ancestor_key(application) != _ancestor_key(root):
+        if _chromium_app(root):
+            # Preserve the outer snapshot's CHILDREN-cache bypass.
+            candidates.extend(child for i in range(max(0, _child_count(application)))
+                              if (child := _child_at(application, i)) is not None)
+        else:
+            candidates.extend(_fresh_application_children(application))
+    return [node for node in candidates if is_modal(node)]
 
 
 def active_modals(root, *, fallback: bool = True) -> list:

@@ -1704,7 +1704,8 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
-                    accessor._active_modals = _atspi.active_modals(node, fallback=False)
+                    accessor._active_modals = (_atspi.active_modals(node, fallback=False) if seek else
+                                               _atspi.snapshot_top_level_modals(node))
                     # Discovery/search must not scroll the inert background.
                     blocked = _atspi.outside_modals(node, accessor._active_modals)
                     accessor._table_seek = None if blocked else self._table_seek
@@ -1732,6 +1733,16 @@ class LinuxDriver:
                                 observe.ax_handle_for(snap.snapshot_id, el.ref),
                                 cache=accessor._row_identity_cache,
                             )) for el in snap.elements
+                        ))
+                    # A modal may appear after its background in traversal, or
+                    # be a native sibling outside this snapshot's root.
+                    if accessor._active_modals:
+                        snap = replace(snap, elements=tuple(
+                            replace(el, blocked_by_modal=True, clickable=False, editable=False)
+                            if _atspi.outside_modals(
+                                observe.ax_handle_for(snap.snapshot_id, el.ref),
+                                accessor._active_modals,
+                            ) else el for el in snap.elements
                         ))
                     _atspi.note_browser_bar(node, snap.elements)
                     return snap

@@ -19832,3 +19832,39 @@ def test_native_control_identity_survives_rename_and_flattening(fake_atspi, monk
         assert raw.node_identity == expected
         assert snap.elements[0].node_identity == expected
         assert snap.elements[0].title == name
+
+
+def test_snapshot_50k_rows_never_queries_collection(fake_atspi, monkeypatch):
+    """Modal discovery must not materialize rows omitted by the snapshot walk."""
+    window, table, _, _ = _large_gtk_tree(rows=50000)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    queries = []
+    reads = []
+
+    class Collection:
+        def get_matches(self, *args):
+            queries.append(args)
+            return []
+
+    def collection(node):
+        queries.append(node)
+        return Collection()
+    monkeypatch.setattr(_Acc, "get_collection_iface", collection, raising=False)
+    native_child = _Acc.get_child_at_index
+    def child(node, index):
+        reads.append((node, index))
+        return native_child(node, index)
+    monkeypatch.setattr(_Acc, "get_child_at_index", child)
+    native_cell = table.get_accessible_at
+    def cell(row, col):
+        reads.append((row, col))
+        return native_cell(row, col)
+    table.get_accessible_at = cell
+    for _ in range(2):
+        reads.clear()
+        snap = driver.snapshot(Scope.WINDOW, "treeprobe")
+        assert queries == []
+        assert "ROW-00000" in _gtk_row_titles(snap)
+        assert "ROW-00019" in _gtk_row_titles(snap)
+        assert len(reads) <= 10 * len(snap.elements)

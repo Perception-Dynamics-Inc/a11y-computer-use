@@ -1207,6 +1207,12 @@ does not retry a modal refusal through another input method. If the bounded
 native fallback cannot establish the modal boundary, input is refused with
 `modal_boundary_unavailable`.
 
+Ordinary snapshots inspect application top-level children and collect modal
+candidates from nodes the pruned walk already reads. They apply background
+blocking after the walk, without a recursive Collection query or a separate
+search through table, tree, or list rows. Search operations that scroll content
+retain the input-time modal check before revealing a match.
+
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
 and queries subtrees with more than 64 children before walking their rows.

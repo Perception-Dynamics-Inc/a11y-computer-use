@@ -562,3 +562,5 @@
 
 
 - 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
+
+- 2026-10-25 (#1045 repair): A window-wide modal Collection query materializes GTK TreeView rows just like document URL discovery; removing only one query leaves the first-snapshot regression. Discover snapshot modals from application children and already-visited nodes, then mark emitted background handles after the walk. Preserve input-time discovery for actions and search-driven scrolling. The private GTK3 20k-row probe returned a full first snapshot in 0.312 s after both queries were removed from ordinary snapshots.
