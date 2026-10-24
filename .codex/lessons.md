@@ -560,3 +560,5 @@
 
 - 2026-10-24 (#1047): GTK 4 text ref clicks must bypass the editable grab_focus shortcut in press_element. Return an exact no-dispatch receipt so Runtime reaches the existing geometry-checked pointer path and read-only focus verification; testing LinuxDriver.click alone misses the default AX-preferred route.
 - 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
+
+- 2026-10-25 (#1057): Opening a menu inserts new menu items into refs previously held by unrelated controls. Rebind newly exposed items on public issuance under an unchanged menu identity; retain changed-target guards for existing items and internal reads. Blanket retention across public snapshots poisons fresh menu refs.
