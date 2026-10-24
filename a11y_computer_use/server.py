@@ -2862,7 +2862,8 @@ class Runtime:
             return None
         chosen = scope or getattr(current, "scope", None) or Scope.WINDOW
         try:
-            snap = self.driver.snapshot(chosen, app)
+            reader = getattr(self.driver, "effect_snapshot", None)
+            snap = reader(chosen, app) if callable(reader) else self.driver.snapshot(chosen, app)
         except Exception:
             return None
         epoch = getattr(current, "snapshot_id", None)
