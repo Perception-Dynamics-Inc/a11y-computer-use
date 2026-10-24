@@ -1144,10 +1144,7 @@ def drag_drop_verdict(
         return "unverifiable", "the text selection could not be read; re-observe before further action"
     if getattr(start, "role", "") in {"opaque_region", "AXCanvas", "AXImage"}:
         return "unverifiable", "the painted drag effect could not be read; re-observe before further action"
-    comparable = (
-        file_landed is False
-        or (before is not None and after is not None and start is not None)
-    )
+    comparable = before is not None and after is not None and start is not None
     if comparable:
         return "suspected_noop", "the drop was not confirmed"
     return "unverifiable", "the drop was not confirmed because its effect could not be read"
