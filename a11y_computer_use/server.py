@@ -3666,6 +3666,8 @@ class Runtime:
         if last is None or last.app != app or instance_changed or document_changed:
             anchors = {}
             changed = {}
+            self._verified_click_names = {}
+        renames = getattr(self, "_verified_click_names", {})
         identity_indexes = {}
         for element in snap.elements:
             if refs is None or element.ref in refs:
@@ -3687,11 +3689,30 @@ class Runtime:
                             identity_indexes[source.snapshot_id] = {el.ref: el for el in source.elements}
                     old_identity = self._issued_identity(identity_indexes[old.snapshot_id], element.ref)
                     new_identity = self._issued_identity(identity_indexes[snap.snapshot_id], element.ref)
-                    if old_identity != new_identity:
+                    verified_name = renames.get(element.ref)
+                    verified_rename = (
+                        verified_name is not None and verified_name[0] is old
+                        and verified_name[1] == new_identity
+                    )
+                    # A public observation can re-issue a renamed native
+                    # control even when no Runtime action caused the rename.
+                    # Require the same node, role, row and semantic ancestry;
+                    # a reused ref/DOM id alone is not evidence of continuity.
+                    same_node_rename = False
+                    if (
+                        old_identity != new_identity and prior.title != element.title
+                        and prior.node_identity and prior.node_identity == element.node_identity
+                        and prior.actionable and element.actionable
+                    ):
+                        normalized = dict(identity_indexes[snap.snapshot_id])
+                        normalized[element.ref] = replace(element, title=prior.title)
+                        same_node_rename = old_identity == self._issued_identity(normalized, element.ref)
+                    if old_identity != new_identity and not (verified_rename or same_node_rename):
                         changed[element.ref] = snap
                         continue
                 changed.pop(element.ref, None)
                 anchors[element.ref] = snap
+                renames.pop(element.ref, None)
         self._changed_snapshot_refs = changed
         self._issued_anchors = anchors
         self._last_issued = snap
@@ -3707,15 +3728,22 @@ class Runtime:
         """Target semantics and ancestry, excluding ancestor UI state.
 
         Firefox label ancestors can echo the value of their child input.
-        Window titles also change with edits. Neither identifies that child;
-        the addressed element's own name and every captured row identity do.
+        Window/document titles also change with edits. Native context identity
+        replaces those names, including documents exposed as AXGroup. Neither
+        mutable title identifies a child; control names, semantic container
+        names and every captured row identity still do.
         """
         chain = []
         seen = set()
         while ref in elements and ref not in seen:
             seen.add(ref)
             el = elements[ref]
-            chain.append((el.role, "" if chain and el.role in {"AXWindow", "AXStaticText"} else el.title, el.row_identity))
+            mutable_title = (
+                el.role == "AXWindow" or bool(el.context_identity)
+                or (bool(chain) and el.role == "AXStaticText")
+            )
+            chain.append((el.role, "" if mutable_title else el.title,
+                          el.row_identity, el.context_identity, el.instance_id, el.stable_id))
             ref = el.parent
         return tuple(chain)
 
@@ -5915,6 +5943,32 @@ class Runtime:
             verdict=verdict,
             cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
+        # A verified click may rename its own button (Count 0 -> Count 1).
+        # Authorize that exact observed identity only when a later public
+        # snapshot issues it. Internal effect reads must not rebind old refs.
+        if (
+            ref is not None and isinstance(target, Element)
+            and not activated and result.outcome == "confirmed"
+        ):
+            baseline = getattr(self, "_action_baseline", None)
+            capture = baseline.get("capture") if isinstance(baseline, dict) else None
+            after = capture.get("snap") if isinstance(capture, dict) else None
+            issued = getattr(self, "_issued_anchors", {}).get(ref)
+            if isinstance(after, Snapshot) and issued is not None and after.app == issued.app:
+                old_nodes = {el.ref: el for el in issued.elements}
+                new_nodes = {el.ref: el for el in after.elements}
+                old = old_nodes.get(ref)
+                fresh = new_nodes.get(ref)
+                if (
+                    old is not None and fresh is not None
+                    and old.role == "AXButton" and old.title != fresh.title
+                ):
+                    normalized = dict(new_nodes)
+                    normalized[ref] = replace(fresh, title=old.title)
+                    if self._issued_identity(old_nodes, ref) == self._issued_identity(normalized, ref):
+                        renames = getattr(self, "_verified_click_names", {})
+                        renames[ref] = (issued, self._issued_identity(new_nodes, ref))
+                        self._verified_click_names = renames
         # The pointer still hit the target's center. A cover that changed
         # while the target did not is not a click on the target.
         if (

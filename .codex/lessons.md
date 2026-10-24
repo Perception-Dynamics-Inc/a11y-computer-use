@@ -537,6 +537,13 @@
 - 2026-10-24 (PR #1020 main integration): Ref identity retention (#1014) and modal boundary enforcement (#1013) are independent safety checks. Preserve both when merging, including the standalone iframe probe and both documentation sections; run Runtime regressions with modal and retained-anchor coverage together.
 - 2026-10-24 (PR #1022 main integration): Scoped pre-stroke drag evidence and retained snapshot ref identity protect separate action phases. Preserve both regression groups when resolving appended-test conflicts, and verify Runtime drag still resolves issued endpoints through the retained-anchor guard before taking its scoped probe.
 
+- 2026-10-24 (#1039): Chromium document titles appear on AXGroup ancestors as well as AXWindow. Excluding only window names leaves fresh refs poisoned after document.title changes. Carry native window/document role + bus/object identity through flattening; exclude only those context names, retain semantic container names and row identity, and verify the #1014 iframe-button-to-group refusal alongside title-changing Chrome and Electron actions.
+
+- 2026-10-24 (PR #1042 repair): Synthetic ATSPIAccessor metadata tests that include dialogs must use the fake_atspi fixture: dialogs legitimately probe Text/Value, unlike no-value window/group roles. Block gi in the regression to expose missing fixture coverage on Linux too; preserve native value reads and all metadata assertions rather than changing production behavior to accommodate a test double.
+
+- 2026-10-24 (PR #1042 rename repair): A public snapshot must rebind a renamed actionable control when its native bus/object identity proves continuity; a prior verified Runtime click is not required for timer/user updates. Keep role, semantic ancestry and pooled-row identity checks. Use native node identity only to authorize the rename, not as a universal ref guard: Chromium can recreate the original iframe button after a modal closes. Verify both external Count/Play/Follow renames and modal refusal/restoration; avoid copying the snapshot index for unchanged nodes.
+
+
 - 2026-10-24 (PR #1020 drag integration): Modal input gating and scoped pre-stroke drag evidence protect separate phases. Preserve both appended Linux regression groups and keep the scoped drag documentation with drag verification when merging main.
 
 - 2026-10-24 (PR #1020 keyboard timing): Check fresh modal presence before searching a whole document for its focused descendant. Without a modal there is no ancestry boundary to test; when one exists, retain focused-target discovery and the final fresh refusal check. Pin both paths with regressions rather than relaxing scoped-key timing limits.
@@ -552,3 +559,4 @@
 - 2026-10-24 (PR #1020 observation-cost merge): Chromium Collection-based list discovery and emitted-ref identity binding reduce snapshot reads independently of modal input checks. Preserve both appended regression groups when merging and run the full Linux synthetic and Runtime suites together.
 
 - 2026-10-24 (#1047): GTK 4 text ref clicks must bypass the editable grab_focus shortcut in press_element. Return an exact no-dispatch receipt so Runtime reaches the existing geometry-checked pointer path and read-only focus verification; testing LinuxDriver.click alone misses the default AX-preferred route.
+- 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
