@@ -859,7 +859,7 @@ def _scroll_anchor(snap):
         seen = set()
         while el is not None and el.ref not in seen:
             seen.add(el.ref)
-            if el.role in ("AXMenuBar", "AXToolbar"):
+            if not el.scroll_candidate or el.role in ("AXMenuBar", "AXToolbar"):
                 return False
             el = by_ref.get(el.parent)
         return True

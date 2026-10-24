@@ -5463,3 +5463,25 @@ def test_find_omitted_bindings_reset_only_for_observed_new_instance(
             assert anchor is name
             assert runtime._resolve("e34", "set_value")[1] is new_name
         assert mocked_driver["click"] == []
+
+
+@pytest.mark.parametrize("role", ["AXMenu", "AXList", "AXScrollArea"])
+def test_scroll_anchor_excludes_closed_menu_descendants_without_hiding_find(role) -> None:
+    """#991: scroll eligibility cannot remove discoverable popup options."""
+    window = Element(ref="w", role="AXWindow", title="", value=None,
+                     bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s")
+    strip = Element(ref="strip", role="AXGroup", title="strip", value=None,
+                    bounds=Bounds(0, 0, 100, 500, 60), snapshot_id="s", parent="w")
+    menu = Element(ref="menu", role="AXMenu", title="", value=None,
+                   bounds=Bounds(0, 0, 0, 100, 75), snapshot_id="s", parent="w",
+                   scroll_candidate=False)
+    option = Element(ref="option", role=role, title="Lemon", value=None,
+                     bounds=Bounds(0, 0, 0, 100, 25), snapshot_id="s", parent="menu")
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1,
+                    created_at=0.0, displays=(Display(0, 1000, 700, 1.0, True),),
+                    elements=(window, strip, menu, option))
+    assert server._scroll_anchor(snap) == strip
+    assert observe.find_elements(snap, text="Lemon") == (option,)
+    opened = dataclasses.replace(menu, scroll_candidate=True)
+    snap = dataclasses.replace(snap, elements=(window, strip, opened, option))
+    assert server._scroll_anchor(snap).ref in {"menu", "option"}

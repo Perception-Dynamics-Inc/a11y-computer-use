@@ -273,6 +273,8 @@ class Element:
     enabled: bool = True
     focused: bool = False
     default: bool = False
+    # Eligibility for automatic scrolling; does not hide snapshot/search nodes.
+    scroll_candidate: bool = True
     form_id: str | None = None
     clickable: bool = False
     editable: bool = False
