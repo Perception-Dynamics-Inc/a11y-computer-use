@@ -19001,3 +19001,80 @@ def test_chromium_pooled_button_rechecks_after_window_preparation(fake_atspi, mo
     assert exc.value.code is ErrorCode.STALE_REF
     assert exc.value.detail["reason"] == "target_changed"
     assert sent == []
+
+
+def test_drag_evidence_reads_only_windows_and_endpoints(monkeypatch):
+    """A large app must not add another full AT-SPI walk per stroke."""
+    from dataclasses import replace
+    from a11y_computer_use.drivers import _actionable
+    nodes = {
+        'window': RawNode('AXWindow', title='files', position=(0, 0), size=(400, 300)),
+        'source': RawNode('AXCell', title='Alpha', position=(20, 40), size=(100, 20)),
+        'target': RawNode('AXCell', title='Delta', position=(20, 80), size=(100, 20)),
+    }
+    reads = []
+    class Native:
+        def read(self, node):
+            reads.append(node)
+            return nodes[node]
+        def children(self, node):
+            pytest.fail('pre-stroke evidence traversed descendants')
+    monkeypatch.setattr(_atspi, 'ATSPIAccessor', Native)
+    monkeypatch.setattr(_atspi, 'find_root', lambda *args: 'app')
+    monkeypatch.setattr(_atspi, 'snapshot_window_list', lambda root: ['window'])
+    monkeypatch.setattr(_atspi, 'primary_geometry', lambda: [DisplayGeometry(Display(0, 1280, 800, 1, True), (0, 0))])
+    monkeypatch.setattr(_actionable, 'refresh_cached_tree', lambda node: None)
+    monkeypatch.setattr(observe, 'ax_handle_for', lambda epoch, ref: {'e2': 'source', 'e3': 'target'}[ref])
+    class Initial(Native):
+        def children(self, node):
+            return ()
+    baseline = build_snapshot('window', Initial(), scope=Scope.WINDOW, app='files', pid=1,
+                              geometry=[DisplayGeometry(Display(0, 1280, 800, 1, True), (0, 0))])
+    source = replace(baseline.elements[0], ref='e2', role='AXCell', title='Alpha', parent='e1')
+    target = replace(source, ref='e3', title='Delta')
+    baseline = replace(baseline, elements=(*baseline.elements, source, target,
+        *(replace(source, ref=f'extra-{i}') for i in range(1000))))
+    d = LinuxDriver()
+    monkeypatch.setattr(d, '_run', lambda fn: fn())
+    reads.clear()
+    result = d.drag_snapshot(Scope.WINDOW, 'files', baseline, source, target)
+    assert reads == ['window', 'source', 'target']
+    assert len(result.elements) == len(baseline.elements)
+    assert result.element('e2').title == 'Alpha'
+
+
+def test_drag_overlay_discards_closed_dialog_controls(monkeypatch):
+    from dataclasses import replace
+    from a11y_computer_use import outcome
+    from a11y_computer_use.drivers import _actionable
+    raw = RawNode('AXDialog', title='Screenshot', position=(0, 0), size=(400, 300))
+    class Initial:
+        def read(self, node):
+            return raw
+        def children(self, node):
+            return ()
+    geometry = [DisplayGeometry(Display(0, 1280, 800, 1, True), (0, 0))]
+    options = build_snapshot('options', Initial(), scope=Scope.WINDOW,
+                             app='screenshooter', pid=1, geometry=geometry)
+    control = replace(options.elements[0], ref='e2', role='AXButton', title='OK', parent='e1')
+    options = replace(options, elements=(*options.elements, control))
+    reads = []
+    class Native(Initial):
+        def read(self, node):
+            reads.append(node)
+            return RawNode('AXGroup', title='screenshooter', enabled=False)
+    monkeypatch.setattr(_atspi, 'ATSPIAccessor', Native)
+    monkeypatch.setattr(_atspi, 'find_root', lambda *args: 'app')
+    monkeypatch.setattr(_atspi, 'snapshot_window_list', lambda root: [root])
+    monkeypatch.setattr(_atspi, 'primary_geometry', lambda: geometry)
+    monkeypatch.setattr(_actionable, 'refresh_cached_tree', lambda node: None)
+    d = LinuxDriver()
+    monkeypatch.setattr(d, '_run', lambda fn: fn())
+    a, b = Point(0, 200, 150), Point(0, 800, 350)
+    before = d.drag_snapshot(Scope.WINDOW, 'screenshooter', options, a, b)
+    assert reads == ['app']
+    assert not any(e.title == 'OK' for e in before.elements)
+    # The real overlay may have no geometry and thus no point-addressed node.
+    start = outcome.element_at_point(before, a)
+    assert outcome.drag_drop_verdict(before, options, start)[0] == 'confirmed'
+    assert outcome.drag_drop_verdict(before, before, start)[0] == 'unverifiable'
