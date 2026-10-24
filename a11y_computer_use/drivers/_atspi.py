@@ -4576,6 +4576,14 @@ class ATSPIAccessor:
             label = _plain_accessible_name(_labelled_by_name(node))
             name = (_strip_label_colon(label) if label else
                     _gtk_row_label_name(node, str(name)))
+            # GtkScale copies its drawn (possibly rounded) number into the
+            # description. Shared snapshots fall back to that field as the
+            # title, making an unlabeled scale stale after its own write.
+            # Keep the native Value as the value, never as an identity label.
+            if (role_str == "slider" and not name.strip()
+                    and re.fullmatch(r"\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?\s*",
+                                     description)):
+                description = ""
         if role == "AXMenuItem" and not str(name).strip():
             # GTK 4 Gio.Menu labels live on LABELLED_BY targets, sometimes
             # only as Text rather than an accessible name.

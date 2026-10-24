@@ -18819,3 +18819,64 @@ def test_chrome_select_popup_does_not_displace_horizontal_scroll_anchor(
     from a11y_computer_use.observe import find_elements
     assert [el.title for el in find_elements(shot, text="one")] == ["one"]
     assert "First" in {el.title for el in shot.elements}
+
+
+@pytest.mark.parametrize("drawn", ["{value:g}", "{value:.1f}"])
+def test_gtk_unlabelled_scale_value_is_not_ref_identity(
+    fake_atspi, monkeypatch, tmp_path, drawn,
+):
+    """Two native Value writes confirm through snapshots using the original ref."""
+    from a11y_computer_use import safety, server
+
+    slider = _place_row(_Acc("slider", value=10, minimum=0, maximum=100,
+                            states=("ENABLED", "VISIBLE", "SHOWING")),
+                        20, 40, 240, 30)
+    slider.get_description = lambda: drawn.format(value=slider.value)
+    window = _adopt(_Acc("frame", name="Scale", width=640, height=480), slider)
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *args: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *args: None)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("scale", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    runtime._recheck_target = lambda *args, **kwargs: None
+    runtime._cover_owner = lambda *args: None
+    shot = driver.snapshot(Scope.WINDOW, "scale")
+    runtime._current = shot
+    target = next(el for el in shot.elements if el.role == "AXSlider")
+    assert target.title == ""
+    assert observe.ax_handle_for(target.snapshot_id, target.ref) is slider
+    for wanted in ("75", "20"):
+        result = runtime.set_value(target.ref, wanted)
+        assert result.outcome == "confirmed"
+        assert "read back" in result.evidence
+        assert slider.value == float(wanted)
+        live = driver.snapshot(Scope.WINDOW, "scale")
+        matched = observe.resolve_ref(shot, target.ref, live=live)
+        assert matched.title == ""
+        assert float(matched.value) == float(wanted)
+
+
+@pytest.mark.parametrize("toolkit,name,description,expected", [
+    ("gtk", "", "12,5", ""),
+    ("gtk", "", "-1.25e+1", ""),
+    ("gtk", "Volume", "75", "Volume"),
+    ("gtk", "", "Output volume", "Output volume"),
+    ("qt", "", "75", "75"),
+])
+def test_scale_description_filter_preserves_labels(
+    fake_atspi, monkeypatch, toolkit, name, description, expected,
+):
+    slider = _Acc("slider", name=name, value=75, minimum=0, maximum=100,
+                  states=("ENABLED", "VISIBLE", "SHOWING"), width=200, height=30)
+    slider.get_description = lambda: description
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: toolkit)
+    snap = build_snapshot(slider, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="scale", pid=996, geometry=_geometry())
+    target, = snap.elements
+    assert target.title == expected
+    assert float(target.value) == 75

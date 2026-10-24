@@ -690,8 +690,12 @@ Unnamed GTK sliders and spin buttons use their AT-SPI `labelled-by` label as
 their title, before the description fallback. Without a relation, a measured
 left-hand label in the same parent and row supplies the title when the nearest
 candidate is unambiguous. Explicit accessible names remain authoritative; numeric
-values and descriptions remain separate from the title. This naming behavior is
-covered by synthetic tests; native GTK verification is pending.
+values remain separate from the title. An otherwise unnamed GTK slider's purely
+numeric description (GTK's drawn value) is omitted rather than used as a fallback
+title, so changing the value preserves its ref identity and permits snapshot
+read-back. Nonnumeric descriptions remain available as fallback titles. This
+naming behavior and consecutive value writes using the original ref are covered
+by synthetic tests; native GTK verification is pending.
 
 
 ### Same-app window covers in discovery
