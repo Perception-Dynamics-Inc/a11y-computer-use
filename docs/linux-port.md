@@ -1190,6 +1190,37 @@ can confirm a new dialog; without readable transition/effect evidence the result
 is `unverifiable` with `next: []`, never a coordinate retry. Previously observed
 controls in a closed window are excluded from the pre-stroke evidence.
 
+### Modal input boundary
+
+Showing dialogs with AT-SPI `MODAL` state or a reported `modal=true` /
+`aria-modal=true` attribute block input to controls outside their subtree.
+Snapshots label the dialog `(modal)` and background controls
+`(outside_active_modal)` without click/edit actionability; `find` uses the
+same flags. Closing the dialog restores background actionability.
+
+The Runtime checks native modal ancestry after permission and focus checks,
+including agent and `act` batch calls. Ref presses, value writes, and pointer
+clicks also check at the Linux driver boundary. An outside target returns
+`unsupported` with reason `outside_active_modal` before input. Coordinates
+must hit a descendant of the modal; they are never moved inside it. The agent
+does not retry a modal refusal through another input method. If the bounded
+native fallback cannot establish the modal boundary, input is refused with
+`modal_boundary_unavailable`.
+
+Collection discovery is scoped to the addressed window, with native sibling
+windows checked separately. At input time, discovery walks structural containers
+and queries subtrees with more than 64 children before walking their rows.
+This query threshold is independent of the unchanged 4,096-node fallback
+safety budget: ordinary web lists must not add hundreds of remote reads to
+every input. Failed queries still use the bounded walk or refuse. LibreOffice uses
+structural discovery that excludes Writer document content and virtual
+spreadsheet cells, since walking document content adds a full scan to scoped
+keys and a Collection scan can materialize the entire grid. Wide collections can be queried in two complete halves using a reported
+child handle, preserving the pivot and its descendants without extending native
+timeouts or sampling rows. When the optional AT-SPI binding is absent, pointer
+and keyboard input
+retain native window routing; there is no AT-SPI semantic action transport.
+
 
 Snapshot ref identity (#1014): later `desktop_snapshot` calls in both full and
 interactive modes retain an existing ref's role, name, row identity and reported
@@ -1224,3 +1255,11 @@ The title-change check uses a fresh snapshot before each ref action, without
 switch and contenteditable actions. Run `scripts/check_chromium_title_change.py`
 in the same private desktop environment; pass `--electron /path/to/electron`
 to exercise an Electron app instead of Chrome.
+
+
+LibreOffice startup-tip dismissal selects OK/Close only from the observed
+Tip of the Day dialog's subtree, with the native modal boundary still enforced.
+It reports dismissal only after a readable follow-up snapshot shows the dialog
+has closed. A refused press does not send Return to the current focus. Some
+LibreOffice versions show the first-run What's New bar instead of a startup tip;
+that launch has no tip dismissal to report.

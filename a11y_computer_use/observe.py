@@ -236,6 +236,8 @@ class RawNode:
     value: object | None = None
     description: str = ""
     enabled: bool = True
+    modal: bool = False
+    blocked_by_modal: bool = False
     focused: bool = False
     default: bool = False
     # Eligibility for automatic scrolling; does not hide snapshot/search nodes.
@@ -451,6 +453,7 @@ def build_snapshot(
     if root is not None:
         pruned = _prune_root(root, accessor, tuple(geometry))
         _flatten(pruned, None, (), snapshot_id, elements, elisions, handles, full_values)
+    elements = _mark_modal_background(elements)
     _register_epoch(snapshot_id, elisions, handles, full_values)
     return Snapshot(
         snapshot_id=snapshot_id,
@@ -461,6 +464,36 @@ def build_snapshot(
         displays=tuple(g.display for g in geometry),
         elements=tuple(elements),
     )
+
+
+def _mark_modal_background(elements: list[Element]) -> list[Element]:
+    """Keep modal controls reachable and remove background actionability."""
+    by_ref = {el.ref: el for el in elements}
+
+    def ancestry(el):
+        chain = []
+        while el is not None:
+            chain.append(el.ref)
+            el = by_ref.get(el.parent)
+        return chain
+
+    modals = []
+    for modal in elements:
+        if modal.modal:
+            chain = ancestry(modal)
+            window = next((ref for ref in chain if by_ref[ref].role == "AXWindow"), chain[-1])
+            modals.append((modal, window))
+    if not modals:
+        return elements
+    result = []
+    for el in elements:
+        chain = ancestry(el)
+        blocked = el.blocked_by_modal or any(
+            root in chain and modal.ref not in chain for modal, root in modals
+        )
+        result.append(dataclasses.replace(el, clickable=False, editable=False,
+                                         blocked_by_modal=True) if blocked else el)
+    return result
 
 
 def merge_snapshots(snaps: Sequence[Snapshot]) -> Snapshot:
@@ -1550,7 +1583,8 @@ def _identity(el: Element) -> tuple:
     return ("rtp", el.role, el.title, el.path)
 
 
-_DIFF_ATTRS = ("value", "title", "enabled", "focused", "checked", "selected", "expanded")
+_DIFF_ATTRS = ("value", "title", "enabled", "focused", "checked", "selected", "expanded",
+               "modal", "blocked_by_modal")
 
 
 def _state_changes(a: Element, b: Element) -> dict[str, tuple]:
@@ -2171,6 +2205,8 @@ def _target_flags(raw: RawNode) -> tuple[bool, bool, bool]:
     and a later coordinate click uses those bounds. Every other node uses
     `_flags`.
     """
+    if raw.blocked_by_modal:
+        return False, False, _flags(raw)[2]
     if raw.role == OPAQUE_ROLE:
         return True, False, False
     clickable, editable, secure = _flags(raw)
@@ -2876,6 +2912,8 @@ def _flatten(
             parent=parent_ref,
             path=path,
             enabled=node.raw.enabled,
+            modal=node.raw.modal,
+            blocked_by_modal=node.raw.blocked_by_modal,
             focused=node.raw.focused,
             default=node.raw.default,
             form_id=node.raw.form_id,
@@ -3066,6 +3104,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         name
         for name, on in (
             ("click", show_click),
+            ("modal", el.modal),
+            ("outside_active_modal", el.blocked_by_modal),
             ("default", el.default),
             ("edit", el.editable),
             ("secure", el.secure),
@@ -3239,6 +3279,8 @@ def attach_offscreen_matches(
                 parent=parent_ref,
                 path=(parent.path if parent is not None else ()) + (raw.role,),
                 enabled=raw.enabled,
+                modal=raw.modal,
+                blocked_by_modal=raw.blocked_by_modal,
                 focused=raw.focused,
                 clickable=clickable,
                 editable=editable,
