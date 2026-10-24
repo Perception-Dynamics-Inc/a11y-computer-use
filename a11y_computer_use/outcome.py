@@ -1133,10 +1133,12 @@ def drag_drop_verdict(
                 return "unverifiable", "the source is no longer visible; re-observe before any further action"
     if drag_item_moved(before, after, start, end):
         return "confirmed", "the item moved"
-    if before is not None and after is not None and start is not None and end is None:
+    if before is not None and after is not None and start is not None:
         current = _match_named(_snap_elements(after), start)
+        destination = _match_named(_snap_elements(after), end) if end is not None else None
         previous_at, current_at = _drag_center(start), _drag_center(current)
-        if (previous_at is not None and current_at is not None
+        if ((end is None or _drag_center(end) is None or _drag_center(destination) is None)
+                and previous_at is not None and current_at is not None
                 and any(abs(a - b) > _DRAG_MOVE_PX for a, b in zip(previous_at, current_at))):
             return "unverifiable", "the source moved but the destination could not be read; re-observe"
     if (getattr(start, "role", "") in {"AXStaticText", "AXTextArea", "AXTextField", "AXParagraph"}

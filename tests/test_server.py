@@ -5667,3 +5667,11 @@ def test_drag_unreadable_after_state_never_suggests_retry(tmp_path):
     assert out.outcome == "unverifiable"
     assert "could not be read" in out.evidence
     assert out.next == ()
+
+
+def test_drag_moved_source_and_disappeared_destination_has_no_retry(tmp_path):
+    before = _drag_rows("s0", [("Alpha", 20, 40), ("Delta", 20, 68)])
+    after = _drag_rows("s1", [("Alpha", 300, 40)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "unverifiable"
+    assert out.next == ()
