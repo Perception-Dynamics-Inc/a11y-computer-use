@@ -1241,3 +1241,9 @@ from an iframe and verifies both snapshot modes send no input for the old ref:
 XDG_CACHE_HOME=/tmp/1014-live-cache xvfb-run -a dbus-run-session -- sh -c \
   'xfwm4 --compositor=off >/tmp/1014-wm.log 2>&1 & wm=$!; trap "kill $wm" EXIT; python scripts/check_chromium_iframe_modal.py'
 ```
+
+LibreOffice launch dismisses an observed Tip of the Day only through an OK or
+Close button inside that dialog's snapshot subtree. The normal native modal
+boundary checks remain enabled. A failed press does not send Return to an
+unverified focus, and an unreadable follow-up snapshot does not establish that
+the dialog closed. No dismissal is reported when no tip dialog was observed.
