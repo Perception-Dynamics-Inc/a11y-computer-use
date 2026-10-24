@@ -133,6 +133,19 @@ def main(electron: str | None = None) -> None:
                         assert result.outcome == "confirmed", (name, result.as_dict(), result)
                         assert evaluate("document.title") == expected, (name, result, evaluate("document.title"))
                         print(f"PASS {app}: {name}: {expected}", flush=True)
+
+                    # Rename outside Runtime, so no verified click can authorize
+                    # the next name. Only the new public observation binds it.
+                    for n in range(3):
+                        evaluate(f"document.querySelector('#counter').textContent='Count {n}'")
+                        runtime.desktop_snapshot(app, scope="window", mode="interactive")
+                        target = next(el for el in runtime._current.elements
+                                      if el.title == f"Count {n}" and el.actionable)
+                        assert runtime._anchor(target.ref)[1].title == f"Count {n}"
+                        result = runtime.click(ref=target.ref, verify=True)
+                        assert result.outcome == "confirmed", result.as_dict()
+                        assert evaluate("Number(document.querySelector('#counter').dataset.clicks)") == n + 1
+                        print(f"PASS {app}: Count {n}: fresh renamed ref clicked", flush=True)
             finally:
                 if ws is not None:
                     ws.close()

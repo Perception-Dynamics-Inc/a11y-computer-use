@@ -1199,9 +1199,11 @@ replacement. Re-observing the same control refreshes its binding; mutable values
 and bounds are excluded. Window/document titles use native context identity
 (AT-SPI role, bus and object path) instead of mutable names, including web
 documents exposed as groups (#1039). Other named containers and control names
-remain guarded. After a confirmed click, a fresh snapshot may refresh that
-button's verified name change (for example, `Count 0` to `Count 1`). The
-observed role, ancestry and row identity must still match; an internal effect
+remain guarded. A fresh snapshot can refresh an actionable control's name
+(for example, `Count 0` to `Count 1` or `Play` to `Pause`) when its native
+bus/object identity is unchanged, even if a timer or the user caused the rename.
+Without native identity, the existing confirmed-click name verification is
+required. The observed role, ancestry and row identity must still match; an internal effect
 read alone does not issue a new binding. Ancestor text labels that echo input
 values do not identify a child control. An unnamed, non-actionable layout placeholder may
 refresh to a newly populated control; previously actionable controls retain

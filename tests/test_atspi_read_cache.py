@@ -6,6 +6,7 @@ the mutators that drop the cache before the tree is read again.
 """
 
 from __future__ import annotations
+import pytest
 
 from a11y_computer_use.drivers import _atspi
 
@@ -415,3 +416,31 @@ def test_firefox_visible_refresh_does_not_invalidate_child_cache(monkeypatch) ->
         _atspi.ATSPIAccessor().refresh_visible(node)
         assert _atspi._call_first(node, ("get_child_count",)) == 2
     assert node.count_calls == 1
+
+
+@pytest.mark.parametrize("relation", ["same-native", "other-parent", "other-bus", "unknown"])
+def test_parent_application_sharing_requires_native_parent_and_bus(monkeypatch, relation):
+    """Fresh GI wrappers must share reads without crossing application owners."""
+    parent = _Node(role="section")
+    wrapper = _Node(role="section")
+    child = _Node()
+    owner = object()
+    parent.get_application = lambda: owner
+    child.get_parent = lambda: wrapper
+    calls = []
+    child.get_application = lambda: calls.append(1) or owner
+    keys = {
+        id(parent): (":1.42", "/parent"),
+        id(wrapper): (":1.42", "/parent" if relation != "other-parent" else "/elsewhere"),
+        id(child): ((":1.99" if relation == "other-bus" else ":1.42"), "/child"),
+    }
+    if relation == "unknown":
+        keys[id(wrapper)] = None
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: keys.get(id(node)))
+    with _atspi.read_cache():
+        _atspi._share_parent_application(parent, [child])
+        assert _atspi._call_first(child, ("get_application",)) is owner
+        assert calls == ([] if relation == "same-native" else [1])
+        _atspi._drop_read_cache()
+        assert _atspi._call_first(child, ("get_application",)) is owner
+    assert len(calls) == (1 if relation == "same-native" else 2)

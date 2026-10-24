@@ -253,6 +253,8 @@ class RawNode:
     row_identity: tuple = ()
     # Native window/document identity, independent of its mutable title.
     context_identity: tuple = ()
+    #: Native node identity, independent of its mutable accessible name.
+    node_identity: tuple = ()
     #: Linux AT-SPI only. Empty on macOS, Windows, and the browser, so those
     #: trees keep today's walk and token budget. ``"page"`` is a Chromium
     #: ``document web``, ``"docframe"`` a ``document frame``, ``"iframe"`` an
@@ -2888,6 +2890,7 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             row_identity=node.raw.row_identity,
             context_identity=node.raw.context_identity,
+            node_identity=node.raw.node_identity,
             instance_id=instance_id,
             document_id=document_id,
             subrole=(
@@ -3245,6 +3248,7 @@ def attach_offscreen_matches(
                 expanded=raw.expanded,
                 stable_id=raw.stable_id or None,
                 row_identity=raw.row_identity,
+                node_identity=raw.node_identity,
                 instance_id=(parent.instance_id if parent is not None else raw.instance_id),
                 document_id=(parent.document_id if parent is not None else raw.document_id),
                 note=raw.note or None,

@@ -6191,3 +6191,91 @@ def test_snapshot_refreshes_verified_counter_name(
             assert runtime._anchor("e2") == (current[0], current[0].element("e2"))
         if replacement is None:
             assert clicks == ["Count 0", "Count 1", "Count 2"]
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff", "find"])
+@pytest.mark.parametrize("names", [("Count 0", "Count 1", "Count 2"),
+                                   ("Play", "Pause", "Play"),
+                                   ("Follow", "Following", "Follow")])
+def test_public_observation_rebinds_same_native_control_after_external_rename(
+    monkeypatch, mocked_driver, store, audit_dir, mode, names,
+):
+    """A timer/user rename needs no preceding verified Runtime click (#1039)."""
+    store.set_tier(APP, safety.Tier.FULL)
+    parent = Element("e1", "AXGroup", "Controls", None, None, "initial")
+    button = Element("e2", "AXButton", names[0], None, Bounds(1, 10, 40, 150, 25),
+                     "initial", parent="e1", clickable=True,
+                     node_identity=(":1.2", "/accessible/button"))
+    current = [dataclasses.replace(build_synthetic_snapshot(), snapshot_id="initial",
+                                   elements=(parent, button))]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "resolve_ref", lambda snap, ref, **kwargs:
+                        observe.rematch_ref(snap, ref, current[0]))
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        for n, name in enumerate(names[1:], 1):
+            renamed = dataclasses.replace(button, title=name, snapshot_id=f"rename-{n}")
+            current[0] = dataclasses.replace(current[0], snapshot_id=f"rename-{n}",
+                                             elements=(parent, renamed))
+            # Before any public observation, the old label remains binding.
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref="e2")
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert len(mocked_driver["click"]) == n - 1
+            if mode == "find":
+                assert "e2" in runtime.find(APP, text=name)
+            else:
+                runtime.desktop_snapshot(APP, mode=mode)
+            assert runtime._anchor("e2") == (current[0], renamed)
+            runtime.click(ref="e2", verify=True)
+            assert len(mocked_driver["click"]) == n
+
+
+@pytest.mark.parametrize("change", ["node", "role", "parent", "row", "missing_node"])
+def test_public_snapshot_native_rename_does_not_authorize_replacement(
+    monkeypatch, mocked_driver, store, audit_dir, change,
+):
+    """Same-slot replacements and pooled rows retain #1014's refusal."""
+    store.set_tier(APP, safety.Tier.FULL)
+    parent = Element("e1", "AXGroup", "Controls", None, None, "before")
+    button = Element("e2", "AXButton", "Keep Draft", None, Bounds(1, 10, 40, 150, 25),
+                     "before", parent="e1", clickable=True, stable_id="button",
+                     node_identity=(":1.2", "/accessible/1"))
+    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
+                                 elements=(parent, button))
+    new = dataclasses.replace(button, title="Delete All", snapshot_id="after")
+    if change == "node":
+        new = dataclasses.replace(new, node_identity=(":1.2", "/accessible/2"))
+    elif change == "missing_node":
+        new = dataclasses.replace(new, node_identity=())
+    elif change == "role":
+        new = dataclasses.replace(new, role="AXGroup", title="", clickable=False)
+    elif change == "parent":
+        parent = dataclasses.replace(parent, title="Another frame")
+    else:
+        new = dataclasses.replace(new, row_identity=(("list item", "Replacement", ()),))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(parent, new))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        for _ in range(2):
+            runtime.desktop_snapshot(APP)
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref="e2")
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert caught.value.detail["reason"] == "target_changed"
+            assert caught.value.detail["outcome"] == "refused"
+            assert mocked_driver["click"] == []
+            assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+
+        # Closing a modal can recreate the original native button. Its exact
+        # original semantics may bind again, as before this rename fix.
+        restored = dataclasses.replace(button, snapshot_id="restored",
+                                       node_identity=(":1.2", "/accessible/restored"))
+        current[0] = dataclasses.replace(before, snapshot_id="restored",
+                                         elements=(before.element("e1"), restored))
+        runtime.desktop_snapshot(APP)
+        assert runtime._anchor("e2") == (current[0], restored)

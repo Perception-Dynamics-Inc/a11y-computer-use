@@ -2862,7 +2862,8 @@ class Runtime:
             return None
         chosen = scope or getattr(current, "scope", None) or Scope.WINDOW
         try:
-            snap = self.driver.snapshot(chosen, app)
+            reader = getattr(self.driver, "effect_snapshot", None)
+            snap = reader(chosen, app) if callable(reader) else self.driver.snapshot(chosen, app)
         except Exception:
             return None
         epoch = getattr(current, "snapshot_id", None)
@@ -3674,7 +3675,20 @@ class Runtime:
                         verified_name is not None and verified_name[0] is old
                         and verified_name[1] == new_identity
                     )
-                    if old_identity != new_identity and not verified_rename:
+                    # A public observation can re-issue a renamed native
+                    # control even when no Runtime action caused the rename.
+                    # Require the same node, role, row and semantic ancestry;
+                    # a reused ref/DOM id alone is not evidence of continuity.
+                    same_node_rename = False
+                    if (
+                        old_identity != new_identity and prior.title != element.title
+                        and prior.node_identity and prior.node_identity == element.node_identity
+                        and prior.actionable and element.actionable
+                    ):
+                        normalized = dict(identity_indexes[snap.snapshot_id])
+                        normalized[element.ref] = replace(element, title=prior.title)
+                        same_node_rename = old_identity == self._issued_identity(normalized, element.ref)
+                    if old_identity != new_identity and not (verified_rename or same_node_rename):
                         changed[element.ref] = snap
                         continue
                 changed.pop(element.ref, None)

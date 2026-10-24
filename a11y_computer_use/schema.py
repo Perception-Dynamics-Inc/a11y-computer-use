@@ -288,6 +288,8 @@ class Element:
     row_identity: tuple = ()
     # Native window/document identity, independent of its mutable title.
     context_identity: tuple = ()
+    #: Native node identity, independent of its mutable accessible name.
+    node_identity: tuple = ()
     instance_id: str | None = None
     document_id: str | None = None
     #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
