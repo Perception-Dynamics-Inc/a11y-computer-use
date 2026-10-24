@@ -1196,8 +1196,16 @@ interactive modes retain an existing ref's role, name, row identity and reported
 parent chain. If that ref number now identifies a different target, input is
 refused with `stale_ref`, reason `target_changed`, even when full mode prints the
 replacement. Re-observing the same control refreshes its binding; mutable values
-and bounds are excluded. Ancestor window titles and text labels that echo input values are mutable
-and do not identify a child control. An unnamed, non-actionable layout placeholder may
+and bounds are excluded. Window/document titles use native context identity
+(AT-SPI role, bus and object path) instead of mutable names, including web
+documents exposed as groups (#1039). Other named containers and control names
+remain guarded. A fresh snapshot can refresh an actionable control's name
+(for example, `Count 0` to `Count 1` or `Play` to `Pause`) when its native
+bus/object identity is unchanged, even if a timer or the user caused the rename.
+Without native identity, the existing confirmed-click name verification is
+required. The observed role, ancestry and row identity must still match; an internal effect
+read alone does not issue a new binding. Ancestor text labels that echo input
+values do not identify a child control. An unnamed, non-actionable layout placeholder may
 refresh to a newly populated control; previously actionable controls retain
 the changed-target refusal. A fresh observation with a different reported
 document URL starts a new ref namespace, as does an observed process restart.
@@ -1210,3 +1218,9 @@ from an iframe and verifies both snapshot modes send no input for the old ref:
 XDG_CACHE_HOME=/tmp/1014-live-cache xvfb-run -a dbus-run-session -- sh -c \
   'xfwm4 --compositor=off >/tmp/1014-wm.log 2>&1 & wm=$!; trap "kill $wm" EXIT; python scripts/check_chromium_iframe_modal.py'
 ```
+
+The title-change check uses a fresh snapshot before each ref action, without
+`find`, and independently reads `document.title` after typing, Save, row, tab,
+switch and contenteditable actions. Run `scripts/check_chromium_title_change.py`
+in the same private desktop environment; pass `--electron /path/to/electron`
+to exercise an Electron app instead of Chrome.

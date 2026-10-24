@@ -4954,6 +4954,8 @@ class ATSPIAccessor:
             platform_editable=entry,
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
+            context_identity=window_context_identity(node, role_str),
+            node_identity=_atspi_wrapper_key(node) or (),
             # Only a group can be suppressed as browser chrome. A button,
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
@@ -5386,6 +5388,19 @@ def app_instance_id(acc) -> str | None:
 
 
 _DOCUMENT_WINDOW_ROLES = frozenset({"frame", "window", "dialog"})
+
+
+def window_context_identity(acc, role: str) -> tuple:
+    """Stable native context for titles that change without replacing controls.
+
+    A document web maps to AXGroup, so the shared role cannot distinguish it
+    from a named semantic container. Never use a Python proxy id as identity
+    across observations; missing native identity keeps ordinary name checks.
+    """
+    if role not in {"frame", "window", "document web", "document frame"}:
+        return ()
+    key = _atspi_wrapper_key(acc)
+    return (role, *key) if key is not None else ()
 
 
 def window_document_id(_acc, role: str, title: str) -> str | None:
