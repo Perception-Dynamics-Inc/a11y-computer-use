@@ -5753,3 +5753,40 @@ def test_selection_verification_reads_the_dispatched_target(tmp_path, monkeypatc
     assert result.outcome == 'confirmed'
     assert d.clicked == [refreshed]
     assert reads == [refreshed, refreshed]
+
+
+@pytest.mark.parametrize("readable", [True, False])
+def test_drag_reads_overlay_instead_of_previous_click_baseline(tmp_path, readable):
+    from dataclasses import replace
+    # The capture-options and result dialogs share a title. The preceding
+    # click can read back before the asynchronous selection overlay appears.
+    stale = _drag_rows("options", [("Select a region", 20, 40)])
+    stale = replace(stale, elements=(replace(stale.elements[0], role="AXDialog", title="Screenshot"), *stale.elements[1:]))
+    overlay = replace(stale, snapshot_id="overlay", elements=(
+        replace(stale.elements[0], title="", bounds=Bounds(0, 0, 0, 1280, 800)),
+    ))
+    after = replace(stale, snapshot_id="result", elements=(
+        stale.elements[0], replace(stale.elements[1], title="Preview"),
+    ))
+    rt = _drag_runtime(tmp_path, overlay if readable else None, after)
+    rt._current = stale
+    rt._remember_baseline(stale)
+    from a11y_computer_use import outcome
+    old_start = outcome.element_at_point(stale, Point(0, 200, 150))
+    old_end = outcome.element_at_point(stale, Point(0, 800, 350))
+    assert outcome.drag_drop_verdict(stale, after, old_start, old_end)[0] == "suspected_noop"
+    strokes = []
+    original = rt.driver.drag
+    def drag(start, end, **kwargs):
+        strokes.append((start, end))
+        original(start, end, **kwargs)
+    rt.driver.drag = drag
+    out = rt.drag(start_x=200, start_y=150, end_x=800, end_y=350)
+    assert out.outcome == ("confirmed" if readable else "unverifiable")
+    assert out.next == ()
+    assert len(strokes) == 1
+    assert strokes[0] == (Point(0, 200, 150), Point(0, 800, 350))
+    if readable:
+        assert out.evidence == "a new window or dialog appeared"
+    else:
+        assert "could not be read" in out.evidence
