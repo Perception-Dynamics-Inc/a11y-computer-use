@@ -5724,3 +5724,32 @@ def test_drag_moved_source_and_disappeared_destination_has_no_retry(tmp_path):
     out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
     assert out.outcome == "unverifiable"
     assert out.next == ()
+
+
+def test_selection_verification_reads_the_dispatched_target(tmp_path, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextField', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    refreshed = replace(el, snapshot_id='fresh-selection')
+    checks = []
+    def recheck(app, target):
+        checks.append(target)
+        if len(checks) == 1:
+            raise ComputerUseError(ErrorCode.FOCUS_CHANGED, 'covered')
+    monkeypatch.setattr(rt, '_recheck_target', recheck)
+    monkeypatch.setattr(rt, '_raise_occluded_click_target', lambda *args: refreshed)
+    reads = []
+    def read(target):
+        reads.append(target)
+        return ((14, 19, 'three'),) if d.clicked else ()
+    d.selection_details = read
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert d.clicked == [refreshed]
+    assert reads == [refreshed, refreshed]

@@ -5511,6 +5511,7 @@ class Runtime:
                             and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
                             and callable(selection_reader))
         selection_before = None
+        selection_target = target
         toggle_probe = None
         probe_toggle = getattr(self.driver, "toggle_click_probe", None)
 
@@ -5529,7 +5530,7 @@ class Runtime:
         raised: list[Element] = []
 
         def execute() -> None:
-            nonlocal before, selection_before, toggle_probe
+            nonlocal before, selection_before, selection_target, toggle_probe
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
@@ -5672,6 +5673,7 @@ class Runtime:
                 self._refuse_secure(act)
                 self._recheck_target(app, act)
             if verify_selection:
+                selection_target = act
                 selection_before = selection_reader(act)
             if callable(probe_toggle):
                 toggle_probe = probe_toggle(act)
@@ -5776,12 +5778,12 @@ class Runtime:
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
         if verify_selection and not activated:
-            selection_after = selection_reader(target)
+            selection_after = selection_reader(selection_target)
             if detailed_selection:
                 deadline = time.monotonic() + 0.3
                 while (not selection_after or selection_after == selection_before) and time.monotonic() < deadline:
                     time.sleep(0.02)
-                    selection_after = selection_reader(target)
+                    selection_after = selection_reader(selection_target)
                 if selection_after and selection_after != selection_before and selection_before is not None:
                     verdict = ("confirmed", f"the text selection changed: {selection_after!r}")
                 elif selection_after is None or selection_before is None:
