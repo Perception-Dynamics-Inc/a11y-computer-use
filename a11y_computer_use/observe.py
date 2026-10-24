@@ -238,6 +238,8 @@ class RawNode:
     enabled: bool = True
     focused: bool = False
     default: bool = False
+    # Eligibility for automatic scrolling; does not hide snapshot/search nodes.
+    scroll_candidate: bool = True
     form_id: str | None = None
     position: tuple[float, float] | None = None
     size: tuple[float, float] | None = None
@@ -2871,6 +2873,7 @@ def _flatten(
             focused=node.raw.focused,
             default=node.raw.default,
             form_id=node.raw.form_id,
+            scroll_candidate=node.raw.scroll_candidate,
             clickable=clickable,
             editable=editable,
             secure=secure,
