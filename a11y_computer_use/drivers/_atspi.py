@@ -118,6 +118,7 @@ _ROLE = {
     "table row": "AXRow",
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",
+    "tool tip": "AXTooltip",
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "progress bar": "AXProgressIndicator",
@@ -2228,7 +2229,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
-    "AXStatusBar", "AXPopover", "AXCalendar", "AXTab",
+    "AXStatusBar", "AXPopover", "AXCalendar", "AXTab", "AXTooltip",
 })
 
 
@@ -4319,6 +4320,18 @@ def _list_item_subtrees(container, rows: list[tuple]) -> list[tuple]:
     return result
 
 
+def chromium_closed_menu_model(node) -> bool:
+    """Exclude stale select models only from automatic scroll discovery."""
+    if _role_name(node) not in {"menu", "popup menu"} or not _chromium_app(node):
+        return False
+    if not _state_has(node, "SHOWING"):
+        return True
+    parent = _parent_of(node)
+    return (parent is not None and _role_name(parent) == "combo box"
+            and _state_has(parent, "EXPANDABLE")
+            and not _state_has(parent, "EXPANDED"))
+
+
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
@@ -4881,6 +4894,7 @@ class ATSPIAccessor:
             title=str(name),
             description=str(description),
             enabled=enabled,
+            scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
             default=role == "AXButton" and _has_default_state(node),
             focusable=focusable,
@@ -5073,16 +5087,6 @@ class ATSPIAccessor:
         # Only a Chromium tree has these. Asking each child walked its
         # parents to the application on every node of a Calc sheet.
         if self._tree_is_chromium(node):
-            # Closed select menus retain children and sometimes on-screen
-            # bounds. They are popup models, not overflow containers; exposing
-            # them lets scroll_to_find choose the menu over the real strip.
-            collapsed_combo = (
-                role == "combo box" and _state_has(node, "EXPANDABLE")
-                and not _state_has(node, "EXPANDED")
-            )
-            kids = [child for child in kids
-                    if _role_name(child) not in {"menu", "popup menu"}
-                    or (_state_has(child, "SHOWING") and not collapsed_combo)]
             kids = [child for child in kids
                     if not chromium_clipped_target(child) or _child_count(child) > 0]
         if self._tree_is_gecko(node):
@@ -15545,6 +15549,79 @@ def chromium_list_row(acc) -> bool:
         return False
 
 
+def chromium_select_option_parent(acc):
+    """Native HTML size/multiple select only; ARIA lists keep exact hit tests."""
+    if acc is None or not _chromium_app(acc):
+        return None
+    if _role_name(acc) != "list item" or _get_attributes(acc).get("tag") != "option":
+        return None
+    parent = _parent_of(acc)
+    if (parent is not None and _role_name(parent) == "list box"
+            and _get_attributes(parent).get("tag") == "select"):
+        return parent
+    return None
+
+
+def chromium_select_selection(parent):
+    """Complete native selected identities, or None for an unreadable set."""
+    _drop_read_cache()
+    _drop_cached_properties(parent)
+    iface = _selection_iface(parent)
+    count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+    if type(count) is not int or not 0 <= count <= _MAX_CHILDREN_FETCH:
+        return None
+    selected = set()
+    for index in range(count):
+        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), index)
+        if child is None:
+            return None
+        selected.add(_ancestor_key(child))
+    return frozenset(selected) if len(selected) == count else None
+
+
+def _chromium_select_option_at_point(acc, hit, x: int, y: int) -> bool:
+    """Resolve a native select hit using fresh, nonoverlapping option boxes.
+
+    Blink's settled hit test returns the select itself, not its option.
+    Require that exact parent hit first; never apply this to arbitrary web
+    containers, sibling hits, missing hits, or inferred row geometry.
+    """
+    parent = chromium_select_option_parent(acc)
+    if parent is None or _ancestor_key(hit) != _ancestor_key(parent):
+        return False
+    _drop_read_cache()
+    _drop_cached_properties(parent)
+    _drop_cached_properties(acc)
+
+    def contains(node):
+        pos, size = _extents(node)
+        return (pos is not None and size is not None
+                and pos[0] <= x < pos[0] + size[0]
+                and pos[1] <= y < pos[1] + size[1])
+
+    if not _state_has(parent, "SHOWING") or not contains(parent):
+        return False
+    if not _state_has(acc, "SHOWING") or not contains(acc):
+        return False
+    count = _child_count(parent)
+    if not 0 < count <= _MAX_CHILDREN_FETCH:
+        return False
+    matches = []
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None:
+            return False
+        _drop_cached_properties(child)
+        if _get_attributes(child).get("tag") != "option":
+            return False
+        pos, size = _extents(child)
+        if pos is None or size is None:
+            return False
+        if pos[0] <= x < pos[0] + size[0] and pos[1] <= y < pos[1] + size[1]:
+            matches.append(_ancestor_key(child))
+    return matches == [_ancestor_key(acc)]
+
+
 def selected_option_names(acc) -> list[str]:
     """Names of the selected options in ``acc``'s list, in child order."""
     parent, _index, _target = _selection_parent(acc)
@@ -19420,6 +19497,8 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
         if hit is None:
             return False
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
+            return True
+        if _chromium_select_option_at_point(acc, hit, x, y):
             return True
         node = hit
     return False

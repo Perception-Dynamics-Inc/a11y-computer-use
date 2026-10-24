@@ -100,7 +100,7 @@ A Chrome document can hide a whole form under one zero-height section. On the Fi
 
 Under a `document web`, a `document frame`, or an `internal frame`, a zero-width or zero-height non-interactive wrapper is treated like GTK's negative-extent hollow node: it is kept only when a descendant with a real box survives, and its rect is the union of those descendants. On the live login page that wrapper is `section#react-page` at 1271 by 0 with AT-SPI actions `click` and `showContextMenu`. `click` maps to AXPress. `clickAncestor` and `showContextMenu` do not: a context menu is not activation, and clickAncestor would mark every container that holds a click listener. An unnamed, valueless, non-focusable zero-size wrapper is still hollow, and it is not a clickable target, so a ref click does not call `do_action` on it. A focusable node, a named node, or a real control (push button, link, check box, entry) with a zero box still drops. A zero-size node outside that web content, and a positive rect that lies off every display, still drop their subtrees. macOS and Windows nodes do not set the mark, so their snapshots and token budgets are unchanged. The snapshot read passes the zero size through (`_extents(..., keep_zero=True)`). Hit-testing and scrolling still treat a zero box as no box. `file_dialog` stays unsupported on Linux.
 
-Chromium snapshots omit menus that are not SHOWING and menus under collapsed expandable combo boxes. This keeps closed select popup models out of automatic `scroll_to_find` container selection, allowing a horizontal overflow group to remain the anchor. Open menus and ordinary non-showing containers with painted descendants remain eligible. This behavior is covered by synthetic snapshot and anchor-selection regressions; it has not been live-verified.
+Chromium snapshots retain menu models and their painted descendants, including options under collapsed combo boxes. Automatic scroll discovery excludes menus that are not SHOWING and menus under collapsed expandable combo boxes. This keeps closed select popup models out of automatic `scroll_to_find` container selection, allowing a horizontal overflow group to remain the anchor. Open menus and ordinary non-showing containers with painted descendants remain eligible. This behavior is covered by synthetic snapshot and anchor-selection regressions; it has not been live-verified.
 
 Chromium page content counts the kept-depth budget from its `document web` root, so browser window controls do not consume the page’s 12 levels. Nested sections retain table, row, cell, and link refs within that page budget, including in the snapshots used by `find` and `scroll_to_find` confirmation. The raw-depth backstop still counts browser ancestors, and deeper page content remains subject to pruning.
 
@@ -115,6 +115,26 @@ Closing that bar leaves the page scrolled to the match. Chrome then reports the 
 The find bar and an omnibox popup also stick in the AT-SPI client cache. A snapshot taken while the bar is open remembers that Chrome process. Typing in the find field does too, which is what ``scroll_to_find`` does: it opens the bar, types, and closes it before the next snapshot, so that snapshot would not otherwise see the find field. The next snapshot, including one after the bar closes and one after Reload, drops that cache and walks the frame that holds the selected tab rather than a leftover find-in-page or omnibox frame. A page-window snapshot that still has a cached find-in-page or omnibox frame beside it drops that cache even when the process was not remembered yet. Reload does not reuse the cached document. The address bar by itself does not remember the process.
 
 For Chrome/Electron processes that advertise a DevTools port, the Linux form overlay uses the optional `[browser]` extra to read and write matching DOM controls. Without `websocket-client`, snapshots and form writes retain the native AT-SPI path, including selection and numeric value writes. Native verification still determines success. Other CDP connection, script, and read-back failures remain errors; they do not retry a potentially completed write through AT-SPI. Selecting the standalone browser backend still requires the extra.
+
+### Native Chromium select option clicks
+
+For native HTML `<select multiple>` and size-based listboxes, ref clicks keep
+the requested pointer gesture: plain click replaces selection, Ctrl toggles,
+and Shift uses the browser's range anchor. Chromium can return the enclosing
+select from its settled document hit test. That exact parent hit is accepted
+only when fresh native option rectangles identify the requested option
+unambiguously inside the showing listbox. Missing, overlapping, off-viewport,
+or unreadable geometry is refused; ARIA lists retain exact-target hit testing.
+The fallback inspects at most the existing 250-child fetch allowance and
+refuses larger or nested option structures rather than guessing geometry.
+
+Selection is read back twice: plain clicks require only the target selected,
+Ctrl clicks require exactly that option toggled, and Shift clicks require a
+changed set containing the target. Unreadable or unchanged sets are not
+confirmed. No option action or compensating selection write is sent after a
+failed native-select click. This path has synthetic regressions; a standalone
+Chrome/X11 diagnostic also exercised plain replacement, Ctrl add/remove, and
+Shift extension. The live pytest suites were not run for this change.
 
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 
@@ -1081,3 +1101,9 @@ with `expander_target_ambiguous` before input. GTK can report the entire row as
 its bounds even though only the arrow and label receive clicks. The driver does
 not guess label geometry or substitute native activation. Use explicit screenshot
 coordinates on the arrow or label and verify that the expanded state changes.
+
+AT-SPI `tool tip` nodes retain the `tooltip` role in snapshots and
+`find(role="tooltip")`, including named leaves and containers with static-text
+children. Names and bounds come from AT-SPI; ordinary groups are not inferred
+to be tooltips. This mapping is covered by synthetic tests, not a live Chrome
+run.
