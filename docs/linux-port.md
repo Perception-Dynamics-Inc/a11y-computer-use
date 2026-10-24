@@ -1164,3 +1164,9 @@ selection updates. Changed readable selections report `confirmed` with text and
 offsets. Unreadable selections report `unverifiable` with `next: []`, so a caller
 does not repeat a click that may already have selected the word. Readable
 unchanged selections retain `suspected_noop`. No alternate input is substituted.
+
+Drag verification reads a fresh pre-stroke tree rather than reusing the previous
+action's read-back. This matters when a region-selection overlay appears after
+the preceding click has returned, and both capture dialogs share a title. A
+failed pre-stroke read leaves the outcome unverifiable with no retry hints;
+it does not treat an older dialog snapshot as evidence for repeating the stroke.
