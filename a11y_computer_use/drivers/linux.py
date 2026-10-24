@@ -2171,7 +2171,10 @@ class LinuxDriver:
             raise
 
     def take_click_snapshot(self, element: Element) -> Snapshot | None:
-        """Consume the full live tree that resolved this exact click target."""
+        """Consume the full live tree that resolved this exact input target.
+
+        Click uses it for before-state; drag shares it with its second ref.
+        """
         resolved = getattr(self, "_resolved_click_snapshot", None)
         self._resolved_click_snapshot = None
         if resolved is not None and resolved[0] is element:
@@ -2775,7 +2778,10 @@ class LinuxDriver:
         if isinstance(action, (Click, Hover, Scroll)):
             self._check_modal_target(action.target, app=app)
         elif isinstance(action, Drag):
-            for target in (action.start, *action.path, action.end):
+            # Waypoints are part of one pressed stroke, not independent
+            # input targets. Keep fresh, settled boundary checks at both
+            # ends without repeating a full modal discovery at every move.
+            for target in (action.start, action.end):
                 self._check_modal_target(target, app=app)
         elif input_target is not None:
             self._check_modal_target(input_target, app=app)
