@@ -262,8 +262,8 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         return "expand requires ref"
     if action.name == "scroll_to_find" and not (args.get("text") or args.get("role")):
         return "scroll_to_find requires text or role"
-    if action.name == "scroll_to_find" and args.get("direction") not in (None, "down", "up"):
-        return "scroll_to_find direction must be down or up"
+    if action.name == "scroll_to_find" and args.get("direction") not in (None, "down", "up", "left", "right"):
+        return "scroll_to_find direction must be down, up, left or right"
     if action.name == "choose_file":
         return chooser_argument_error(args)
     if action.name == "snapshot" and args.get("mode") not in (None, "full", "diff"):
@@ -726,7 +726,7 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "scroll_to_find",
         "Scroll until an element matching text and/or role is on screen, then "
         "return its ref. Use this when the target is below the fold, before "
-        "falling back to pixels. direction is down or up.",
+        "falling back to pixels. direction is down, up, left or right.",
         {
             "text": _STR,
             "role": _STR,
