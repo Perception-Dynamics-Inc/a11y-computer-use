@@ -1,0 +1,10 @@
+<!doctype html><title>Notes Lab</title>
+<label>Title <input aria-label="Title"></label>
+<button onclick="document.title='Notes Lab - saved:'+document.querySelector('input').value">Save</button>
+<div role="listbox" aria-label="Notes">
+<div role="option" tabindex="0" onclick="this.setAttribute('aria-selected','true');document.title='Notes Lab - Meeting'">Meeting</div>
+</div>
+<div role="tablist"><button role="tab" onclick="this.setAttribute('aria-selected','true');document.title='Notes Lab - Tags'">Tags</button></div>
+<button role="switch" aria-checked="false" onclick="this.setAttribute('aria-checked','true');document.title='Notes Lab - Pinned'">Pinned</button>
+<div role="textbox" aria-label="Body" contenteditable="true" oninput="document.title='Notes Lab - body:'+this.textContent" style="border:1px solid;min-height:50px"></div>
+<button id="counter" onclick="this.dataset.clicks=Number(this.dataset.clicks||0)+1;document.title='Counter clicked '+this.dataset.clicks">Count 0</button>
