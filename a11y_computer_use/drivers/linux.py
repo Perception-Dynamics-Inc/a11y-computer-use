@@ -21,6 +21,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from contextvars import ContextVar
 
 from a11y_computer_use.schema import (
     Bounds,
@@ -39,6 +40,9 @@ from a11y_computer_use.schema import (
     Target,
     WaitCondition,
 )
+
+
+_ISSUE_ROW_IDENTITIES = ContextVar("linux_issue_row_identities", default=True)
 
 
 def _no_accessibility_tree(app: str) -> ComputerUseError:
@@ -1380,6 +1384,14 @@ class LinuxDriver:
             return _dbus_guard.call_with_reconnect(self._snapshot_desktop)
         return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
 
+    def effect_snapshot(self, scope: Scope, app: str) -> Snapshot:
+        """Read all effect evidence without issuing new row-ref identities."""
+        token = _ISSUE_ROW_IDENTITIES.set(False)
+        try:
+            return self.snapshot(scope, app)
+        finally:
+            _ISSUE_ROW_IDENTITIES.reset(token)
+
     def drag_overlay(self, point: Point) -> tuple[int, str] | None:
         """Read the native overlay receiving a coordinate drag, if any."""
         if _on_wayland():
@@ -1639,6 +1651,10 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
+        # Capture on the caller before marshaling the native walk. ContextVar
+        # keeps concurrent explicit observations outside this action probe.
+        row_identity = _ISSUE_ROW_IDENTITIES.get()
+
         def _do() -> Snapshot:
             hinted = _hint_pid(app)
             with _atspi.app_reply_watch(app, hinted, root) as watch:
@@ -1652,6 +1668,10 @@ class LinuxDriver:
                 if isinstance(pid, int) and pid > 0:
                     watch.pid = pid
                 accessor = _atspi.ATSPIAccessor()
+                # Only emitted refs need issuing identity. Native ancestry
+                # still binds rows hidden by pruning, without fingerprinting
+                # every layout/text wrapper that the pruner discards.
+                accessor._defer_row_identity = True
                 # ``app`` is the resolved comm when the caller said LibreOffice
                 # and the bus said soffice.bin. Either name marks the suite.
                 accessor.libreoffice = _atspi.libreoffice_app(app or "") or _atspi.libreoffice_app(
@@ -1706,6 +1726,13 @@ class LinuxDriver:
                     if pending:
                         specs = [(cell, accessor.read(cell), table) for cell, table in pending]
                         snap = observe.attach_offscreen_matches(snap, specs)
+                    if row_identity and accessor._tree_is_chromium(node):
+                        snap = replace(snap, elements=tuple(
+                            replace(el, row_identity=_atspi.chromium_row_identity(
+                                observe.ax_handle_for(snap.snapshot_id, el.ref),
+                                cache=accessor._row_identity_cache,
+                            )) for el in snap.elements
+                        ))
                     _atspi.note_browser_bar(node, snap.elements)
                     return snap
 
@@ -2092,9 +2119,19 @@ class LinuxDriver:
         self._resolved_popover_cover = None
         self._resolved_click_snapshot = None
         if live is None:
-            live = self.snapshot(snap.scope, snap.app)
+            probe = getattr(self, "effect_snapshot", self.snapshot)
+            live = probe(snap.scope, snap.app)
         try:
             resolved = observe.rematch_ref(snap, ref, live)
+            from a11y_computer_use.drivers import _atspi
+
+            handle = observe.ax_handle_for(live.snapshot_id, resolved.ref)
+            if handle is not None and self._run(lambda: _atspi._chromium_app(handle)):
+                # The full tree supplies matching, covers and the before-state.
+                # Only this target needs an identity for the ensuing action.
+                identity = self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
+                self._verify_chromium_row_target(anchor, handle, current=identity)
+                resolved = replace(resolved, row_identity=identity)
             self._remember_popover_cover(live, resolved)
             self._resolved_click_snapshot = (resolved, live)
             return resolved
@@ -2862,16 +2899,18 @@ class LinuxDriver:
             },
         )
 
-    def _verify_chromium_row_target(self, element: Element, handle) -> None:
+    def _verify_chromium_row_target(self, element: Element, handle,
+                                    *, current: tuple | None = None) -> None:
         """Refuse a recycled row before dispatching any input."""
         if not element.row_identity:
             return
         from a11y_computer_use.drivers import _atspi
 
-        try:
-            current = self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
-        except Exception:
-            current = ()
+        if current is None:
+            try:
+                current = self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
+            except Exception:
+                current = ()
         if current != element.row_identity:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
