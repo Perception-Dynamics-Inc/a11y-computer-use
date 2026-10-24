@@ -1903,14 +1903,30 @@ def _tip_of_the_day(snap) -> object | None:
 
 
 def _tip_ok_button(snap) -> object | None:
-    """The OK or Close button of a snapshot that contains the tip dialog."""
+    """An OK or Close button inside the observed tip dialog's subtree."""
+    dialog = _tip_of_the_day(snap)
+    if dialog is None or not getattr(dialog, "ref", None):
+        return None
+    by_ref = {el.ref: el for el in snap.elements}
+
+    def inside_dialog(el):
+        seen = set()
+        parent = getattr(el, "parent", None)
+        while parent and parent not in seen:
+            if parent == dialog.ref:
+                return True
+            seen.add(parent)
+            parent = getattr(by_ref.get(parent), "parent", None)
+        return False
+
     buttons = []
     for el in getattr(snap, "elements", None) or []:
         if getattr(el, "role", "") != "AXButton":
             continue
         if str(getattr(el, "title", "") or "").strip().lower() not in {"ok", "close"}:
             continue
-        buttons.append(el)
+        if inside_dialog(el):
+            buttons.append(el)
     for el in buttons:
         if getattr(el, "focused", False):
             return el
@@ -8971,15 +8987,12 @@ class Runtime:
                     pressed = self.driver.press_element(button)
                 except ComputerUseError:
                     return dismissed
-                if not pressed and callable(getattr(self.driver, "key_chord", None)):
-                    try:
-                        self.driver.key_chord("return")
-                    except ComputerUseError:
-                        return dismissed
+                if not pressed:
+                    return dismissed
                 dismissed = str(getattr(dialog, "title", "") or "Tip of the Day")
                 time.sleep(0.4)
                 snap = self._office_snapshot(launch_name or name)
-                if _tip_of_the_day(snap) is None:
+                if snap is not None and _tip_of_the_day(snap) is None:
                     return dismissed
                 return None
             if dismissed is not None or not document or looked:

@@ -19465,3 +19465,34 @@ def test_modal_discovery_queries_moderate_lists_before_remote_row_walk(
     with pytest.raises(ComputerUseError, match="outside_active_modal"):
         _atspi.refuse_outside_modal(document, frame)
     assert _atspi.refuse_outside_modal(modal, frame)
+
+
+def test_office_startup_dismisses_inside_modal_without_allowing_background(
+    modal_boundary_tree, monkeypatch,
+):
+    from a11y_computer_use import server
+
+    driver, frame, background, modal, inside, calls = modal_boundary_tree
+    modal.name = "Tip of the Day"
+    inside.name = "Close"
+    background.name = "OK"
+    background.states.add("FOCUSED")
+    runtime = object.__new__(server.Runtime)
+    runtime.driver = driver
+    before = driver.snapshot(Scope.WINDOW, "soffice")
+    target = next(el for el in before.elements if el.title == "OK")
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.press_element(target)
+    assert calls == []
+
+    def close(node, **kwargs):
+        assert node is inside
+        calls.append(node.name)
+        _adopt(frame, background)
+        modal.states.clear()
+        return True
+
+    monkeypatch.setattr(_atspi, "do_press", close)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: None)
+    assert runtime._dismiss_libreoffice_tip("localc", "localc", None, "Calc") == "Tip of the Day"
+    assert calls == ["Close"]

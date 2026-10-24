@@ -1241,3 +1241,10 @@ from an iframe and verifies both snapshot modes send no input for the old ref:
 XDG_CACHE_HOME=/tmp/1014-live-cache xvfb-run -a dbus-run-session -- sh -c \
   'xfwm4 --compositor=off >/tmp/1014-wm.log 2>&1 & wm=$!; trap "kill $wm" EXIT; python scripts/check_chromium_iframe_modal.py'
 ```
+
+LibreOffice startup-tip dismissal selects OK/Close only from the observed
+Tip of the Day dialog's subtree, with the native modal boundary still enforced.
+It reports dismissal only after a readable follow-up snapshot shows the dialog
+has closed. A refused press does not send Return to the current focus. Some
+LibreOffice versions show the first-run What's New bar instead of a startup tip;
+that launch has no tip dismissal to report.

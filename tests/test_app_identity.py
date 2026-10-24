@@ -465,6 +465,8 @@ def test_launch_reads_calc_when_the_tip_dialog_closes(tmp_path, monkeypatch) -> 
         def __init__(self, role, title):
             self.role = role
             self.title = title
+            self.ref = "tip" if role == "AXDialog" else title
+            self.parent = "tip" if role == "AXButton" else None
             self.focused = title == "OK"
 
     class _Snap:
@@ -549,6 +551,8 @@ def test_launch_dismisses_the_tip_of_the_day_and_reports_it(tmp_path, monkeypatc
         def __init__(self, role, title, focused=False):
             self.role = role
             self.title = title
+            self.ref = "tip" if role == "AXDialog" else title
+            self.parent = "tip" if role == "AXButton" else None
             self.focused = focused
 
     class _Snap:
@@ -708,3 +712,42 @@ def test_installed_bundle_keeps_requested_spelling_despite_linux_path() -> None:
     assert resolution.resolved is True
     assert resolution.launch_name == "Mousepad"
     assert resolution.gate_key == "com.example.Mousepad"
+
+
+@pytest.mark.parametrize("result", ["closed", "still-open", "unreadable", "refused", "missing-button"])
+def test_launch_tip_dismissal_stays_inside_dialog_and_verifies_close(monkeypatch, result):
+    """A focused background OK cannot receive the launcher's dismissal."""
+    from types import SimpleNamespace as Node
+    from a11y_computer_use import server
+
+    def node(ref, role, title, parent=None, focused=False):
+        return Node(ref=ref, role=role, title=title, parent=parent, focused=focused)
+
+    dialog = node("tip", "AXDialog", "Tip of the Day")
+    close = node("close", "AXButton", "Close", "buttons")
+    background = node("background", "AXButton", "OK", "window", True)
+    elements = [node("window", "AXWindow", "Calc"), dialog,
+                node("buttons", "AXGroup", "", "tip"), background]
+    if result != "missing-button":
+        elements.append(close)
+    before = Node(elements=elements)
+    after = {"closed": Node(elements=[background]), "unreadable": None}.get(result, before)
+    shots = iter([before, after])
+    pressed = []
+
+    class Driver:
+        def press_element(self, target):
+            assert target is close
+            pressed.append(target)
+            return result != "refused"
+
+        def key_chord(self, chord):
+            pytest.fail("Dismissal must not send a key to unverified focus")
+
+    runtime = object.__new__(server.Runtime)
+    runtime.driver = Driver()
+    monkeypatch.setattr(runtime, "_office_snapshot", lambda app: next(shots))
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: None)
+    message = runtime._dismiss_libreoffice_tip("localc", "localc", None, "Calc")
+    assert message == ("Tip of the Day" if result == "closed" else None)
+    assert pressed == ([] if result == "missing-button" else [close])
