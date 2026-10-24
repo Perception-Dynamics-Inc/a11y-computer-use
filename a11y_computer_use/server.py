@@ -3570,7 +3570,7 @@ class Runtime:
                 ("confirmed", "clipboard owner or targets changed") if changed else
                 ("unverifiable", "clipboard ownership change was not verified")
             )
-        no_retry = copy or (tool == "key" and judged == "unverifiable")
+        no_retry = copy or (tool in {"key", "drag"} and judged == "unverifiable")
         browser = getattr(self.driver, "name", None) == "browser"
         return outcome.ActionResult(
             text,
@@ -6746,6 +6746,20 @@ class Runtime:
         before_snap = before.get("snap") if isinstance(before, dict) else None
         start_el = start if isinstance(start, Element) else outcome.element_at_point(before_snap, start)
         end_el = end if isinstance(end, Element) else outcome.element_at_point(before_snap, end)
+        selection_reader = getattr(self.driver, "text_selection", None)
+
+        def read_selection() -> tuple[tuple[int, int], ...] | None:
+            if (not callable(selection_reader) or not isinstance(start_el, Element)
+                    or start_el.secure or start_el.role not in {
+                        "AXStaticText", "AXTextArea", "AXTextField", "AXParagraph",
+                    }):
+                return None
+            try:
+                return selection_reader(start_el)
+            except Exception:
+                return None
+
+        selection_before = read_selection()
         dest = _drag_dest_file(before_snap, start_el, end_el)
         existed = _path_is_file(dest) if dest is not None else None
 
@@ -6764,7 +6778,9 @@ class Runtime:
             file_landed = self._drag_file_landed(dest, existed)
         verdict = outcome.drag_drop_verdict(
             before_snap, after, start_el, end_el, file_landed=file_landed,
+            selection_before=selection_before, selection_after=read_selection(),
         )
+        self._remember_baseline(after)
         via = f" via {len(waypoints)} waypoints" if waypoints else ""
         text = f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
         if verdict[0] != "confirmed":
@@ -10568,7 +10584,10 @@ def build_server(
         release, so a short drag can drop. The result is confirmed when the
         dragged item changes order or moves relative to the target, or when
         the file is in the target folder afterwards. Otherwise the text says
-        the drop was not confirmed. A selection change is not a drop. Refs
+        the drop was not confirmed. A changed native text selection, a new
+        window/dialog, or a source disappearing as the target gains children
+        also confirms the drag. Unreadable outcomes are unverifiable with no
+        retry hints; re-observe before further action. Refs
         restart in every snapshot: two refs right after a snapshot of another
         app that also issued either one are stale_ref (reason other_snapshot)
         and send no input. For a drop in another app, give start_ref and the

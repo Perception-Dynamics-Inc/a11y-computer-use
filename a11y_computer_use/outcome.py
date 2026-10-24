@@ -1023,7 +1023,9 @@ def _match_named(elements: Sequence[object], element: object) -> object | None:
     stable = getattr(element, "stable_id", None)
     if stable:
         for other in elements:
-            if getattr(other, "stable_id", None) == stable and getattr(other, "role", "") == role:
+            if (getattr(other, "stable_id", None) == stable
+                    and getattr(other, "role", "") == role
+                    and _drag_label(other) == _drag_label(element)):
                 return other
     label = _drag_label(element)
     if not label:
@@ -1088,25 +1090,67 @@ def drag_drop_verdict(
     end: object | None = None,
     *,
     file_landed: bool | None = None,
+    selection_before: object | None = None,
+    selection_after: object | None = None,
 ) -> tuple[str, str]:
     """``(outcome, evidence)`` for a drag.
 
-    Confirmed when the item moved, or the source file is newly in the target
-    folder (``file_landed``). A tree that can be compared and did not change
-    is ``suspected_noop``. Nothing to compare is ``unverifiable``. Both of
-    those say the drop was not confirmed. Selection alone is not a drop.
+    Confirm with item movement, target child evidence, a new window/dialog,
+    file arrival, or a changed native text selection. Disappearance alone
+    cannot establish the destination and must never invite a repeated drag.
     """
     if file_landed is True:
         return "confirmed", "the file is now in the target folder"
+    if selection_before is not None and selection_after and selection_after != selection_before:
+        return "confirmed", "the text selection changed"
+    if before is not None and after is not None:
+        old, new = _snap_elements(before), _snap_elements(after)
+        for node in new:
+            bounds = getattr(node, "bounds", None)
+            if (getattr(node, "role", "") in {"AXWindow", "AXDialog", "AXSheet"}
+                    and bounds is not None and bounds.width > 1 and bounds.height > 1):
+                known = any(
+                    getattr(prev, "role", "") == getattr(node, "role", "")
+                    and ((getattr(node, "stable_id", None)
+                          and getattr(prev, "stable_id", None) == node.stable_id)
+                         or _drag_label(prev) == _drag_label(node)
+                         or getattr(prev, "bounds", None) == bounds)
+                    for prev in old
+                )
+                if not known:
+                    return "confirmed", "a new window or dialog appeared"
+        if start is not None:
+            moved = _match_named(new, start)
+            target = _match_named(new, end) if end is not None else None
+            if moved is not None and target is not None:
+                if (getattr(moved, "parent", None) == getattr(target, "ref", None)
+                        and getattr(start, "parent", None) != getattr(end, "ref", None)):
+                    return "confirmed", "the item moved under the target"
+            if moved is None:
+                if (target is not None and getattr(end, "expanded", None) is None
+                        and getattr(target, "expanded", None) is False):
+                    return "confirmed", "the source disappeared and the collapsed target gained children"
+                return "unverifiable", "the source is no longer visible; re-observe before any further action"
     if drag_item_moved(before, after, start, end):
         return "confirmed", "the item moved"
+    if before is not None and after is not None and start is not None and end is None:
+        current = _match_named(_snap_elements(after), start)
+        previous_at, current_at = _drag_center(start), _drag_center(current)
+        if (previous_at is not None and current_at is not None
+                and any(abs(a - b) > _DRAG_MOVE_PX for a, b in zip(previous_at, current_at))):
+            return "unverifiable", "the source moved but the destination could not be read; re-observe"
+    if (getattr(start, "role", "") in {"AXStaticText", "AXTextArea", "AXTextField", "AXParagraph"}
+            and (selection_before is None or selection_after is None)):
+        return "unverifiable", "the text selection could not be read; re-observe before further action"
+    if getattr(start, "role", "") in {"opaque_region", "AXCanvas", "AXImage"}:
+        return "unverifiable", "the painted drag effect could not be read; re-observe before further action"
     comparable = (
         file_landed is False
         or (before is not None and after is not None and start is not None)
     )
     if comparable:
         return "suspected_noop", "the drop was not confirmed"
-    return "unverifiable", "the drop was not confirmed"
+    return "unverifiable", "the drop was not confirmed because its effect could not be read"
 
 
 def element_at_point(snap: object | None, point: object | None) -> object | None:

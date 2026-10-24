@@ -5562,3 +5562,100 @@ def test_scroll_to_find_horizontal_strip(monkeypatch, direction, delta, pinned, 
         assert "last_rows: item-1" in out
     assert anchors == ["e6"]
     assert actions[-1].dx == delta and actions[-1].dy == 0
+
+
+@pytest.mark.parametrize("coordinates", [False, True])
+def test_drag_collapsed_tree_child_is_confirmed_without_retry(tmp_path, coordinates):
+    from dataclasses import replace
+    before = _drag_rows("s0", [("Alpha", 20, 40), ("Bravo", 20, 68), ("Delta", 20, 96)])
+    after = _drag_rows("s1", [("Bravo", 20, 40), ("Delta", 20, 68)])
+    # GTK recycles the old row's native identity for Bravo.
+    before = replace(before, elements=tuple(replace(e, stable_id=e.ref) for e in before.elements))
+    after = replace(after, elements=tuple(
+        replace(e, stable_id=e.ref, expanded=False if e.title == "Delta" else None)
+        for e in after.elements
+    ))
+    rt = _drag_runtime(tmp_path, before, after)
+    out = rt.drag(start_x=100, start_y=54, end_x=100, end_y=110) if coordinates else rt.drag(start_ref="e2", end_ref="e4")
+    assert out.outcome == "confirmed"
+    assert "gained children" in out.evidence
+    assert out.next == ()
+
+
+def test_drag_region_new_dialog_is_confirmed_without_source(tmp_path):
+    from dataclasses import replace
+    before = _drag_rows("s0", [])
+    before = replace(before, elements=(replace(before.elements[0], role="AXGroup", title="screenshooter", bounds=None),))
+    after = _drag_rows("s1", [("Preview", 20, 40)])
+    after = replace(after, elements=(replace(after.elements[0], role="AXDialog", title="Screenshot"), *after.elements[1:]))
+    out = _drag_runtime(tmp_path, before, after).drag(start_x=100, start_y=120, end_x=500, end_y=420)
+    assert out.outcome == "confirmed"
+    assert out.evidence == "a new window or dialog appeared"
+    assert out.next == ()
+
+
+@pytest.mark.parametrize("after_selection, expected", [(((6, 25),), "confirmed"), ((), "suspected_noop"), (None, "unverifiable")])
+def test_drag_text_selection_reads_real_offsets(tmp_path, after_selection, expected):
+    from dataclasses import replace
+    before = _drag_rows("s0", [("Alpha bravo charlie delta", 20, 40)])
+    before = replace(before, elements=(before.elements[0], replace(before.elements[1], role="AXStaticText")))
+    rt = _drag_runtime(tmp_path, before, before)
+    reads = iter([(), after_selection])
+    rt.driver.text_selection = lambda element: next(reads)
+    out = rt.drag(start_x=30, start_y=50, end_x=150, end_y=50)
+    assert out.outcome == expected
+    if expected != "suspected_noop":
+        assert out.next == ()
+
+
+def test_drag_disappearing_source_is_unverifiable_without_retry(tmp_path):
+    before = _drag_rows("s0", [("Alpha", 20, 40), ("Delta", 20, 68)])
+    after = _drag_rows("s1", [("Delta", 20, 40)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "unverifiable"
+    assert "no longer visible" in out.evidence
+    assert out.next == ()
+
+
+def test_drag_real_noop_remains_noop(tmp_path):
+    before = _drag_rows("s0", [("Alpha", 20, 40), ("Delta", 20, 68)])
+    out = _drag_runtime(tmp_path, before, before).drag(start_ref="e2", end_ref="e2")
+    assert out.outcome == "suspected_noop"
+    assert "drop not confirmed" in out
+
+
+def test_drag_reparented_source_is_confirmed(tmp_path):
+    from dataclasses import replace
+    before = _drag_rows("s0", [("Alpha", 20, 40), ("Delta", 20, 68)])
+    after = replace(before, elements=(before.elements[0], replace(before.elements[1], parent="e3"), before.elements[2]))
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the item moved under the target"
+    assert out.next == ()
+
+
+def test_drag_utility_windows_and_title_changes_are_not_drop_evidence(tmp_path):
+    from dataclasses import replace
+    before = _drag_rows("s0", [("Alpha", 20, 40), ("Delta", 20, 68)])
+    utility = Element("e9", "AXWindow", "", None, Bounds(0, -99, -99, 1, 1), "s1")
+    after = replace(before, elements=(replace(before.elements[0], title="new title"), *before.elements[1:], utility))
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e2")
+    assert out.outcome == "suspected_noop"
+
+
+def test_drag_source_moved_with_unreadable_destination_has_no_retry(tmp_path):
+    before = _drag_rows("s0", [("Alpha", 20, 40)])
+    after = _drag_rows("s1", [("Alpha", 300, 40)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_x=600, end_y=500)
+    assert out.outcome == "unverifiable"
+    assert "source moved" in out.evidence
+    assert out.next == ()
+
+
+def test_drag_opaque_effect_is_unverifiable_without_retry(tmp_path):
+    from dataclasses import replace
+    before = _drag_rows("s0", [("Canvas", 20, 40)])
+    before = replace(before, elements=(before.elements[0], replace(before.elements[1], role="opaque_region")))
+    out = _drag_runtime(tmp_path, before, before).drag(start_ref="e2", end_x=600, end_y=500)
+    assert out.outcome == "unverifiable"
+    assert out.next == ()
