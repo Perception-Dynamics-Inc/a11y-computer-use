@@ -6129,3 +6129,65 @@ def test_snapshot_title_change_keeps_context_but_refuses_replacement(
         if change == "title":
             runtime.click(ref="e4", verify=True)
             assert len(mocked_driver["click"]) == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("replacement", [None, "name", "role", "parent"])
+@pytest.mark.parametrize("verify", [False, True])
+def test_snapshot_refreshes_verified_counter_name(
+    monkeypatch, mocked_driver, store, audit_dir, mode, replacement, verify,
+):
+    """Fresh refs follow verified button renames, never later replacements."""
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    parent = Element("e1", "AXGroup", "Counter", None, None, "count-0")
+    button = Element("e2", "AXButton", "Count 0", None,
+                     Bounds(1, 10, 40, 150, 25), "count-0", parent="e1", clickable=True)
+    current = [dataclasses.replace(base, snapshot_id="count-0", elements=(parent, button))]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "resolve_ref", lambda snap, ref, **kwargs: observe.rematch_ref(snap, ref, current[0]))
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    clicks = []
+
+    def click(target, **kwargs):
+        clicks.append(target.title)
+        n = len(clicks)
+        current[0] = dataclasses.replace(current[0], snapshot_id=f"count-{n}", elements=(
+            parent, dataclasses.replace(button, title=f"Count {n}", snapshot_id=f"count-{n}"),
+        ))
+        return []
+
+    monkeypatch.setattr(act, "click", click)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        for n in range(3):
+            result = runtime.click(ref="e2", verify=verify)
+            assert result.outcome == "confirmed"
+            assert clicks[-1] == f"Count {n}"
+            # A private verification read alone does not issue the renamed ref.
+            assert runtime._anchor("e2")[1].title == f"Count {n}"
+            with pytest.raises(ComputerUseError) as stale:
+                runtime.click(ref="e2")
+            assert stale.value.code is ErrorCode.STALE_REF
+            assert len(clicks) == n + 1
+            if replacement and n == 0:
+                nodes = list(current[0].elements)
+                if replacement == "name":
+                    nodes[1] = dataclasses.replace(nodes[1], title="Delete")
+                elif replacement == "role":
+                    nodes[1] = dataclasses.replace(nodes[1], role="AXGroup")
+                else:
+                    nodes[0] = dataclasses.replace(parent, title="Different frame")
+                current[0] = dataclasses.replace(current[0], elements=tuple(nodes))
+                runtime.desktop_snapshot(APP, mode=mode)
+                with pytest.raises(ComputerUseError) as caught:
+                    runtime.click(ref="e2")
+                assert caught.value.code is ErrorCode.STALE_REF
+                assert caught.value.detail["reason"] == "target_changed"
+                assert clicks == ["Count 0"]
+                assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+                break
+            runtime.desktop_snapshot(APP, mode=mode)
+            assert runtime._anchor("e2") == (current[0], current[0].element("e2"))
+        if replacement is None:
+            assert clicks == ["Count 0", "Count 1", "Count 2"]
