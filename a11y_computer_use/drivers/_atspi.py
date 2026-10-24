@@ -118,6 +118,7 @@ _ROLE = {
     "table row": "AXRow",
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",
+    "tool tip": "AXTooltip",
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "progress bar": "AXProgressIndicator",
@@ -2228,7 +2229,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
-    "AXStatusBar", "AXPopover", "AXCalendar", "AXTab",
+    "AXStatusBar", "AXPopover", "AXCalendar", "AXTab", "AXTooltip",
 })
 
 
