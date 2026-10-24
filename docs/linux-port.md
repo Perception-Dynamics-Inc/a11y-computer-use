@@ -1263,3 +1263,10 @@ It reports dismissal only after a readable follow-up snapshot shows the dialog
 has closed. A refused press does not send Return to the current focus. Some
 LibreOffice versions show the first-run What's New bar instead of a startup tip;
 that launch has no tip dismissal to report.
+
+GTK 4 editable text refs use pointer input for a plain ref click, including
+when accessibility actions are preferred. AT-SPI focus/activate acknowledgments
+can leave focus in another field. The click uses the reported bounds and
+requires observed target focus; unreliable geometry is refused and a missed
+click returns an unconfirmed focus error. Typing still requires confirmed focus.
+This routing has synthetic regression coverage; it has not been live-verified.

@@ -2998,6 +2998,14 @@ class LinuxDriver:
             return False
         if handle is None:
             return False
+        if (element.editable
+                and element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
+                and self._run(lambda: bool(_atspi._gtk4_app(handle)))):
+            # GTK 4 grab_focus/activate can acknowledge without moving focus.
+            # No native action was sent: let Runtime use the measured pointer
+            # click, whose geometry and observed-focus checks remain mandatory.
+            self._click_without_press = element
+            return False
         if self._run(lambda: _atspi.qt_menu_button_without_press(handle)):
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
