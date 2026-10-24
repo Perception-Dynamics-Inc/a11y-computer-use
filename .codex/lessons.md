@@ -519,3 +519,5 @@
 - 2026-10-24 (#975/#976): Text selection offsets alone miss asynchronous Chrome word selections and hide the selected text. Share a scoped read-only Text reader between observations and verification, preserve masked full-text sentinels before offset reads, and suppress retry hints for unreadable double-click outcomes.
 
 - 2026-10-24 (#975 main integration): Preserve drag unreadable-outcome retry suppression (#1006) alongside text-selection double-click suppression when joining the shared Runtime conclusion path; retain both appended server regression groups.
+
+- 2026-10-24 (#977 follow-up): Internal scroll-search snapshots must not replace the issuing snapshot's row identity. Resolve retained anchors independently of the current probe snapshot, and bind only refs actually returned by scroll_to_find (matches or its reported container). Exercise find -> scroll_to_find -> click with a pooled node; a direct external scroll misses this cross-fix interaction between #979 and #1005. Keep mutable values excluded as in #1001/#996.
