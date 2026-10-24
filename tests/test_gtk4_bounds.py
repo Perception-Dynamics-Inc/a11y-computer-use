@@ -671,3 +671,55 @@ def test_negative_gtk4_box_without_frame_containment_stays_untrusted(
         row.parent = None
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     assert _atspi.gtk4_window_origin_untrusted(row) is True
+
+
+@pytest.mark.parametrize("role", ["AXTextField", "AXTextArea", "AXSearchField"])
+@pytest.mark.parametrize("case", ["focused", "missed", "untrusted"])
+def test_gtk4_editable_ref_click_bypasses_noop_focus(monkeypatch, role, case):
+    """The default AX-preferred route must reach the verified pointer path."""
+    import dataclasses
+
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    _frame, field = _button(_App("GTK", "4.18.6"))
+    field.role = "text"
+    field.actions = ("activate",)
+    monkeypatch.setattr("a11y_computer_use.observe.ax_handle_for", lambda *_args: field)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda _handle: None)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda *_args: case == "untrusted")
+
+    def unexpected_focus(_node):
+        pytest.fail("a ref click must not substitute grab_focus for pointer input")
+
+    monkeypatch.setattr(_atspi, "grab_focus", unexpected_focus)
+    monkeypatch.setattr(
+        _atspi, "_focus_on_target",
+        lambda node: node is field and bool(clicks) and case == "focused",
+    )
+    element = dataclasses.replace(
+        _element(Bounds(0, 846, 413, 71, 44), role), editable=True, clickable=False,
+    )
+    # Runtime's plain ref-click sequence, including the no-dispatch receipt.
+    assert driver.press_element(element) is False
+    assert driver._focused_editable is None
+    assert field.pressed == []
+    assert clicks == []
+    target = driver.verify_click_fallback(element, "python3")
+    assert target is element
+    assert driver._click_without_press is None
+    if case == "focused":
+        assert driver.click(target) is None
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.click(target)
+        assert exc.value.code is (
+            ErrorCode.FOCUS_LOST if case == "missed" else ErrorCode.UNSUPPORTED
+        )
+        assert exc.value.detail["outcome"] == (
+            "unconfirmed" if case == "missed" else "refused"
+        )
+    assert clicks == ([] if case == "untrusted" else [(881, 435)])
+    assert field.pressed == []

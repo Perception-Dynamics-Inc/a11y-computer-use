@@ -558,4 +558,5 @@
 
 - 2026-10-24 (PR #1020 observation-cost merge): Chromium Collection-based list discovery and emitted-ref identity binding reduce snapshot reads independently of modal input checks. Preserve both appended regression groups when merging and run the full Linux synthetic and Runtime suites together.
 
+- 2026-10-24 (#1047): GTK 4 text ref clicks must bypass the editable grab_focus shortcut in press_element. Return an exact no-dispatch receipt so Runtime reaches the existing geometry-checked pointer path and read-only focus verification; testing LinuxDriver.click alone misses the default AX-preferred route.
 - 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
