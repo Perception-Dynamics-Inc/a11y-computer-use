@@ -6389,3 +6389,52 @@ def test_public_observation_issues_newly_opened_menu_item(
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
         assert len(mocked_driver["click"]) == 2
+
+
+@pytest.mark.parametrize("app,requested,dead", [
+    ("soffice.bin", "E7\n", False),
+    ("soffice.bin", "E7\r\n", False),
+    ("soffice.bin", "E7\n", True),
+    ("other", "E7\n", False),
+    ("soffice.bin", "other", False),
+])
+def test_opaque_toolbar_type_receipt_is_scoped_and_consumed(tmp_path, monkeypatch, app, requested, dead):
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    driver._opaque_toolbar_type = ("soffice.bin", "E7\n")
+    monkeypatch.setattr(runtime, "_process_died", lambda before: dead)
+    rereads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: rereads.append(args))
+    matched = app == "soffice.bin" and requested.replace("\r\n", "\n") == "E7\n"
+    if matched:
+        monkeypatch.setattr(runtime, "_drawing_type_verdict",
+                            lambda *args: pytest.fail("must not probe a drawing"))
+    verdict = runtime._judge_mutation(app, None, None, requested)
+    assert driver._opaque_toolbar_type is None
+    assert bool(rereads) is not matched
+    if matched:
+        assert verdict == (("partial", "the target process exited after the action") if dead else (
+            "unverifiable", "keys sent to an unreadable toolbar control; effect unverified",
+        ))
+
+
+def test_opaque_toolbar_type_has_no_retry_hint(tmp_path, monkeypatch):
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    driver._opaque_toolbar_type = ("soffice.bin", "E7\n")
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    result = runtime._conclude("typed 3 characters", tool="type", app="soffice.bin",
+                               before=None, requested="E7\n")
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert driver._opaque_toolbar_type is None

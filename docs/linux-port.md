@@ -1285,3 +1285,10 @@ reads the full text from that exact snapshot handle on the AT-SPI thread.
 The model-facing preview stays capped; its ellipsis is never compared with the
 requested text. Missing handles and protected native fields do not supply
 full-text evidence.
+
+LibreOffice embedded toolbar controls such as Calc's opaque Name Box may expose
+only focused panels without readable Text. For these targets, `type` sends the
+requested keys once and returns `unverifiable`; it does not treat the input as
+a grid edit, commit an editor, or poll selected-cell contents. This path has
+synthetic regression coverage only. Inspect the active cell after address
+navigation rather than retrying the text merely because its effect is unverified.

@@ -562,3 +562,5 @@
 - 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
 
 - 2026-10-25 (#1057): Opening a menu inserts new menu items into refs previously held by unrelated controls. Rebind newly exposed items on public issuance under an unchanged menu identity; retain changed-target guards for existing items and internal reads. Blanket retention across public snapshots poisons fresh menu refs.
+
+- 2026-10-25 (#1056): Calc keyboard input can target opaque toolbar panels (Name Box), not the selected cell. Identify the unreadable toolbar focus before document/grid verification; never commit an editor or read grid contents as evidence for that input. Delivery alone remains unverifiable, with a one-use app/payload-bound receipt.
