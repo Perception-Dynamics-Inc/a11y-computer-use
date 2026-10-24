@@ -5564,6 +5564,55 @@ def test_scroll_to_find_horizontal_strip(monkeypatch, direction, delta, pinned, 
     assert actions[-1].dx == delta and actions[-1].dy == 0
 
 
+@pytest.mark.parametrize('before,after,expected', [
+    ((), ((14, 19, 'three'),), 'confirmed'),
+    (None, None, 'unverifiable'),
+    (None, ((14, 19, 'three'),), 'unverifiable'),
+    ((), (), 'suspected_noop'),
+    (((14, 19, 'three'),), ((14, 19, 'three'),), 'suspected_noop'),
+])
+def test_detailed_selection_double_click_reports_text_or_no_retry(
+    tmp_path, monkeypatch, before, after, expected,
+):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = [before, after]
+    d.selection_details = lambda el: states.pop(0) if len(states) > 1 else states[0]
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextArea', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == expected
+    assert len(d.clicked) == 1
+    if expected == 'confirmed':
+        assert 'three' in result.evidence and '14, 19' in result.evidence
+    if expected == 'unverifiable':
+        assert not result.next
+        assert 'could not be read' in result.evidence
+
+
+def test_detailed_double_click_waits_for_selection_without_reclick(tmp_path, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = iter([(), (), ((14, 19, 'three'),)])
+    d.selection_details = lambda el: next(states)
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextField', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert 'three' in result.evidence
+    assert len(d.clicked) == 1
+
+
 @pytest.mark.parametrize("coordinates", [False, True])
 def test_drag_collapsed_tree_child_is_confirmed_without_retry(tmp_path, coordinates):
     from dataclasses import replace
@@ -5675,3 +5724,32 @@ def test_drag_moved_source_and_disappeared_destination_has_no_retry(tmp_path):
     out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
     assert out.outcome == "unverifiable"
     assert out.next == ()
+
+
+def test_selection_verification_reads_the_dispatched_target(tmp_path, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextField', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    refreshed = replace(el, snapshot_id='fresh-selection')
+    checks = []
+    def recheck(app, target):
+        checks.append(target)
+        if len(checks) == 1:
+            raise ComputerUseError(ErrorCode.FOCUS_CHANGED, 'covered')
+    monkeypatch.setattr(rt, '_recheck_target', recheck)
+    monkeypatch.setattr(rt, '_raise_occluded_click_target', lambda *args: refreshed)
+    reads = []
+    def read(target):
+        reads.append(target)
+        return ((14, 19, 'three'),) if d.clicked else ()
+    d.selection_details = read
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert d.clicked == [refreshed]
+    assert reads == [refreshed, refreshed]

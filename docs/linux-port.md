@@ -1147,3 +1147,20 @@ Horizontal strips can be searched with `scroll_to_find(direction="right")`
 or `direction="left"`, optionally pinning the strip with `ref`. These send
 horizontal wheel steps. The default direction remains `down`; horizontal
 scroll position is reported as unknown when no axis-aware read is available.
+
+### Read-only text selections
+
+`desktop_snapshot` and `find` annotate readable selection owners in the focused
+document with `selection=[start, end) 'text'`. Offsets are native AT-SPI character
+offsets, with an exclusive end. The reader checks the scoped object and its
+descendants using `Text.get_n_selections`, `get_selection`, and `get_text`; it
+never sends copy keys or reads or writes the clipboard. Traversal has a 0.15 s
+budget between native calls; a blocked D-Bus call can exceed that budget.
+Secure subtrees and masked text sentinels do not expose selected text. Missing
+annotations do not establish an empty selection when a read is unavailable.
+
+Text-field double clicks use the same reader and poll briefly for asynchronous
+selection updates. Changed readable selections report `confirmed` with text and
+offsets. Unreadable selections report `unverifiable` with `next: []`, so a caller
+does not repeat a click that may already have selected the word. Readable
+unchanged selections retain `suspected_noop`. No alternate input is substituted.
