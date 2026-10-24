@@ -5485,3 +5485,80 @@ def test_scroll_anchor_excludes_closed_menu_descendants_without_hiding_find(role
     opened = dataclasses.replace(menu, scroll_candidate=True)
     snap = dataclasses.replace(snap, elements=(window, strip, opened, option))
     assert server._scroll_anchor(snap).ref in {"menu", "option"}
+
+
+@pytest.mark.parametrize("direction,delta", [("right", 5), ("left", -5)])
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("found", [False, True])
+def test_scroll_to_find_horizontal_strip(monkeypatch, direction, delta, pinned, found) -> None:
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def mk(has_target: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXWebArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 1280, 713), snapshot_id="s"),
+               Element(ref="e6", role="AXScrollArea", title="strip", value=None,
+                       bounds=Bounds(0, 24, 101, 362, 382), snapshot_id="s"),
+               Element(ref="e7", role="AXButton", title="item-1", value=None,
+                       bounds=Bounds(0, 30, 150, 80, 40), snapshot_id="s", parent="e6")]
+        if has_target:
+            els.append(Element(ref="e9", role="AXButton", title="Reykjavik", value=None,
+                               bounds=Bounds(0, 30, 300, 300, 40), snapshot_id="s", clickable=True, parent="e6"))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 1280, 713, 1.0, True),), elements=tuple(els))
+
+    before = mk(True)
+    # The target is named but outside the window on the requested axis.
+    offscreen = dataclasses.replace(before.elements[-1],
+                                    bounds=Bounds(0, 1600 if delta > 0 else -400, 300, 300, 40))
+    before = dataclasses.replace(before, elements=before.elements[:-1] + (offscreen,))
+    seq = [before, mk(found)]
+    anchors: list = []
+
+    class _D:
+        i = 0
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return seq[min(_D.i, len(seq) - 1)]
+
+        def scroll_viewport_page(self, *args):
+            pytest.fail("horizontal search must not page the vertical scrollbar")
+
+        def reveal_table_match(self, *args):
+            pytest.fail("horizontal search must not reveal a vertical table row")
+
+        def scroll_offset(self, *args):
+            pytest.fail("vertical offset is not horizontal progress evidence")
+
+        def scroll(self, target, **kw):
+            assert kw == {"dx": delta, "dy": 0}
+            anchors.append(target.ref)
+            _D.i += 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._current = mk(False)
+    actions = []
+
+    def run(action, app, execute, **kw):
+        actions.append(action)
+        return execute()
+
+    rt._run_gated = run
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    rt.driver.resolve_ref = lambda old, ref, *, live: observe.rematch_ref(old, ref, live)
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="Reykjavik", ref="e6" if pinned else None, direction=direction, max_scrolls=1)
+    if found:
+        assert "found after 1 scroll(s)" in out
+    else:
+        assert "not found after 1 scroll(s)" in out
+        assert "scroll_position: unknown" in out
+        assert "last_rows: item-1" in out
+    assert anchors == ["e6"]
+    assert actions[-1].dx == delta and actions[-1].dy == 0
