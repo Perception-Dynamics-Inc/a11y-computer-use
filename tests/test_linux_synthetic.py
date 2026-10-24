@@ -3269,6 +3269,33 @@ def test_kate_gutter_label_uses_native_editor_context(monkeypatch, case):
         assert raw.surface_name == ""
 
 
+@pytest.mark.parametrize("native_role,expected", [
+    ("row header", "AXRow"),
+    ("column header", "AXColumn"),
+])
+def test_chromium_childless_table_header_keeps_native_role(
+    fake_atspi, native_role, expected,
+):
+    """A header remains findable when Chromium omits its static-text child."""
+    app = _Acc("application", name="chrome")
+    app.get_toolkit_name = lambda: "Chromium"
+    header = _Acc(native_role, name="Elevation", width=88, height=37,
+                  states=("SHOWING", "VISIBLE", "ENABLED"))
+    table = _adopt(_Acc("table", width=166, height=400,
+                        states=("SHOWING", "VISIBLE", "ENABLED")), header)
+    _adopt(app, table)
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(header)
+    assert raw.role == expected
+    assert raw.title == "Elevation"
+    snap = build_snapshot(table, accessor, scope=Scope.WINDOW, app="chrome", pid=1,
+                          geometry=_geometry())
+    matches = [el for el in snap.elements if el.title == "Elevation"]
+    assert len(matches) == 1
+    assert matches[0].role == expected
+    assert observe.ax_handle_for(snap.snapshot_id, matches[0].ref) is header
+
+
 class _ValueApi:
     @staticmethod
     def get_current_value(acc):
@@ -19078,3 +19105,167 @@ def test_drag_overlay_discards_closed_dialog_controls(monkeypatch):
     start = outcome.element_at_point(before, a)
     assert outcome.drag_drop_verdict(before, options, start)[0] == 'confirmed'
     assert outcome.drag_drop_verdict(before, before, start)[0] == 'unverifiable'
+
+
+@pytest.mark.parametrize("hits", [[], ["list"]])
+def test_chromium_list_discovery_uses_native_role_query(fake_atspi, monkeypatch, hits):
+    """Discovery must not walk a Chrome window again before its snapshot."""
+    roles = _NS(**{name: name for name in ("LIST", "LIST_BOX", "TABLE", "TREE", "TREE_TABLE")})
+    rules = []
+    api = _NS(Role=roles, StateSet=_NS(new=lambda states: states),
+              CollectionMatchType=_NS(NONE=0, ANY=1),
+              CollectionSortOrder=_NS(CANONICAL=0),
+              MatchRule=_NS(new=lambda *args: rules.append(args) or args))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: api)
+    window = _Acc("frame")
+    listing = _Acc("list", width=100, height=100)
+    monkeypatch.setattr(_atspi, "_extents", lambda node: ((0, 0), (100, 100)))
+    queries = []
+    def query(*args):
+        queries.append(args)
+        return [listing] if hits else []
+    window.get_collection_iface = lambda: _NS(get_matches=query)
+    window.get_child_count = lambda: pytest.fail("duplicate full-window discovery")
+    assert _atspi._list_containers(window) == ([listing] if hits else [])
+    assert len(queries) == 1
+    assert set(rules[0][4]) == {"LIST", "LIST_BOX", "TABLE", "TREE", "TREE_TABLE"}
+
+
+def test_chromium_row_snapshot_does_not_refresh_or_read_unrelated_semantics(monkeypatch):
+    """A plain button has no row identity; inspect only its native ancestry."""
+    button = _GeckoNode("push button", "Outside")
+    panel = _GeckoNode("section", children=[button])
+    document = _GeckoNode("document web", children=[panel])
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    for node in (button, panel, document):
+        node.get_attributes = lambda: pytest.fail("non-row identity attributes")
+        node.get_name = lambda: pytest.fail("non-row identity name")
+        node.get_child_count = lambda: pytest.fail("identity must not walk descendants")
+    monkeypatch.setattr(_atspi, "_drop_cached_properties",
+                        lambda node: pytest.fail("snapshot identity must share existing reads"))
+    assert _atspi.chromium_row_identity(button, cache={}) == ()
+
+
+def test_chromium_row_under_cached_nonrow_ancestors_retains_identity(monkeypatch):
+    """Skipping ordinary semantics must still bind a later row to its parent."""
+    button = _GeckoNode("push button", "Open")
+    row = _GeckoNode("list item", "Item", children=[button])
+    listing = _GeckoNode("list", children=[row])
+    _GeckoNode("document web", children=[listing])
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    cache = {}
+    assert _atspi.chromium_row_identity(listing, cache=cache) == ()
+    identity = _atspi.chromium_row_identity(button, cache=cache)
+    assert identity == _atspi.chromium_row_identity(button, fresh=True)
+    assert [part[0] for part in identity] == ["push button", "list item", "list"]
+
+
+def test_chromium_ref_click_bounds_full_window_reads(fake_atspi, monkeypatch):
+    """Resolution and effect verification each get at most one full walk."""
+    from a11y_computer_use import server
+
+    button = _Acc("push button", name="Outside", width=80, height=30,
+                  states={"SHOWING", "VISIBLE", "ENABLED", "SENSITIVE"})
+    message = _Acc("static", name="Before", width=100, height=30, states={"SHOWING"})
+    document = _adopt(_Acc("document web", width=800, height=600, states={"SHOWING"}),
+                      button, message)
+    window = _adopt(_Acc("frame", name="Chrome", width=800, height=600), document)
+    app = _adopt(_Acc("application", name="chrome"), window)
+    app.get_toolkit_name = lambda: "Chrome"
+    for node in (window, document, button, message):
+        node.get_application = lambda: app
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("chrome", None))
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *_args: None)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    runtime._current = driver.snapshot(Scope.WINDOW, "chrome")
+    target = next(el for el in runtime._current.elements if el.title == "Outside")
+    identity_reads = []
+    original_identity = _atspi.chromium_row_identity
+    def read_identity(node, **kwargs):
+        identity_reads.append(node)
+        return original_identity(node, **kwargs)
+    monkeypatch.setattr(_atspi, "chromium_row_identity", read_identity)
+    walks = []
+    original = driver._snapshot_root
+    def snapshot_root(*args, **kwargs):
+        walks.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(driver, "_snapshot_root", snapshot_root)
+    presses = []
+    def press(index):
+        presses.append(button.name)
+        message.name = "After"
+        return True
+    button.get_action_iface = lambda: _NS(
+        get_n_actions=lambda: 1, get_action_name=lambda index: "press", do_action=press,
+    )
+    monkeypatch.setattr(driver, "_visible_action", lambda *_args: None)
+    result = runtime.click(ref=target.ref)
+    assert presses == ["Outside"]
+    assert result.outcome == "confirmed"
+    assert result.evidence == "the accessibility state changed"
+    assert len(walks) == 2
+    assert identity_reads == [button]
+
+
+@pytest.mark.parametrize("failure", ["exception", "unknown"])
+def test_chromium_list_query_failure_keeps_discovery_walk(fake_atspi, monkeypatch, failure):
+    listing = _Acc("list", width=100, height=100)
+    window = _adopt(_Acc("frame"), listing)
+    api = _NS(Role=_NS(**{name: name for name in (
+        "LIST", "LIST_BOX", "TABLE", "TREE", "TREE_TABLE")}),
+        StateSet=_NS(new=lambda states: states), CollectionMatchType=_NS(NONE=0, ANY=1),
+        CollectionSortOrder=_NS(CANONICAL=0), MatchRule=_NS(new=lambda *args: args))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: api)
+    monkeypatch.setattr(_atspi, "_extents", lambda node: ((0, 0), (100, 100)))
+    def query(*args):
+        if failure == "exception":
+            raise RuntimeError("Collection unavailable")
+        return None
+    window.get_collection_iface = lambda: _NS(get_matches=query)
+    assert _atspi._list_containers(window) == [listing]
+
+
+def test_chromium_snapshot_binds_only_emitted_refs_and_keeps_row_guard(fake_atspi, monkeypatch):
+    button = _Acc("push button", name="Open", width=80, height=30, states={"SHOWING"})
+    row = _adopt(_Acc("list item", name="Original row", width=100, height=40,
+                      states={"SHOWING"}), button)
+    # Layout wrappers are walked but should not incur issuing-identity reads.
+    content = row
+    for _ in range(8):
+        content = _adopt(_Acc("section", width=800, height=600, states={"SHOWING"}), content)
+    document = _adopt(_Acc("document web", width=800, height=600, states={"SHOWING"}), content)
+    window = _adopt(_Acc("frame", name="Chrome", width=800, height=600), document)
+    app = _adopt(_Acc("application", name="chrome"), window)
+    app.get_toolkit_name = lambda: "Chrome"
+    for node in (app, *_atspi._ancestor_chain(button)):
+        node.get_application = lambda: app
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    identities = []
+    original = _atspi.chromium_row_identity
+    def identity(node, **kwargs):
+        identities.append(node)
+        return original(node, **kwargs)
+    monkeypatch.setattr(_atspi, "chromium_row_identity", identity)
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert len(identities) == len(snap.elements)
+    assert len(identities) < 12
+    target = next(el for el in snap.elements if el.title == "Open")
+    assert target.row_identity == original(button, fresh=True)
+    assert target.row_identity
+    identities.clear()
+    effect = driver.effect_snapshot(Scope.WINDOW, "chrome")
+    assert identities == []
+    assert all(not el.row_identity for el in effect.elements)
+    driver.snapshot(Scope.WINDOW, "chrome")
+    assert len(identities) == len(snap.elements)
+    row.name = "Replacement row"
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(snap, target.ref)
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "target_changed"
