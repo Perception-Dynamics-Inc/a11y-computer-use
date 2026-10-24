@@ -19082,7 +19082,12 @@ def test_drag_overlay_discards_closed_dialog_controls(monkeypatch):
 
 @pytest.mark.parametrize("role", ["frame", "window", "document web", "document frame", "panel", "internal frame", "dialog"])
 @pytest.mark.parametrize("native_key", [(":1.2", "/accessible/42"), None])
-def test_context_identity_survives_snapshot_without_using_title(monkeypatch, role, native_key):
+def test_context_identity_survives_snapshot_without_using_title(fake_atspi, monkeypatch, role, native_key):
+    import sys
+
+    # Dialogs also read Value: keep the entire accessor on the fake binding,
+    # and prove this metadata regression needs no platform-native dependency.
+    monkeypatch.setitem(sys.modules, "gi", None)
     monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0., 0.), (800., 600.)))
     monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda acc: native_key)
