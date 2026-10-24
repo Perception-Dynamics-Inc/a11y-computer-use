@@ -5919,3 +5919,71 @@ def test_snapshot_preserves_issued_target_identity(
                 assert pressed == []
                 assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
                 runtime.desktop_snapshot(APP, mode=mode)
+
+
+@pytest.mark.parametrize("change", ["window_title", "placeholder", "document", "missing_url"])
+def test_snapshot_identity_refreshes_only_for_new_context(
+    monkeypatch, mocked_driver, store, audit_dir, change,
+):
+    """Fresh documents and populated layout nodes must not poison new refs."""
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Form Probe", None, None, "before")
+    field = Element("e2", "AXTextField", "Name", "", Bounds(1, 10, 40, 150, 25),
+                    "before", parent="e1", editable=True, document_id="title:Form Probe")
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, field))
+    if change == "placeholder":
+        before = dataclasses.replace(before, elements=(window, dataclasses.replace(
+            field, role="AXGroup", title="", editable=False,
+        )))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(
+        dataclasses.replace(window, title="Form Probe — modified", snapshot_id="after"),
+        dataclasses.replace(field, title="Notes" if change in {"document", "missing_url"} else "Name",
+                            snapshot_id="after"),
+    ))
+    current = [before]
+    url = ["https://example.test/form"]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(server.Runtime, "current_document_url", lambda self: url[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        if change == "document":
+            url[0] = "https://example.test/notes"
+        elif change == "missing_url":
+            url[0] = None
+        runtime.desktop_snapshot(APP)
+        if change == "missing_url":
+            with pytest.raises(ComputerUseError) as caught:
+                runtime._anchor("e2")
+            assert caught.value.detail["reason"] == "target_changed"
+        else:
+            assert runtime._anchor("e2") == (after, after.element("e2"))
+        assert mocked_driver["click"] == []
+
+
+def test_snapshot_identity_ignores_ancestor_text_value_echo(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """Firefox labels include child input values after a verified write."""
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    label = Element("e1", "AXStaticText", "Name", None, None, "before")
+    field = Element("e2", "AXTextField", "Name", "", None, "before", parent="e1", editable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(label, field))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(
+        dataclasses.replace(label, title="Name Ann Lee", snapshot_id="after"),
+        dataclasses.replace(field, value="Ann Lee", snapshot_id="after"),
+    ))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        runtime.desktop_snapshot(APP)
+        assert runtime._anchor("e2") == (after, after.element("e2"))
+        # The label itself still changed its name; it has no child anchor's
+        # mutable-text exception.
+        with pytest.raises(ComputerUseError) as caught:
+            runtime._anchor("e1")
+        assert caught.value.detail["reason"] == "target_changed"

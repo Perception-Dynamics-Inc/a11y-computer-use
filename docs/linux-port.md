@@ -1182,7 +1182,12 @@ interactive modes retain an existing ref's role, name, row identity and reported
 parent chain. If that ref number now identifies a different target, input is
 refused with `stale_ref`, reason `target_changed`, even when full mode prints the
 replacement. Re-observing the same control refreshes its binding; mutable values
-and bounds are excluded. This does not change modal input policy.
+and bounds are excluded. Ancestor window titles and text labels that echo input values are mutable
+and do not identify a child control. An unnamed, non-actionable layout placeholder may
+refresh to a newly populated control; previously actionable controls retain
+the changed-target refusal. A fresh observation with a different reported
+document URL starts a new ref namespace, as does an observed process restart.
+A missing URL does not clear the refusal. This does not change modal input policy.
 
 A standalone Chrome/AT-SPI check (not a pytest live file) opens a native modal
 from an iframe and verifies both snapshot modes send no input for the old ref:

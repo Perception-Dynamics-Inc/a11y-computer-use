@@ -3630,15 +3630,38 @@ class Runtime:
             previous_instances and current_instances
             and previous_instances.isdisjoint(current_instances)
         )
+        # A newly observed document starts a new ref namespace. A title is
+        # mutable UI state, so use a reported URL rather than window labels.
+        document_url = (
+            self.current_document_url()
+            if any(el.instance_id or el.document_id for el in snap.elements) or self._resolves_apps()
+            else None
+        )
+        previous_url = getattr(self, "_issued_document_url", None)
+        document_changed = bool(previous_url and document_url and previous_url != document_url)
+        self._issued_document_url = document_url or (
+            previous_url if last is not None and last.app == app and not instance_changed else None
+        )
         changed = getattr(self, "_changed_snapshot_refs", {}).copy()
-        if last is None or last.app != app or instance_changed:
+        if last is None or last.app != app or instance_changed or document_changed:
             anchors = {}
             changed = {}
         identity_indexes = {}
         for element in snap.elements:
             if refs is None or element.ref in refs:
                 old = anchors.get(element.ref)
-                if preserve_identity and old is not None:
+                if old is not None and old.snapshot_id not in identity_indexes:
+                    identity_indexes[old.snapshot_id] = {el.ref: el for el in old.elements}
+                prior = identity_indexes[old.snapshot_id][element.ref] if old is not None else None
+                # Empty layout placeholders published during startup do not
+                # identify a control. Do not permanently poison a later editor
+                # that takes their ref once the native tree is populated.
+                placeholder = bool(
+                    prior is not None and prior.role == "AXGroup"
+                    and not prior.title and not prior.actionable
+                    and not prior.stable_id and not prior.row_identity and element.actionable
+                )
+                if preserve_identity and old is not None and not placeholder:
                     for source in (old, snap):
                         if source.snapshot_id not in identity_indexes:
                             identity_indexes[source.snapshot_id] = {el.ref: el for el in source.elements}
@@ -3661,13 +3684,18 @@ class Runtime:
 
     @staticmethod
     def _issued_identity(elements: dict[str, Element], ref: str) -> tuple:
-        """Stable semantics of the target and its reported parent chain."""
+        """Target semantics and ancestry, excluding ancestor UI state.
+
+        Firefox label ancestors can echo the value of their child input.
+        Window titles also change with edits. Neither identifies that child;
+        the addressed element's own name and every captured row identity do.
+        """
         chain = []
         seen = set()
         while ref in elements and ref not in seen:
             seen.add(ref)
             el = elements[ref]
-            chain.append((el.role, el.title, el.row_identity))
+            chain.append((el.role, "" if chain and el.role in {"AXWindow", "AXStaticText"} else el.title, el.row_identity))
             ref = el.parent
         return tuple(chain)
 
