@@ -6837,11 +6837,28 @@ class Runtime:
         # not that click's baseline (whose dialog may share the result title).
         current = getattr(self, "_current", None)
         scope = getattr(current, "scope", None) or Scope.WINDOW
-        fresh = self._probe_snapshot(scope, start_app)
+        probe = getattr(self.driver, "drag_snapshot", None)
+        if callable(probe):
+            baseline = self._capture(start_app)
+            baseline = baseline.get("snap") if isinstance(baseline, dict) else None
+            try:
+                fresh = probe(scope, start_app, baseline, start, end)
+            except Exception:
+                fresh = None
+        else:
+            fresh = self._probe_snapshot(scope, start_app)
         before = self._freeze(fresh) if fresh is not None else None
         before_snap = fresh
-        start_el = start if isinstance(start, Element) else outcome.element_at_point(before_snap, start)
-        end_el = end if isinstance(end, Element) else outcome.element_at_point(before_snap, end)
+        def evidence_element(target):
+            if not isinstance(target, Element):
+                return outcome.element_at_point(before_snap, target)
+            if before_snap is not None:
+                for el in before_snap.elements:
+                    if el.ref == target.ref or (target.stable_id and el.stable_id == target.stable_id):
+                        return el
+            return target
+
+        start_el, end_el = evidence_element(start), evidence_element(end)
         selection_reader = getattr(self.driver, "text_selection", None)
 
         def read_selection() -> tuple[tuple[int, int], ...] | None:
@@ -10693,8 +10710,9 @@ def build_server(
         the file is in the target folder afterwards. Otherwise the text says
         the drop was not confirmed. A changed native text selection, a new
         window/dialog, or a source disappearing as the target gains children
-        also confirms the drag. Verification compares fresh trees immediately
-        before and after the stroke. Unreadable outcomes are unverifiable with no
+        also confirms the drag. On Linux, verification refreshes source/target
+        and window evidence before the stroke, then reads the resulting tree.
+        Unreadable outcomes are unverifiable with no
         retry hints; re-observe before further action. Refs
         restart in every snapshot: two refs right after a snapshot of another
         app that also issued either one are stale_ref (reason other_snapshot)

@@ -21595,7 +21595,13 @@ def active_modals(root, *, fallback: bool = True) -> list:
                     "Cannot establish the active modal boundary; no input was sent",
                     detail={"reason": "modal_boundary_unavailable"})
             candidates.append(node)
-            if libreoffice and _role_name(node) in {"table", "document spreadsheet"}:
+            if libreoffice and _role_name(node) in {
+                "table", "document spreadsheet", "document text",
+                "tool bar", "menu bar", "status bar",
+            }:
+                # Native Office dialogs are structural siblings of document
+                # content. Walking Writer paragraphs adds a whole-document
+                # scan to every scoped key, just as Calc materializes cells.
                 continue
             count = _child_count(node)
             if not libreoffice and count > 4096 - len(seen) - len(queue):

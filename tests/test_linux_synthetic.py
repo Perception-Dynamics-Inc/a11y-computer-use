@@ -19278,6 +19278,7 @@ def test_modal_guard_checks_keys_against_the_focused_window(monkeypatch, chord):
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     focused, root = object(), object()
+    monkeypatch.setattr(_atspi, "active_modals", lambda node: [root])
     monkeypatch.setattr(_atspi, "_focused_node", lambda app: (focused, False))
     monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
     checked = []
@@ -19328,3 +19329,112 @@ def test_modal_collection_splits_without_omitting_pivot_descendants(fake_atspi, 
     with pytest.raises(ComputerUseError) as caught:
         _atspi.active_modals(root)
     assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+def test_drag_evidence_reads_only_windows_and_endpoints(monkeypatch):
+    """A large app must not add another full AT-SPI walk per stroke."""
+    from dataclasses import replace
+    from a11y_computer_use.drivers import _actionable
+    nodes = {
+        'window': RawNode('AXWindow', title='files', position=(0, 0), size=(400, 300)),
+        'source': RawNode('AXCell', title='Alpha', position=(20, 40), size=(100, 20)),
+        'target': RawNode('AXCell', title='Delta', position=(20, 80), size=(100, 20)),
+    }
+    reads = []
+    class Native:
+        def read(self, node):
+            reads.append(node)
+            return nodes[node]
+        def children(self, node):
+            pytest.fail('pre-stroke evidence traversed descendants')
+    monkeypatch.setattr(_atspi, 'ATSPIAccessor', Native)
+    monkeypatch.setattr(_atspi, 'find_root', lambda *args: 'app')
+    monkeypatch.setattr(_atspi, 'snapshot_window_list', lambda root: ['window'])
+    monkeypatch.setattr(_atspi, 'primary_geometry', lambda: [DisplayGeometry(Display(0, 1280, 800, 1, True), (0, 0))])
+    monkeypatch.setattr(_actionable, 'refresh_cached_tree', lambda node: None)
+    monkeypatch.setattr(observe, 'ax_handle_for', lambda epoch, ref: {'e2': 'source', 'e3': 'target'}[ref])
+    class Initial(Native):
+        def children(self, node):
+            return ()
+    baseline = build_snapshot('window', Initial(), scope=Scope.WINDOW, app='files', pid=1,
+                              geometry=[DisplayGeometry(Display(0, 1280, 800, 1, True), (0, 0))])
+    source = replace(baseline.elements[0], ref='e2', role='AXCell', title='Alpha', parent='e1')
+    target = replace(source, ref='e3', title='Delta')
+    baseline = replace(baseline, elements=(*baseline.elements, source, target,
+        *(replace(source, ref=f'extra-{i}') for i in range(1000))))
+    d = LinuxDriver()
+    monkeypatch.setattr(d, '_run', lambda fn: fn())
+    reads.clear()
+    result = d.drag_snapshot(Scope.WINDOW, 'files', baseline, source, target)
+    assert reads == ['window', 'source', 'target']
+    assert len(result.elements) == len(baseline.elements)
+    assert result.element('e2').title == 'Alpha'
+
+
+def test_drag_overlay_discards_closed_dialog_controls(monkeypatch):
+    from dataclasses import replace
+    from a11y_computer_use import outcome
+    from a11y_computer_use.drivers import _actionable
+    raw = RawNode('AXDialog', title='Screenshot', position=(0, 0), size=(400, 300))
+    class Initial:
+        def read(self, node):
+            return raw
+        def children(self, node):
+            return ()
+    geometry = [DisplayGeometry(Display(0, 1280, 800, 1, True), (0, 0))]
+    options = build_snapshot('options', Initial(), scope=Scope.WINDOW,
+                             app='screenshooter', pid=1, geometry=geometry)
+    control = replace(options.elements[0], ref='e2', role='AXButton', title='OK', parent='e1')
+    options = replace(options, elements=(*options.elements, control))
+    reads = []
+    class Native(Initial):
+        def read(self, node):
+            reads.append(node)
+            return RawNode('AXGroup', title='screenshooter', enabled=False)
+    monkeypatch.setattr(_atspi, 'ATSPIAccessor', Native)
+    monkeypatch.setattr(_atspi, 'find_root', lambda *args: 'app')
+    monkeypatch.setattr(_atspi, 'snapshot_window_list', lambda root: [root])
+    monkeypatch.setattr(_atspi, 'primary_geometry', lambda: geometry)
+    monkeypatch.setattr(_actionable, 'refresh_cached_tree', lambda node: None)
+    d = LinuxDriver()
+    monkeypatch.setattr(d, '_run', lambda fn: fn())
+    a, b = Point(0, 200, 150), Point(0, 800, 350)
+    before = d.drag_snapshot(Scope.WINDOW, 'screenshooter', options, a, b)
+    assert reads == ['app']
+    assert not any(e.title == 'OK' for e in before.elements)
+    # The real overlay may have no geometry and thus no point-addressed node.
+    start = outcome.element_at_point(before, a)
+    assert outcome.drag_drop_verdict(before, options, start)[0] == 'confirmed'
+    assert outcome.drag_drop_verdict(before, before, start)[0] == 'unverifiable'
+
+
+@pytest.mark.parametrize("action", ["key", "type"])
+def test_modal_keyboard_guard_avoids_focus_walk_without_modal(monkeypatch, action):
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    root = object()
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    checked = []
+    def modals(node):
+        assert node is root
+        checked.append(node)
+        return []
+    monkeypatch.setattr(_atspi, "active_modals", modals)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: pytest.fail(
+        "no modal requires no full-document focus walk"))
+    driver.check_modal_input(KeyChord("End") if action == "key" else TypeText("hello"), "writer")
+    assert checked == [root]
+
+
+def test_modal_office_discovery_does_not_walk_writer_content(fake_atspi, monkeypatch):
+    document = _Acc("document text", name="Writer document")
+    modal = _Acc("dialog", name="Find", states=("SHOWING", "MODAL"))
+    bars = [_Acc(role) for role in ("tool bar", "menu bar", "status bar")]
+    frame = _adopt(_Acc("frame", name="Writer"), document, *bars, modal)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: True)
+    for node in (document, *bars):
+        node.get_child_count = lambda: pytest.fail("Office content is not a native dialog container")
+    assert _atspi.active_modals(frame) == [modal]
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(document, frame)
+    assert _atspi.refuse_outside_modal(modal, frame)

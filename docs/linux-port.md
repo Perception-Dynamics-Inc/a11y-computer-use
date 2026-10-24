@@ -1171,11 +1171,18 @@ offsets. Unreadable selections report `unverifiable` with `next: []`, so a calle
 does not repeat a click that may already have selected the word. Readable
 unchanged selections retain `suspected_noop`. No alternate input is substituted.
 
-Drag verification reads a fresh pre-stroke tree rather than reusing the previous
-action's read-back. This matters when a region-selection overlay appears after
+Drag verification refreshes pre-stroke evidence rather than relying only on the
+previous action's read-back. This matters when a region-selection overlay appears after
 the preceding click has returned, and both capture dialogs share a title. A
 failed pre-stroke read leaves the outcome unverifiable with no retry hints;
 it does not treat an older dialog snapshot as evidence for repeating the stroke.
+
+On Linux the pre-stroke drag read is restricted to top-level window evidence
+and the source/target elements; it does not traverse their descendants. The
+post-stroke snapshot still verifies the result. A group-only selection overlay
+can confirm a new dialog; without readable transition/effect evidence the result
+is `unverifiable` with `next: []`, never a coordinate retry. Previously observed
+controls in a closed window are excluded from the pre-stroke evidence.
 
 ### Modal input boundary
 
@@ -1197,13 +1204,14 @@ native fallback cannot establish the modal boundary, input is refused with
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
 and queries wide subtrees before walking their virtual rows. LibreOffice uses
-structural discovery that excludes
-virtual spreadsheet cells, since a Collection scan can materialize the entire
-grid. Wide collections can be queried in two complete halves using a reported
+structural discovery that excludes Writer document content and virtual
+spreadsheet cells, since walking document content adds a full scan to scoped
+keys and a Collection scan can materialize the entire grid. Wide collections can be queried in two complete halves using a reported
 child handle, preserving the pivot and its descendants without extending native
 timeouts or sampling rows. When the optional AT-SPI binding is absent, pointer
 and keyboard input
 retain native window routing; there is no AT-SPI semantic action transport.
+
 
 Snapshot ref identity (#1014): later `desktop_snapshot` calls in both full and
 interactive modes retain an existing ref's role, name, row identity and reported
