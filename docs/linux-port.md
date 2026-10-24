@@ -1270,3 +1270,9 @@ can leave focus in another field. The click uses the reported bounds and
 requires observed target focus; unreliable geometry is refused and a missed
 click returns an unconfirmed focus error. Typing still requires confirmed focus.
 This routing has synthetic regression coverage; it has not been live-verified.
+
+When a typed target's snapshot value is clipped, Linux outcome verification
+reads the full text from that exact snapshot handle on the AT-SPI thread.
+The model-facing preview stays capped; its ellipsis is never compared with the
+requested text. Missing handles and protected native fields do not supply
+full-text evidence.

@@ -3187,6 +3187,11 @@ class Runtime:
                     before_value = "" if earlier.value is None else str(earlier.value)
             if anchor is not None:
                 readback = "" if anchor.value is None else str(anchor.value)
+                full_read = getattr(self.driver, "type_outcome_text", None)
+                if readback.endswith("…") and callable(full_read):
+                    # Element.value is a model preview. Compare the actual
+                    # target text, never the clipped prefix, with the request.
+                    readback = full_read(anchor)
             if getattr(self.driver, "name", None) == "linux":
                 from a11y_computer_use import observe
                 from a11y_computer_use.drivers import _atspi
