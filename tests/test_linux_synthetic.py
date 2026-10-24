@@ -19191,3 +19191,140 @@ def test_modal_coordinates_use_settled_native_hit(modal_boundary_tree, monkeypat
             driver._check_modal_target(Point(0, 350, 225))
     assert len(read) == _atspi._HIT_TRIES
     assert calls == []
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_modal_discovery_never_queries_calc_collection_or_cells(fake_atspi, monkeypatch, fallback):
+    frame = _Acc("frame", name="Calc", states=("SHOWING",))
+    table = _Acc("table")
+    modal = _Acc("dialog", name="Format cells", states=("SHOWING", "MODAL"))
+    _adopt(frame, table, modal)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: True)
+    frame.get_collection_iface = lambda: pytest.fail("Collection materializes Calc's virtual grid")
+    table.get_child_count = lambda: pytest.fail("sheet cells cannot contain native modal windows")
+    assert _atspi.active_modals(frame, fallback=fallback) == [modal]
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(table, frame)
+    assert _atspi.refuse_outside_modal(modal, frame)
+
+
+def test_modal_collection_is_scoped_to_addressed_window(fake_atspi, monkeypatch):
+    from types import SimpleNamespace
+
+    frame = _Acc("frame", states=("SHOWING",))
+    modal = _Acc("dialog", states=("SHOWING", "MODAL"))
+    app = _adopt(_Acc("application"), frame, modal)
+    # A large page needs Collection at the frame; the application need not
+    # implement it. Native sibling dialogs must still be included.
+    app.get_collection_iface = lambda: pytest.fail("must query the addressed frame")
+    frame.get_child_count = lambda: pytest.fail("must not walk the whole page")
+    frame.get_collection_iface = lambda: SimpleNamespace(get_matches=lambda *args: [])
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: [frame, modal])
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        CollectionMatchType=SimpleNamespace(NONE=0, ANY=1),
+        CollectionSortOrder=SimpleNamespace(CANONICAL=0),
+        Role=SimpleNamespace(DIALOG=1),
+        MatchRule=SimpleNamespace(new=lambda *args: object()),
+        StateSet=SimpleNamespace(new=lambda *args: object()),
+    ))
+    assert _atspi.active_modals(frame, fallback=False) == [modal]
+
+
+def test_modal_guard_without_native_transport_preserves_pointer_dispatch(monkeypatch):
+    from contextlib import nullcontext
+    from a11y_computer_use.drivers import _linux_input
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    def missing_binding(*args):
+        raise ImportError("PyGObject is unavailable")
+    monkeypatch.setattr(_atspi, "_accessible_at_point", missing_binding)
+    sent = []
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **kwargs: sent.append((x, y)))
+    monkeypatch.setattr(_linux_input, "held", lambda modifiers: nullcontext())
+    point = Point(0, 23, 41)
+    driver.click(point)
+    assert sent == [(23, 41)]
+
+
+def test_modal_discovery_uses_complete_collection_before_virtual_rows(fake_atspi, monkeypatch):
+    frame = _Acc("frame", states=("SHOWING",))
+    document = _Acc("document web")
+    modal = _Acc("dialog", states=("SHOWING", "MODAL"))
+    _adopt(frame, document)
+    _adopt(document, modal)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    queried = []
+    def collection(node, *, split=False):
+        assert node is document and split
+        queried.append(node)
+        return [modal]
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    document.get_child_count = lambda: 5000
+    document.get_child_at_index = lambda index: pytest.fail("must use Collection before virtual rows")
+    assert _atspi.active_modals(frame) == [modal]
+    assert queried == [document]
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(document, frame)
+    assert _atspi.refuse_outside_modal(modal, frame)
+
+
+@pytest.mark.parametrize("chord", ["f5", "Escape", "Tab", "ctrl+r"])
+def test_modal_guard_checks_keys_against_the_focused_window(monkeypatch, chord):
+    from a11y_computer_use.schema import KeyChord
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    focused, root = object(), object()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (focused, False))
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    checked = []
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", lambda target, window: checked.append((target, window)))
+    driver.check_modal_input(KeyChord(chord), "chrome")
+    assert checked == [(focused, root)]
+
+
+def test_modal_collection_splits_without_omitting_pivot_descendants(fake_atspi, monkeypatch):
+    from types import SimpleNamespace
+
+    before = _Acc("dialog", name="Before", states=("SHOWING", "MODAL"))
+    nested = _Acc("dialog", name="Nested", states=("SHOWING", "MODAL"))
+    after = _Acc("dialog", name="After", states=("SHOWING", "MODAL"))
+    pivot = _adopt(_Acc("table row"), nested)
+    root = _adopt(_Acc("table"), before, pivot, after)
+    seen = []
+    def whole(*args):
+        raise TimeoutError("wide Collection cannot reply within the native timeout")
+    def prefix(current, rule, sort, tree, scope, count, traverse):
+        assert current is pivot and tree == "children" and scope
+        assert count == 0 and traverse
+        seen.append("before")
+        return [before]
+    def suffix(current, rule, sort, tree, count, traverse):
+        assert current is pivot and tree == "sibling"
+        assert count == 0 and traverse
+        seen.append("after")
+        return [nested, after]
+    coll = SimpleNamespace(get_matches=whole, get_matches_to=prefix, get_matches_from=suffix)
+    root.get_collection_iface = lambda: coll
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(
+        CollectionMatchType=SimpleNamespace(NONE=0, ANY=1),
+        CollectionSortOrder=SimpleNamespace(CANONICAL=0),
+        CollectionTreeTraversalType=SimpleNamespace(RESTRICT_CHILDREN="children", RESTRICT_SIBLING="sibling"),
+        Role=SimpleNamespace(DIALOG=1),
+        MatchRule=SimpleNamespace(new=lambda *args: object()),
+        StateSet=SimpleNamespace(new=lambda *args: object()),
+    ))
+    assert _atspi._modal_collection(root) is None
+    assert _atspi._modal_collection(root, split=True) == [before, pivot, nested, after]
+    assert seen == ["before", "after"]
+    coll.get_matches_from = whole
+    assert _atspi._modal_collection(root, split=True) is None
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    root.get_child_count = lambda: 5000
+    root.get_child_at_index = lambda index: pivot if index == 2500 else pytest.fail("must not enumerate rows")
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.active_modals(root)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"

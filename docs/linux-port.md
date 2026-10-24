@@ -1193,3 +1193,14 @@ must hit a descendant of the modal; they are never moved inside it. The agent
 does not retry a modal refusal through another input method. If the bounded
 native fallback cannot establish the modal boundary, input is refused with
 `modal_boundary_unavailable`.
+
+Collection discovery is scoped to the addressed window, with native sibling
+windows checked separately. At input time, discovery walks structural containers
+and queries wide subtrees before walking their virtual rows. LibreOffice uses
+structural discovery that excludes
+virtual spreadsheet cells, since a Collection scan can materialize the entire
+grid. Wide collections can be queried in two complete halves using a reported
+child handle, preserving the pivot and its descendants without extending native
+timeouts or sampling rows. When the optional AT-SPI binding is absent, pointer
+and keyboard input
+retain native window routing; there is no AT-SPI semantic action transport.

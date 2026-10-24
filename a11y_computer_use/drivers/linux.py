@@ -2614,15 +2614,23 @@ class LinuxDriver:
                 root = _atspi.find_root(owner, Scope.WINDOW)
             return _atspi.refuse_outside_modal(handle, root)
 
+        def probe():
+            try:
+                return self._run(check)
+            except ImportError:
+                # Without AT-SPI there is no semantic action bypass. Pointer
+                # input still follows the toolkit's native modal routing.
+                return False
+
         if not isinstance(target, Point):
-            self._run(check)
+            probe()
             return
         # Chromium's first hit is approximate and starts an asynchronous
         # renderer hit test. Read its settled answer before allowing input.
         # Wait on the caller so the AT-SPI event thread remains available.
         for attempt in range(_atspi._HIT_TRIES):
             try:
-                modal_open = self._run(check)
+                modal_open = probe()
                 if not modal_open or attempt + 1 == _atspi._HIT_TRIES:
                     return
             except ComputerUseError as exc:
@@ -2644,9 +2652,12 @@ class LinuxDriver:
         elif input_target is not None:
             self._check_modal_target(input_target, app=app)
         elif isinstance(action, (TypeText, KeyChord)):
-            focused, _ = self._run(lambda: _atspi._focused_node(app))
-            root = self._run(lambda: _atspi.find_root(app, Scope.WINDOW))
-            self._run(lambda: _atspi.refuse_outside_modal(focused, root))
+            try:
+                focused, _ = self._run(lambda: _atspi._focused_node(app))
+                root = self._run(lambda: _atspi.find_root(app, Scope.WINDOW))
+                self._run(lambda: _atspi.refuse_outside_modal(focused, root))
+            except ImportError:
+                return  # No semantic transport; keys use native window routing.
 
     def _visible_action(self, target, action: str, handle=None) -> None:
         """Schedule cosmetic feedback without influencing dispatch or outcome.
