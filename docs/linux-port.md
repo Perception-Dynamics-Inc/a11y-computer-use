@@ -114,6 +114,26 @@ The find bar and an omnibox popup also stick in the AT-SPI client cache. A snaps
 
 For Chrome/Electron processes that advertise a DevTools port, the Linux form overlay uses the optional `[browser]` extra to read and write matching DOM controls. Without `websocket-client`, snapshots and form writes retain the native AT-SPI path, including selection and numeric value writes. Native verification still determines success. Other CDP connection, script, and read-back failures remain errors; they do not retry a potentially completed write through AT-SPI. Selecting the standalone browser backend still requires the extra.
 
+### Native Chromium select option clicks
+
+For native HTML `<select multiple>` and size-based listboxes, ref clicks keep
+the requested pointer gesture: plain click replaces selection, Ctrl toggles,
+and Shift uses the browser's range anchor. Chromium can return the enclosing
+select from its settled document hit test. That exact parent hit is accepted
+only when fresh native option rectangles identify the requested option
+unambiguously inside the showing listbox. Missing, overlapping, off-viewport,
+or unreadable geometry is refused; ARIA lists retain exact-target hit testing.
+The fallback inspects at most the existing 250-child fetch allowance and
+refuses larger or nested option structures rather than guessing geometry.
+
+Selection is read back twice: plain clicks require only the target selected,
+Ctrl clicks require exactly that option toggled, and Shift clicks require a
+changed set containing the target. Unreadable or unchanged sets are not
+confirmed. No option action or compensating selection write is sent after a
+failed native-select click. This path has synthetic regressions; a standalone
+Chrome/X11 diagnostic also exercised plain replacement, Ctrl add/remove, and
+Shift extension. The live pytest suites were not run for this change.
+
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 
 | Driver primitive | Linux (implemented) | macOS / Windows analog |
