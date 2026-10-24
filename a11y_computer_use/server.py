@@ -6825,6 +6825,24 @@ class Runtime:
         end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
         waypoints = self._drag_path(path, start, display_id)
         action = Drag(start=start, end=end, path=waypoints)
+        overlay_reader = getattr(self.driver, "drag_overlay", None)
+        overlay = overlay_reader(start) if isinstance(start, Point) and callable(overlay_reader) else None
+        if overlay is not None:
+            # Override-redirect selection windows leave the underlying app
+            # foreground. Gate and observe the actual native input owner.
+            start_app = overlay[1]
+
+        def recheck(gated: str) -> None:
+            if isinstance(start, Point) and callable(overlay_reader):
+                if overlay_reader(start) != overlay:
+                    raise ComputerUseError(
+                        ErrorCode.FOCUS_CHANGED,
+                        "the drag overlay changed before input; re-observe",
+                        detail={"gated_app": gated, "reason": "drag_overlay_changed"},
+                    )
+                if overlay is not None:
+                    return
+            self._recheck_enabled_target(gated, start, end, *waypoints)
 
         def execute() -> None:
             self._refuse_disabled(start, end, *waypoints, verb="drag")
@@ -6880,9 +6898,7 @@ class Runtime:
             action,
             start_app,
             execute,
-            recheck=lambda gated, items=(start, end, *waypoints): self._recheck_enabled_target(
-                gated, *items
-            ),
+            recheck=recheck,
         )
         scope = getattr(before_snap, "scope", None) or Scope.WINDOW
         after = self._reread(start_app, scope)
@@ -10712,6 +10728,8 @@ def build_server(
         window/dialog, or a source disappearing as the target gains children
         also confirms the drag. On Linux, verification refreshes source/target
         and window evidence before the stroke, then reads the resulting tree.
+        X11 selection overlays are gated and observed by their native owner,
+        with the same overlay rechecked before input.
         Unreadable outcomes are unverifiable with no
         retry hints; re-observe before further action. Refs
         restart in every snapshot: two refs right after a snapshot of another
