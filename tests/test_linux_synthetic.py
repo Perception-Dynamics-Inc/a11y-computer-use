@@ -19433,6 +19433,32 @@ def test_drag_overlay_discards_closed_dialog_controls(monkeypatch):
     assert outcome.drag_drop_verdict(before, before, start)[0] == 'unverifiable'
 
 
+@pytest.mark.parametrize("role", ["frame", "window", "document web", "document frame", "panel", "internal frame", "dialog"])
+@pytest.mark.parametrize("native_key", [(":1.2", "/accessible/42"), None])
+def test_context_identity_survives_snapshot_without_using_title(fake_atspi, monkeypatch, role, native_key):
+    import sys
+
+    # Dialogs also read Value: keep the entire accessor on the fake binding,
+    # and prove this metadata regression needs no platform-native dependency.
+    monkeypatch.setitem(sys.modules, "gi", None)
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0., 0.), (800., 600.)))
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda acc: native_key)
+    node = _Acc(role, name="Notes Lab")
+    raw = _atspi.ATSPIAccessor().read(node)
+    expected = ((role, *native_key) if native_key and role in {
+        "frame", "window", "document web", "document frame"
+    } else ())
+    assert raw.context_identity == expected
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    assert snap.elements[0].context_identity == expected
+    node.name = "Notes Lab - saved"
+    fresh = _atspi.ATSPIAccessor().read(node)
+    assert fresh.title == "Notes Lab - saved"
+    assert fresh.context_identity == expected
+
+
 @pytest.mark.parametrize("action", ["key", "type"])
 def test_modal_keyboard_guard_avoids_focus_walk_without_modal(monkeypatch, action):
     from a11y_computer_use.schema import KeyChord, TypeText
@@ -19789,3 +19815,20 @@ def test_snapshot_document_url_does_not_promote_iframe_or_chrome(monkeypatch):
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     assert driver.snapshot_document_url(snap) is None
+
+
+def test_native_control_identity_survives_rename_and_flattening(fake_atspi, monkeypatch):
+    """Retain the bus/object key, not the title or a transient Python proxy."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((10., 40.), (150., 25.)))
+    key = [(':1.2', '/accessible/42')]
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda acc: key[0])
+    for name, expected in [("Count 0", key[0]), ("Count 1", key[0]), ("Count 2", ())]:
+        if not expected:
+            key[0] = None
+        raw = _atspi.ATSPIAccessor().read(_Acc("push button", name=name))
+        snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                              app="chrome", pid=1, geometry=_geometry())
+        assert raw.node_identity == expected
+        assert snap.elements[0].node_identity == expected
+        assert snap.elements[0].title == name
