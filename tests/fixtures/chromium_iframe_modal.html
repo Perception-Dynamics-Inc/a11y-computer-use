@@ -1,0 +1,9 @@
+<!doctype html>
+<title>Iframe ref identity</title>
+<button onclick="window.clicks++">Background Action</button>
+<iframe title="Embedded frame" srcdoc="<button onclick='parent.openFromIframe()'>Open dialog from iframe</button>"></iframe>
+<dialog aria-label="Opened from frame"><button onclick="window.clicks++; this.parentElement.close()">Frame dialog OK</button></dialog>
+<script>
+window.clicks = 0;
+window.openFromIframe = () => { document.querySelector('dialog').showModal(); };
+</script>
