@@ -515,3 +515,5 @@
 - 2026-10-24 (PR #992 repair): Chromium popup SHOWING and combo EXPANDED can disagree with painted menu items. Keep popup descendants in snapshots/find; closed-model exclusions belong only to automatic scroll-container selection.
 
 - 2026-10-24 (PR #997 repair): GTK 3 viewport traversal recovery and Chromium scroll-anchor popup filtering are independent. Preserve both appended regression groups when merging; use only the showing scroll pane’s measured bounds for viewport traversal and retain native descendant geometry.
+
+- 2026-10-24 (#975/#976): Text selection offsets alone miss asynchronous Chrome word selections and hide the selected text. Share a scoped read-only Text reader between observations and verification, preserve masked full-text sentinels before offset reads, and suppress retry hints for unreadable double-click outcomes.

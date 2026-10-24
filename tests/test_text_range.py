@@ -143,3 +143,98 @@ def test_range_inside_widget_but_outside_display_is_refused(native, monkeypatch)
     monkeypatch.setattr(d, 'displays', lambda: (Display(0, 100, 800, 1.0, True),))
     with pytest.raises(ComputerUseError, match='outside the visible display'):
         d.text_match_target(element(), 'DRAGWORDK5')
+
+
+def test_read_selection_descendants_exact_text_and_dedup(native, monkeypatch):
+    root, child = NS(), NS()
+    root.get_child_count = lambda: 1
+    root.get_child_at_index = lambda i: child
+    child.get_child_count = lambda: 0
+    monkeypatch.setattr(observe, 'ax_handle_for', lambda *a: root)
+    binding = _atspi._atspi()
+    monkeypatch.setattr(_atspi, '_atspi', lambda: binding)
+    api = binding.Text
+    api.get_n_selections = lambda node: 1
+    api.get_selection = lambda node, i: (6, 16)
+    calls = []
+    def text(node, start, end):
+        calls.append((start, end))
+        return native.raw if end == -1 else native.raw[start:end]
+    api.get_text = text
+    assert driver(monkeypatch).selection_details(element()) == ((6, 16, 'DRAGWORDK5'),)
+    assert calls == [(0, -1), (6, 16), (0, -1), (6, 16)]
+
+
+@pytest.mark.parametrize('kind', ['secure', 'masked', 'unavailable', 'empty', 'deadline'])
+def test_read_selection_failure_and_empty_are_distinct(native, monkeypatch, kind):
+    root = NS(get_child_count=lambda: 0)
+    monkeypatch.setattr(observe, 'ax_handle_for', lambda *a: root)
+    binding = _atspi._atspi()
+    monkeypatch.setattr(_atspi, '_atspi', lambda: binding)
+    api = binding.Text
+    api.get_n_selections = lambda node: 0 if kind == 'empty' else 1
+    api.get_selection = lambda node, i: None if kind == 'unavailable' else (6, 16)
+    reads = []
+    def text(node, start, end):
+        reads.append((start, end))
+        return '' if kind == 'masked' else native.raw[start:end]
+    api.get_text = text
+    if kind == 'secure':
+        monkeypatch.setattr(_atspi, 'is_secure', lambda node: True)
+    rows = _atspi.read_text_selections(root, budget=0 if kind == 'deadline' else .15)
+    assert rows == (() if kind == 'empty' else None)
+    if kind in {'secure', 'unavailable', 'empty', 'deadline'}:
+        assert reads == []
+    if kind == 'masked':
+        assert reads == [(0, -1)]
+
+
+def test_snapshot_selection_scoped_to_focused_document(native, monkeypatch):
+    frame = NS(get_role_name=lambda: 'frame')
+    doc = NS(get_role_name=lambda: 'document web', get_parent=lambda: frame)
+    paragraph = NS(get_role_name=lambda: 'paragraph', get_parent=lambda: doc)
+    handles = {'e1': paragraph, 'e2': doc}
+    monkeypatch.setattr(observe, 'ax_handle_for', lambda sid, ref: handles[ref])
+    roots = []
+    def read(root):
+        roots.append(root)
+        return ((paragraph, 6, 16, 'DRAGWORDK5'),)
+    monkeypatch.setattr(_atspi, 'read_text_selections', read)
+    el = replace(element(), focused=True)
+    snap = Snapshot('range-test', Scope.WINDOW, 'editor', 1, 0, (), (el, replace(el, ref='e2', focused=False)))
+    changed = driver(monkeypatch)._snapshot_selections(snap)
+    assert roots == [doc]
+    assert "selection=[6, 16) 'DRAGWORDK5'" in changed.elements[0].note
+    assert changed.elements[1] is snap.elements[1]
+
+
+def test_selection_ref_inside_protected_parent_is_not_read(native, monkeypatch):
+    parent = NS(get_role_name=lambda: 'password text')
+    child = NS(get_parent=lambda: parent)
+    monkeypatch.setattr(_atspi, 'is_secure', lambda node: node is parent)
+    binding = _atspi._atspi()
+    binding.Text.get_n_selections = lambda node: pytest.fail('protected descendant Text read')
+    monkeypatch.setattr(_atspi, '_atspi', lambda: binding)
+    assert _atspi.read_text_selections(child) is None
+
+
+def test_selection_note_survives_snapshot_and_find_rendering(native, monkeypatch, tmp_path):
+    from a11y_computer_use import server, safety
+    d = driver(monkeypatch)
+    el = replace(element(), note="selection=[6, 16) 'DRAGWORDK5'")
+    snap = Snapshot('range-test', Scope.WINDOW, 'editor', 1, 0, (), (el,))
+    monkeypatch.setattr(d, 'ensure_trusted', lambda: None)
+    monkeypatch.setattr(d, 'snapshot', lambda *a, **kw: snap)
+    with server.Runtime(driver=d, store=safety.PermissionStore(tmp_path / 'p.json'),
+                        audit=safety.AuditLog(tmp_path / 'audit')) as rt:
+        monkeypatch.setattr(rt, '_resolve_app', lambda app: (None, 'editor'))
+        monkeypatch.setattr(rt, '_run_gated', lambda action, app, execute: execute())
+        assert el.note in rt.desktop_snapshot('editor')
+        assert el.note in rt.find('editor', text='DRAGWORDK5')
+
+
+def test_selection_reader_without_optional_native_binding(monkeypatch):
+    def missing():
+        raise ImportError('gi unavailable on this platform')
+    monkeypatch.setattr(_atspi, '_atspi', missing)
+    assert _atspi.read_text_selections(object()) is None

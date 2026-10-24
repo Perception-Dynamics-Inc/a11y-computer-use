@@ -5562,3 +5562,52 @@ def test_scroll_to_find_horizontal_strip(monkeypatch, direction, delta, pinned, 
         assert "last_rows: item-1" in out
     assert anchors == ["e6"]
     assert actions[-1].dx == delta and actions[-1].dy == 0
+
+
+@pytest.mark.parametrize('before,after,expected', [
+    ((), ((14, 19, 'three'),), 'confirmed'),
+    (None, None, 'unverifiable'),
+    (None, ((14, 19, 'three'),), 'unverifiable'),
+    ((), (), 'suspected_noop'),
+    (((14, 19, 'three'),), ((14, 19, 'three'),), 'suspected_noop'),
+])
+def test_detailed_selection_double_click_reports_text_or_no_retry(
+    tmp_path, monkeypatch, before, after, expected,
+):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = [before, after]
+    d.selection_details = lambda el: states.pop(0) if len(states) > 1 else states[0]
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextArea', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == expected
+    assert len(d.clicked) == 1
+    if expected == 'confirmed':
+        assert 'three' in result.evidence and '14, 19' in result.evidence
+    if expected == 'unverifiable':
+        assert not result.next
+        assert 'could not be read' in result.evidence
+
+
+def test_detailed_double_click_waits_for_selection_without_reclick(tmp_path, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = iter([(), (), ((14, 19, 'three'),)])
+    d.selection_details = lambda el: next(states)
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXTextField', editable=True, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert 'three' in result.evidence
+    assert len(d.clicked) == 1
