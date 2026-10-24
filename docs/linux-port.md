@@ -27,6 +27,20 @@ retains its native name, and cells retain their native handles and measured
 bounds. Short visible cell lists remain flat. This labeling is covered by
 hermetic snapshot and find tests; live Calc verification is pending.
 
+## Drag outcome evidence
+
+Drag verification uses the shared verifier. A reordered or re-parented source,
+a source disappearing while the destination gains a collapsed disclosure state,
+a new window/dialog, a newly arrived file, or a changed native text-selection
+range confirms the action. Selecting a row alone and scrolling the whole list
+are not drop evidence. The selection reader does not touch the clipboard.
+
+When the source disappears without readable destination evidence, text selection
+cannot be read, or the target is an opaque painted surface, the result is
+`unverifiable` with `next: []`. Re-observe before another action: repeating old
+coordinates can drag the row that replaced the original source. An unchanged,
+readable row drag remains `suspected_noop`.
+
 ## What's already shared (no per-OS work)
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
