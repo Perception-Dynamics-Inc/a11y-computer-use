@@ -561,6 +561,8 @@
 - 2026-10-24 (#1045): Issuing-ref namespace checks must not call Linux's whole-tree document_url discovery. Its Collection query can materialize every virtual GTK/Chrome table row even though identity comparison uses only pruned elements. Read URL metadata from emitted handles, exclude iframe-only URLs, and preserve the prior namespace when the document is absent.
 
 
+
+- 2026-10-24 (#1047): GTK 4 text ref clicks must bypass the editable grab_focus shortcut in press_element. Return an exact no-dispatch receipt so Runtime reaches the existing geometry-checked pointer path and read-only focus verification; testing LinuxDriver.click alone misses the default AX-preferred route.
 - 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
 
 - 2026-10-25 (#1045 repair): A window-wide modal Collection query materializes GTK TreeView rows just like document URL discovery; removing only one query leaves the first-snapshot regression. Discover snapshot modals from application children and already-visited nodes, then mark emitted background handles after the walk. Preserve input-time discovery for actions and search-driven scrolling. The private GTK3 20k-row probe returned a full first snapshot in 0.312 s after both queries were removed from ordinary snapshots.
