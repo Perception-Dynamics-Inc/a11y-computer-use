@@ -21665,8 +21665,13 @@ def refuse_outside_modal(acc, root=None) -> bool:
                 "Cannot establish the target window's modal boundary; no input was sent",
                 detail={"reason": "modal_boundary_unavailable"})
         # Include sibling native dialogs in the application, but no other apps.
+        # Native top-level dialogs (including LibreOffice startup tips) can
+        # belong directly to the application, without a frame ancestor. The
+        # desktop is above that application and must never become our scope.
+        application = next((node for node in chain
+                            if _role_name(node) == "application"), None)
         root = next((node for node in chain if _role_name(node) in {"frame", "window"}),
-                    chain[-1] if chain else None)
+                    application if application is not None else chain[-1] if chain else None)
     modals = active_modals(root)
     if outside_modals(acc, modals):
         names = ", ".join(repr(_node_name(node)) for node in modals)

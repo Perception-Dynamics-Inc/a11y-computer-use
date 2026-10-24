@@ -19496,3 +19496,19 @@ def test_office_startup_dismisses_inside_modal_without_allowing_background(
     monkeypatch.setattr(server.time, "sleep", lambda seconds: None)
     assert runtime._dismiss_libreoffice_tip("localc", "localc", None, "Calc") == "Tip of the Day"
     assert calls == ["Close"]
+
+
+def test_native_top_level_modal_input_stays_within_owning_application(fake_atspi, monkeypatch):
+    """A dialog under the app must not cause a desktop-wide boundary scan."""
+    inside = _Acc("push button", name="OK", states=("SHOWING", "ENABLED"))
+    modal = _adopt(_Acc("dialog", name="Tip of the Day", states=("SHOWING", "MODAL")), inside)
+    sheet = _Acc("table")
+    frame = _adopt(_Acc("frame"), sheet)
+    app = _adopt(_Acc("application", name="soffice"), frame, modal)
+    desktop = _adopt(_Acc("desktop frame"), app)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: node is app or node is frame)
+    desktop.get_child_count = lambda: pytest.fail("input guard walked the desktop")
+    sheet.get_child_count = lambda: pytest.fail("input guard materialized the Calc grid")
+    assert _atspi.refuse_outside_modal(inside)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(sheet)
