@@ -21111,6 +21111,61 @@ def test_electron_child_modal_blocks_only_native_parent(
         assert not next(el for el in restored.elements if el.title == bg.name).blocked_by_modal
 
 
+def test_modal_snapshot_classification_reads_context_once(modal_boundary_tree, monkeypatch):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    original = _atspi._chromium_modal_parent
+    contexts = []
+    def parent(node):
+        contexts.append(node)
+        return original(node)
+    monkeypatch.setattr(_atspi, "_chromium_modal_parent", parent)
+    cache = {}
+    for _ in range(3):
+        assert _atspi.outside_modals(bg, [modal], cache=cache)
+        assert not _atspi.outside_modals(inside, [modal], cache=cache)
+    assert contexts == [modal]
+    _adopt(frame, bg, inside, modal)
+    assert _atspi.outside_modals(inside, [modal], cache={})
+
+
+def test_complete_action_discovery_reused_for_pointer_ref_check(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: False)
+    original = _atspi.active_modals
+    discoveries = []
+    def discover(root, **kwargs):
+        discoveries.append(root)
+        return original(root, **kwargs)
+    monkeypatch.setattr(_atspi, "active_modals", discover)
+    cache = {}
+    assert _atspi.input_modals(frame, cache) == [modal]
+    assert _atspi.input_modals(frame, cache, point=(350, 225)) == [modal]
+    for _ in range(3):
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            _atspi.refuse_outside_modal(bg, frame, modal_cache=cache, point=(100, 110))
+    assert discoveries == [frame]
+    frame.children.remove(modal)
+    assert _atspi.input_modals(frame, {}) == []
+
+
+def test_point_limited_modal_discovery_cannot_authorize_ref(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: False)
+    discoveries = []
+    def discover(root, **kwargs):
+        discoveries.append(kwargs)
+        return [] if "point" in kwargs else [modal]
+    monkeypatch.setattr(_atspi, "active_modals", discover)
+    cache = {}
+    assert _atspi.input_modals(frame, cache, point=(500, 62)) == []
+    for _ in range(3):
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            _atspi.refuse_outside_modal(bg, frame, modal_cache=cache)
+    assert discoveries == [{"point": (500, 62)}, {}]
+
+
 @pytest.mark.parametrize("recreated", [False, True])
 @pytest.mark.parametrize("route", ["path", "query", "fragment", "title", "missing"])
 def test_spa_route_change_refuses_old_ref_before_dispatch(monkeypatch, recreated, route):
