@@ -16,3 +16,13 @@ def test_gate_uses_median_and_preserves_every_sample():
     assert summary(samples)["maximum"] == 20.
     assert summary(samples)["samples"] == samples
     assert verdict([1.] * 7, samples)["status"] == "pass"
+
+
+def test_modal_and_large_page_rows_are_release_gated():
+    from scripts.latency.run import ROWS
+
+    required = {"R12-find", "R12-click", "R13-key", "R13-click", "R13-type"}
+    assert required <= set(ROWS)
+    # The new cases go through the same relative gate, including its retry.
+    result = verdict([1.] * 7, [1.26] * 7, ([1.] * 7, [1.26] * 7))
+    assert result["status"] == "fail"

@@ -1484,3 +1484,11 @@ property events; without a listener reuse is limited to the immediate action.
 Native mutations invalidate discoveries even before their events arrive.
 The separate [latency gate](../scripts/latency/README.md) compares native MCP/CLI
 calls with the pinned 0.4.76 wheel and blocks release publishing on regressions.
+
+Modal snapshot marking reuses boundary metadata and per-node classification
+only within one read-only traversal. The cache is cleared before the next
+walk, so reparented controls are checked again. Native identity layouts are
+initialized once; bus names and object paths are still read from the current
+native object. At input time, a complete action-scoped modal discovery can
+also serve its later pointer checks; point-limited discovery never authorizes
+a broader ref check. Event and mutation invalidation remain in force.

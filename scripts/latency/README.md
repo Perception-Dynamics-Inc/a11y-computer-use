@@ -77,3 +77,34 @@ are separate from the seven-sample MCP/CLI gate.
 R1 uses the exact minimal `top.html` / `ifr.html` / `inner.html` checkbox shape
 from [#1061](https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues/1061),
 including its onchange title evidence. It is separate from the modal/drag fixture.
+
+R12-find/R12-click cover LibreOffice Writer's native Tools → Options dialog,
+including the blocked document behind it. Find must return the Fonts cell;
+a single ref click must select that row. Selection is checked independently
+of its honest partial activation receipt. R13-click/R13-type/R13-key use the
+#1088 no-modal fixture with 60 navigation links and 1,500 list items, checking
+the counter, exact field value, and form submission respectively. These rows
+use the same fixed 0.4.76 baseline and 25% median budget, with no timing waiver.
+LibreOffice Writer and its GTK3 VCL plugin are required in addition to Chrome.
+
+To inspect the native-worker call counts and cProfile files for one modal
+find and click (profiling overhead is separate from gate medians):
+
+```bash
+PYTHONPATH=/path/to/checkout bash scripts/latency/session.sh /path/to/python \
+  scripts/latency/profile_modal.py --output /tmp/modal-profile.json
+```
+
+Repeat with the wheel interpreter and empty `PYTHONPATH` for the baseline.
+Counts include cached adapter getter calls, not wire-level D-Bus packets;
+`build_snapshot`, `find_root`, and `snapshot_window_list` expose repeated tree
+and window reads independently of elapsed time.
+
+The separate Electron #1097 correctness diagnostic uses three refused parent
+clicks, three types and three value changes, verifies unchanged parent values,
+and requires a confirmed write inside its modal:
+
+```bash
+bash scripts/latency/session.sh /path/to/head/bin/python \
+  scripts/latency/check_electron_modal.py --electron /path/to/electron
+```

@@ -32,6 +32,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
+from functools import lru_cache
 from contextlib import contextmanager
 
 from a11y_computer_use.observe import (
@@ -5748,23 +5749,10 @@ def _atspi_object_path(acc) -> str | None:
         return None
 
 
-def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
-    """``(bus_name, object_path)`` for one libatspi accessible, else None.
-
-    ``get_child_at_index`` can return a new Python wrapper after the previous
-    one is collected, and CPython can reuse that wrapper's ``id()``. The bus
-    name and object path stay on the C object. This does not call D-Bus. A
-    test double has no gpointer. An object whose unique bus name cannot be
-    read is None, so the caller does not treat two applications that happen
-    to publish the same path as one node.
-    """
-    pointer = _gobject_pointer(acc)
-    if not pointer:
-        return None
-    try:
-        import ctypes
-    except Exception:
-        return None
+@lru_cache(maxsize=1)
+def _atspi_identity_layouts():
+    """Build immutable native layouts once; identity values remain live reads."""
+    import ctypes
 
     class _GObject(ctypes.Structure):
         _fields_ = [
@@ -5788,6 +5776,27 @@ def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
             ("bus_name", ctypes.c_char_p),
             ("bus", ctypes.c_void_p),
         ]
+
+    return _AtspiObject, _AtspiApplication
+
+
+def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
+    """``(bus_name, object_path)`` for one libatspi accessible, else None.
+
+    ``get_child_at_index`` can return a new Python wrapper after the previous
+    one is collected, and CPython can reuse that wrapper's ``id()``. The bus
+    name and object path stay on the C object. This does not call D-Bus. A
+    test double has no gpointer. An object whose unique bus name cannot be
+    read is None, so the caller does not treat two applications that happen
+    to publish the same path as one node.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        _AtspiObject, _AtspiApplication = _atspi_identity_layouts()
+    except ImportError:
+        return None
 
     try:
         obj = _AtspiObject.from_address(pointer)
@@ -22235,26 +22244,42 @@ def outside_modals(acc, modals: list, *, cache=None) -> bool:
     """True unless acc belongs to every applicable modal (nested modals included)."""
     if not modals:
         return False
+    result_key = ("outside_modals", id(acc), tuple(id(node) for node in modals))
+    if cache is not None and result_key in cache:
+        return cache[result_key][2]
+    result = _outside_modals(acc, modals, cache=cache)
+    if cache is not None:
+        cache[result_key] = (acc, tuple(modals), result)  # Pin all wrapper identities.
+    return result
+
+
+def _outside_modals(acc, modals, *, cache):
     chain = _modal_chain(acc, cache)
     parents = {_ancestor_key(node) for node in chain}
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in modals:
-        native_parent = _chromium_modal_parent(modal)
+        context_key = ("modal_context", id(modal))
+        context = cache.get(context_key) if cache is not None else None
+        if context is None:
+            modal_chain = _modal_chain(modal, cache)
+            context = (modal, _chromium_modal_parent(modal),
+                       next((node for node in modal_chain
+                             if _role_name(node) in {"document web", "document frame"}), None),
+                       next((node for node in modal_chain
+                             if _role_name(node) in {"frame", "window"}), None))
+            if cache is not None:
+                cache[context_key] = context
+        _, native_parent, document, owner = context
         if (native_parent is not None and frame is not None
                 and _ancestor_key(frame) not in {
                     _ancestor_key(native_parent), _ancestor_key(modal)}):
             continue
-        modal_chain = _modal_chain(modal, cache)
-        document = next((node for node in modal_chain
-                         if _role_name(node) in {"document web", "document frame"}), None)
         if (document is not None and _ancestor_key(document) not in parents
                 and (frame is not None or any(
                     _role_name(node) in {"document web", "document frame"} for node in chain))):
             # A page cannot make browser chrome or another document inert.
             # Missing hits/ancestry do not prove a target is browser chrome.
             continue
-        owner = next((node for node in modal_chain
-                      if _role_name(node) in {"frame", "window"}), None)
         if (owner is not None and frame is not None
                 and _ancestor_key(owner) != _ancestor_key(modal)
                 and _ancestor_key(owner) != _ancestor_key(frame)):
@@ -22281,7 +22306,17 @@ def input_modals(root, cache: dict | None = None, *, point=None) -> list:
     if generation != _modal_generation or generation is None:
         _modal_discoveries.clear()
         _modal_generation = generation
-    key = (_ancestor_key(root), point)
+    root_key = _ancestor_key(root)
+    complete_key = (root_key, None)
+    complete_action_key = (generation, complete_key)
+    if cache is not None and complete_action_key in cache:
+        return cache[complete_action_key][1]
+    if generation is not None and complete_key in _modal_discoveries:
+        result = _modal_discoveries[complete_key]
+        if cache is not None:
+            cache[complete_action_key] = result
+        return result[1]
+    key = (root_key, point)
     action_key = (generation, key)
     if cache is not None and action_key in cache:
         return cache[action_key][1]
