@@ -387,3 +387,48 @@ def test_addressed_input_with_unreadable_activated_window_has_no_retry(
     assert "re-observe first" in result.evidence
     assert driver.typed == (["x"] if verb == "type" else [])
     assert driver.chords == (["End"] if verb == "key" else [])
+
+
+@pytest.mark.parametrize("addressed", [False, True])
+@pytest.mark.parametrize("public_snapshot", [False, True])
+def test_retype_after_outside_clear_reads_live_baseline(
+    tmp_path, monkeypatch, no_bus, addressed, public_snapshot,
+):
+    """#1117: equal prior payloads must not cause eight stale-read polls."""
+    from dataclasses import replace
+    from tests.test_action_outcomes import _tree
+
+    driver = _LinuxKeys(_rows(), active_id=2)
+    rt = _runtime(tmp_path, driver, "chrome")
+    value = [""]
+    reads = []
+
+    def snapshot(scope, app):
+        reads.append(value[0])
+        elements = _tree()
+        elements[2] = replace(elements[2], value=value[0])
+        return Snapshot(snapshot_id="fresh", app=app, scope=scope, elements=tuple(elements),
+                        pid=0, created_at=0.0, displays=())
+
+    def deliver(text):
+        driver.typed.append(text)
+        value[0] += text
+        return len(text)
+
+    driver.snapshot = snapshot
+    driver.type_text = deliver
+    monkeypatch.setattr(rt, "_guard_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rt, "_active_type_selection", lambda *args: None)
+    rt._current = snapshot(Scope.WINDOW, "chrome")
+    for _ in range(3):
+        value[0] = ""  # A user clears the field outside this Runtime.
+        if public_snapshot:
+            rt.desktop_snapshot("chrome")
+        reads.clear()
+        result = rt.type_text("hello world", app="chrome" if addressed else None)
+        assert result.outcome == "confirmed", result.evidence
+        assert result.evidence == "read back 'hello world'"
+        assert reads == ["", "hello world"]
+        assert value[0] == "hello world"
+    assert driver.typed == ["hello world"] * 3
+    assert driver.focused == []
