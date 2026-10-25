@@ -2201,7 +2201,9 @@ class LinuxDriver:
         semantics as macOS, without macOS's pyobjc `observe.snapshot`.
 
         An unnamed textarea whose pruned path changed can also resolve by
-        its AT-SPI bus/object identity in the fresh tree.
+        its AT-SPI bus/object identity in the fresh tree. Rematching must
+        preserve the recorded native window and document chain, independently
+        of mutable window/tab titles.
 
         A node the pruned tree dropped because its document is not showing is
         ``not_showing``, not ``stale_ref``. ``stale_ref`` stays the answer when
@@ -2229,6 +2231,17 @@ class LinuxDriver:
             live = probe(snap.scope, snap.app)
         try:
             resolved = observe.rematch_ref(snap, ref, live)
+            # Role/name/path are only anchors within the issuing native
+            # window and document. Browser titles deliberately are not file
+            # identities, so the shared matcher alone cannot bind a tab.
+            # Use already-emitted metadata: no ancestry IPC on normal clicks.
+            if LinuxDriver._ref_context(snap, anchor) != LinuxDriver._ref_context(live, resolved):
+                self._raise_if_hidden_alive(snap, ref)
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    f"{ref} no longer belongs to the issuing window/document",
+                    detail={"ref": ref, "reason": "document_changed", "outcome": "refused"},
+                )
             from a11y_computer_use.drivers import _atspi
 
             handle = observe.ax_handle_for(live.snapshot_id, resolved.ref)
@@ -2260,6 +2273,7 @@ class LinuxDriver:
                             el for el in live.elements
                             if el.role == anchor.role and el.title == anchor.title
                             and observe._bound_to_same_target(anchor, el)
+                            and LinuxDriver._ref_context(snap, anchor) == LinuxDriver._ref_context(live, el)
                             and self._run(lambda el=el: _atspi._atspi_wrapper_key(
                                 observe.ax_handle_for(live.snapshot_id, el.ref)
                             )) == key
@@ -2275,6 +2289,27 @@ class LinuxDriver:
             }:
                 self._raise_if_hidden_alive(snap, ref)
             raise
+
+    @staticmethod
+    def _ref_context(snap: Snapshot, element: Element) -> tuple:
+        """Native window/document chain retained in the pruned snapshot.
+
+        Names and node identity are intentionally excluded: titles and button
+        labels may change, and controls can be recreated within one document.
+        """
+        context = []
+        seen = set()
+        while element.ref not in seen:
+            seen.add(element.ref)
+            if element.context_identity:
+                context.append(element.context_identity)
+            if element.parent is None:
+                break
+            try:
+                element = snap.element(element.parent)
+            except KeyError:
+                break
+        return tuple(context)
 
     def take_click_snapshot(self, element: Element) -> Snapshot | None:
         """Consume the full live tree that resolved this exact input target.

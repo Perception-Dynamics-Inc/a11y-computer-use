@@ -2231,7 +2231,9 @@ def _wrapper_candidate(raw: RawNode, depth: int) -> bool:
     """Could this node collapse onto a single kept child? The child-independent
     half of the collapse test (the other half is "exactly one kept child and
     nothing elided", known only after its subtree is pruned)."""
-    return depth > 0 and _noninteractive_wrapper(raw)
+    # Native document/window boundaries bind refs even when unnamed. Keep
+    # them so a one-control tab cannot lose its context during flattening.
+    return depth > 0 and not raw.context_identity and _noninteractive_wrapper(raw)
 
 
 @dataclass

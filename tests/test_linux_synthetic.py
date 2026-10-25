@@ -20308,6 +20308,125 @@ def test_gecko_modal_collection_failure_keeps_bounded_fallback(fake_atspi, monke
         assert _atspi.active_modals(frame) == [dialog]
 
 
+@pytest.mark.parametrize("tab_open", ["link", "ctrl+t"])
+@pytest.mark.parametrize("namesake", [True, False])
+def test_background_chrome_ref_never_presses_front_tab(monkeypatch, tab_open, namesake):
+    """Both tab-opening repros, including the no-namesake control (synthetic)."""
+    from dataclasses import replace
+    from a11y_computer_use.schema import Element, Snapshot
+
+    tree = _chrome_documents()
+    original = tree["hidden"]
+    original.role = "push button"
+    original.name = "Alpha action"
+    front = tree["name"]
+    front.role = "push button"
+    front.name = "Alpha action" if namesake else "Bravo action"
+    window = Element("e1", "AXWindow", "Tabs Lab A", None, None, "tabs-old",
+                     context_identity=("frame", ":1.42", "/window"))
+    document = Element("e2", "AXGroup", "Tabs Lab A", None, None, "tabs-old",
+                       parent="e1", context_identity=("document web", ":1.42", "/tabA"))
+    button = Element("e3", "AXButton", "Alpha action", None, None, "tabs-old",
+                     parent="e2", clickable=True)
+    old = Snapshot("tabs-old", Scope.WINDOW, "chrome", 1, 0., (), (window, document, button))
+    # A target=_blank link and Ctrl+T both leave A alive in a background
+    # document. Ctrl+T can also detach that document from the native frame.
+    if tab_open == "ctrl+t":
+        tree["background"].parent = None
+    live = replace(old, snapshot_id="tabs-live", elements=(
+        replace(window, snapshot_id="tabs-live", title="Tabs Lab B"),
+        replace(document, snapshot_id="tabs-live", title="Tabs Lab B",
+                context_identity=("document web", ":1.42", "/tabB")),
+        replace(button, snapshot_id="tabs-live", title=front.name),
+    ))
+    observe._register_epoch(old.snapshot_id, {}, {button.ref: original})
+    observe._register_epoch(live.snapshot_id, {}, {button.ref: front})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    pressed = []
+    monkeypatch.setattr(driver, "press_element", lambda el: pressed.append(el))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(driver.resolve_ref(old, button.ref, live=live))
+    assert exc.value.detail["reason"] == "not_showing"
+    assert exc.value.detail["outcome"] == "refused"
+    assert pressed == []
+    assert driver.take_click_snapshot(button) is None
+
+
+@pytest.mark.parametrize("changed", ["document", "window", "missing_document", "missing_window"])
+@pytest.mark.parametrize("gone", [True, False])
+def test_linux_rematch_requires_issuing_document_and_window(monkeypatch, changed, gone):
+    """Showing/defunct originals cannot authorize a namesake in another context."""
+    from dataclasses import replace
+    from a11y_computer_use.schema import Element, Snapshot
+
+    window = Element("e1", "AXWindow", "Chrome", None, None, "binding-old",
+                     context_identity=("frame", ":1.42", "/window"))
+    document = Element("e2", "AXGroup", "Page", None, None, "binding-old",
+                       parent="e1", context_identity=("document web", ":1.42", "/doc"))
+    button = Element("e3", "AXButton", "Alpha action", None, None, "binding-old", parent="e2")
+    old = Snapshot("binding-old", Scope.WINDOW, "chrome", 1, 0., (), (window, document, button))
+    elements = [replace(el, snapshot_id="binding-live") for el in old.elements]
+    index = 1 if "document" in changed else 0
+    elements[index] = replace(elements[index], context_identity=(
+        () if changed.startswith("missing") else ("document web" if index else "frame", ":1.42", "/other")
+    ))
+    live = replace(old, snapshot_id="binding-live", elements=tuple(elements))
+    handle = object()
+    observe._register_epoch(old.snapshot_id, {}, {button.ref: handle})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "accessible_gone", lambda node: gone)
+    monkeypatch.setattr(_atspi, "hidden_web_target", lambda node: False)
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, button.ref, live=live)
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "document_changed"
+
+
+def test_linux_same_context_rematch_uses_no_extra_native_reads(monkeypatch):
+    """Mutable titles and recreated controls preserve #1014/#1042 behavior."""
+    from dataclasses import replace
+    from a11y_computer_use.schema import Element, Snapshot
+
+    window = Element("e1", "AXWindow", "Old title", None, None, "context-old",
+                     context_identity=("frame", ":1.42", "/window"))
+    document = Element("e2", "AXGroup", "Old title", None, None, "context-old",
+                       parent="e1", context_identity=("document web", ":1.42", "/doc"))
+    button = Element("e3", "AXButton", "Alpha action", None, None, "context-old",
+                     parent="e2", node_identity=(":1.42", "/old-button"))
+    old = Snapshot("context-old", Scope.WINDOW, "chrome", 1, 0., (), (window, document, button))
+    live = replace(old, snapshot_id="context-live", elements=(
+        replace(window, snapshot_id="context-live", title="New title"),
+        replace(document, snapshot_id="context-live", title="New title"),
+        replace(button, snapshot_id="context-live", node_identity=(":1.42", "/new-button")),
+    ))
+    driver = LinuxDriver()
+    def unexpected_native_read(fn):
+        pytest.fail("Context verification must use snapshot metadata, without native IPC")
+    monkeypatch.setattr(driver, "_run", unexpected_native_read)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    assert driver.resolve_ref(old, button.ref, live=live) is live.elements[2]
+
+
+def test_unnamed_document_context_survives_single_child_pruning():
+    """One-control pages must retain their native document/tab boundary."""
+    tree = (RawNode("AXWindow", title="Chrome", position=(0, 0), size=(800, 600),
+                    context_identity=("frame", ":1.42", "/window")), [
+        (RawNode("AXGroup", position=(0, 0), size=(800, 600),
+                 context_identity=("document web", ":1.42", "/doc")), [
+            (RawNode("AXButton", title="Alpha action", position=(10, 10), size=(100, 30)), []),
+        ]),
+    ])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    button = next(el for el in snap.elements if el.title == "Alpha action")
+    assert LinuxDriver._ref_context(snap, button) == (
+        ("document web", ":1.42", "/doc"), ("frame", ":1.42", "/window"),
+    )
+
+
 @pytest.mark.parametrize("kind", [
     "empty", "backdrop", "control", "control_child", "missing", "small",
     "native", "missing_bounds", "foreign_document", "zero_modal_bounds",
