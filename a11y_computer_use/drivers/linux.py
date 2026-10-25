@@ -2211,7 +2211,8 @@ class LinuxDriver:
         ``not_showing``, not ``stale_ref``. ``stale_ref`` stays the answer when
         the node is gone. A node that is still alive and has scrolled off the
         display stays ``stale_ref`` here; crop asks `alive_offscreen` and
-        reports ``not_visible`` instead. Click keeps this ``stale_ref``.
+        reports ``not_visible`` instead. If the fresh window reports display
+        overflow, an unresolved ref instead names window move/resize recovery.
         """
         from a11y_computer_use import observe
 
@@ -2293,6 +2294,25 @@ class LinuxDriver:
                         ]
                         if len(matches) == 1:
                             return matches[0]
+            if (exc.code is ErrorCode.STALE_REF
+                    and exc.detail.get("reason") in {"not_found", "title_changed", "role_changed"}
+                    and live.app == snap.app and live.pid == snap.pid):
+                # Display-edge pruning can omit or renumber controls. It does
+                # not establish a reorder; refuse with the measured cause.
+                windows = [el for el in live.elements
+                           if el.role in {"AXWindow", "AXDialog", "AXSheet"}]
+                old_windows = [el for el in snap.elements
+                               if el.role in {"AXWindow", "AXDialog", "AXSheet"}]
+                same_window = (len(windows) == len(old_windows) == 1
+                               and windows[0].context_identity == old_windows[0].context_identity)
+                overflow = windows[0].content_note if same_window else ""
+                if "window extends beyond the displays" in overflow:
+                    raise ComputerUseError(
+                        ErrorCode.NOT_VISIBLE,
+                        f"{ref} cannot be resolved while its {overflow}",
+                        detail={"ref": ref, "reason": "window_beyond_display",
+                                "next": ["window"], "hint": overflow},
+                    ) from exc
             # A quit-and-relaunched app, or a different document, must stay
             # stale_ref. Searching the new tree for a hidden namesake would
             # retarget the error onto the replacement.

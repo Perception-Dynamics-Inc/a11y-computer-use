@@ -6073,6 +6073,24 @@ class Runtime:
             verdict=verdict,
             cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
+        if (isinstance(target, Element) and target.bounds is not None
+                and result.outcome in {"suspected_noop", "unverifiable", "partial"}):
+            box = target.bounds
+            # Use the action's captured display metadata: a failed new display
+            # query after dispatch must not turn an unknown effect into a retry.
+            captured = before.get("snap") if isinstance(before, dict) else None
+            displays = captured.displays if isinstance(captured, Snapshot) else ()
+            display = next((d for d in displays if d.display_id == box.display_id), None)
+            if (display is not None
+                    and (box.x < 0 or box.y < 0
+                         or box.x + box.width > display.width
+                         or box.y + box.height > display.height)):
+                result = outcome.ActionResult(
+                    text, outcome="unverifiable", next=(),
+                    evidence="effect unknown after click on a display-clipped target; "
+                             "re-observe before further input; use window list, then "
+                             "window move or window resize to bring it on screen",
+                )
         if opaque_target and result.outcome in {"suspected_noop", "unverifiable"}:
             result = outcome.ActionResult(
                 text, outcome="unverifiable", next=(),
