@@ -10,7 +10,7 @@ os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
 
 
 def click(python, point, env):
-    command = [python, '-m', 'a11y_computer_use', 'run-once',
+    command = [python, '/src/scripts/latency/run_once.py', 'run-once',
                json.dumps(dict(tool='click', x=int(point.x), y=int(point.y)))]
     for i in range(200):
         result = subprocess.run(command, env=dict(env, PYTHONFAULTHANDLER='1'),
