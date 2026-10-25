@@ -20771,3 +20771,100 @@ def test_web_focus_remount_identity(fake_atspi, monkeypatch, case, operation):
             call(el, "hello world")
         assert exc.value.code is ErrorCode.FOCUS_LOST
         assert writes == []
+
+
+@pytest.mark.parametrize("event", ["window:create", "window:destroy", "document:reload",
+                                  "document:load-complete", "object:children-changed:add",
+                                  "object:state-changed:modal",
+                                  "object:property-change:accessible-attributes"])
+def test_modal_discovery_event_cache_refuses_new_modal(modal_boundary_tree, monkeypatch, event):
+    from a11y_computer_use.drivers import _atspi_events
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: True)
+    _atspi._modal_discoveries.clear()
+    original = _atspi.active_modals
+    discoveries = []
+    def discover(root):
+        discoveries.append(root)
+        return original(root)
+    monkeypatch.setattr(_atspi, "active_modals", discover)
+    assert _atspi.input_modals(frame, {}) == []
+    assert _atspi.input_modals(frame, {}) == []
+    assert discoveries == [frame]
+    local = {}
+    assert _atspi.input_modals(frame, local) == []
+    frame.children.append(modal)
+    _atspi_events._on_event(_NS(type=event))
+    # Both the persistent and action-local results must expire.
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(bg, frame, modal_cache=local)
+    assert discoveries == [frame, frame]
+    assert _atspi.input_modals(frame, {}) == [modal]
+
+
+@pytest.mark.parametrize("kind", ["click", "hover", "scroll", "drag", "type", "key"])
+def test_all_runtime_inputs_share_one_modal_discovery(modal_boundary_tree, monkeypatch, kind):
+    from a11y_computer_use.schema import Click, Hover, Scroll, Drag, TypeText, KeyChord
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    point = Point(0, 350, 225)
+    action = dict(click=Click(point), hover=Hover(point), scroll=Scroll(point),
+                  drag=Drag(point, point), type=TypeText("ab"), key=KeyChord("Tab"))[kind]
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: inside)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (inside, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    original = _atspi.active_modals
+    discoveries = []
+    def discover(root):
+        discoveries.append(root)
+        return original(root)
+    monkeypatch.setattr(_atspi, "active_modals", discover)
+    with driver.input_context(action):
+        driver.check_modal_input(action, "modal-test")
+        driver.check_modal_input(action, "modal-test")
+    assert discoveries == [frame]
+
+
+def test_chromium_modal_discovery_queries_document_before_content(fake_atspi, monkeypatch):
+    dialog = _Acc("dialog", states=("SHOWING", "MODAL"))
+    document = _adopt(_Acc("document web"), dialog)
+    frame = _adopt(_Acc("frame"), document)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    queried = []
+    def collection(node, **kwargs):
+        queried.append(node)
+        return [dialog]
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    document.get_child_count = lambda: pytest.fail("must not enumerate page content")
+    assert _atspi.active_modals(frame) == [dialog]
+    assert queried == [document]
+
+
+def test_modal_settles_once_but_rechecks_hit_before_dispatch(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    point = Point(0, 350, 225)
+    hits = []
+    current = [inside]
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: hits.append(current[0]) or current[0])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    with driver.input_context(Click(point)):
+        driver.check_modal_input(Click(point), "modal-test")
+        assert len(hits) == _atspi._HIT_TRIES
+        driver.check_modal_input(Click(point), "modal-test")
+        assert len(hits) == _atspi._HIT_TRIES + 1
+        current[0] = bg
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            driver.check_modal_input(Click(point), "modal-test")
+    assert calls == []
+
+
+def test_page_toolbar_modal_keeps_collection_failure_fallback(fake_atspi, monkeypatch):
+    dialog = _Acc("dialog", states=("SHOWING", "MODAL"))
+    toolbar = _adopt(_Acc("tool bar"), dialog)
+    document = _adopt(_Acc("document web"), toolbar)
+    frame = _adopt(_Acc("frame"), document)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_modal_collection", lambda *args, **kwargs: None)
+    assert _atspi.active_modals(frame) == [dialog]

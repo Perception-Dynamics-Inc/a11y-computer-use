@@ -44,6 +44,9 @@ _STANDING_EVENTS = (
     "object:property-change:accessible-name",
     "document:load-complete",
     "window:activate",
+    "window:",
+    "document:",
+    "object:property-change",
 )
 
 _thread: threading.Thread | None = None
@@ -55,6 +58,8 @@ _listener_failed = False
 _events: deque = deque(maxlen=4096)
 _events_cv = threading.Condition()
 _seq = 0
+_modal_epoch = 0
+_modal_events_ready = False
 
 
 _ON = frozenset({"1", "true", "yes", "on"})
@@ -176,6 +181,17 @@ def ensure_started() -> bool:
     return True
 
 
+def modal_cache_ready() -> bool:
+    """Cross-action caching requires every boundary event subscription."""
+    return listening() and _modal_events_ready
+
+
+def modal_epoch() -> int:
+    """Generation for modal discovery; valid only with a working listener."""
+    with _events_cv:
+        return _modal_epoch
+
+
 def current_seq() -> int:
     with _events_cv:
         return _seq
@@ -244,8 +260,13 @@ def wait_for_structural(since_seq: int = 0, timeout: float = 0.5):
 
 
 def _on_event(event) -> bool:
-    global _seq
+    global _seq, _modal_epoch
     with _events_cv:
+        kind = getattr(event, "type", "")
+        if kind.startswith(("window:", "document:", "object:children-changed",
+                            "object:state-changed",
+                            "object:property-change")):
+            _modal_epoch += 1
         _seq += 1
         _events.append((_seq, getattr(event, "type", ""),
                         getattr(event, "detail1", 0)))
@@ -266,13 +287,18 @@ def _run() -> None:
         Atspi.init()
         # Same bound as `_atspi._atspi`: 300ms per call, no 15s startup grace.
         Atspi.set_timeout(300, 0)
-        global _listener
+        global _listener, _modal_events_ready
+        required = {"window:", "document:", "object:property-change",
+                    "object:children-changed", "object:state-changed"}
+        registered = set()
         _listener = Atspi.EventListener.new(_on_event)
         for ev in _STANDING_EVENTS:
             try:
-                _listener.register(ev)
+                if _listener.register(ev) is not False:
+                    registered.add(ev)
             except Exception:  # noqa: BLE001 - a missing event type must not abort the rest
                 pass
+        _modal_events_ready = required <= registered
         # Set before _ready so a waiter that observes _ready also observes
         # the listener. event_main runs only after that.
         _listening.set()

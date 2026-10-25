@@ -871,8 +871,10 @@ def _call_first_inline(obj, names, *args, default=None):
             continue
         if _is_mutator(name):
             modal_cache = getattr(_read_cache_local, "input_modals", None)
-            if modal_cache is not None and name not in {"clear_cache", "clearCache"}:
-                modal_cache.clear()
+            if name not in {"clear_cache", "clearCache"}:
+                _modal_discoveries.clear()
+                if modal_cache is not None:
+                    modal_cache.clear()
             _drop_read_cache()
             return _safe(lambda m=method: m(*args), default, marshal=False)
         key = _cache_key(name, args)
@@ -21855,6 +21857,12 @@ def active_modals(root, *, fallback: bool = True) -> list:
                     "Cannot establish the active modal boundary; no input was sent",
                     detail={"reason": "modal_boundary_unavailable"})
             candidates.append(node)
+            if (_role_name(node) in {"tool bar", "menu bar", "status bar"}
+                    and not any(_role_name(parent) in {"document web", "document frame"}
+                                for parent in _ancestor_chain(node))):
+                # Native modal windows are structural siblings, not toolbar
+                # controls or lazily populated menu models.
+                continue
             if libreoffice and _role_name(node) in {
                 "table", "document spreadsheet", "document text",
                 "tool bar", "menu bar", "status bar",
@@ -21864,9 +21872,9 @@ def active_modals(root, *, fallback: bool = True) -> list:
                 # scan to every scoped key, just as Calc materializes cells.
                 continue
             if (_role_name(node) in {"document web", "document frame"}
-                    and _gecko_app(node)):
-                # Deep Gecko pages never reach the wide-child threshold below.
-                # Query all dialog descendants at the document boundary instead.
+                    and (_gecko_app(node) or _chromium_app(node))):
+                # Query all dialog descendants at the document boundary for
+                # both engines instead of walking page content.
                 descendants = _modal_collection(node)
                 if descendants is not None:
                     candidates.extend(descendants)
@@ -21948,15 +21956,38 @@ def outside_modals(acc, modals: list) -> bool:
     return False
 
 
+# Accessed on the native event thread. Without a listener, retain discovery
+# only within the immediate action, never across actions.
+_modal_discoveries: dict = {}
+_modal_generation: int | None = None
+
+
 def input_modals(root, cache: dict | None = None) -> list:
-    """Discover once per window during a click; retain fallback identity owners."""
+    """Reuse discovery until a window/document/structural event invalidates it."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    global _modal_generation
     if cache is None:
-        return active_modals(root)
+        cache = getattr(_read_cache_local, "input_modals", None)
+    generation = _atspi_events.modal_epoch() if _atspi_events.modal_cache_ready() else None
+    if generation != _modal_generation or generation is None:
+        _modal_discoveries.clear()
+        _modal_generation = generation
     key = _ancestor_key(root)
-    if key not in cache:
-        # Keep the root alive when _ancestor_key must fall back to id().
-        cache[key] = (root, active_modals(root))
-    return cache[key][1]
+    action_key = (generation, key)
+    if cache is not None and action_key in cache:
+        return cache[action_key][1]
+    if generation is not None and key in _modal_discoveries:
+        result = _modal_discoveries[key]
+    else:
+        result = (root, active_modals(root))
+        if generation is not None:
+            if len(_modal_discoveries) >= 64:
+                _modal_discoveries.clear()  # Eviction forces rediscovery.
+            _modal_discoveries[key] = result
+    if cache is not None:
+        cache[action_key] = result  # Pin fallback id() owners.
+    return result[1]
 
 
 def modal_dismiss_hit(acc, root, x: int, y: int, *, modal_cache=None) -> bool:

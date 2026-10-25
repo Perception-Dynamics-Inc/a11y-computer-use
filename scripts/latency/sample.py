@@ -1,0 +1,194 @@
+"""One isolated native-app/MCP sample. Invoked by run.py, never by pytest."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import gzip
+import functools
+import http.server
+import shutil
+import threading
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+FIXTURES = Path(__file__).with_name("fixtures")
+
+
+def ref(text, title):
+    for line in text.splitlines():
+        match = re.match(r"\s*(e\d+)\s", line)
+        if match and title in line:
+            return match[1]
+    raise AssertionError(f"Missing {title!r}: {text}")
+
+
+async def sample(row, head):
+    from a11y_computer_use import safety
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Scope
+
+    driver = LinuxDriver()
+    driver.ensure_trusted()
+    with tempfile.TemporaryDirectory(prefix="a11y-latency-") as temp:
+        home = Path(temp)
+        env = dict(os.environ, HOME=temp, XDG_CACHE_HOME=str(home / "cache"),
+                   A11Y_VISIBLE_ACTIONS="0", NO_AT_BRIDGE="0", GTK_MODULES="gail:atk-bridge")
+        app = "bigtree" if row == "R5" else "mousepad" if row == "R7" else "firefox" if row == "R2" else "chrome"
+        store = safety.PermissionStore(home / ".a11y-computer-use" / "permissions.json")
+        for alias in (app, "firefox-bin" if app == "firefox" else app,
+                      "python3" if app == "bigtree" else app,
+                      "python3.13" if app == "bigtree" else app,
+                      "python" if app == "bigtree" else app):
+            store.set_tier(alias, safety.Tier.FULL)
+        if row == "R5":
+            args = [sys.executable, str(FIXTURES / "bigtree.py"), "20000"]
+        elif row == "R7":
+            args = ["mousepad", "--disable-server"]
+        elif row == "R2":
+            page = home / "seven-summits.html"
+            page.write_bytes(gzip.decompress((FIXTURES / "seven-summits.html.gz").read_bytes())
+                             + b"<script>" + (FIXTURES / "offline-sort.js").read_bytes() + b"</script>")
+            (home / "user.js").write_text('user_pref("browser.aboutwelcome.enabled",false);user_pref("browser.shell.checkDefaultBrowser",false);user_pref("browser.startup.homepage_override.mstone","ignore");user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification",true);')
+            args = [os.environ.get("FIREFOX", "firefox"), "--no-remote", "--profile", temp, page.as_uri()]
+        else:
+            args = [os.environ.get("CHROME", "google-chrome"), "--no-sandbox", "--force-renderer-accessibility",
+                    "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--disable-gpu",
+                    "--password-store=basic", "--window-size=1280,800", f"--user-data-dir={home / 'chrome'}",
+                    (FIXTURES / "controls.html").as_uri()]
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+        shutil.copyfile(FIXTURES / "controls.html", home / "controls.html")
+        http_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+            functools.partial(QuietHandler, directory=temp))
+        threading.Thread(target=http_server.serve_forever, daemon=True).start()
+        if app in {"chrome", "firefox"}:
+            args[-1] = f"http://127.0.0.1:{http_server.server_port}/" + ("seven-summits.html" if row == "R2" else "controls.html")
+        with open(home / "app.log", "w") as log:
+            process = subprocess.Popen(args, env=env, stdout=log, stderr=log, start_new_session=True)
+            try:
+                # Wait for registration without warming the R5 snapshot/tree.
+                from a11y_computer_use.drivers import _linux_system
+                deadline = time.monotonic() + 30
+                while not any(app in str(w.get("app", "")).lower()
+                              or (row == "R5" and w.get("title") == "Big Tree")
+                              for w in _linux_system.windows()):
+                    if process.poll() is not None or time.monotonic() > deadline:
+                        raise AssertionError(("app registration", log.name, process.poll()))
+                    await asyncio.sleep(.1)
+                from a11y_computer_use.drivers import _atspi
+                while driver._run(lambda: _atspi.find_root(app, Scope.WINDOW)) is None:
+                    assert time.monotonic() < deadline, "AT-SPI registration did not settle"
+                    await asyncio.sleep(.1)
+                params = StdioServerParameters(command=sys.executable, args=["-m", "a11y_computer_use", "mcp"], env=env)
+                async with stdio_client(params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        async def call(tool, **kwargs):
+                            reply = await session.call_tool(tool, kwargs)
+                            text = "\n".join(getattr(c, "text", "") for c in reply.content)
+                            assert not reply.isError, (tool, kwargs, text)
+                            return text
+                        async def snapshot():
+                            return await call("desktop_snapshot", app=app, scope="window", mode="full")
+                        if row == "R5":
+                            start = time.perf_counter()
+                            text = await call("desktop_snapshot", app=app, scope="window", mode="interactive")
+                            elapsed = time.perf_counter() - start
+                            assert "Row 00001" in text and "opaque_region" not in text
+                            # RSS belongs to the server, not the client or GTK app.
+                            # Discover the direct MCP child by parent PID and command.
+                            children = []
+                            for status in Path("/proc").glob("[0-9]*/status"):
+                                try:
+                                    data = status.read_text()
+                                    if int(status.parent.name) != process.pid and re.search(rf"^PPid:\s+{os.getpid()}$", data, re.M):
+                                        children.append(int(re.search(r"^VmRSS:\s+(\d+)", data, re.M)[1]))
+                                except (OSError, TypeError):
+                                    pass
+                            assert len(children) == 1, children
+                            return dict(seconds=elapsed, rss_kib=children[0])
+                        text = await snapshot()
+                        if row == "R7":
+                            await call("click", ref=ref(text, '"Help"'))
+                            text = await snapshot()
+                            target = ref(text, '"About')
+                            start = time.perf_counter()
+                            receipt = await call("click", ref=target)
+                            elapsed = time.perf_counter() - start
+                            assert "About Mousepad" in await snapshot(), receipt
+                        elif row == "R2":
+                            # Find is outside the CLI-click timer, as in #1067.
+                            await call("scroll_to_find", app=app, text="First ascent")
+                            await call("find", app=app, text="First ascent")
+                            driver = LinuxDriver()
+                            snap = driver.snapshot(Scope.WINDOW, app)
+                            header = next(el for el in snap.elements if el.title == "First ascent" and el.bounds)
+                            point = header.bounds.center
+                            start = time.perf_counter()
+                            reply = subprocess.run([sys.executable, "-m", "a11y_computer_use", "run-once",
+                                                    json.dumps(dict(tool="click", x=int(point.x), y=int(point.y)))],
+                                                   env=env, capture_output=True, text=True, check=True)
+                            elapsed = time.perf_counter() - start
+                            assert "refused" not in reply.stdout
+                            assert "Offline sort confirmed" in await snapshot(), reply.stdout
+                        elif row == "R8":
+                            driver = LinuxDriver()
+                            snap = driver.snapshot(Scope.WINDOW, app)
+                            box = next(el.bounds for el in snap.elements if el.title == "Pointer box" and el.bounds)
+                            x, y = int(box.center.x), int(box.center.y)
+                            path = [[x + i * 15, y] for i in range(18)]
+                            start = time.perf_counter()
+                            receipt = await call("drag", start_x=x, start_y=y, end_x=x+17*15, end_y=y, path=path)
+                            elapsed = time.perf_counter() - start
+                            assert "Drag completed" in await snapshot(), receipt
+                        elif row in {"R1", "R1-iframe"}:
+                            target = ref(text, '"Frame checkbox"' if row.endswith("iframe") else '"Top checkbox"')
+                            start = time.perf_counter()
+                            receipt = await call("click", ref=target)
+                            elapsed = time.perf_counter() - start
+                            assert "checked" in await snapshot(), receipt
+                        elif row == "R9":
+                            await call("click", ref=ref(text, '"Change title"'))
+                            fresh = await snapshot()
+                            receipt = await call("click", ref=ref(fresh, '"Row action"'))
+                            assert "Row activated" in await snapshot(), receipt
+                            return dict(correct=True)
+                        elif row == "R10":
+                            await call("click", ref=ref(text, '"Open modal"'))
+                            text = await snapshot()
+                            for _ in range(3):
+                                reply = await session.call_tool("click", dict(ref=ref(text, '"Background Action"')))
+                                error = " ".join(getattr(c, "text", "") for c in reply.content)
+                                assert reply.isError and "outside_active_modal" in error, error
+                            await call("key", chord="ctrl+l", app=app)
+                            return dict(correct=True, refusals=3, shortcuts_not_refused=["ctrl+l"])
+                        else:
+                            raise ValueError(row)
+                        return dict(seconds=elapsed)
+            finally:
+                import signal
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=15)
+                http_server.shutdown()
+                http_server.server_close()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("row")
+    parser.add_argument("--head", action="store_true")
+    args = parser.parse_args()
+    print(json.dumps(asyncio.run(sample(args.row, args.head))))
