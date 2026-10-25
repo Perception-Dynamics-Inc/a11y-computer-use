@@ -264,6 +264,55 @@ def _pixel_notches(pixels: int) -> int:
     return count if pixels > 0 else -count
 
 
+def _search_notches(shot: Snapshot, anchor: Element, text: str | None,
+                    dy: int, box: tuple[int, int, int, int]) -> int:
+    """Size a search burst from the measured viewport and ordinal row spacing.
+
+    Ordinals guide navigation only. They never supply match evidence or
+    target geometry. Without a consistent sequence, keep viewport overlap.
+    """
+    default = (1 if dy > 0 else -1) * max(1, min(
+        _MAX_PIXEL_NOTCHES, box[3] // (2 * _PIXELS_PER_NOTCH),
+    ))
+    if not text:
+        return default
+    query = re.fullmatch(r"(\D*)(\d+)(\D*)", text)
+    if query is None:
+        return default
+    prefix, number, suffix = query.groups()
+    under = {anchor.ref}
+    for _ in range(len(shot.elements)):
+        added = {el.ref for el in shot.elements if el.parent in under} - under
+        if not added:
+            break
+        under.update(added)
+    samples = {}
+    for el in shot.elements:
+        if el.ref not in under or el.ref == anchor.ref:
+            continue
+        b = el.bounds
+        if b.height <= 0 or not box[1] <= b.y + b.height / 2 < box[1] + box[3]:
+            continue
+        match = re.fullmatch(re.escape(prefix) + r"(\d+)" + re.escape(suffix) + r".*", el.title or "")
+        if match:
+            samples[int(match[1])] = b.y
+    ordered = sorted(samples.items())
+    if len(ordered) < 2:
+        return default
+    pitches = [(y2 - y1) / (n2 - n1) for (n1, y1), (n2, y2) in zip(ordered, ordered[1:])]
+    if min(pitches) <= 0 or max(pitches) > min(pitches) * 1.2:
+        return default
+    wanted = int(number)
+    if ordered[0][0] <= wanted <= ordered[-1][0]:
+        return default
+    nearest = ordered[-1][0] if wanted > ordered[-1][0] else ordered[0][0]
+    distance = wanted - nearest
+    # Approach half the observed ordinal distance. A later real read can
+    # correct overshoot; wheel settings are not a pixel-distance promise.
+    count = max(1, min(_MAX_PIXEL_NOTCHES, int(abs(distance) * min(pitches) / (2 * _PIXELS_PER_NOTCH))))
+    return count if distance > 0 else -count
+
+
 def _pixel_scroll_box(target: Target) -> tuple[int, int, int, int] | None:
     """On-screen box whose pixels prove a scrollbar-less pixel scroll moved."""
     if isinstance(target, Element):
@@ -3987,6 +4036,73 @@ class LinuxDriver:
         )
         self._note_pointer(x1, y1)
         return None
+
+    def scroll_search_step(self, target: Element, *, snapshot: Snapshot,
+                           text: str | None, dy: int) -> bool:
+        """Wheel a Chromium overflow list, verifying fresh row movement.
+
+        False means unsupported with no input. This search-only path avoids
+        line-scroll's Value/scroll_to/track fallback and repeated pixel waits.
+        It never reports a target found: Runtime confirms real snapshot refs.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_input
+
+        if _on_wayland() or not dy:
+            return False
+        handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        # This shortcut relies on fresh libatspi/GObject row discovery.
+        # Other transports keep the ordinary driver scroll contract.
+        if handle is None or not self._run(lambda: hasattr(handle, "__gpointer__")):
+            return False
+
+        def prepare():
+            container = _atspi.list_container(handle)
+            if container is None or _atspi.scroll_container_kind(container) == "document":
+                return None
+            edges = _atspi._viewport_edges(container)
+            if edges is None:
+                return None
+            left, top, right, bottom = edges
+            box = (int(left), int(top), int(right - left), int(bottom - top))
+            if box[2] < 1 or box[3] < 4:
+                return None
+            rows = _atspi._in_view_named_rows(container)
+            names = _atspi.row_names(rows)
+            return (container, box, names) if len(names) >= 2 else None
+
+        prepared = self._run(prepare)
+        if prepared is None:
+            return False
+        container, box, before = prepared
+        self._visible_action(target, "Scroll")
+        self._raise_handle_window(handle)
+        self._focused_editable = None
+        notches = _search_notches(snapshot, target, text, dy, box)
+        # Only measured viewport coordinates; never infer a target's bounds.
+        x, y = box[0] + box[2] // 2, box[1] + box[3] // 2
+        before_grab = _grab_region(box)
+        _linux_input.scroll(x, y, dy=notches, notch_interval_s=0.008)
+        deadline = time.monotonic() + 0.9
+        previous = None
+        while True:
+            # Separate operations let the event thread publish updated rows
+            # between probes and give each probe a fresh getter cache.
+            rows = self._run(lambda: _atspi._in_view_named_rows(container))
+            names = self._run(lambda: _atspi.row_names(rows))
+            if len(names) >= 2 and names != before and names == previous:
+                self._run(lambda: _atspi.commit_shown_rows(container, rows))
+                return True
+            previous = names
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        mean = _region_mean_change(before_grab, _grab_region(box))
+        reason = "rows_stale" if mean is None or mean > _atspi._PAGE_MOVE_MEAN else "page_unchanged"
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED, "search wheel did not publish changed visible rows",
+            detail={"reason": reason, "dy": notches, "rows": list(before)},
+        )
 
     def scroll_offset(self, target: Element) -> float | None:
         """Vertical offset of the scroll container that holds ``target``.

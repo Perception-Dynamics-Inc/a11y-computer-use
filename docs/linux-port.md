@@ -1313,3 +1313,16 @@ requested keys once and returns `unverifiable`; it does not treat the input as
 a grid edit, commit an editor, or poll selected-cell contents. This path has
 synthetic regression coverage only. Inspect the active cell after address
 navigation rather than retrying the text merely because its effect is unverified.
+
+
+For `scroll_to_find` only, Chromium overflow lists use a separate wheel path.
+The burst starts from the measured viewport size. Consistent numbered labels
+in that container allow larger bursts (at most 24 notches) and correction
+toward a distant ordinal. Numbers guide scrolling and never establish a match
+or supply target geometry. Each moving step requires two fresh, agreeing row
+reads, followed by Runtime's snapshot matching and confirming read before a
+found ref is returned. This avoids repeated Value/scroll_to/track attempts and
+pixel-settle loops in the explicit line-scroll path. Unchanged rows still stop
+or reverse the search; changed pixels with stale rows request another snapshot.
+Budget reports name the requested no-progress budget; the independent 120-second
+hard limit is identified separately with a continuation hint.

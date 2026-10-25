@@ -252,3 +252,42 @@ def test_native_search_never_types_find_shortcuts(runtime, pinned, role) -> None
     assert "not found" in result
     assert inputs == []
     assert len(runtime.driver.scrolls) == 1
+
+
+def test_search_step_hook_is_gated_and_does_not_imply_found(runtime, tmp_path):
+    def search_step(target, *, snapshot, text, dy):
+        assert snapshot is runtime._current
+        assert text == "absent"
+        assert dy == 5
+        runtime.driver.scrolls.append(target)
+        runtime.store.set_tier("test-app", safety.Tier.READ)
+        return True
+
+    runtime.driver.scroll_search_step = search_step
+    runtime.driver.scroll = lambda *a, **kw: pytest.fail("legacy fallback after handled step")
+    with pytest.raises(server.ActionRefused):
+        runtime.scroll_to_find("test-app", text="absent", max_scrolls=2)
+    assert len(runtime.driver.scrolls) == 1
+    rows = [row for row in audit_rows(tmp_path) if row["action"] == "scroll"]
+    assert [row["result"] for row in rows] == ["ok", "deny"]
+
+
+def test_search_step_acknowledgement_is_not_a_match(runtime):
+    reads = []
+    take_snapshot = runtime.driver.snapshot
+
+    def read(scope, app):
+        reads.append(app)
+        return take_snapshot(scope, app)
+
+    def step(target, **kwargs):
+        runtime.driver.scrolls.append(target)
+        return True
+
+    runtime.driver.snapshot = read
+    runtime.driver.scroll_search_step = step
+    runtime.driver.scroll = lambda *a, **kw: pytest.fail("unexpected legacy fallback")
+    out = runtime.scroll_to_find("test-app", text="absent", max_scrolls=2)
+    assert out.startswith("not found after 2 scroll(s)")
+    assert len(reads) == 3  # one fresh Runtime observation per step, plus the initial read
+    assert len(runtime.driver.scrolls) == 2
