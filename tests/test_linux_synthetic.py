@@ -19109,6 +19109,106 @@ def test_modal_boundary_coordinate_and_cached_ref_no_input(modal_boundary_tree, 
     driver.check_modal_input(Click(point), "modal-test")
 
 
+@pytest.mark.parametrize("signal", ["native", "aria-modal"])
+@pytest.mark.parametrize("hit_kind", ["missing", "unknown", "address"])
+def test_page_modal_address_coordinates_use_document_area(
+    modal_boundary_tree, monkeypatch, signal, hit_kind,
+):
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    if signal == "aria-modal":
+        modal.states.remove("MODAL")
+        modal.get_attributes = lambda: {"aria-modal": "true"}
+    document = _adopt(_Acc("document web", name="Page"), bg, modal)
+    _place_row(document, 0, 100, 800, 500)
+    address = _Acc("entry", name="Address and search bar")
+    _adopt(frame, address, document)
+    hit = {"missing": None, "unknown": _Acc("text"), "address": address}[hit_kind]
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: hit)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    driver.check_modal_input(Click(Point(0, 500, 62)), "modal-test")
+    # Unknown ancestry in the page remains fail-closed.
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: None)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Click(Point(0, 100, 150)), "modal-test")
+    # Even an approximate toolbar hit cannot authorize a point in the page.
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: address)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Click(Point(0, 100, 150)), "modal-test")
+    # No measured document area means unknown hits still fail closed.
+    document.component = None
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: None)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Click(Point(0, 500, 62)), "modal-test")
+    assert calls == []
+
+
+def test_browser_chrome_modal_discovery_never_walks_page(
+    modal_boundary_tree,
+):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    document = _adopt(_Acc("document web", name="Page"), bg, modal)
+    _place_row(document, 0, 100, 800, 500)
+    native = _Acc("dialog", name="Browser dialog", states={"SHOWING", "MODAL"})
+    _adopt(frame, document, native)
+    document.get_child_count = lambda: pytest.fail("chrome input must not traverse page")
+    # Native browser dialogs still apply even when page traversal is excluded.
+    assert _atspi.active_modals(frame, point=(500, 62)) == [native]
+    frame.children.remove(native)
+    assert _atspi.active_modals(frame, point=(500, 62)) == []
+
+
+def test_page_modal_unknown_ref_uses_fresh_reported_bounds(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    document = _adopt(_Acc("document web", name="Page", width=800, height=500,
+                           states={"SHOWING", "VISIBLE"}), bg, modal)
+    _place_row(document, 0, 100, 800, 500)
+    address = _Acc("entry", name="Address and search bar", width=400, height=30,
+                   states={"SHOWING", "VISIBLE", "ENABLED", "EDITABLE"})
+    _place_row(address, 300, 45, 400, 30)
+    _adopt(frame, address, document)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    ref = next(el for el in snap.elements if el.title == address.name)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_system.frontmost_app_id", lambda: "modal-test")
+    address.parent = None  # Chrome hit/ref wrapper loses its ancestry.
+    driver.check_modal_input(Click(ref), "modal-test")
+    _place_row(address, 300, 145, 400, 30)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Click(ref), "modal-test")
+    assert calls == []
+
+
+@pytest.mark.parametrize("signal", ["native", "aria-modal"])
+def test_page_modal_implicit_type_refused_before_any_input(
+    modal_boundary_tree, monkeypatch, tmp_path, signal,
+):
+    from a11y_computer_use import safety, server
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    if signal == "aria-modal":
+        modal.states.remove("MODAL")
+        modal.get_attributes = lambda: {"aria-modal": "true"}
+    _adopt(frame, _adopt(_Acc("document web", name="Page", width=800, height=500,
+                                  states={"SHOWING", "VISIBLE"}), bg, modal))
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (inside, False))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("modal-test", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(runtime, "_reject_terminal", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "_dialog_confirmation", lambda *args: None)
+    monkeypatch.setattr(runtime, "_recheck_target", lambda *args, **kwargs: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    monkeypatch.setattr(driver, "type_text", lambda *args, **kwargs: calls.append("typed"))
+    from a11y_computer_use.schema import TypeText
+    with pytest.raises(ComputerUseError, match="native dialog open, focus moved"):
+        runtime._run_gated(TypeText("https://example.test/\n"), "modal-test",
+                           lambda: driver.type_text("https://example.test/\n"))
+    assert calls == []  # Neither text nor newline/button activation dispatched.
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    explicit = next(el for el in snap.elements if el.title == inside.name)
+    driver.check_modal_input(TypeText("explicit"), "modal-test", input_target=explicit)
+
+
 def test_modal_runtime_gate_is_audited_and_shared_by_agent(modal_boundary_tree, monkeypatch, tmp_path):
     import json
     from a11y_computer_use import safety, server
@@ -20815,9 +20915,9 @@ def test_all_runtime_inputs_share_one_modal_discovery(modal_boundary_tree, monke
     monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
     original = _atspi.active_modals
     discoveries = []
-    def discover(root):
+    def discover(root, **kwargs):
         discoveries.append(root)
-        return original(root)
+        return original(root, **kwargs)
     monkeypatch.setattr(_atspi, "active_modals", discover)
     with driver.input_context(action):
         driver.check_modal_input(action, "modal-test")

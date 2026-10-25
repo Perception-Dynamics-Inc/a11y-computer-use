@@ -2892,16 +2892,18 @@ class LinuxDriver:
             handle = (observe.ax_handle_for(target.snapshot_id, target.ref)
                       if isinstance(target, Element) else None)
             root = None
+            point = None
             if isinstance(target, Element) and handle is None and app is None:
                 return  # press_element cannot dispatch without a native handle.
             if isinstance(target, Point):
+                x, y = _point_of(target)
+                point = (int(x), int(y))
                 if cache is not None or dismiss:
                     owner = app or _linux_system.frontmost_app_id()
                     root = _atspi.find_root(owner, Scope.WINDOW)
                     # No modal means no boundary hit test or settlement wait.
-                    if root is not None and not _atspi.input_modals(root, cache):
+                    if root is not None and not _atspi.input_modals(root, cache, point=point):
                         return False
-                x, y = _point_of(target)
                 handle = _atspi._accessible_at_point(int(x), int(y))
                 if dismiss and _atspi.modal_dismiss_hit(
                         handle, root, int(x), int(y), modal_cache=cache):
@@ -2909,6 +2911,8 @@ class LinuxDriver:
             if handle is None:
                 owner = app or _linux_system.frontmost_app_id()
                 root = _atspi.find_root(owner, Scope.WINDOW)
+            if point is not None:
+                return _atspi.refuse_outside_modal(handle, root, modal_cache=cache, point=point)
             if cache is None:
                 return _atspi.refuse_outside_modal(handle, root)
             return _atspi.refuse_outside_modal(handle, root, modal_cache=cache)
@@ -2981,6 +2985,18 @@ class LinuxDriver:
                                 and all(_atspi.modal_document(node) is not None for node in modals)))):
                         return
                 focused, _ = self._run(lambda: _atspi._focused_node(app))
+                if isinstance(action, TypeText):
+                    def focused_page_modal():
+                        parents = {_atspi._ancestor_key(n) for n in _atspi._ancestor_chain(focused)}
+                        return any(_atspi.modal_document(n) is not None
+                                   and _atspi._ancestor_key(n) in parents for n in modals)
+                    if self._run(focused_page_modal):
+                        raise ComputerUseError(
+                            ErrorCode.UNSUPPORTED,
+                            "native dialog open, focus moved: explicit ref required; no input was sent",
+                            detail={"reason": "native_dialog_open_focus_moved", "outcome": "refused",
+                                    "hint": "Use an explicit ref to type into the active page modal.",
+                                    "next": []})
                 def check_focus():
                     with _atspi.input_modal_cache(cache):
                         return _atspi.refuse_outside_modal(focused, root)
