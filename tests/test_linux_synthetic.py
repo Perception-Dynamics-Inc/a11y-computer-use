@@ -21193,3 +21193,29 @@ def test_spa_outer_route_change_refuses_iframe_control(monkeypatch):
         LinuxDriver().resolve_ref(old, button.ref, live=live)
     assert caught.value.detail["reason"] == "route_changed"
     assert caught.value.detail["old_url"] == outer.document_route
+
+
+@pytest.mark.parametrize("collection", [False, True])
+def test_electron_sibling_document_focused_entry_readback(fake_atspi, monkeypatch, collection):
+    """A focused main document must not hide the side WebContentsView entry."""
+    main = _Acc("document web", states=("FOCUSED",))
+    side = _Acc("document web", states=("FOCUSED",))
+    main_field = _Acc("entry")
+    side_field = _Acc("entry", states=("FOCUSED",))
+    window = _adopt(_Acc("frame"), _adopt(main, main_field), _adopt(side, side_field))
+    for node in (main, side, main_field, side_field):
+        _mark_toolkit(node, "Chromium", "Electron")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (main, False))
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: window)
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, state: state in node.states)
+    hits = [main, side, side_field]
+    monkeypatch.setattr(_atspi, "_focused_accessibles", lambda root, limit: hits if collection else [])
+    monkeypatch.setattr(_atspi, "_readable_text", lambda node: "q" if node is side_field else "Main paneMain field")
+
+    assert _atspi.focused_chromium_entry("electron") is side_field
+    assert _atspi.focused_text("electron") == "q"
+    assert _atspi.focused_chromium_entry("electron", max_nodes=2) is None
+
+    main_field.states.add("FOCUSED")
+    hits.append(main_field)
+    assert _atspi.focused_chromium_entry("electron") is None
