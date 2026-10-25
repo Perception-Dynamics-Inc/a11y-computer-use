@@ -21000,3 +21000,59 @@ def test_snapshot_modal_ancestry_reuses_siblings_and_refreshes_next_read(fake_at
     # Snapshot-local reuse must never authorize a subsequently reparented node.
     _adopt(frame, second)
     assert _atspi.outside_modals(second, [modal], cache={})
+
+
+@pytest.mark.parametrize("resizable,relationship", [(False, True), (True, True), (False, False)])
+def test_electron_child_modal_blocks_only_native_parent(
+    modal_boundary_tree, monkeypatch, resizable, relationship,
+):
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import Click, TypeText
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    modal.role = "frame"
+    modal.name = "Settings Modal"
+    modal.states.discard("MODAL")
+    modal.states.add("ACTIVE")
+    if resizable:
+        frame.states.add("RESIZABLE")
+    _adopt(frame, bg)
+    unrelated = _Acc("frame", name="Other", states=("SHOWING", "RESIZABLE"))
+    other_button = _outline_cell("Other Action", ["press"])
+    other_button.role = "push button"
+    _adopt(unrelated, other_button)
+    application = _adopt(_Acc("application", name="electron"), frame, modal, unrelated)
+    application.get_toolkit_name = lambda: "Chromium"
+    for node in (application, frame, bg, modal, inside, unrelated, other_button):
+        node.get_application = lambda: application
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 321)
+    monkeypatch.setattr(_linux_system, "active_transient_dialog", lambda **kw: (
+        relationship and kw == {"pid": 321, "title": "Settings Modal", "parent_title": frame.name}))
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: list(node.children))
+    expected = relationship and not resizable
+    assert _atspi.is_modal(modal) is expected
+    if expected:
+        assert not _atspi.outside_modals(other_button, [modal])
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in snap.elements if el.title == bg.name)
+    assert background.blocked_by_modal is expected
+    assert background.clickable is not expected
+    if expected:
+        assert "outside_active_modal" in observe.render_matches(snap, (background,))
+        for invoke in (
+            lambda: driver.press_element(background),
+            lambda: driver.set_value(background, "banana"),
+            lambda: driver.type_into(background, "zz"),
+            lambda: driver.check_modal_input(Click(background), "modal-test"),
+            lambda: driver.check_modal_input(TypeText("zz"), "modal-test", input_target=background),
+        ):
+            with pytest.raises(ComputerUseError, match="outside_active_modal") as caught:
+                invoke()
+            assert "Settings Modal" in str(caught.value)
+        assert calls == []
+        assert _atspi.ATSPIAccessor().read(modal).modal
+        assert not _atspi.outside_modals(inside, [modal])
+        application.children.remove(modal)
+        modal.states.discard("SHOWING")
+        restored = driver.snapshot(Scope.WINDOW, "modal-test")
+        assert not next(el for el in restored.elements if el.title == bg.name).blocked_by_modal
