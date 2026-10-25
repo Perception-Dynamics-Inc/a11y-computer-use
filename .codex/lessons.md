@@ -564,3 +564,5 @@
 - 2026-10-25 (#1057): Opening a menu inserts new menu items into refs previously held by unrelated controls. Rebind newly exposed items on public issuance under an unchanged menu identity; retain changed-target guards for existing items and internal reads. Blanket retention across public snapshots poisons fresh menu refs.
 
 - 2026-10-25 (#1056): Calc keyboard input can target opaque toolbar panels (Name Box), not the selected cell. Identify the unreadable toolbar focus before document/grid verification; never commit an editor or read grid contents as evidence for that input. Delivery alone remains unverifiable, with a one-use app/payload-bound receipt.
+
+- 2026-10-25 (#1061): Runtime and Linux driver modal checks can repeat whole-window discovery during one click. Share discovery only within that action and native window, skip modal hit settlement when no modal exists, and retain ancestry checks for open modals. Bind the caller-owned cache on the native worker thread and invalidate before semantic mutations or menu-dismissal input; a failed action acknowledgement can still open a dialog.
