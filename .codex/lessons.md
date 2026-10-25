@@ -610,3 +610,5 @@
 - 2026-10-26 (PR #1107 CI repair): A bounded worker must recompute remaining time after Thread.start; scheduler delay during startup otherwise gets added to the original join budget. For modal snapshot marking, reported containment in every active modal proves membership without window/document classification; retain the full classification for outside targets and refresh ancestry on each traversal.
 
 - 2026-10-26 (PR #1115 repair): Display-edge ref recovery and fresh public ref rebinding protect different cases. Preserve both regression groups when merging: unresolved old refs need measured overflow guidance, while newly issued surviving refs must remain usable after pruning renumbers them.
+
+- 2026-10-26 (#1118): Qt character extents can have zero width and positive height for combining marks, joiners and variation selectors. Preserve them only when their measured x and vertical span lie in the viewport; keep zero-height and clipped glyphs excluded. Leave other rectangle consumers' zero-size policy unchanged.

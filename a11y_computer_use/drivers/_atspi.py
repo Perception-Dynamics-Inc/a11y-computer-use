@@ -3271,11 +3271,14 @@ def _aria_spin_value(acc) -> str | None:
     return f"{shown} (min {_format_bound(low)}, max {_format_bound(high)})"
 
 
-def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
+def _rect_hits_box(
+    rect, box: tuple[float, float, float, float], *, allow_zero_width: bool = False,
+) -> bool | None:
     """Whether ``rect`` intersects ``box``, or None when the rect is unreadable.
 
-    A zero-size glyph is off the widget. Coordinates are the same space as
-    ``box`` (screen pixels).
+    Zero-size glyphs are normally off the widget. Qt character reads may
+    accept a zero-width glyph with positive height at a measured in-box x.
+    Coordinates are the same space as ``box`` (screen pixels).
     """
     if rect is None:
         return None
@@ -3286,9 +3289,11 @@ def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
         height = float(getattr(rect, "height"))
     except (TypeError, ValueError, AttributeError):
         return None
-    if width <= 0 or height <= 0:
+    if width < 0 or height <= 0 or (width == 0 and not allow_zero_width):
         return False
     left, top, box_w, box_h = box
+    if width == 0:
+        return left <= x < left + box_w and y < top + box_h and y + height > top
     return y < top + box_h and y + height > top and x < left + box_w and x + width > left
 
 
@@ -3499,7 +3504,9 @@ def _qt_character_viewport_text(acc, box=None) -> str | None:
         rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
             acc, start + index, coord,
         ))
-        hits = _rect_hits_box(rect, box)
+        # Qt reports combining marks, joiners and variation selectors with
+        # zero advance. Their native position/height still establish visibility.
+        hits = _rect_hits_box(rect, box, allow_zero_width=True)
         if hits is None:
             return None
         # Keep a separator at clipped characters so two disconnected
