@@ -1371,3 +1371,17 @@ intended text using keyboard shortcuts, and type the replacement, then inspect
 the result. Quill's separate typing outcome/read-back limitation is tracked in
 #1080; a retry after unconfirmed typing can duplicate text. Iframe editor
 eligibility is tracked separately in #1079.
+
+
+For web search entries that replace themselves on focus, Linux `type(ref)` and
+`set_value(ref)` can continue on the focused replacement after their own focus
+request. The original must be detached; the replacement must have the same
+native role and accessible name, overlap the original measured bounds, and be
+showing, editable, non-secure, and inside the same native document and window.
+The write and text read-back use the replacement, and the next snapshot/find
+walk reads the live child tree. A later focus-loss refusal can use the captured
+identity to recover a delayed remount; retrying insertion requires an empty,
+readable replacement so partially delivered text is not duplicated. A different name, document, window, or existing
+peer field still refuses before text input. Ordinary stale-ref identity checks
+remain in effect. This handoff is synthetic-tested and live-verified in Chrome
+on a local input-swapping page through both LinuxDriver and Runtime.

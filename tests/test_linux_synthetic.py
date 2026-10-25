@@ -20667,3 +20667,107 @@ def test_page_modal_coordinate_and_toolbar_typing_guards(modal_boundary_tree, mo
     with pytest.raises(ComputerUseError, match="outside_active_modal"):
         driver.check_modal_input(TypeText("background"), "chrome")
     assert calls == []
+
+
+@pytest.mark.parametrize("case", ["same", "delayed", "late", "late_name", "combo", "role", "name", "document", "window", "readonly", "hidden", "hidden_document", "peer", "geometry", "secure"])
+@pytest.mark.parametrize("operation", ["type", "set_value"])
+def test_web_focus_remount_identity(fake_atspi, monkeypatch, case, operation):
+    """Focus swaps may hand off only to the intended live web entry."""
+    window = _Acc("frame", states={"SHOWING", "VISIBLE"}, width=800, height=600)
+    doc = _Acc("document web", states={"SHOWING", "VISIBLE"}, width=800, height=600)
+    slot = _Acc("section", states={"SHOWING", "VISIBLE"}, width=800, height=600)
+    old = _Acc("entry", name="Search site", states={"EDITABLE", "SHOWING"}, width=400, height=35)
+    new = _Acc("entry", name="Search site", states={"EDITABLE", "SHOWING", "FOCUSED"}, width=400, height=35)
+    new.text = ""
+    if case == "combo":
+        old.role = new.role = "combo box"
+    _adopt(window, _adopt(doc, _adopt(slot, old)))
+    ready = [case not in {"delayed", "late", "late_name"}]
+    def focus(target):
+        if target is old:
+            if not ready[0]:
+                old.states.add("FOCUSED")
+                if case == "delayed":
+                    old.states.discard("EDITABLE")
+                return True
+            if case != "peer":
+                _adopt(slot, new)
+                old.states.add("DEFUNCT")
+            else:
+                _adopt(slot, old, new)
+            if case in {"name", "late_name"}:
+                new.name = "Other field"
+            if case == "document":
+                _adopt(window, _adopt(_Acc("document web"), new))
+            if case == "window":
+                _adopt(_Acc("frame"), _adopt(doc, new))
+            if case == "role":
+                new.role = "combo box"
+            if case == "readonly":
+                new.states.discard("EDITABLE")
+            if case == "hidden":
+                new.states.discard("SHOWING")
+            if case == "hidden_document":
+                doc.states.discard("SHOWING")
+            if case == "geometry":
+                new.component = _Geom(400, 35, x=800)
+        return True
+    monkeypatch.setattr(_atspi, "grab_focus", focus)
+    monkeypatch.setattr(_atspi, "_focused_accessibles", lambda root: [new if ready[0] else old])
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda node: False)
+    monkeypatch.setattr(_atspi, "is_secure", lambda node: case == "secure" and node is new)
+    def settle(_seconds):
+        if case == "delayed" and not ready[0]:
+            ready[0] = True
+            focus(old)
+    monkeypatch.setattr(_atspi.time, "sleep", settle)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda _: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *args: None)
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *args: None)
+    monkeypatch.setattr(driver, "_check_modal_target", lambda *args: None)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda _: {})
+    monkeypatch.setattr(_atspi, "drawing_text_editable", lambda _: False)
+    monkeypatch.setattr(_atspi, "math_command_editable", lambda _: False)
+    monkeypatch.setattr(_atspi, "_capture_text_points", lambda _: [])
+    monkeypatch.setattr(_atspi, "_refuse_model_editor_replace", lambda _: None)
+    monkeypatch.setattr(_atspi, "_refuse_drawing_multiline_value", lambda *args: None)
+    monkeypatch.setattr(_atspi, "control_kind", lambda _: None)
+    monkeypatch.setattr(_atspi, "is_sheet_cell", lambda _: False)
+    from a11y_computer_use.drivers import _cdp_forms
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda *args, **kwargs: None)
+    monkeypatch.setattr(driver, "_dom_window_title", lambda _: "")
+    monkeypatch.setattr(driver, "_dom_pids", lambda _: ())
+    monkeypatch.setitem(observe._HANDLES, "remount", {"e1": old})
+    writes = []
+    def write(handle, text):
+        if handle is old and case in {"late", "late_name"}:
+            ready[0] = True
+            old.states.discard("FOCUSED")
+            focus(old)
+            raise ComputerUseError(ErrorCode.FOCUS_LOST, "remounted before input")
+        assert handle is new
+        assert observe.ax_handle_for("remount", "e1") is new
+        writes.append(text)
+        return True
+    monkeypatch.setattr(driver, "_type_confirmed_handle", write)
+    monkeypatch.setattr(_atspi, "set_text", write)
+    el = Element("e1", "AXComboBox" if case == "combo" else "AXTextField", "Search site", "", Bounds(0, 0, 0, 400, 35), "remount", editable=True)
+    call = driver.type_into if operation == "type" else driver.set_value
+    if case in {"same", "delayed", "late", "combo"}:
+        assert call(el, "hello world")
+        assert writes == ["hello world"]
+        assert driver._focused_editable is new
+        fresh = build_snapshot(
+            window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+            app="chrome", pid=42, geometry=_geometry(),
+        )
+        matches = observe.find_elements(fresh, text="Search site")
+        assert len(matches) == 1
+        assert observe.ax_handle_for(fresh.snapshot_id, matches[0].ref) is new
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            call(el, "hello world")
+        assert exc.value.code is ErrorCode.FOCUS_LOST
+        assert writes == []
