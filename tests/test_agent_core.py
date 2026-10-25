@@ -5253,3 +5253,36 @@ def test_modal_refusal_stops_batch_without_input_recovery(reason):
     assert reason in result.step_log[0].error
     assert result.step_log[0].turn_stop == "failure"
     assert result.step_log[0].skipped[0]["name"] == "click"
+
+
+@pytest.mark.parametrize("startup_s", [0.2, 0.8])
+def test_bounded_worker_startup_spends_the_existing_deadline(monkeypatch, startup_s):
+    """A delayed worker start cannot add a second wait past max_time."""
+    import threading
+
+    from a11y_computer_use.agent.core import _StepDeadline
+
+    clock = [10.0]
+    waits = []
+
+    class DelayedWorker:
+        def __init__(self, **kwargs):
+            assert kwargs["daemon"] is True
+
+        def start(self):
+            clock[0] += startup_s
+
+        def join(self, timeout):
+            waits.append(timeout)
+
+        def is_alive(self):
+            return True
+
+    agent = Agent(ScriptedModel([]), runtime=FakeRuntime(window()), max_time_s=0.5)
+    agent._run_started = clock[0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(threading, "Thread", DelayedWorker)
+    with pytest.raises(_StepDeadline):
+        agent._run_bounded(lambda: None, where="tool", action="click")
+    assert waits == [pytest.approx(max(0.0, 0.5 - startup_s))]
+    assert agent._deadline_hit.is_set()

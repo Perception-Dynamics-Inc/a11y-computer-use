@@ -22277,8 +22277,14 @@ def outside_modals(acc, modals: list, *, cache=None) -> bool:
 def _outside_modals(acc, modals, *, cache):
     chain = _modal_chain(acc, cache)
     parents = {_ancestor_key(node) for node in chain}
+    # Reported containment already proves membership, including nested
+    # modals. Window/document classification is needed only for an outside
+    # target; doing it for every Options-dialog cell repeats remote reads.
+    outside = [modal for modal in modals if _ancestor_key(modal) not in parents]
+    if not outside:
+        return False
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
-    for modal in modals:
+    for modal in outside:
         context_key = ("modal_context", id(modal))
         context = cache.get(context_key) if cache is not None else None
         if context is None:

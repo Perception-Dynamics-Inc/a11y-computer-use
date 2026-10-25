@@ -17791,8 +17791,9 @@ def test_ref_click_fallback_requires_fresh_identity_and_hit(monkeypatch, case):
     assert snapshots == [(Scope.WINDOW, "featherpad")]
 
 
+@pytest.mark.parametrize("entry", ["click", "menu"])
 @pytest.mark.parametrize("case", ["dialog", "hidden", "window", "missing", "error", "unanswered", "no_identity"])
-def test_click_dialog_state_requires_complete_visible_native_evidence(monkeypatch, case):
+def test_click_dialog_state_requires_complete_visible_native_evidence(monkeypatch, case, entry):
     from types import SimpleNamespace
 
     driver = LinuxDriver()
@@ -17819,7 +17820,14 @@ def test_click_dialog_state_requires_complete_visible_native_evidence(monkeypatc
         def fail():
             raise RuntimeError("D-Bus unavailable")
         child.get_name = fail
-    result = driver.click_dialog_state(element)
+    roots = []
+    def find_root(name, scope):
+        roots.append((name, scope))
+        return app
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    result = (driver.click_dialog_state(element) if entry == "click"
+              else driver.menu_dialog_state("soffice.bin"))
+    assert roots == ([] if entry == "click" else [("soffice.bin", Scope.APP)])
     assert uncached == [app]
     if case == "dialog":
         assert result == {"native-dialog-id": "Preferences"}
@@ -21274,3 +21282,26 @@ def test_electron_sibling_document_focused_entry_readback(fake_atspi, monkeypatc
     main_field.states.add("FOCUSED")
     hits.append(main_field)
     assert _atspi.focused_chromium_entry("electron") is None
+
+
+def test_contained_modal_target_needs_no_window_classification(fake_atspi, monkeypatch):
+    inner = _Acc("dialog", states=("SHOWING", "MODAL"))
+    button = _Acc("push button")
+    _adopt(inner, button)
+    outer = _adopt(_Acc("dialog", states=("SHOWING", "MODAL")), inner)
+    frame = _adopt(_Acc("frame"), outer)
+    contexts = []
+    original = _atspi._chromium_modal_parent
+
+    def classify(node):
+        contexts.append(node)
+        return original(node)
+
+    monkeypatch.setattr(_atspi, "_chromium_modal_parent", classify)
+    assert not _atspi.outside_modals(button, [outer, inner], cache={})
+    assert contexts == []
+    # A new traversal must still refuse a target moved outside either modal.
+    _adopt(outer, button, inner)
+    assert _atspi.outside_modals(button, [outer, inner], cache={})
+    _adopt(frame, button, outer)
+    assert _atspi.outside_modals(button, [outer], cache={})
