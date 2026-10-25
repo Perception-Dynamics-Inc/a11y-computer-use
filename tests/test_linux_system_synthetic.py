@@ -1818,3 +1818,29 @@ def test_launched_child_is_reaped_without_another_launch(exit_kind) -> None:
         if proc.returncode is None:
             proc.kill()
         proc.wait()
+
+
+@pytest.mark.parametrize("change", [None, "normal", "no-parent", "inactive", "foreign", "duplicate", "fixed-parent"])
+def test_active_transient_dialog_requires_exact_native_relationship(monkeypatch, change):
+    parent = _ClassWin(0x21, 200, title="Parent")
+    child = _ClassWin(0x22, 200, title="Settings Modal")
+    parent_original = parent.get_full_property
+    parent.get_full_property = lambda atom, kind: (
+        _NS(value=[] if change == "fixed-parent" else ["_NET_WM_ACTION_RESIZE"])
+        if atom == "_NET_WM_ALLOWED_ACTIONS" else parent_original(atom, kind))
+    original = child.get_full_property
+    def prop(atom, kind):
+        if atom == "_NET_WM_WINDOW_TYPE":
+            return _NS(value=["normal" if change == "normal" else "_NET_WM_WINDOW_TYPE_DIALOG"])
+        if atom == "WM_TRANSIENT_FOR":
+            return None if change == "no-parent" else _NS(value=[parent.id])
+        if atom == "_NET_WM_PID" and change == "foreign":
+            return _NS(value=[999])
+        return original(atom, kind)
+    child.get_full_property = prop
+    wins = [parent, child]
+    if change == "duplicate":
+        wins.append(_ClassWin(0x23, 200, title="Parent"))
+    _active_display(monkeypatch, wins, parent.id if change == "inactive" else child.id)
+    assert _linux_system.active_transient_dialog(
+        pid=200, title="Settings Modal", parent_title="Parent") is (change is None)

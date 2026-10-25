@@ -1239,6 +1239,18 @@ blocking after the walk, without a recursive Collection query or a separate
 search through table, tree, or list rows. Chromium document searches retain
 pre-reveal descendant modal discovery. Input-time modal checks remain in effect.
 
+Electron child windows can omit both native MODAL and `_NET_WM_STATE_MODAL`.
+For Chromium top-levels, an active, showing X11 dialog transient for an exact
+same-process parent is treated as modal when that parent's accessibility
+RESIZABLE state is absent but X11 still advertises the resize action. This
+combination distinguishes a temporarily blocked parent from an ordinary
+resizable parent or a fixed-size window. Matching requires unique native
+window titles; missing or ambiguous X11 metadata does not establish this
+fallback boundary. The modal is marked in snapshots, its parent's controls
+are blocked, and ref click, set_value and type refuse with
+`outside_active_modal` before dispatch. Other top-level windows remain usable.
+This fallback is X11-only; native/ARIA modal signals remain independent.
+
 Page modal pointer checks use the owning document's reported screen rectangle.
 A point outside that area remains browser chrome even if Chrome returns no hit
 or a text wrapper with unknown ancestry. Missing document geometry retains the

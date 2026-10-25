@@ -955,6 +955,39 @@ def window_id_for_toplevel(*, title: str, pid: int | None, extents,
     return _window_overlapping(rows, extents)
 
 
+def active_transient_dialog(*, pid: int, title: str, parent_title: str) -> bool:
+    """Match an active X11 dialog to its exact same-process transient parent.
+
+    Titles must identify unique managed windows; never infer ownership from
+    overlap. This relationship alone does not establish modality.
+    """
+    if not pid or not title or not parent_title:
+        return False
+    try:
+        with _open_display() as d:
+            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            children = [win for win in owned if _win_title(win, d) == title]
+            parents = [win for win in owned if _win_title(win, d) == parent_title]
+            if len(children) != 1 or len(parents) != 1:
+                return False
+            child, parent = children[0], parents[0]
+            if child.id == parent.id or _active_window_id(d) != child.id:
+                return False
+            if child.get_attributes().map_state != 2 or parent.get_attributes().map_state != 2:
+                return False
+            actions = _prop(parent, d, "_NET_WM_ALLOWED_ACTIONS")
+            if actions is None or not any(
+                    _atom_is(a, _atom(d, "_NET_WM_ACTION_RESIZE")) for a in actions):
+                return False
+            types = _prop(child, d, "_NET_WM_WINDOW_TYPE")
+            transient = _prop(child, d, "WM_TRANSIENT_FOR")
+            return (types is not None and transient is not None
+                    and any(_atom_is(t, _atom(d, "_NET_WM_WINDOW_TYPE_DIALOG")) for t in types)
+                    and int(transient[0]) == int(parent.id))
+    except Exception:
+        return False
+
+
 def _window_overlapping(rows: list[dict], extents) -> int | None:
     """Window id whose client box overlaps ``extents`` the most, or None."""
     if not extents or len(extents) != 4:
