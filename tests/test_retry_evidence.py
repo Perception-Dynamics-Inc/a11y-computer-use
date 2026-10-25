@@ -376,3 +376,16 @@ def test_native_outline_partial_requires_selected_state(readable_native_button, 
     assert outcome.retry_verdict(verdict, before, after)[0] == ("partial" if selected else "unverifiable")
     button.states = None
     assert native.retry_evidence(action, button, None) is None
+
+
+def test_native_retry_deadline_exhaustion_remains_unknown(readable_native_button, monkeypatch):
+    native, action, button, _document, _Node = readable_native_button
+    before = native.retry_evidence(action, button, None)
+    assert before is not None
+    ticks = iter((0.0, 0.041))
+    monkeypatch.setattr(native.time, "monotonic", lambda: next(ticks, 0.041))
+    after = native.retry_evidence(action, button, None)
+    assert after is None
+    verdict = outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)
+    assert verdict[0] == "unverifiable"
+    assert outcome.suggest_next("click", verdict[0]) == ()
