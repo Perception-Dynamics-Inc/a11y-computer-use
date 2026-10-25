@@ -324,6 +324,8 @@ class Element:
     text_range: tuple[int, int, str] | None = None
     modal: bool = False
     blocked_by_modal: bool = False
+    # A document boundary limits descendant modals to this subtree.
+    modal_scope_root: bool = False
 
     @property
     def actionable(self) -> bool:

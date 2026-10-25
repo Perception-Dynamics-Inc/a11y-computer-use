@@ -1206,6 +1206,13 @@ coordinate hit tests when a modal is open; waypoints do not repeat discovery.
 
 Showing dialogs with AT-SPI `MODAL` state or a reported `modal=true` /
 `aria-modal=true` attribute block input to controls outside their subtree.
+A page modal is scoped to its nearest reported web document, including an
+owning iframe, rather than the browser window. Browser toolbar, address bar,
+tabs and window controls remain actionable in interactive snapshots. With
+only page modals open, browser `alt+Left`, `ctrl+l`, `ctrl+w` and `ctrl+Tab`
+shortcuts retain native browser routing. Native browser dialogs still enforce
+the window boundary. Page-background refusals suggest Back or the address bar;
+these hints do not dispatch an action or replace the caller's requested input.
 Snapshots label the dialog `(modal)` and background controls
 `(outside_active_modal)` without click/edit actionability; `find` uses the
 same flags. Closing the dialog restores background actionability.
