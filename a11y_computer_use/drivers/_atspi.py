@@ -16569,6 +16569,29 @@ def _chromium_contenteditable(acc) -> bool:
     }
 
 
+def _refuse_model_editor_replace(acc) -> None:
+    """Refuse known Chromium model editors before any replace mutation.
+
+    The clear-and-type path can delete their paragraphs, then mistake the
+    remaining object placeholder for uncleared text and never insert. Native
+    text/selection restoration cannot restore the editor model
+    or its formatting. Match exact class tokens reported by AT-SPI, including
+    empty editors, rather than treating every ARIA textbox as a model editor.
+    """
+    classes = set(str(_get_attributes(acc).get("class") or "").split())
+    if not classes & {"ql-editor", "ck-editor__editable"}:
+        return
+    if not _chromium_contenteditable(acc):
+        return
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "set_value cannot safely replace this rich-text editor's document model; "
+        "nothing was changed. Focus the editor, select the intended text with "
+        "keyboard shortcuts, then use type to replace the selection; verify the result",
+        detail={"reason": "rich_text_replace_unsafe", "unchanged": True},
+    )
+
+
 def _clear_contenteditable(acc) -> bool:
     """Empty a Chrome contenteditable. True only when the read is blank.
 
@@ -16941,6 +16964,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     """
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
+    _refuse_model_editor_replace(acc)
     saved = _capture_text_points(acc)
     try:
         ok = _set_text_body(acc, text, force=force)
