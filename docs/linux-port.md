@@ -1360,6 +1360,13 @@ run another Collection query or traverse unseen table rows (#1045). An iframe
 URL alone does not establish top-document navigation. This does not change
 modal input policy.
 
+When hiding or clipping siblings renumbers surviving controls (#1110), a public
+snapshot rebinds the printed refs if each shifted control has a unique matching
+native node in the preceding snapshot and its issued semantics and ancestry
+remain unchanged. Previously refused controls and recycled row identities cannot
+supply this continuity. Internal effect reads do not rebind refs. Callers must use
+the refs from the latest public observation.
+
 A standalone Chrome/AT-SPI check (not a pytest live file) opens a native modal
 from an iframe and verifies both snapshot modes send no input for the old ref:
 
