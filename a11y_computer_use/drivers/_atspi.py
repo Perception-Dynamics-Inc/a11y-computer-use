@@ -22127,7 +22127,12 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
     # At input time, inspect structural containers first. A recursive window
     # query can overload Chromium on a wide page before its reply times out.
     # Delegate wide subtrees to two complete native queries instead.
-    candidates = None if libreoffice or fallback else _modal_collection(root)
+    if libreoffice:
+        candidates = None
+    elif fallback:
+        candidates = _cached_modal_collection(root)
+    else:
+        candidates = _modal_collection(root)
     if candidates is None and not fallback and not libreoffice:
         candidates = []
     if candidates is None:
@@ -22320,6 +22325,32 @@ def _outside_modals(acc, modals, *, cache):
 # only within the immediate action, never across actions.
 _modal_discoveries: dict = {}
 _modal_generation: int | None = None
+
+
+def _remember_modal_collection(root, candidates, generation) -> None:
+    """Retain a complete role query only under the subscribed boundary epoch."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    global _modal_generation
+    if (generation is None or not _atspi_events.modal_cache_ready()
+            or generation != _atspi_events.modal_epoch()):
+        return
+    # A fresh query supersedes derived discoveries even if its event has not
+    # arrived yet. Eviction is safe: other windows will simply rediscover.
+    _modal_discoveries.clear()
+    _modal_generation = generation
+    _modal_discoveries[("collection", _ancestor_key(root))] = (root, list(candidates))
+
+
+def _cached_modal_collection(root):
+    """Complete dialog-role candidates, or None when discovery must run again."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    if (not _atspi_events.modal_cache_ready()
+            or _modal_generation != _atspi_events.modal_epoch()):
+        return None
+    result = _modal_discoveries.get(("collection", _ancestor_key(root)))
+    return list(result[1]) if result is not None else None
 
 
 def input_modals(root, cache: dict | None = None, *, point=None) -> list:
