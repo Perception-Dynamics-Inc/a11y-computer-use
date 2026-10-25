@@ -9850,6 +9850,83 @@ _FOCUS_CONFIRM_PAUSE_S = 0.04
 _FOCUS_CONFIRM_REGRAB = 10
 
 
+def web_entry_context(acc):
+    """Capture a web entry's identity before focus can detach its proxy."""
+    role = _role_name(acc)
+    name = _call_first(acc, ("get_name",), default="")
+    if role not in {"entry", "text", "search box", "combo box", "combo-box"} or not name:
+        return None
+    chain = list(_ancestor_chain(acc))
+    doc = next((n for n in chain if _role_name(n) in {"document web", "document frame"}), None)
+    window = next((n for n in chain if _role_name(n) in {"frame", "window"}), None)
+    if doc is None or window is None:
+        return None
+    parent = _parent_of(acc)
+    box = _extents(acc)
+    return role, name, doc, window, parent, box, _ancestor_key(doc), _ancestor_key(window)
+
+
+def focus_web_entry(acc, *, context=None, request_focus: bool = True):
+    """Focus a web entry, allowing only a detached, same-context remount.
+
+    Capture identity before focus: a detached proxy can lose its ancestry.
+    This exception is restricted to the focus we request here; it does not
+    relax ordinary ref resolution or authorize writes to arbitrary focus.
+    """
+    context = context if context is not None else web_entry_context(acc)
+    if context is None:
+        return acc
+    role, name, doc, window, parent, box, doc_key, window_key = context
+    if request_focus:
+        grab_focus(acc)
+    for attempt in range(_FOCUS_CONFIRM_POLLS):
+        # A startup placeholder may briefly report focus before its async
+        # handler mounts the editable input (Wikipedia's header does this).
+        if request_focus and _focus_on_target(acc) is True and _state_has(acc, "EDITABLE"):
+            return acc
+        # Collection is document-local, so browser chrome and other tabs
+        # cannot become candidates, even if they carry the same name.
+        hits = _focused_accessibles(doc)
+        if len(hits) == 1:
+            candidate = hits[0]
+            _call_first(candidate, ("clear_cache", "clearCache"))
+            parents = list(_ancestor_chain(candidate))
+            live_doc = next((n for n in parents if _role_name(n) in {"document web", "document frame"}), None)
+            live_window = next((n for n in parents if _role_name(n) in {"frame", "window"}), None)
+            _call_first(parent, ("clear_cache", "clearCache"))
+            # Do not redirect to an existing peer field: prove detachment.
+            detached = _state_has(acc, "DEFUNCT")
+            if not detached and parent is not None:
+                count = _child_count(parent)
+                detached = 0 <= count <= 64 and all(
+                    (child := _child_at(parent, i)) is not None
+                    and _ancestor_key(child) != _ancestor_key(acc)
+                    for i in range(count)
+                )
+            pos, size = box
+            cpos, csize = _extents(candidate)
+            overlap = (pos is not None and size is not None and cpos is not None and csize is not None
+                       and min(pos[0]+size[0], cpos[0]+csize[0]) > max(pos[0], cpos[0])
+                       and min(pos[1]+size[1], cpos[1]+csize[1]) > max(pos[1], cpos[1]))
+            if (detached and live_doc is not None and live_window is not None
+                    and _ancestor_key(live_doc) == doc_key
+                    and _ancestor_key(live_window) == window_key
+                    and _state_has(live_doc, "SHOWING")
+                    and _state_has(live_window, "SHOWING")
+                    and _role_name(candidate) == role
+                    and _call_first(candidate, ("get_name",), default="") == name
+                    and _state_has(candidate, "EDITABLE")
+                    and _state_has(candidate, "SHOWING")
+                    and _state_has(candidate, "FOCUSED")
+                    and not is_secure(candidate) and not _blocks_text_replace(candidate)
+                    and overlap):
+                _invalidate_tree_cache(parent)
+                return candidate
+        if attempt + 1 < _FOCUS_CONFIRM_POLLS:
+            time.sleep(_FOCUS_CONFIRM_PAUSE_S)
+    raise _focus_lost_error("focus is not on the target or a verified replacement; nothing was typed")
+
+
 def _focus_lost_error(message: str):
     """Refused set_value: focus is not on the target, so no key was sent."""
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
