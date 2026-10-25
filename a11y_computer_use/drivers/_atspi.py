@@ -7608,12 +7608,32 @@ def focused_chromium_entry(app: str, *, max_nodes: int = 400):
     """Find the focused entry when Chrome also marks its container focused.
 
     Only native focused states identify the target; ambiguous entries are
-    refused by returning None.
+    refused by returning None. Focused web documents are resolved across the
+    owning window because Electron can expose multiple focused sibling views.
     """
     try:
         acc, truncated = _focused_node(app, max_nodes=max_nodes)
         if truncated or acc is None or not _chromium_app(acc):
             return None
+        # Electron WebContentsViews are sibling documents. Both documents
+        # can report FOCUSED, so the first Collection hit need not contain
+        # the keyboard target.
+        if _role_name(acc) == "document web":
+            from a11y_computer_use.schema import Scope
+
+            root = find_root(app, Scope.WINDOW)
+            if root is None:
+                return None
+            hits = _focused_accessibles(root, limit=max_nodes + 1)
+            if hits:
+                if len(hits) > max_nodes:
+                    return None
+                entries = [
+                    node for node in hits
+                    if chromium_single_line_entry(node) and _state_has(node, "FOCUSED")
+                ]
+                return entries[0] if len(entries) == 1 else None
+            acc = root
         queue = [acc]
         entries = []
         seen = 0
@@ -22257,8 +22277,14 @@ def outside_modals(acc, modals: list, *, cache=None) -> bool:
 def _outside_modals(acc, modals, *, cache):
     chain = _modal_chain(acc, cache)
     parents = {_ancestor_key(node) for node in chain}
+    # Reported containment already proves membership, including nested
+    # modals. Window/document classification is needed only for an outside
+    # target; doing it for every Options-dialog cell repeats remote reads.
+    outside = [modal for modal in modals if _ancestor_key(modal) not in parents]
+    if not outside:
+        return False
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
-    for modal in modals:
+    for modal in outside:
         context_key = ("modal_context", id(modal))
         context = cache.get(context_key) if cache is not None else None
         if context is None:
