@@ -1344,3 +1344,23 @@ pixel-settle loops in the explicit line-scroll path. Unchanged rows still stop
 or reverse the search; changed pixels with stale rows request another snapshot.
 Budget reports name the requested no-progress budget; the independent 120-second
 hard limit is identified separately with a continuation hint.
+
+### Model-managed rich-text replacement
+
+On Chromium, `set_value` refuses Quill (`ql-editor`) and CKEditor 5
+(`ck-editor__editable`) surfaces before writing, with reason
+`rich_text_replace_unsafe` and `unchanged: true`. Their AT-SPI Text represents
+paragraphs as object placeholders. The clear-and-type path can delete the
+paragraphs, then fail its blank check on the remaining placeholder and stop
+before insertion. Its raw-text restoration also fails to recover the document;
+native text cannot restore the original document model or formatting.
+This also applies to empty-string replacements and empty editors. Ordinary
+inputs, textareas and plain contenteditable textboxes retain their existing
+replacement paths. The guard uses exact native class tokens; it does not claim
+to identify every model-managed editor.
+
+To replace text in these editors, explicitly focus the editor, select the
+intended text using keyboard shortcuts, and type the replacement, then inspect
+the result. Quill's separate typing outcome/read-back limitation is tracked in
+#1080; a retry after unconfirmed typing can duplicate text. Iframe editor
+eligibility is tracked separately in #1079.
