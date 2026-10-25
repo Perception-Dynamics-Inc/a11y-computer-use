@@ -6341,3 +6341,100 @@ def test_shared_drag_tree_does_not_rebind_changed_destination(tmp_path, monkeypa
     assert caught.value.code is ErrorCode.STALE_REF
     assert rt.driver.i == 0
     assert audit_entries(tmp_path / "audit")[-1]["result"] == "stale_ref"
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff", "find"])
+@pytest.mark.parametrize("old_role,menu_name,item_name", [
+    ("AXTabGroup", "Help", "About"),
+    ("AXMenu", "Data", "Sort..."),
+])
+def test_public_observation_issues_newly_opened_menu_item(
+    monkeypatch, mocked_driver, store, audit_dir, mode, old_role, menu_name, item_name,
+):
+    """#1057: inserted menu items bind to their newest issuing snapshot."""
+    store.set_tier(APP, safety.Tier.FULL)
+    menu = Element("e1", "AXMenu", menu_name, None, Bounds(1, 10, 10, 80, 20),
+                   "closed", clickable=True)
+    old = Element("e2", old_role, "Tools" if old_role == "AXMenu" else "",
+                  None, None, "closed")
+    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="closed",
+                                 elements=(menu, old))
+    item = Element("e2", "AXMenuItem", item_name, None, Bounds(1, 10, 40, 150, 25),
+                   "open", parent="e1", clickable=True)
+    opened = dataclasses.replace(before, snapshot_id="open", elements=(menu, item))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "resolve_ref", lambda snap, ref, **kwargs:
+                        observe.rematch_ref(snap, ref, current[0]))
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        runtime.click(ref="e1")
+        current[0] = opened
+        # Internal reads do not issue the new ref or replace the old anchor.
+        assert runtime._anchor("e2") == (before, old)
+        if mode == "find":
+            assert "e2" in runtime.find(APP, text=item_name)
+        else:
+            runtime.desktop_snapshot(APP, mode=mode)
+        assert runtime._anchor("e2") == (opened, item)
+        runtime.click(ref="e2", verify=True)
+        assert len(mocked_driver["click"]) == 2
+        assert mocked_driver["click"][-1][0] == item
+        replacement = dataclasses.replace(item, title="Different command", snapshot_id="changed")
+        current[0] = dataclasses.replace(opened, snapshot_id="changed", elements=(menu, replacement))
+        runtime.desktop_snapshot(APP)
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert len(mocked_driver["click"]) == 2
+
+
+@pytest.mark.parametrize("app,requested,dead", [
+    ("soffice.bin", "E7\n", False),
+    ("soffice.bin", "E7\r\n", False),
+    ("soffice.bin", "E7\n", True),
+    ("other", "E7\n", False),
+    ("soffice.bin", "other", False),
+])
+def test_opaque_toolbar_type_receipt_is_scoped_and_consumed(tmp_path, monkeypatch, app, requested, dead):
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    driver._opaque_toolbar_type = ("soffice.bin", "E7\n")
+    monkeypatch.setattr(runtime, "_process_died", lambda before: dead)
+    rereads = []
+    monkeypatch.setattr(runtime, "_reread", lambda *args: rereads.append(args))
+    matched = app == "soffice.bin" and requested.replace("\r\n", "\n") == "E7\n"
+    if matched:
+        monkeypatch.setattr(runtime, "_drawing_type_verdict",
+                            lambda *args: pytest.fail("must not probe a drawing"))
+    verdict = runtime._judge_mutation(app, None, None, requested)
+    assert driver._opaque_toolbar_type is None
+    assert bool(rereads) is not matched
+    if matched:
+        assert verdict == (("partial", "the target process exited after the action") if dead else (
+            "unverifiable", "keys sent to an unreadable toolbar control; effect unverified",
+        ))
+
+
+def test_opaque_toolbar_type_has_no_retry_hint(tmp_path, monkeypatch):
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    driver._opaque_toolbar_type = ("soffice.bin", "E7\n")
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    result = runtime._conclude("typed 3 characters", tool="type", app="soffice.bin",
+                               before=None, requested="E7\n")
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert driver._opaque_toolbar_type is None

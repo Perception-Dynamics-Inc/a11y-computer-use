@@ -150,6 +150,11 @@ of refs already returned to the caller. `scroll_to_find` binds only the matched
 refs it returns, or the container ref in a miss report; hidden row reads cannot
 replace an earlier `find` binding. `wait_for` retains the issuing anchor.
 
+Public observations rebind newly exposed menu-item refs after a menu opens,
+including slots previously occupied by unrelated controls. The menu must retain
+its semantic identity. Internal reads do not issue refs, and changed existing
+menu items still pass through the stale-target guard.
+
 A manual Chrome/AT-SPI check uses the pooled DOM fixture, exercises
 `find` → `scroll_to_find` → `click` through Runtime, and verifies that
 recycling `Row 00010` into `Row 00050` sends no DOM click:
@@ -1292,3 +1297,10 @@ reads the full text from that exact snapshot handle on the AT-SPI thread.
 The model-facing preview stays capped; its ellipsis is never compared with the
 requested text. Missing handles and protected native fields do not supply
 full-text evidence.
+
+LibreOffice embedded toolbar controls such as Calc's opaque Name Box may expose
+only focused panels without readable Text. For these targets, `type` sends the
+requested keys once and returns `unverifiable`; it does not treat the input as
+a grid edit, commit an editor, or poll selected-cell contents. This path has
+synthetic regression coverage only. Inspect the active cell after address
+navigation rather than retrying the text merely because its effect is unverified.
