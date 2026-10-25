@@ -19731,6 +19731,92 @@ def test_chromium_snapshot_binds_only_emitted_refs_and_keeps_row_guard(fake_atsp
     assert exc.value.detail["reason"] == "target_changed"
 
 
+@pytest.mark.parametrize("rows", [1000, 50000])
+@pytest.mark.parametrize("web", [False, True])
+def test_issuing_snapshot_url_reads_only_emitted_handles(monkeypatch, rows, web):
+    """Ref bookkeeping must not materialize a pruned GTK/Chrome table."""
+    from dataclasses import replace
+    from a11y_computer_use.server import Runtime
+
+    class CountedNode(_GeckoNode):
+        reads = 0
+
+        def get_role_name(self):
+            CountedNode.reads += 1
+            return super().get_role_name()
+
+        def get_child_count(self):
+            pytest.fail("issuing refs must not discover descendants")
+
+        def get_child_at_index(self, index):
+            pytest.fail("issuing refs must not discover descendants")
+
+        def get_collection_iface(self):
+            pytest.fail("Collection can materialize every virtual table row")
+
+    table = CountedNode("table", children=[CountedNode("table row") for _ in range(rows)])
+    document = CountedNode("document web" if web else "frame", states=("SHOWING",), children=[table])
+    document.description = "https://example.test/first" if web else ""
+    handles = {"e1": document, "e2": table, "e3": table.children[0]}
+    snap = Snapshot("first", Scope.WINDOW, "fixture", 123, 0, (), tuple(
+        Element(ref, "AXGroup", "Table" if ref == "e2" else "", None, None,
+                "first", parent=None if ref == "e1" else "e1",
+                instance_id="123:start", document_id="title:fixture")
+        for ref in handles
+    ))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda epoch, ref: handles[ref])
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    # The former path starts here and performs Collection/descendant discovery.
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: document)
+    runtime = Runtime.__new__(Runtime)
+    runtime.driver = driver
+    runtime._current = snap
+    for epoch in ("first", "second"):
+        current = replace(snap, snapshot_id=epoch)
+        runtime._current = current
+        CountedNode.reads = 0
+        runtime._note_issued(current, preserve_identity=True)
+        assert CountedNode.reads <= 10 * len(snap.elements)
+        assert len(runtime._issued_anchors) == len(snap.elements)
+        assert runtime._issued_document_url == (document.description or None)
+
+    # A real observed URL change still starts a fresh namespace; missing URLs
+    # do not erase the old identity, and explicit find can issue fresh refs.
+    replacement = replace(snap, snapshot_id="replacement", elements=tuple(
+        replace(el, title="Replacement", snapshot_id="replacement") for el in snap.elements
+    ))
+    runtime._note_issued(replacement, preserve_identity=True)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._anchor("e2")
+    assert caught.value.code is ErrorCode.STALE_REF
+    runtime._note_issued(replacement, refs={"e2"})
+    assert runtime._anchor("e2")[0] is replacement
+    if web:
+        document.description = "https://example.test/next"
+        runtime._note_issued(replacement, preserve_identity=True)
+        assert not runtime._changed_snapshot_refs
+
+
+def test_snapshot_document_url_does_not_promote_iframe_or_chrome(monkeypatch):
+    """A filtered observation is not evidence of top-document navigation."""
+    outer = _GeckoNode("document web", states=("SHOWING",))
+    outer.description = "https://example.test/outer"
+    inner = _GeckoNode("document web", states=("SHOWING",))
+    inner.description = "https://example.test/frame"
+    inner.parent = outer
+    chrome = _GeckoNode("document web", states=("SHOWING",))
+    chrome.description = "chrome://omnibox-popup.top-chrome/"
+    handles = {"e1": inner, "e2": chrome}
+    snap = Snapshot("filtered", Scope.WINDOW, "fixture", 123, 0, (), tuple(
+        Element(ref, "AXGroup", "", None, None, "filtered") for ref in handles
+    ))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda epoch, ref: handles[ref])
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert driver.snapshot_document_url(snap) is None
+
+
 def test_native_control_identity_survives_rename_and_flattening(fake_atspi, monkeypatch):
     """Retain the bus/object key, not the title or a transient Python proxy."""
     monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
@@ -19746,6 +19832,42 @@ def test_native_control_identity_survives_rename_and_flattening(fake_atspi, monk
         assert raw.node_identity == expected
         assert snap.elements[0].node_identity == expected
         assert snap.elements[0].title == name
+
+
+def test_snapshot_50k_rows_never_queries_collection(fake_atspi, monkeypatch):
+    """Modal discovery must not materialize rows omitted by the snapshot walk."""
+    window, table, _, _ = _large_gtk_tree(rows=50000)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    queries = []
+    reads = []
+
+    class Collection:
+        def get_matches(self, *args):
+            queries.append(args)
+            return []
+
+    def collection(node):
+        queries.append(node)
+        return Collection()
+    monkeypatch.setattr(_Acc, "get_collection_iface", collection, raising=False)
+    native_child = _Acc.get_child_at_index
+    def child(node, index):
+        reads.append((node, index))
+        return native_child(node, index)
+    monkeypatch.setattr(_Acc, "get_child_at_index", child)
+    native_cell = table.get_accessible_at
+    def cell(row, col):
+        reads.append((row, col))
+        return native_cell(row, col)
+    table.get_accessible_at = cell
+    for _ in range(2):
+        reads.clear()
+        snap = driver.snapshot(Scope.WINDOW, "treeprobe")
+        assert queries == []
+        assert "ROW-00000" in _gtk_row_titles(snap)
+        assert "ROW-00019" in _gtk_row_titles(snap)
+        assert len(reads) <= 10 * len(snap.elements)
 
 
 @pytest.mark.parametrize("length", [199, 200, 201, 1000])
@@ -19817,6 +19939,46 @@ def test_type_outcome_clipped_unreadable_target_is_not_confirmed(monkeypatch):
     assert runtime._judge_mutation(
         "editor", None, snap.elements[0], "x" * 1000, previous="",
     )[0] == "unverifiable"
+
+
+@pytest.mark.parametrize("needle", ["ROW-00012", "ROW-00019"])
+def test_first_gtk_find_after_snapshot_never_queries_collection(fake_atspi, monkeypatch, needle):
+    """A cold find must retain visible rows without materializing the model."""
+    window, _, _, _ = _large_gtk_tree(rows=20000)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        _Acc, "get_collection_iface",
+        lambda node: pytest.fail("GTK find must not query recursive Collection"),
+        raising=False,
+    )
+    snap = driver.snapshot(Scope.WINDOW, "treeprobe")
+    assert needle in _gtk_row_titles(snap)
+    driver._table_seek = needle
+    found = driver.snapshot(Scope.WINDOW, "treeprobe")
+    assert observe.find_elements(found, text=needle)
+    assert needle in _gtk_row_titles(found)
+
+
+@pytest.mark.parametrize("modal_open", [False, True])
+def test_gtk_model_modal_guard_checks_sibling_without_reading_rows(fake_atspi, monkeypatch, modal_open):
+    """A cold GTK TreeView must remain clickable without querying its model."""
+    window, table, _, _ = _large_gtk_tree(rows=20000)
+    button = _Acc("push button", name="Apply selection")
+    button.parent = window
+    window.children.append(button)
+    modal = _Acc("dialog", name="Confirm", states=("SHOWING", "MODAL"))
+    application = _adopt(_Acc("application", name="treeprobe"), window,
+                         *([modal] if modal_open else []))
+    table.get_child_count = lambda: pytest.fail("modal discovery read virtual GTK rows")
+    table.get_collection_iface = lambda: pytest.fail("modal discovery queried virtual GTK rows")
+    assert _atspi.active_modals(window) == ([modal] if modal_open else [])
+    if modal_open:
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            _atspi.refuse_outside_modal(button, window)
+        assert _atspi.refuse_outside_modal(modal, application)
+    else:
+        assert _atspi.refuse_outside_modal(button, window) is False
 
 
 @pytest.mark.parametrize("points", [0, 18, 40])

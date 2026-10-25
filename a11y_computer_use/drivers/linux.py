@@ -1712,7 +1712,15 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
-                    accessor._active_modals = _atspi.active_modals(node, fallback=False)
+                    # Only Chromium needs pre-reveal descendant discovery.
+                    # A GTK find uses the same pruned walk as a snapshot;
+                    # querying Collection here materializes the entire model
+                    # on the first find and exhausts the snapshot budget.
+                    accessor._active_modals = (
+                        _atspi.active_modals(node, fallback=False)
+                        if seek and _atspi._chromium_app(node)
+                        else _atspi.snapshot_top_level_modals(node)
+                    )
                     # Discovery/search must not scroll the inert background.
                     blocked = _atspi.outside_modals(node, accessor._active_modals)
                     accessor._table_seek = None if blocked else self._table_seek
@@ -1740,6 +1748,16 @@ class LinuxDriver:
                                 observe.ax_handle_for(snap.snapshot_id, el.ref),
                                 cache=accessor._row_identity_cache,
                             )) for el in snap.elements
+                        ))
+                    # A modal may appear after its background in traversal, or
+                    # be a native sibling outside this snapshot's root.
+                    if accessor._active_modals:
+                        snap = replace(snap, elements=tuple(
+                            replace(el, blocked_by_modal=True, clickable=False, editable=False)
+                            if _atspi.outside_modals(
+                                observe.ax_handle_for(snap.snapshot_id, el.ref),
+                                accessor._active_modals,
+                            ) else el for el in snap.elements
                         ))
                     _atspi.note_browser_bar(node, snap.elements)
                     return snap
@@ -1846,6 +1864,37 @@ class LinuxDriver:
                 el = replace(el, note=f"{el.note}; {note}" if el.note else note)
             elements.append(el)
         return replace(snap, elements=tuple(elements))
+
+    def snapshot_document_url(self, snap: Snapshot) -> str | None:
+        """Content URL from emitted handles, without discovering unseen rows.
+
+        Missing documents leave the previous issuing namespace intact. This
+        observation-only lookup must not use Collection or walk descendants:
+        either can materialize a large native virtual table just to issue refs.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.untrusted import is_browser_chrome_url
+
+        def read():
+            for element in snap.elements:
+                handle = observe.ax_handle_for(snap.snapshot_id, element.ref)
+                if handle is None:
+                    continue
+                url = _atspi._doc_url(handle)
+                if (url and not is_browser_chrome_url(url)
+                        and not _atspi._nested_in_document(handle)
+                        and _atspi._frame_hierarchy_showing(handle)):
+                    # Snapshot pruning already excludes hidden Firefox tabs.
+                    # Re-running the general URL picker would rediscover tabs
+                    # through native descendants outside this snapshot.
+                    return url
+            return None
+
+        try:
+            return self._run(read)
+        except Exception:  # best-effort metadata; absence is not navigation
+            return None
 
     def document_url(self, app: str | None = None) -> str | None:
         """AT-SPI DocURL for ``app``'s document, or None when the tree has none."""
