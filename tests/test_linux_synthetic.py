@@ -19875,3 +19875,88 @@ def test_drag_modal_endpoints_still_refuse_background(
     assert calls == []
     frame.children.remove(modal)
     driver.check_modal_input(Drag(start, end), "modal-test")
+
+
+@pytest.mark.parametrize("text", ["E7\n", "F5", "E7\r\n"])
+def test_opaque_office_toolbar_type_avoids_cell_verification(fake_atspi, monkeypatch, text):
+    """Opaque Name Box input is dispatched once, without grid reads/writes."""
+    from a11y_computer_use.drivers import linux
+
+    toolbar = _Acc("tool bar", name="Formula Tool Bar")
+    panel = _Acc("panel", states=("FOCUSED",))
+    _adopt(toolbar, panel)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (panel, False))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: None)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    sent = []
+    monkeypatch.setattr(_linux_input, "type_string", sent.append)
+    for name in ("drawing_focus_text", "sheet_editor_text", "spreadsheet_open",
+                 "sheet_grid_check", "poll_sheet_type", "_commit_open_sheet_editor",
+                 "note_focused_find_bar", "focused_chromium_entry"):
+        monkeypatch.setattr(_atspi, name, lambda *a, **kw: pytest.fail("unrelated document probe"))
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    checks = []
+    driver._refuse_xtest_password_focus = lambda: checks.append(True)
+    normalized = text.replace("\r\n", "\n")
+    assert driver.type_text(text) == len(normalized)
+    assert sent == [normalized]
+    assert checks == [True]
+    assert driver._opaque_toolbar_type == ("soffice.bin", normalized)
+    assert driver._sheet_type_origin is None
+
+
+@pytest.mark.parametrize("case", ["opaque", "readable", "empty", "cell", "document",
+                                  "missing", "truncated", "secure", "other_app"])
+def test_opaque_office_toolbar_focus_requires_native_evidence(fake_atspi, monkeypatch, case):
+    toolbar = _Acc("tool bar")
+    panel = _Acc("panel", states=("FOCUSED",))
+    _adopt(toolbar, panel)
+    if case in {"cell", "document"}:
+        panel.role = "table cell" if case == "cell" else "document spreadsheet"
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (
+        None if case == "missing" else panel, case == "truncated",
+    ))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: (
+        "" if case == "empty" else "A1" if case == "readable" else None
+    ))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: case == "secure")
+    assert _atspi.opaque_office_toolbar_focus(
+        "firefox" if case == "other_app" else "soffice.bin",
+    ) is (case == "opaque")
+
+
+def test_opaque_office_toolbar_uses_advertised_interfaces(fake_atspi, monkeypatch):
+    toolbar = _Acc("tool bar")
+    panel = _Acc("panel", states=("FOCUSED",))
+    panel.get_interfaces = lambda: ["org.a11y.atspi.Accessible", "org.a11y.atspi.Component"]
+    _adopt(toolbar, panel)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (panel, False))
+    monkeypatch.setattr(_atspi, "_readable_text", lambda acc: pytest.fail("no Text interface"))
+    assert _atspi.opaque_office_toolbar_focus("soffice.bin")
+
+
+@pytest.mark.parametrize("blocked", ["password", "wayland"])
+def test_opaque_office_toolbar_preserves_input_gates(fake_atspi, monkeypatch, blocked):
+    from a11y_computer_use.drivers import linux
+
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_chromium_entry", lambda app: None)
+    monkeypatch.setattr(_atspi, "opaque_office_toolbar_focus", lambda app: True)
+    monkeypatch.setattr(linux, "_on_wayland", lambda: blocked == "wayland")
+
+    def refuse_password():
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "secure focus")
+
+    driver._refuse_xtest_password_focus = refuse_password
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: pytest.fail("blocked input"))
+    with pytest.raises(ComputerUseError):
+        driver.type_text("E7\n")
+    assert driver._opaque_toolbar_type is None
