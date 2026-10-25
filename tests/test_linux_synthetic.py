@@ -20576,3 +20576,94 @@ def test_model_editor_guard_preserves_plain_control_paths(
     field = _chrome_contenteditable(_KeyClearedWebField("original"))
     field.attrs.update(tag=tag, **{"class": classes})
     _atspi._refuse_model_editor_replace(field)
+
+
+@pytest.mark.parametrize("signal", ["native", "aria-modal"])
+@pytest.mark.parametrize("iframe", [False, True])
+def test_page_modal_preserves_browser_chrome(modal_boundary_tree, signal, iframe):
+    """#1084: page background stays inert while browser controls remain usable."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    if signal == "aria-modal":
+        modal.states.remove("MODAL")
+        modal.get_attributes = lambda: {"aria-modal": "true"}
+    back = _outline_cell("Back", ["press"])
+    back.role = "push button"
+    address = _Acc("entry", name="Address and search bar", width=400, height=30,
+                   states={"SHOWING", "VISIBLE", "EDITABLE", "ENABLED"})
+    tab = _Acc("page tab", name="Other tab", width=150, height=30, states={"SHOWING", "VISIBLE", "ENABLED"})
+    document = _adopt(_Acc("document web", name="Page", width=800, height=500,
+                           states={"SHOWING", "VISIBLE"}), bg, modal)
+    if iframe:
+        document = _adopt(_Acc("document web", name="Outer", width=800, height=500,
+                               states={"SHOWING", "VISIBLE"}), document)
+    _adopt(frame, back, address, tab, document)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    for node in (back, address, tab):
+        assert node.name in {el.title for el in snap.elements}, observe.render_text(snap)
+        element = next(el for el in snap.elements if el.title == node.name)
+        assert not element.blocked_by_modal
+        assert not _atspi.outside_modals(node, [modal])
+        assert _atspi.refuse_outside_modal(node, frame)
+    interactive = observe.render_text(snap, mode="interactive")
+    assert 'button "Back"' in interactive
+    assert 'textfield "Address and search bar"' in interactive
+    background = next(el for el in snap.elements if el.title == bg.name)
+    assert background.blocked_by_modal and not background.clickable
+    with pytest.raises(ComputerUseError, match="outside_active_modal") as caught:
+        _atspi.refuse_outside_modal(bg, frame)
+    assert caught.value.detail["next"]
+    assert driver.press_element(next(el for el in snap.elements if el.title == "Back"))
+    assert calls == ["Back"]
+    assert not _atspi.outside_modals(inside, [modal])
+    assert _atspi.outside_modals(None, [modal])
+    assert _atspi.outside_modals(_Acc("push button", name="Unknown owner"), [modal])
+    # A native browser dialog must still block its toolbar.
+    native = _adopt(_Acc("dialog", name="Native", states={"SHOWING", "MODAL"}),
+                    _Acc("push button", name="OK"))
+    _adopt(frame, back, document, native)
+    assert _atspi.outside_modals(back, [modal, native])
+
+
+@pytest.mark.parametrize("chord", ["alt+Left", "ctrl+l", "ctrl+w", "ctrl+Tab"])
+@pytest.mark.parametrize("native", [False, True])
+def test_browser_navigation_keys_escape_only_page_modals(
+    modal_boundary_tree, monkeypatch, chord, native,
+):
+    from a11y_computer_use.schema import KeyChord
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    if not native:
+        _adopt(frame, _adopt(_Acc("document web", name="Page"), bg, modal))
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: frame)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (bg, False))
+    if native:
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            driver.check_modal_input(KeyChord(chord), "chrome")
+    else:
+        driver.check_modal_input(KeyChord(chord), "chrome")
+    assert calls == []
+
+
+def test_page_modal_coordinate_and_toolbar_typing_guards(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.schema import Click, TypeText
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    back = _outline_cell("Back", ["press"])
+    back.role = "push button"
+    address = _Acc("entry", name="Address and search bar", width=400, height=30,
+                   states={"SHOWING", "VISIBLE", "ENABLED", "EDITABLE", "FOCUSED"})
+    _adopt(frame, back, address, _adopt(_Acc("document web", name="Page"), bg, modal))
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda x, y: back)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    driver.check_modal_input(Click(Point(0, 60, 110)), "chrome")
+    # Address-bar input is scoped by actual focus, not by a guessed toolbar box.
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (address, False))
+    driver.check_modal_input(TypeText("https://example.test/"), "chrome")
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda x, y: bg)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Click(Point(0, 60, 110)), "chrome")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (bg, False))
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(TypeText("background"), "chrome")
+    assert calls == []
