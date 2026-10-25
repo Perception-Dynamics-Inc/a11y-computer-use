@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Latency controls</title>
+<style>body{margin:30px}#backdrop{position:fixed;inset:0;background:#8888}#modal{position:fixed;left:340px;top:200px;background:white;padding:30px}#pointer{width:800px;height:450px;background:#ddd}</style>
+<label><input type="checkbox">Top checkbox</label>
+<iframe title="Checkbox frame" srcdoc='<label><input type="checkbox">Frame checkbox</label>'></iframe>
+<button onclick="document.title='Renamed controls'">Change title</button>
+<button onclick="this.textContent='Row activated'">Row action</button>
+<button onclick="backdrop.hidden=false;modal.hidden=false">Open modal</button>
+<button style="position:fixed;left:30px;top:150px" onclick="document.title='BACKGROUND ACTIVATED'">Background Action</button>
+<div id="pointer" role="group" aria-label="Pointer box">Drag here</div>
+<output id="result">No drag</output>
+<div id="backdrop" hidden onclick="backdrop.hidden=true;modal.hidden=true;document.title='Modal dismissed'"></div>
+<div id="modal" role="dialog" aria-modal="true" aria-label="Photo viewer" hidden>
+<button onclick="this.textContent='Inside '+(++window.n)">Inside Action</button></div>
+<script>window.n=0;pointer.onpointerdown=e=>{pointer.setPointerCapture(e.pointerId)};pointer.onpointerup=e=>{result.textContent='Drag completed'}</script>

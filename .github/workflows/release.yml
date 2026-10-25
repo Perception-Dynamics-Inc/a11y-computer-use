@@ -19,6 +19,9 @@ env:
   A11Y_VISIBLE_ACTIONS: "0"
 
 jobs:
+  latency-bench:
+    uses: ./.github/workflows/latency-bench.yml
+
   build:
     name: Build sdist + wheel
     runs-on: ubuntu-latest
@@ -40,7 +43,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, latency-bench]
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     environment: pypi

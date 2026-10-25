@@ -871,8 +871,10 @@ def _call_first_inline(obj, names, *args, default=None):
             continue
         if _is_mutator(name):
             modal_cache = getattr(_read_cache_local, "input_modals", None)
-            if modal_cache is not None and name not in {"clear_cache", "clearCache"}:
-                modal_cache.clear()
+            if name not in {"clear_cache", "clearCache"}:
+                _modal_discoveries.clear()
+                if modal_cache is not None:
+                    modal_cache.clear()
             _drop_read_cache()
             return _safe(lambda m=method: m(*args), default, marshal=False)
         key = _cache_key(name, args)
@@ -4383,6 +4385,7 @@ class ATSPIAccessor:
 
     def __init__(self) -> None:
         self._active_modals: list = []
+        self._modal_ancestry: dict = {}
         self._visible_children: dict[int, list] = {}
         self._defer_row_identity = False
         self._visible_bounds: dict[int, tuple] = {}
@@ -4955,7 +4958,7 @@ class ATSPIAccessor:
             enabled=enabled,
             modal=is_modal(node, attrs=attrs),
             modal_scope_root=role_str in {"document web", "document frame"},
-            blocked_by_modal=outside_modals(node, self._active_modals),
+            blocked_by_modal=outside_modals(node, self._active_modals, cache=self._modal_ancestry),
             scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
             default=role == "AXButton" and _has_default_state(node),
@@ -21855,6 +21858,12 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
                     "Cannot establish the active modal boundary; no input was sent",
                     detail={"reason": "modal_boundary_unavailable"})
             candidates.append(node)
+            if (_role_name(node) in {"tool bar", "menu bar", "status bar"}
+                    and not any(_role_name(parent) in {"document web", "document frame"}
+                                for parent in _ancestor_chain(node))):
+                # Native modal windows are structural siblings, not toolbar
+                # controls or lazily populated menu models.
+                continue
             if point is not None and _role_name(node) in {"document web", "document frame"}:
                 box = _raw_rect(node, "SCREEN")
                 if box is not None and box[2] > 0 and box[3] > 0:
@@ -21873,9 +21882,9 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
                 # scan to every scoped key, just as Calc materializes cells.
                 continue
             if (_role_name(node) in {"document web", "document frame"}
-                    and _gecko_app(node)):
-                # Deep Gecko pages never reach the wide-child threshold below.
-                # Query all dialog descendants at the document boundary instead.
+                    and (_gecko_app(node) or _chromium_app(node))):
+                # Query all dialog descendants at the document boundary for
+                # both engines instead of walking page content.
                 descendants = _modal_collection(node)
                 if descendants is not None:
                     candidates.extend(descendants)
@@ -21931,22 +21940,50 @@ def modal_document(modal):
                  if _role_name(node) in {"document web", "document frame"}), None)
 
 
-def outside_modals(acc, modals: list) -> bool:
+def _modal_chain(acc, cache):
+    """Reuse reported ancestry only during one read-only snapshot traversal."""
+    if cache is None:
+        return list(_ancestor_chain(acc))
+    chain = []
+    seen = set()
+    node = acc
+    while node is not None and len(chain) < 32:
+        key = _ancestor_key(node)
+        if key in seen:
+            break
+        seen.add(key)
+        if key in cache:
+            chain.extend(cache[key][:32 - len(chain)])
+            break
+        chain.append(node)
+        node = _parent_of(node)
+    # Cache only complete acyclic paths; bounded/cyclic ancestry must be
+    # re-read from each target, just like the uncached guard.
+    if node is None or (_ancestor_key(node) in cache and len(chain) < 32):
+        # Values retain wrappers, including fallback id() identities.
+        for index, ancestor in enumerate(chain):
+            cache[_ancestor_key(ancestor)] = chain[index:]
+    return chain
+
+
+def outside_modals(acc, modals: list, *, cache=None) -> bool:
     """True unless acc belongs to every applicable modal (nested modals included)."""
     if not modals:
         return False
-    chain = list(_ancestor_chain(acc))
+    chain = _modal_chain(acc, cache)
     parents = {_ancestor_key(node) for node in chain}
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in modals:
-        document = modal_document(modal)
+        modal_chain = _modal_chain(modal, cache)
+        document = next((node for node in modal_chain
+                         if _role_name(node) in {"document web", "document frame"}), None)
         if (document is not None and _ancestor_key(document) not in parents
                 and (frame is not None or any(
                     _role_name(node) in {"document web", "document frame"} for node in chain))):
             # A page cannot make browser chrome or another document inert.
             # Missing hits/ancestry do not prove a target is browser chrome.
             continue
-        owner = next((node for node in _ancestor_chain(modal)
+        owner = next((node for node in modal_chain
                       if _role_name(node) in {"frame", "window"}), None)
         if (owner is not None and frame is not None
                 and _ancestor_key(owner) != _ancestor_key(modal)
@@ -21957,17 +21994,38 @@ def outside_modals(acc, modals: list) -> bool:
     return False
 
 
+# Accessed on the native event thread. Without a listener, retain discovery
+# only within the immediate action, never across actions.
+_modal_discoveries: dict = {}
+_modal_generation: int | None = None
+
+
 def input_modals(root, cache: dict | None = None, *, point=None) -> list:
-    """Discover once per window during a click; retain fallback identity owners."""
-    def discover():
-        return active_modals(root) if point is None else active_modals(root, point=point)
+    """Reuse discovery until a window/document/structural event invalidates it."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    global _modal_generation
     if cache is None:
-        return discover()
-    key = _ancestor_key(root)
-    if key not in cache:
-        # Keep the root alive when _ancestor_key must fall back to id().
-        cache[key] = (root, discover())
-    return cache[key][1]
+        cache = getattr(_read_cache_local, "input_modals", None)
+    generation = _atspi_events.modal_epoch() if _atspi_events.modal_cache_ready() else None
+    if generation != _modal_generation or generation is None:
+        _modal_discoveries.clear()
+        _modal_generation = generation
+    key = (_ancestor_key(root), point)
+    action_key = (generation, key)
+    if cache is not None and action_key in cache:
+        return cache[action_key][1]
+    if generation is not None and key in _modal_discoveries:
+        result = _modal_discoveries[key]
+    else:
+        result = (root, active_modals(root) if point is None else active_modals(root, point=point))
+        if generation is not None:
+            if len(_modal_discoveries) >= 64:
+                _modal_discoveries.clear()  # Eviction forces rediscovery.
+            _modal_discoveries[key] = result
+    if cache is not None:
+        cache[action_key] = result  # Pin fallback id() owners.
+    return result[1]
 
 
 def modal_dismiss_hit(acc, root, x: int, y: int, *, modal_cache=None) -> bool:
@@ -21977,7 +22035,7 @@ def modal_dismiss_hit(acc, root, x: int, y: int, *, modal_cache=None) -> bool:
     A clickable generic sibling is eligible only when its reported rectangle
     encloses the modal. Missing hits/geometry and native dialogs fail closed.
     """
-    modals = input_modals(root, modal_cache)
+    modals = input_modals(root, modal_cache, point=(x, y))
     if not modals or acc is None or _point_in_extents(acc, x, y) is not True:
         return False
     chain = list(_ancestor_chain(acc))
