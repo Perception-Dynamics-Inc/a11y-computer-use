@@ -3741,6 +3741,9 @@ class Runtime:
             self._verified_click_names = {}
         renames = getattr(self, "_verified_click_names", {})
         identity_indexes = {}
+        shifted_nodes = None
+        prior_anchors = anchors.copy()
+        refused_refs = set(changed)
         for element in snap.elements:
             if refs is None or element.ref in refs:
                 old = anchors.get(element.ref)
@@ -3797,8 +3800,36 @@ class Runtime:
                             for el in old.elements if el.role == "AXMenuItem"
                         )
                     )
+                    # Hidden/clipped siblings renumber surviving controls.
+                    # Public issuance can rebind such a control only with
+                    # native continuity and unchanged semantics/ancestry.
+                    # Recycled row objects must still fail the identity check.
+                    shifted_control = False
+                    if old_identity != new_identity and element.node_identity and last is not None:
+                        if shifted_nodes is None:
+                            last_index = {el.ref: el for el in last.elements}
+                            shifted_nodes = {}
+                            for candidate in last.elements:
+                                if (candidate.node_identity and candidate.ref in prior_anchors
+                                        and candidate.ref not in refused_refs):
+                                    source = prior_anchors[candidate.ref]
+                                    if source.snapshot_id not in identity_indexes:
+                                        identity_indexes[source.snapshot_id] = {el.ref: el for el in source.elements}
+                                    issued = identity_indexes[source.snapshot_id][candidate.ref]
+                                    if (issued.node_identity == candidate.node_identity
+                                            and self._issued_identity(identity_indexes[source.snapshot_id], candidate.ref)
+                                            == self._issued_identity(last_index, candidate.ref)):
+                                        shifted_nodes.setdefault(candidate.node_identity, []).append(candidate)
+                            identity_indexes[last.snapshot_id] = last_index
+                        candidates = shifted_nodes.get(element.node_identity, ())
+                        shifted_control = (
+                            len(candidates) == 1 and candidates[0].ref != element.ref
+                            and self._issued_identity(
+                                identity_indexes[last.snapshot_id], candidates[0].ref,
+                            ) == new_identity
+                        )
                     if old_identity != new_identity and not (
-                        verified_rename or same_node_rename or newly_exposed_item
+                        verified_rename or same_node_rename or newly_exposed_item or shifted_control
                     ):
                         changed[element.ref] = snap
                         continue
