@@ -1324,6 +1324,14 @@ a grid edit, commit an editor, or poll selected-cell contents. This path has
 synthetic regression coverage only. Inspect the active cell after address
 navigation rather than retrying the text merely because its effect is unverified.
 
+Linux ref rematching stays inside the issuing native window and web document
+(#1074). A same-named control in another tab or window cannot receive the
+click: a still-alive hidden original returns `not_showing`, and a changed or
+missing native context returns `stale_ref`. Unnamed single-child documents
+retain their context during pruning. Normal rematches compare metadata already
+in the snapshots, without additional native ancestry reads. Mutable document
+and window titles, and controls recreated inside the same document, remain
+eligible for the existing anchor checks.
 
 For `scroll_to_find` only, Chromium overflow lists use a separate wheel path.
 The burst starts from the measured viewport size. Consistent numbered labels
