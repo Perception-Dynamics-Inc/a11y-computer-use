@@ -107,6 +107,21 @@ class TreeDriver:
     def ensure_trusted(self) -> None:
         return None
 
+    def retry_evidence(self, action, app, snapshot, input_target=None):
+        """The fake owns a complete in-memory model, including empty sets."""
+        rows = tuple((el.role, el.title, el.value if el.value is not None else (),
+                      el.focused, el.checked if el.checked is not None else (),
+                      el.selected, el.expanded if el.expanded is not None else (),
+                      el.bounds or (), el.parent or (), el.path, el.enabled)
+                     for el in self.elements)
+        return outcome.RetryEvidence(
+            context=(tuple(row for row in rows if row[3]),
+                     tuple(row for row in rows if row[0] == "AXWindow"),
+                     tuple((el.ref, sum(child.parent == el.ref for child in self.elements))
+                           for el in self.elements)),
+            signals=tuple((name, rows) for name in sorted(set().union(*outcome.RETRY_SIGNALS.values()))),
+        )
+
     def frontmost_app(self):
         return self.front, self.pid
 
@@ -446,8 +461,10 @@ def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path,
     )
     runtime = _runtime(tmp_path, driver)
     missed = runtime.click("e4")
-    assert missed.outcome == "partial"
-    assert missed.evidence == "the caret is not in the target paragraph"
+    assert missed.outcome == "unverifiable"
+    assert missed.next == ()
+    assert "re-observe first" in missed.evidence
+    assert missed.evidence.startswith("the caret is not in the target paragraph")
     assert "changed" not in missed.evidence
 
     monkeypatch.setattr(
@@ -483,8 +500,10 @@ def test_side_pane_click_is_confirmed_only_when_the_location_changes(tmp_path, m
     )
     runtime = _runtime(tmp_path, driver)
     missed = runtime.click("e4")
-    assert missed.outcome == "partial"
-    assert missed.evidence == "the row was selected but the location did not change"
+    assert missed.outcome == "unverifiable"
+    assert missed.next == ()
+    assert "re-observe first" in missed.evidence
+    assert missed.evidence.startswith("the row was selected but the location did not change")
     assert missed.outcome != "confirmed"
 
     monkeypatch.setattr(
@@ -638,14 +657,18 @@ def test_chrome_churn_outside_the_page_does_not_confirm_a_click(tmp_path) -> Non
     driver.press_element = press  # type: ignore[method-assign]
     runtime = _runtime(tmp_path, driver)
     inert = runtime.click("btn")
-    assert inert.outcome == "suspected_noop", (inert.outcome, inert.evidence)
-    assert "did not change" in inert.evidence
+    assert inert.outcome == "unverifiable", (inert.outcome, inert.evidence)
+    assert inert.next == ()
+    assert "re-observe first" in inert.evidence
+    assert "readings differ" in inert.evidence
 
     driver.save_page = True
     changed = runtime.click("btn")
     assert changed.outcome == "confirmed", (changed.outcome, changed.evidence)
     again = runtime.click("btn")
-    assert again.outcome == "suspected_noop", (again.outcome, again.evidence)
+    assert again.outcome == "unverifiable", (again.outcome, again.evidence)
+    assert again.next == ()
+    assert "re-observe first" in again.evidence
 
     driver.save_page = False
     driver.focus_button = True
@@ -704,7 +727,9 @@ def test_set_value_in_a_background_window_is_confirmed_from_app_scope(tmp_path) 
     driver.landed = "nope"
     missed = runtime.set_value("e9", "alpha-ok")
     assert missed.outcome != "confirmed"
-    assert missed.outcome in {"partial", "suspected_noop"}
+    assert missed.outcome == "unverifiable"
+    assert missed.next == ()
+    assert "re-observe first" in missed.evidence
     assert "alpha-ok" not in missed.evidence or "nope" in missed.evidence
 
 
@@ -866,7 +891,9 @@ def test_key_confirms_text_under_a_tab_group_and_the_selected_cell(tmp_path) -> 
     driver.key_effect = churn
     runtime.desktop_snapshot(APP)
     quiet = runtime.key("F5")
-    assert quiet.outcome == "suspected_noop", (quiet.outcome, quiet.evidence)
+    assert quiet.outcome == "unverifiable", (quiet.outcome, quiet.evidence)
+    assert quiet.next == ()
+    assert "re-observe first" in quiet.evidence
 
     driver.elements = [
         _element("w", "AXWindow", "Calc", path=("AXWindow",)),
@@ -925,7 +952,9 @@ def test_scroll_uses_bounds_and_set_value_uses_readback(tmp_path) -> None:
     runtime.desktop_snapshot(APP)
     driver.landed = "An"
     partial = runtime.set_value("e3", "Ann")
-    assert partial.outcome == "partial"
+    assert partial.outcome == "unverifiable"
+    assert partial.next == ()
+    assert "re-observe first" in partial.evidence
     assert "Ann" in partial.evidence
 
 
@@ -1380,8 +1409,10 @@ def test_covered_ref_click_is_not_clicked_and_the_point_stays(tmp_path) -> None:
     driver.press_element = lambda element: False  # type: ignore[method-assign]
     runtime = _runtime(tmp_path, driver)
     covered = runtime.click("search", verify=True)
-    assert covered.outcome == "suspected_noop"
-    assert covered.evidence == "covered by 'Welcome'"
+    assert covered.outcome == "unverifiable"
+    assert covered.next == ()
+    assert "re-observe first" in covered.evidence
+    assert covered.evidence.startswith("covered by 'Welcome'")
     assert not str(covered).startswith("clicked")
     assert "did not reach the target" in covered
     assert "+0 -31 ~0" in covered
@@ -2862,7 +2893,13 @@ def test_impress_click_scoped_verdict_skips_effect_scan(tmp_path, monkeypatch, v
     monkeypatch.setattr(runtime, "_effect_after", lambda *args: pytest.fail("effect scan"))
     monkeypatch.setattr(runtime, "_reread", lambda *args: pytest.fail("outcome scan"))
     result = runtime.click("e4")
-    assert (result.outcome, result.evidence) == verdict
+    if verdict[0] == "partial":
+        assert result.outcome == "unverifiable"
+        assert result.next == ()
+        assert result.evidence.startswith(verdict[1])
+        assert "re-observe first" in result.evidence
+    else:
+        assert (result.outcome, result.evidence) == verdict
     assert runtime._action_baseline["capture"] is None
 
 

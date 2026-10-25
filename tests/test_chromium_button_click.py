@@ -119,7 +119,10 @@ def test_runtime_reports_mechanism_but_still_checks_effect(button_case, monkeypa
     monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
     result = rt.click(ref="e1")
     assert "via AT-SPI doAction(click)" in result
-    assert result.outcome == verdict
+    assert result.outcome == ("confirmed" if verdict == "confirmed" else "unverifiable")
+    if verdict != "confirmed":
+        assert result.next == ()
+        assert "re-observe first" in result.evidence
     assert calls == ["click"]
 
 
@@ -178,7 +181,10 @@ def test_ref_click_counts_full_window_reads(button_case, monkeypatch, changed):
     monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
     result = rt.click(ref="e1")
     assert len(reads) == (1 if changed else 2)
-    assert result.outcome == ("confirmed" if changed else "suspected_noop")
+    assert result.outcome == ("confirmed" if changed else "unverifiable")
+    if not changed:
+        assert result.next == ()
+        assert "re-observe first" in result.evidence
     assert calls == ["click"]
     assert "_recheck_target" in guards
     assert "_popover_cover" in guards

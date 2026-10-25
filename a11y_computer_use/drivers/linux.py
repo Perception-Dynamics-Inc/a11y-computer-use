@@ -2324,6 +2324,36 @@ class LinuxDriver:
             return resolved[1]
         return None
 
+    def retry_evidence(self, action, app, snapshot, input_target=None):
+        """Read scoped retry evidence without discovering or walking a window.
+
+        Unknown owners and unsupported action signals fail closed. Use only
+        already-issued native handles; coordinate input is not hit-tested a
+        second time just for verification.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.schema import Click, KeyChord
+
+        if not isinstance(action, (Click, KeyChord)):
+            return None
+        if snapshot is None or snapshot.app != app:
+            return None  # An addressed action must not probe another app's focus.
+        target = action.target if isinstance(action, Click) else None
+        focused = next((node for node in snapshot.elements if node.focused), None) if snapshot else None
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        elif isinstance(action, KeyChord) and focused is not None:
+            handle = observe.ax_handle_for(focused.snapshot_id, focused.ref)
+        else:
+            return None
+        if getattr(type(handle), "__gtype__", None) is None:
+            # This optional probe requires a native Accessible. Foreign tree
+            # accessors cannot establish that libatspi reads are available.
+            return None
+        focus_handle = observe.ax_handle_for(focused.snapshot_id, focused.ref) if focused else None
+        return self._run(lambda: _atspi.retry_evidence(action, handle, focus_handle))
+
     def toggle_click_probe(self, target: Target):
         """Capture a page toggle or GTK dialog selection before the click."""
         from a11y_computer_use import observe

@@ -642,8 +642,10 @@ def test_coordinate_click_on_a_calc_cell_uses_the_selected_cell(monkeypatch) -> 
     )
     result = rt.click(x=141, y=208)
     assert clicked_at, "the pointer click was not sent"
-    assert result.outcome == "partial"
-    assert result.evidence == "the selected cell is B2, not B4"
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert "re-observe first" in result.evidence
+    assert result.evidence.startswith("the selected cell is B2, not B4")
 
 
 def test_libreoffice_pointer_shift_is_the_title_bar_only_on_24() -> None:
@@ -12881,8 +12883,10 @@ def test_click_on_an_outline_row_stays_a_single_click(
     single = runtime.click(cell.ref)
     assert "clicked" in single
     assert "(activates on double-click)" in single
-    assert single.outcome == "partial"
-    assert single.evidence == "the row was selected and activates on double-click"
+    assert single.outcome == "unverifiable"
+    assert single.next == ()
+    assert "re-observe first" in single.evidence
+    assert single.evidence.startswith("the row was selected and activates on double-click")
     presses = [event for event in events if event[0] == _X_BPRESS]
     assert len(presses) <= 1, events
     assert named == []
@@ -16941,8 +16945,10 @@ def test_calc_ref_click_with_active_dialog_cannot_confirm(monkeypatch, role) -> 
     rt._judge_mutation = lambda *args, **kwargs: ("confirmed", "tree changed")
     result = rt.click(ref="e1")
     assert clicks == [cell]
-    assert result.outcome == "partial"
-    assert result.evidence == (
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert "re-observe first" in result.evidence
+    assert result.evidence.startswith(
         "active dialog 'Format Cells'; the selected cell C4 could not be verified"
     )
 
@@ -18321,8 +18327,10 @@ def test_gtk_flat_table_click_reports_selection_only(
     events.clear()
     result = runtime.click(target.ref, verify=verify)
     assert note in result
-    assert result.outcome == "partial"
-    assert result.evidence == "row activation is not verified; single click selects only"
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert "re-observe first" in result.evidence
+    assert result.evidence.startswith("row activation is not verified; single click selects only")
     assert "SELECTED" in cell.states
     assert actions == []
     assert not [event for event in events if event[0] == _X_BPRESS]
@@ -20871,6 +20879,51 @@ def test_web_focus_remount_identity(fake_atspi, monkeypatch, case, operation):
             call(el, "hello world")
         assert exc.value.code is ErrorCode.FOCUS_LOST
         assert writes == []
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_chromium_modal_split_failure_uses_complete_query(fake_atspi, monkeypatch, complete):
+    """A failed split is not a missing modal or proof that discovery is impossible."""
+    modal = _Acc("dialog", states=("SHOWING", "MODAL"))
+    table = _Acc("table")
+    frame = _adopt(_Acc("frame"), table)
+    table.get_child_count = lambda: 5000
+    table.get_child_at_index = lambda index: pytest.fail("must not enumerate virtual rows")
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    queries = []
+    def collection(node, *, split=False):
+        assert node is table
+        queries.append(split)
+        return [modal] if complete and not split else None
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    if complete:
+        assert _atspi.active_modals(frame) == [modal]
+    else:
+        with pytest.raises(ComputerUseError) as caught:
+            _atspi.active_modals(frame)
+        assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+    assert queries == [True, False]
+
+
+def test_chromium_modal_collection_uses_document_before_virtual_table(fake_atspi, monkeypatch):
+    modal = _Acc("dialog", states=("SHOWING", "MODAL"))
+    table = _Acc("table")
+    document = _adopt(_Acc("document web"), table)
+    frame = _adopt(_Acc("frame"), document)
+    table.get_child_count = lambda: pytest.fail("must not enumerate virtual table")
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda node: False)
+    queries = []
+    def collection(node, *, split=False):
+        queries.append(node)
+        assert node is document
+        assert not split
+        return [modal]
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    assert _atspi.active_modals(frame) == [modal]
+    assert queries == [document]
 
 
 @pytest.mark.parametrize("event", ["window:create", "window:destroy", "document:reload",

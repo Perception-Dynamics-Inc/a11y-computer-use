@@ -13364,6 +13364,223 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
+def retry_evidence(action, target, focus):
+    """Read retry signals with the native application child cache bypassed."""
+    from a11y_computer_use.schema import Click, Element, KeyChord
+
+    formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
+        "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
+    }
+    label = isinstance(action, Click) and isinstance(action.target, Element) and action.target.role in {"AXStaticText", "AXButton"}
+    outline = (isinstance(action, Click) and isinstance(action.target, Element)
+               and action.target.note == "activates on double-click"
+               and action.count == 1 and not action.modifiers)
+    if target is None or not (formatting or label or outline):
+        return None
+    return _without_child_cache(target, lambda: _retry_evidence(action, target, focus))
+
+
+def _retry_evidence(action, target, focus):
+    """Scoped evidence for formatting and inert labels; unknown elsewhere.
+
+    No Collection query, whole-window traversal, hit test, or focus-discovery
+    walk is allowed here. Unsupported signals remain None, never an empty success.
+    The two reads share a 0.1 s traversal budget (native IPC can still fail).
+    """
+    from functools import cache
+
+    from a11y_computer_use.outcome import RetryEvidence
+    from a11y_computer_use.schema import Click, Element, KeyChord
+
+    if target is None:
+        return None
+    deadline = time.monotonic() + 0.04
+    formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
+        "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
+    }
+    element = action.target if isinstance(action, Click) and isinstance(action.target, Element) else None
+    outline = (element is not None and element.note == "activates on double-click"
+               and action.count == 1 and not action.modifiers)
+    if not formatting and not outline and (element is None or element.role not in {"AXStaticText", "AXButton"}):
+        return None
+    try:
+        _drop_cached_properties(target)
+        if is_secure(target):
+            return None
+        if outline:
+            states = _call_first(target, ("get_state_set",))
+            flags = _call_first(states, ("get_states",))
+            if flags is None:
+                return None
+            selected = any("SELECTED" in str(flag) for flag in flags)
+            return RetryEvidence(effect=(target, "outline_selection", selected))
+        if formatting:
+            if not _state_has(target, "FOCUSED"):
+                return RetryEvidence(toggle=True, reason="the focused text owner could not be resolved")
+            api = _atspi().Text
+            caret = api.get_caret_offset(target)
+            selections = api.get_n_selections(target)
+            if type(caret) is not int or caret < 0 or type(selections) is not int or selections < 0:
+                return RetryEvidence(toggle=True)
+            if selections:
+                span = _selection_bounds(api.get_selection(target, 0))
+                if span is None:
+                    return RetryEvidence(toggle=True)
+                caret = span[0]
+            attributes, start, end = api.get_attribute_run(target, caret, False)
+            attribute = {"b": "weight", "i": "style", "u": "underline"}[action.chord[-1].lower()]
+            value = attributes.get(attribute)
+            if value is None or not start <= caret < end or time.monotonic() >= deadline:
+                return RetryEvidence(toggle=True, reason="formatting attributes could not be read")
+            return RetryEvidence(
+                toggle=True, effect=(target, caret, attribute, value),
+                effect_reason="the selected text formatting attribute changed",
+            )
+        # Read actual capabilities, not snapshot role/layout heuristics. GTK
+        # labels can be buttons; web buttons can expose readable inert content.
+        parent = _call_first(target, ("get_parent", "getParent"))
+        application = _call_first(target, ("get_application", "getApplication"))
+        if parent is None or application is None:
+            return None
+
+        @cache
+        def identity(node):
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            _drop_cached_properties(node)
+            name = _call_first(node, ("get_name", "getName"))
+            role = _call_first(node, ("get_role_name", "getRoleName"))
+            states = _call_first(node, ("get_state_set",))
+            flags = _call_first(states, ("get_states",))
+            if name is None or role is None or flags is None:
+                raise ValueError("unreadable identity/state")
+            if role in {"canvas", "drawing area"} or role == "image" and not name:
+                raise ValueError("opaque signal")
+            return node, role, name, tuple(str(flag) for flag in flags)
+
+        @cache
+        def child_count(node):
+            count = _call_first(node, ("get_child_count", "getChildCount"))
+            if type(count) is not int or count < 0:
+                raise ValueError("unreadable child count")
+            return count
+
+        @cache
+        def content(node):
+            # No Text/Value interface is a readable absence, distinct from a
+            # supported interface whose native read failed.
+            if is_secure(node):
+                raise ValueError("secure signal")
+            interfaces = _call_first(node, ("get_interfaces",))
+            if interfaces is None:
+                raise ValueError("unreadable capabilities")
+            text = _full_text(node) if "Text" in interfaces else ()
+            value = ()
+            if "Value" in interfaces:
+                value_iface = _call_first(node, ("get_value_iface",))
+                value = _call_first(value_iface, ("get_current_value",))
+            if text is None or value is None:
+                raise ValueError("unreadable text/value")
+            return text, value
+
+        if identity(parent)[1] in {"frame", "dialog", "alert", "application"}:
+            return None  # A parent probe must not become a whole-window walk.
+        parent_count = child_count(parent)
+        window_count = child_count(application)
+        if parent_count > 8 or window_count > 8:
+            return None
+        windows = []
+        for index in range(window_count):
+            node = _call_first(application, ("get_child_at_index", "getChildAtIndex"), index)
+            if node is None:
+                return None
+            windows.append(identity(node))
+        ancestors = []
+        owner = parent
+        for _ in range(16):
+            row = identity(owner)
+            ancestors.append((row, child_count(owner)))
+            if any(owner == window[0] for window in windows):
+                break
+            owner = _call_first(owner, ("get_parent", "getParent"))
+            if owner is None:
+                return None
+        else:
+            return None
+        # Scope to the parent subtree and the ancestor chain, never walk the
+        # app/window to discover focus. Any truncated subtree stays unknown.
+        siblings = []
+        container = parent
+        # Unnamed layout wrappers are not a semantic boundary. Include their
+        # nearest named container/document, stopping before the app window.
+        for row, _count in ancestors:
+            if row[1] in {"frame", "dialog", "alert"}:
+                break
+            container = row[0]
+            if row[2] or row[1] in {"document web", "document frame"}:
+                break
+        container_rows = []
+        count = child_count(container)
+        if count > 32:
+            return None
+        for index in range(count):
+            child = _call_first(container, ("get_child_at_index", "getChildAtIndex"), index)
+            if child is None:
+                return None
+            # Sibling subtree membership needs native identity and child
+            # count; selection/state/text reads belong to the target parent.
+            # Do not expand unrelated document controls merely for context.
+            container_rows.append((child, child_count(child)))
+        pending = [parent]
+        while pending:
+            node = pending.pop()
+            if len(siblings) >= 32:
+                return None
+            row = identity(node)
+            count = child_count(node)
+            siblings.append((row, count))
+            if count > 32 - len(pending) - len(siblings):
+                return None
+            for index in range(count):
+                child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), index)
+                if child is None:
+                    return None
+                pending.append(child)
+        documents = []
+        for row, _count in ancestors:
+            if row[1] in {"document web", "document frame"}:
+                iface = _call_first(row[0], ("get_document_iface",))
+                attributes = _call_first(iface, ("get_document_attributes",))
+                if attributes is None:
+                    return None
+                documents.append((row, tuple(sorted(attributes.items() if isinstance(attributes, dict) else attributes))))
+        # Re-resolve focus among already scoped nodes (a click may have moved
+        # it since the public snapshot). A cached focused node must still read
+        # FOCUSED; an unresolved owner cannot establish a no-op.
+        candidates = [row for row, _count in siblings]
+        candidates += [row for row, _count in ancestors]
+        focus_identity = next((row for row in candidates if any("FOCUSED" in flag for flag in row[3])), None)
+        if focus_identity is None and focus is not None:
+            row = identity(focus)
+            if any("FOCUSED" in flag for flag in row[3]):
+                focus_identity = row
+        if focus_identity is None:
+            return None
+        state = identity(target)
+        text, value = content(target)
+        if time.monotonic() >= deadline:
+            return None
+        return RetryEvidence(
+            context=(focus_identity, tuple(windows), (parent, parent_count)),
+            signals=(("target_identity", target), ("target_states", state[3]),
+                     ("target_name", state[2]), ("target_value", value),
+                     ("target_text", text), ("parent_selection", tuple(siblings)),
+                     ("container_children", (tuple(container_rows), tuple(siblings))), ("document", (tuple(documents), tuple(ancestors), tuple(windows)))),
+        )
+    except Exception:
+        return None
+
+
 def writer_key_state(
     app: str, previous: tuple | None = None, *, structure: bool = False,
     selection: bool = False,
@@ -21949,6 +22166,12 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
             # in complete halves, so a modal in its final row is not missed.
             if not libreoffice and count > min(64, 4096 - len(seen) - len(queue)):
                 descendants = _modal_collection(node, split=True)
+                if descendants is None and _chromium_app(node):
+                    # When Chromium cannot answer a split query on a large
+                    # table, ask the same scoped Collection for its complete
+                    # result before falling back
+                    # to bounded enumeration. Neither failure proves absence.
+                    descendants = _modal_collection(node)
                 if descendants is not None:
                     candidates.extend(descendants)
                     continue
