@@ -20981,3 +20981,22 @@ def test_modal_cache_does_not_outlive_incomplete_listener(modal_boundary_tree, m
     # No event can be assumed when a required subscription failed.
     with pytest.raises(ComputerUseError, match="outside_active_modal"):
         _atspi.refuse_outside_modal(bg, frame, modal_cache={})
+
+
+def test_snapshot_modal_ancestry_reuses_siblings_and_refreshes_next_read(fake_atspi, monkeypatch):
+    modal = _Acc("dialog", states=("SHOWING", "MODAL"))
+    first, second = _Acc("push button"), _Acc("push button")
+    group = _adopt(_Acc("panel"), first, second)
+    _adopt(modal, group)
+    frame = _adopt(_Acc("frame"), modal)
+    calls = []
+    parent = _atspi._parent_of
+    monkeypatch.setattr(_atspi, "_parent_of", lambda node: calls.append(node) or parent(node))
+    cache = {}
+    assert not _atspi.outside_modals(first, [modal], cache=cache)
+    calls.clear()
+    assert not _atspi.outside_modals(second, [modal], cache=cache)
+    assert calls == [second]
+    # Snapshot-local reuse must never authorize a subsequently reparented node.
+    _adopt(frame, second)
+    assert _atspi.outside_modals(second, [modal], cache={})

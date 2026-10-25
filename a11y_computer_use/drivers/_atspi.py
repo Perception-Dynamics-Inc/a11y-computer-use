@@ -4385,6 +4385,7 @@ class ATSPIAccessor:
 
     def __init__(self) -> None:
         self._active_modals: list = []
+        self._modal_ancestry: dict = {}
         self._visible_children: dict[int, list] = {}
         self._defer_row_identity = False
         self._visible_bounds: dict[int, tuple] = {}
@@ -4957,7 +4958,7 @@ class ATSPIAccessor:
             enabled=enabled,
             modal=is_modal(node, attrs=attrs),
             modal_scope_root=role_str in {"document web", "document frame"},
-            blocked_by_modal=outside_modals(node, self._active_modals),
+            blocked_by_modal=outside_modals(node, self._active_modals, cache=self._modal_ancestry),
             scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
             default=role == "AXButton" and _has_default_state(node),
@@ -21939,22 +21940,50 @@ def modal_document(modal):
                  if _role_name(node) in {"document web", "document frame"}), None)
 
 
-def outside_modals(acc, modals: list) -> bool:
+def _modal_chain(acc, cache):
+    """Reuse reported ancestry only during one read-only snapshot traversal."""
+    if cache is None:
+        return list(_ancestor_chain(acc))
+    chain = []
+    seen = set()
+    node = acc
+    while node is not None and len(chain) < 32:
+        key = _ancestor_key(node)
+        if key in seen:
+            break
+        seen.add(key)
+        if key in cache:
+            chain.extend(cache[key][:32 - len(chain)])
+            break
+        chain.append(node)
+        node = _parent_of(node)
+    # Cache only complete acyclic paths; bounded/cyclic ancestry must be
+    # re-read from each target, just like the uncached guard.
+    if node is None or (_ancestor_key(node) in cache and len(chain) < 32):
+        # Values retain wrappers, including fallback id() identities.
+        for index, ancestor in enumerate(chain):
+            cache[_ancestor_key(ancestor)] = chain[index:]
+    return chain
+
+
+def outside_modals(acc, modals: list, *, cache=None) -> bool:
     """True unless acc belongs to every applicable modal (nested modals included)."""
     if not modals:
         return False
-    chain = list(_ancestor_chain(acc))
+    chain = _modal_chain(acc, cache)
     parents = {_ancestor_key(node) for node in chain}
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in modals:
-        document = modal_document(modal)
+        modal_chain = _modal_chain(modal, cache)
+        document = next((node for node in modal_chain
+                         if _role_name(node) in {"document web", "document frame"}), None)
         if (document is not None and _ancestor_key(document) not in parents
                 and (frame is not None or any(
                     _role_name(node) in {"document web", "document frame"} for node in chain))):
             # A page cannot make browser chrome or another document inert.
             # Missing hits/ancestry do not prove a target is browser chrome.
             continue
-        owner = next((node for node in _ancestor_chain(modal)
+        owner = next((node for node in modal_chain
                       if _role_name(node) in {"frame", "window"}), None)
         if (owner is not None and frame is not None
                 and _ancestor_key(owner) != _ancestor_key(modal)

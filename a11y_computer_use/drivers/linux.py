@@ -1761,6 +1761,7 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
+                    accessor._modal_ancestry.clear()
                     # Only Chromium needs pre-reveal descendant discovery.
                     # A GTK find uses the same pruned walk as a snapshot;
                     # querying Collection here materializes the entire model
@@ -1771,7 +1772,8 @@ class LinuxDriver:
                         else _atspi.snapshot_top_level_modals(node)
                     )
                     # Discovery/search must not scroll the inert background.
-                    blocked = _atspi.outside_modals(node, accessor._active_modals)
+                    blocked = _atspi.outside_modals(node, accessor._active_modals,
+                                                     cache=accessor._modal_ancestry)
                     accessor._table_seek = None if blocked else self._table_seek
                     document_matches: list = []
                     if seek and not blocked and _atspi._chromium_app(node):
@@ -1805,7 +1807,7 @@ class LinuxDriver:
                             replace(el, blocked_by_modal=True, clickable=False, editable=False)
                             if _atspi.outside_modals(
                                 observe.ax_handle_for(snap.snapshot_id, el.ref),
-                                accessor._active_modals,
+                                accessor._active_modals, cache=accessor._modal_ancestry,
                             ) else el for el in snap.elements
                         ))
                     _atspi.note_browser_bar(node, snap.elements)
