@@ -33,7 +33,7 @@ def ref(text, title):
 
 def run_once_click(python, point, env):
     """Run the measured CLI once, preserving crash diagnostics on failure."""
-    command = [python, "-m", "a11y_computer_use", "run-once",
+    command = [python, str(Path(__file__).with_name("run_once.py")), "run-once",
                json.dumps(dict(tool="click", x=int(point.x), y=int(point.y)))]
     result = subprocess.run(command, env=dict(env, PYTHONFAULTHANDLER="1"),
                             capture_output=True, text=True)

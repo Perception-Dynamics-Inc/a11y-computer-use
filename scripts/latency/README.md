@@ -77,3 +77,12 @@ are separate from the seven-sample MCP/CLI gate.
 R1 uses the exact minimal `top.html` / `ifr.html` / `inner.html` checkbox shape
 from [#1061](https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues/1061),
 including its onchange title evidence. It is separate from the modal/drag fixture.
+
+R2 invokes the installed package through `run_once.py` for both builds. The
+launcher preserves the real CLI arguments, exit status, and exceptions, then
+quits and joins its AT-SPI event thread before releasing the native cache.
+This cleanup stays inside the subprocess timer. The 0.4.76 wheel otherwise
+leaves a daemon loop running through Python finalization: a reproduced CI core
+showed its libatspi/ctypes callback crashing in `PyGILState_Ensure` while the
+main thread was already in libc `exit`. Child failures retain stdout/stderr
+and remain fatal; the separate native-title check still verifies the sort.
