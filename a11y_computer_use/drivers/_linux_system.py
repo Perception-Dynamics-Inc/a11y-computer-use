@@ -22,6 +22,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 
@@ -1986,7 +1987,7 @@ _LAUNCHER_BASENAMES = frozenset({"gtk-launch", "xdg-open", "gio"})
 
 
 def _spawn(argv: list[str], identifier: str):
-    """Start ``argv`` and return the process. The caller reaps it with ``poll``.
+    """Start ``argv`` and reap it asynchronously while preserving its exit status.
 
     A recorder that returns an object with no ``pid`` still works: the handle
     simply has no pid. ``OSError`` is ``app_not_found`` and starts nothing.
@@ -1994,13 +1995,20 @@ def _spawn(argv: list[str], identifier: str):
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     try:
-        return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise ComputerUseError(
             ErrorCode.APP_NOT_FOUND,
             f"could not launch {identifier!r}: {exc}",
             detail={"app": identifier},
         ) from exc
+
+    # Retain ownership even after the caller drops the launch handle. Popen's
+    # waitpid lock lets startup probes poll the same process safely.
+    wait = getattr(proc, "wait", None)
+    if callable(wait):
+        threading.Thread(target=wait, name="a11y-launch-reaper", daemon=True).start()
+    return proc
 
 
 def _launch_handle(proc, identifier: str, names: list[str], *, is_launcher: bool) -> dict:
