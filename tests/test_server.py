@@ -6513,3 +6513,47 @@ def test_canvas_coordinate_click_receipt(tmp_path, monkeypatch, verify, changed,
         assert result.outcome == "unverifiable"
         assert result.next == ()
         assert "re-observe first" in result.evidence
+
+
+@pytest.mark.parametrize("before,after,confirmed", [
+    ({}, {"options": "Options - LibreOffice - User Data"}, True),
+    ({"options": "Options - LibreOffice - User Data"},
+     {"options": "Options - LibreOffice - User Data"}, False),
+    (None, {"options": "Options - LibreOffice - User Data"}, False),
+    ({}, None, False),
+])
+def test_menu_confirms_only_new_native_dialog(
+    monkeypatch, store, audit_dir, mocked_driver, before, after, confirmed,
+):
+    """#1096: menu without a preceding snapshot still observes new dialogs."""
+    store.set_tier(APP, safety.Tier.FULL)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(audit_dir))
+    monkeypatch.setattr(rt, "_resolve_app", lambda app: (True, APP))
+    states = iter([before, after])
+    monkeypatch.setattr(rt.driver, "menu_dialog_state", lambda app: next(states), raising=False)
+    monkeypatch.setattr(rt.driver, "menu_state", lambda app: {})
+    presses = []
+    monkeypatch.setattr(rt.driver, "menu_press",
+                        lambda app, path: presses.append((app, path)) or "Options...")
+    # A failed whole-tree read must not erase complete native dialog evidence.
+    monkeypatch.setattr(rt, "_probe_snapshot", lambda *args: None)
+    monkeypatch.setattr(rt, "_reread", lambda *args: None)
+    result = rt.menu(APP, "Tools > Options...")
+    assert presses == [(APP, "Tools > Options...")]
+    assert result.outcome == ("confirmed" if confirmed else "unverifiable")
+    assert result.next == ()
+    if confirmed:
+        assert result.evidence == 'opened dialog "Options - LibreOffice - User Data"'
+
+
+def test_menu_capture_uses_addressed_app(monkeypatch, store, audit_dir, mocked_driver):
+    store.set_tier(APP, safety.Tier.FULL)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(audit_dir))
+    monkeypatch.setattr(rt, "_resolve_app", lambda app: (True, APP))
+    monkeypatch.setattr(rt.driver, "menu_state", lambda app: {})
+    monkeypatch.setattr(rt.driver, "menu_press", lambda *args: "Options...")
+    captures = []
+    monkeypatch.setattr(rt, "_capture", lambda app: captures.append(app))
+    monkeypatch.setattr(rt, "_reread", lambda *args: None)
+    rt.menu(APP, "Tools > Options...")
+    assert captures == [APP]
