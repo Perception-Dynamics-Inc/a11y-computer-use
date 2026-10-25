@@ -1409,7 +1409,12 @@ missing native context returns `stale_ref`. Unnamed single-child documents
 retain their context during pruning. Normal rematches compare metadata already
 in the snapshots, without additional native ancestry reads. Mutable document
 and window titles, and controls recreated inside the same document, remain
-eligible for the existing anchor checks.
+eligible for the existing anchor checks. Snapshot metadata also retains each
+web document's observed URL. If its path or query changes through SPA navigation,
+an old ref returns `stale_ref` with `reason: route_changed` and the old/new URLs
+before input, even if the same native button survives. Observe the new route to
+obtain a current ref. Fragment-only changes and missing URL reads alone do not
+establish a route change. This guard has synthetic regression coverage.
 
 For `scroll_to_find` only, Chromium overflow lists use a separate wheel path.
 The burst starts from the measured viewport size. Consistent numbered labels
