@@ -1133,10 +1133,13 @@ date are unavailable. No month, date, or day-cell geometry is inferred.
 
 A whole-calendar ref click is refused before input: its center can select an
 arbitrary date. Use keyboard focus and navigation, or explicit x/y from a
-screenshot, then visually verify the selected date. For `verify=true` clicks
-on an observed calendar or opaque region, an unchanged accessibility tree
-reports `effect unknown (opaque target)` rather than `(no change)`. This is
-uncertainty reporting, not pixel comparison or verified date selection.
+screenshot, then visually verify the selected date. Coordinate clicks inside
+an observed calendar or opaque region report `unverifiable` when the
+accessibility tree is unchanged, with or without `verify=true`. The evidence
+says `effect unknown (opaque target)` and recommends a screenshot, with no
+automatic retry hints: repeating a landed click could undo a painted toggle.
+Readable state changes can still confirm the effect. This is uncertainty
+reporting, not pixel comparison or verified date selection.
 
 Native AT-SPI `page tab` controls retain the `AXTab` role (rendered as `tab`),
 with `page tab list` retained as `AXTabGroup`. Use `find(text="Advanced",
