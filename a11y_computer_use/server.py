@@ -7505,7 +7505,13 @@ class Runtime:
         by default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). A step
         that shows different on-screen rows, or that changes the
         container's scroll offset, starts that clock again. The search
-        also stops at 120 seconds from the start. ``budget_s`` of 0 stops
+        also stops at 120 seconds from the start. The stop message names
+        the requested no-progress budget and identifies the hard limit
+        separately. Linux Chromium overflow lists use search-only wheel
+        bursts sized from the measured viewport; consistent ordinal labels
+        allow larger bursts and direction correction toward distant rows.
+        Ordinals guide navigation only; a real visible match is required.
+        ``budget_s`` of 0 stops
         before any scroll. The note names the scroll container, its
         scroll position, and the last rows on screen. A document, a table, or
         a list may be tried with Ctrl+F before the wheel, including an
@@ -7583,6 +7589,11 @@ class Runtime:
             if horizontal:
                 self.driver.scroll(anchor, dx=step, dy=0)
             else:
+                search_step = getattr(self.driver, "scroll_search_step", None)
+                if callable(search_step) and search_step(
+                    anchor, snapshot=self._current, text=text, dy=step,
+                ):
+                    return
                 self.driver.scroll(anchor, dy=step)
 
         def page_unchanged(exc: ComputerUseError) -> bool:
@@ -8054,8 +8065,9 @@ class Runtime:
                     title = f" {(anchor.title or '').strip()!r}" if (anchor.title or "").strip() else ""
                     container = f"{anchor.role}{title} ref={anchor.ref}"
                 self._note_issued(shot, {anchor.ref} if anchor is not None else set())
-                shown_budget = budget_s if budget_cap is None else budget_cap
-                why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
+                why = f" (time budget {budget_s:g}s)" if budget_hit else ""
+                if budget_hit and budget_cap == _SCROLL_FIND_HARD_S:
+                    why += " (120s hard limit reached; call again to continue)"
                 canvas = next((el.content_note for el in shot.elements if el.content_note), "")
                 canvas_line = f"\n{canvas}" if canvas else ""
                 heading = (
@@ -10609,7 +10621,9 @@ def build_server(
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
         Linux refuses ref and coordinate input outside a showing native or ARIA
-        modal with outside_active_modal; close it or use controls inside it.
+        modal with outside_active_modal, except one plain left coordinate click
+        on a measured web backdrop or empty outside area in the same document.
+        Background control hits remain refused, with no automatic retry hints.
         On Linux text-field double clicks verify exact selected text and offsets;
         unreadable selection outcomes are unverifiable with no retry hints.
         On Linux a declined accessibility press permits pointer fallback only
@@ -11014,7 +11028,11 @@ def build_server(
         readable contents returns container_not_readable before sending input;
         this does not establish that the target is absent. An unscoped text search
         with only statusbar hits and an opaque content surface returns an
-        unsupported statusbar_only_match error. budget_s is how long the
+        unsupported statusbar_only_match error. Linux Chrome overflow-list
+        searches use viewport-sized wheel bursts, with larger bursts toward
+        distant ordinal labels; only real visible matches are returned.
+        Budget messages name the requested budget and any hard limit separately.
+        budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
         In-app find is refused before input for containers with opaque

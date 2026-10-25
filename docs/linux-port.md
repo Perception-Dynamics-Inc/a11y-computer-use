@@ -1214,7 +1214,14 @@ The Runtime checks native modal ancestry after permission and focus checks,
 including agent and `act` batch calls. Ref presses, value writes, and pointer
 clicks also check at the Linux driver boundary. An outside target returns
 `unsupported` with reason `outside_active_modal` before input. Coordinates
-must hit a descendant of the modal; they are never moved inside it. The agent
+must hit a descendant of the modal, except for a single plain left click on
+a measured web backdrop or empty outside area in the same document. A generic
+clickable backdrop must enclose the modal in its native screen bounds. Hits
+on background controls, missing hits/bounds, native dialogs, modified/multiple
+clicks, and other pointer operations remain refused. Coordinates are never
+moved inside the modal. The exception permits one requested pointer click;
+normal outcome verification still determines whether it dismissed anything.
+Modal refusals offer no automatic recovery strategies. The agent
 does not retry a modal refusal through another input method. If the bounded
 native fallback cannot establish the modal boundary, input is refused with
 `modal_boundary_unavailable`.
@@ -1325,3 +1332,15 @@ retain their context during pruning. Normal rematches compare metadata already
 in the snapshots, without additional native ancestry reads. Mutable document
 and window titles, and controls recreated inside the same document, remain
 eligible for the existing anchor checks.
+
+For `scroll_to_find` only, Chromium overflow lists use a separate wheel path.
+The burst starts from the measured viewport size. Consistent numbered labels
+in that container allow larger bursts (at most 24 notches) and correction
+toward a distant ordinal. Numbers guide scrolling and never establish a match
+or supply target geometry. Each moving step requires two fresh, agreeing row
+reads, followed by Runtime's snapshot matching and confirming read before a
+found ref is returned. This avoids repeated Value/scroll_to/track attempts and
+pixel-settle loops in the explicit line-scroll path. Unchanged rows still stop
+or reverse the search; changed pixels with stale rows request another snapshot.
+Budget reports name the requested no-progress budget; the independent 120-second
+hard limit is identified separately with a continuation hint.

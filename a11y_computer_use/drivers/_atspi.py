@@ -21844,6 +21844,57 @@ def input_modals(root, cache: dict | None = None) -> list:
     return cache[key][1]
 
 
+def modal_dismiss_hit(acc, root, x: int, y: int, *, modal_cache=None) -> bool:
+    """Recognize measured web backdrop/empty hits; reject control-role hits.
+
+    Accessible hit tests can return the document for an unexposed backdrop.
+    A clickable generic sibling is eligible only when its reported rectangle
+    encloses the modal. Missing hits/geometry and native dialogs fail closed.
+    """
+    modals = input_modals(root, modal_cache)
+    if not modals or acc is None or _point_in_extents(acc, x, y) is not True:
+        return False
+    chain = list(_ancestor_chain(acc))
+    documents = {"document web", "document frame"}
+    doc = next((n for n in chain if _role_name(n) in documents), None)
+    if doc is None:
+        return False
+    doc_key = _ancestor_key(doc)
+    modal_bounds = []
+    for modal in modals:
+        bounds = _raw_rect(modal, "SCREEN")
+        if bounds is None or bounds[2] <= 0 or bounds[3] <= 0:
+            return False
+        modal_bounds.append(bounds)
+        if not any(_ancestor_key(n) == doc_key for n in _ancestor_chain(modal)):
+            return False
+        if _point_in_extents(modal, x, y) is not False:
+            return False
+    generic = {"section", "panel", "filler", "unknown", "redundant object"}
+    for node in chain:
+        role = _role_name(node)
+        if role not in generic | documents:
+            return False
+        if (_state_has(node, "EDITABLE")
+                or (role not in documents and _state_has(node, "FOCUSABLE"))):
+            return False
+        if _raw_action_names(node):
+            # A generic onclick backdrop is actionable too. Require measured
+            # coverage of every modal; ordinary background controls stay blocked.
+            box = _raw_rect(node, "SCREEN")
+            if box is None:
+                return False
+            left, top, width, height = box
+            for mx, my, mw, mh in modal_bounds:
+                if not (width > 0 and height > 0 and mw > 0 and mh > 0
+                        and left <= mx and top <= my
+                        and mx + mw <= left + width and my + mh <= top + height):
+                    return False
+        if _ancestor_key(node) == doc_key:
+            return True
+    return False
+
+
 def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> bool:
     """Refuse before input when the addressed accessible is outside a modal."""
     if root is None:
@@ -21866,6 +21917,7 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> 
         raise ComputerUseError(ErrorCode.UNSUPPORTED,
             f"outside_active_modal: target is outside {names}; no input was sent",
             detail={"reason": "outside_active_modal", "outcome": "refused",
-                    "hint": "Use controls inside the active modal, or close it before acting on the background."})
+                    "hint": "Use a control inside the active modal. A single plain left click on its backdrop or empty outside area may dismiss it; background controls remain blocked.",
+                    "next": []})
 
     return bool(modals)
