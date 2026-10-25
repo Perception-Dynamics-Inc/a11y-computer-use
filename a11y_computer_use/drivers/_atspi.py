@@ -21970,6 +21970,47 @@ def read_text_selections(
 
 # Modal boundaries are independent of pointer occlusion: semantic AT-SPI actions
 # bypass the overlay, so a successful doAction is not evidence of reachability.
+def _chromium_modal_parent(acc):
+    """Electron omits MODAL, but disables its transient dialog's parent.
+
+    Combine the active X11 dialog relationship with the bridge's loss of
+    RESIZABLE on the parent. A transient child alone is not a modal boundary.
+    Keep this read operation-local; closing the child must restore input.
+    """
+    if (_role_name(acc) not in {"frame", "window"} or not _chromium_app(acc)
+            or not _state_has(acc, "SHOWING") or not _state_has(acc, "ACTIVE")):
+        return None
+    key = ("chromium_modal_parent", ())
+    cached = _lookup_read_cache(acc, key)
+    if cached is not _CACHE_MISS:
+        return cached
+    from a11y_computer_use.drivers import _linux_system
+
+    application = _call_first(acc, ("get_application", "getApplication"))
+    parent = None
+    if application is not None:
+        for i in range(max(0, _child_count(application))):
+            candidate = _child_at(application, i)
+            if candidate is None:
+                continue
+            if (_ancestor_key(candidate) == _ancestor_key(acc)
+                    or _role_name(candidate) not in {"frame", "window"}
+                    or not _state_has(candidate, "SHOWING")
+                    or _state_has(candidate, "ACTIVE")
+                    or _call_first(candidate, ("get_state_set", "getState")) is None
+                    or _state_has(candidate, "RESIZABLE")):
+                continue
+            pid = pid_of(acc)
+            if pid and pid == pid_of(candidate) and _linux_system.active_transient_dialog(
+                    pid=pid,
+                    title=_call_first(acc, ("get_name", "getName"), default=""),
+                    parent_title=_call_first(candidate, ("get_name", "getName"), default="")):
+                parent = candidate
+                break
+    _store_read_cache(acc, key, parent)
+    return parent
+
+
 def is_modal(acc, *, attrs: dict | None = None) -> bool:
     """A showing ARIA or native modal, using reported state only."""
     if _role_name(acc) not in {"dialog", "alert", "window", "frame", "file chooser"}:
@@ -21978,7 +22019,8 @@ def is_modal(acc, *, attrs: dict | None = None) -> bool:
         return False
     attrs = _get_attributes(acc) if attrs is None else attrs
     return (_state_has(acc, "MODAL") or
-            str(attrs.get("modal", attrs.get("aria-modal", ""))).lower() == "true")
+            str(attrs.get("modal", attrs.get("aria-modal", ""))).lower() == "true"
+            or _chromium_modal_parent(acc) is not None)
 
 
 def _modal_collection(root, *, split: bool = False):
@@ -22197,6 +22239,11 @@ def outside_modals(acc, modals: list, *, cache=None) -> bool:
     parents = {_ancestor_key(node) for node in chain}
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in modals:
+        native_parent = _chromium_modal_parent(modal)
+        if (native_parent is not None and frame is not None
+                and _ancestor_key(frame) not in {
+                    _ancestor_key(native_parent), _ancestor_key(modal)}):
+            continue
         modal_chain = _modal_chain(modal, cache)
         document = next((node for node in modal_chain
                          if _role_name(node) in {"document web", "document frame"}), None)

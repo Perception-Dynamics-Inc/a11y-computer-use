@@ -4805,6 +4805,7 @@ class LinuxDriver:
         self._focused_editable = None
         if element.secure:
             raise _secure_focus_error("the requested ref is a password field")
+        self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             raise self._focus_lost_on(element)
