@@ -1409,7 +1409,12 @@ missing native context returns `stale_ref`. Unnamed single-child documents
 retain their context during pruning. Normal rematches compare metadata already
 in the snapshots, without additional native ancestry reads. Mutable document
 and window titles, and controls recreated inside the same document, remain
-eligible for the existing anchor checks.
+eligible for the existing anchor checks. Snapshot metadata also retains each
+web document's observed URL. If its path or query changes through SPA navigation,
+an old ref returns `stale_ref` with `reason: route_changed` and the old/new URLs
+before input, even if the same native button survives. Observe the new route to
+obtain a current ref. Fragment-only changes and missing URL reads alone do not
+establish a route change. This guard has synthetic regression coverage.
 
 For `scroll_to_find` only, Chromium overflow lists use a separate wheel path.
 The burst starts from the measured viewport size. Consistent numbered labels
@@ -1492,3 +1497,12 @@ initialized once; bus names and object paths are still read from the current
 native object. At input time, a complete action-scoped modal discovery can
 also serve its later pointer checks; point-limited discovery never authorizes
 a broader ref check. Event and mutation invalidation remain in force.
+
+For Linux `type(app=...)` without a ref and `key(app=...)`, when Runtime
+activates the addressed window, it reads a fresh before-state after activation
+and before input. The previous action’s cached snapshot cannot supply that
+baseline: GTK may expose no focused editor while its window is inactive.
+Key caret/selection probes also run after activation. Unreadable evidence
+retains the shared `unverifiable` result with re-observation guidance and no
+retry hints. `scripts/box/verify_gtk_app_keyboard.py` exercises the focus switch
+in Mousepad, GTK3 Entry, and Chrome on a private X11 desktop.

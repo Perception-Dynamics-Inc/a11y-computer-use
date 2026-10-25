@@ -31,6 +31,18 @@ def ref(text, title):
     raise AssertionError(f"Missing {title!r}: {text}")
 
 
+def run_once_click(python, point, env):
+    """Run the measured CLI once, preserving crash diagnostics on failure."""
+    command = [python, str(Path(__file__).with_name("run_once.py")), "run-once",
+               json.dumps(dict(tool="click", x=int(point.x), y=int(point.y)))]
+    result = subprocess.run(command, env=dict(env, PYTHONFAULTHANDLER="1"),
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"run-once exited {result.returncode}: "
+                           f"stdout={result.stdout!r} stderr={result.stderr!r}")
+    return result
+
+
 async def sample(row, head):
     from a11y_computer_use import safety
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -194,9 +206,7 @@ async def sample(row, head):
                             header = next(el for el in snap.elements if el.title == "First ascent" and el.bounds)
                             point = header.bounds.center
                             start = time.perf_counter()
-                            reply = subprocess.run([sys.executable, "-m", "a11y_computer_use", "run-once",
-                                                    json.dumps(dict(tool="click", x=int(point.x), y=int(point.y)))],
-                                                   env=env, capture_output=True, text=True, check=True)
+                            reply = run_once_click(sys.executable, point, env)
                             elapsed = time.perf_counter() - start
                             assert "refused" not in reply.stdout
                             # The fixture changes this native window title only

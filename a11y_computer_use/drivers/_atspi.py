@@ -4979,6 +4979,7 @@ class ATSPIAccessor:
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
             context_identity=window_context_identity(node, role_str),
+            document_route=_doc_url(node) if role_str in {"document web", "document frame"} else None,
             node_identity=_atspi_wrapper_key(node) or (),
             # Only a group can be suppressed as browser chrome. A button,
             # cell, or canvas does not pay for the parent walk.

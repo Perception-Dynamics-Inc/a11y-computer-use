@@ -21164,3 +21164,87 @@ def test_point_limited_modal_discovery_cannot_authorize_ref(modal_boundary_tree,
         with pytest.raises(ComputerUseError, match="outside_active_modal"):
             _atspi.refuse_outside_modal(bg, frame, modal_cache=cache)
     assert discoveries == [{"point": (500, 62)}, {}]
+
+
+@pytest.mark.parametrize("recreated", [False, True])
+@pytest.mark.parametrize("route", ["path", "query", "fragment", "title", "missing"])
+def test_spa_route_change_refuses_old_ref_before_dispatch(monkeypatch, recreated, route):
+    from dataclasses import replace
+
+    url = "https://example.test/items/1?item=1#tab1"
+    next_url = {
+        "path": "https://example.test/items/2?item=1#tab1",
+        "query": "https://example.test/items/1?item=2#tab1",
+        "fragment": "https://example.test/items/1?item=1#tab2",
+        "title": url,
+        "missing": None,
+    }[route]
+    window = Element("e1", "AXWindow", "Item 1", None, None, "route-old",
+                     context_identity=("frame", ":1.42", "/window"))
+    document = Element("e2", "AXGroup", "Item 1", None, None, "route-old",
+                       parent="e1", context_identity=("document web", ":1.42", "/doc"),
+                       document_route=url)
+    button = Element("e3", "AXButton", "Archive item", None, None, "route-old",
+                     parent="e2", node_identity=(":1.42", "/button"), clickable=True)
+    old = Snapshot("route-old", Scope.WINDOW, "chrome", 1, 0., (), (window, document, button))
+    live = replace(old, snapshot_id="route-live", elements=(
+        replace(window, snapshot_id="route-live", title="Item 2"),
+        replace(document, snapshot_id="route-live", title="Item 2", document_route=next_url),
+        replace(button, snapshot_id="route-live", node_identity=(
+            ":1.42", "/new-button" if recreated else "/button")),
+    ))
+    driver = LinuxDriver()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    pressed = []
+    monkeypatch.setattr(driver, "press_element", lambda el: pressed.append(el))
+    if route in {"path", "query"}:
+        with pytest.raises(ComputerUseError) as caught:
+            driver.press_element(driver.resolve_ref(old, button.ref, live=live))
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail == {
+            "ref": button.ref, "reason": "route_changed", "outcome": "refused",
+            "old_url": url.split("#")[0], "new_url": next_url.split("#")[0],
+        }
+        assert pressed == []
+        assert driver.take_click_snapshot(button) is None
+    else:
+        assert driver.resolve_ref(old, button.ref, live=live) is live.elements[2]
+    # A fresh observation authorizes the current route's control.
+    assert driver.resolve_ref(live, button.ref, live=live) is live.elements[2]
+
+
+def test_document_route_is_frozen_at_observation(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0., 0.), (800., 600.)))
+    node = _Acc("document web", name="Item")
+    node.description = "https://example.test/?item=1"
+    node.get_description = lambda: node.description
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(node)
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="chrome", pid=1, geometry=_geometry())
+    node.description = "https://example.test/?item=2"
+    assert raw.document_route == "https://example.test/?item=1"
+    assert snap.elements[0].document_route == raw.document_route
+    assert accessor.read(node).document_route == node.description
+
+
+def test_spa_outer_route_change_refuses_iframe_control(monkeypatch):
+    from dataclasses import replace
+
+    outer = Element("e1", "AXGroup", "Item", None, None, "outer-old",
+                    context_identity=("document web", ":1.42", "/outer"),
+                    document_route="https://example.test/?item=1")
+    inner = Element("e2", "AXGroup", "Frame", None, None, "outer-old", parent="e1",
+                    context_identity=("document web", ":1.42", "/inner"),
+                    document_route="https://example.test/frame")
+    button = Element("e3", "AXButton", "Archive item", None, None, "outer-old", parent="e2")
+    old = Snapshot("outer-old", Scope.WINDOW, "chrome", 1, 0., (), (outer, inner, button))
+    live = replace(old, snapshot_id="outer-live", elements=(
+        replace(outer, document_route="https://example.test/?item=2"), inner, button,
+    ))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
+    with pytest.raises(ComputerUseError) as caught:
+        LinuxDriver().resolve_ref(old, button.ref, live=live)
+    assert caught.value.detail["reason"] == "route_changed"
+    assert caught.value.detail["old_url"] == outer.document_route

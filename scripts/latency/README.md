@@ -108,3 +108,12 @@ and requires a confirmed write inside its modal:
 bash scripts/latency/session.sh /path/to/head/bin/python \
   scripts/latency/check_electron_modal.py --electron /path/to/electron
 ```
+
+R2 invokes the installed package through `run_once.py` for both builds. The
+launcher preserves the real CLI arguments, exit status, and exceptions, then
+quits and joins its AT-SPI event thread before releasing the native cache.
+This cleanup stays inside the subprocess timer. The 0.4.76 wheel otherwise
+leaves a daemon loop running through Python finalization: a reproduced CI core
+showed its libatspi/ctypes callback crashing in `PyGILState_Ensure` while the
+main thread was already in libc `exit`. Child failures retain stdout/stderr
+and remain fatal; the separate native-title check still verifies the sort.
