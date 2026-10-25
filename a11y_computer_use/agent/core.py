@@ -541,7 +541,10 @@ class Agent:
 
         thread = threading.Thread(target=worker, name=f"a11y-{where}", daemon=True)
         thread.start()
-        thread.join(remaining)
+        # Starting the worker can itself spend the remaining budget (for
+        # example under scheduler pressure on Windows). Do not wait that
+        # same time again after start() returns.
+        thread.join(max(0.0, self._remaining_s()))
         if thread.is_alive():
             self._deadline_hit.set()
             raise _StepDeadline(where, action)
