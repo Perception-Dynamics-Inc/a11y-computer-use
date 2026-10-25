@@ -21256,3 +21256,35 @@ def test_spa_outer_route_change_refuses_iframe_control(monkeypatch):
         LinuxDriver().resolve_ref(old, button.ref, live=live)
     assert caught.value.detail["reason"] == "route_changed"
     assert caught.value.detail["old_url"] == outer.document_route
+
+
+@pytest.mark.parametrize("dy", [1, 3, 5])
+def test_sparse_list_line_scroll_stops_pixel_wait_on_stable_rows(
+    fake_atspi, xtest_recorder, monkeypatch, dy,
+) -> None:
+    """Hermetic low-ink list: stable native rows end the paint wait."""
+    window, _document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar()
+    listing.children.append(bar)
+    bar.parent = listing
+    writes = _bind_overflow_bar(bar, listing, rows, hit)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    grabs = []
+
+    def grab(_box):
+        from PIL import Image
+
+        grabs.append(hit.screen)
+        return Image.new("RGB", (4, 4), (0 if hit.screen <= 1 else 2, 0, 0))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
+    monkeypatch.setattr(_linux_input, "scroll", lambda *a, **kw: pytest.fail("extra wheel"))
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: pytest.fail("extra click"))
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    target = next(el for el in snap.elements if el.role == "AXList")
+    assert driver.scroll(target, dy=dy, unit=ScrollUnit.LINES) is None
+    assert len(grabs) == 3  # baseline plus two matching changed-head probes
+    assert len(writes) == 1
+    assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == f"ITEM-{1 + dy:03d}"
