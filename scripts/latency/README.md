@@ -73,3 +73,7 @@ Use `--unsafe-baseline` with the 0.4.76 wheel. To measure pre-fix main with the
 same fixture, run the script with `PYTHONPATH` pointing to that checkout. This
 diagnostic reports every sample and verifies each click's effect; its timings
 are separate from the seven-sample MCP/CLI gate.
+
+R1 uses the exact minimal `top.html` / `ifr.html` / `inner.html` checkbox shape
+from [#1061](https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues/1061),
+including its onchange title evidence. It is separate from the modal/drag fixture.

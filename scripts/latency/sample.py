@@ -74,12 +74,14 @@ async def sample(row, head):
                     "default-src 'none'; script-src 'unsafe-inline'; "
                     "style-src 'unsafe-inline'; img-src data:; frame-src 'self'")
                 super().end_headers()
-        shutil.copyfile(FIXTURES / "controls.html", home / "controls.html")
+        for fixture in FIXTURES.glob("*.html"):
+            shutil.copyfile(fixture, home / fixture.name)
         http_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
             functools.partial(QuietHandler, directory=temp))
         threading.Thread(target=http_server.serve_forever, daemon=True).start()
         if app in {"chrome", "firefox"}:
-            args[-1] = f"http://127.0.0.1:{http_server.server_port}/" + ("seven-summits.html" if row == "R2" else "controls.html")
+            page_name = {"R2": "seven-summits.html", "R1": "top.html", "R1-iframe": "ifr.html"}.get(row, "controls.html")
+            args[-1] = f"http://127.0.0.1:{http_server.server_port}/{page_name}"
         with open(home / "app.log", "w") as log:
             process = subprocess.Popen(args, env=env, stdout=log, stderr=log, start_new_session=True)
             try:
@@ -165,11 +167,12 @@ async def sample(row, head):
                             elapsed = time.perf_counter() - start
                             assert "Drag completed" in await snapshot(), receipt
                         elif row in {"R1", "R1-iframe"}:
-                            target = ref(text, '"Frame checkbox"' if row.endswith("iframe") else '"Top checkbox"')
+                            target = ref(text, '"Agree box"')
                             start = time.perf_counter()
                             receipt = await call("click", ref=target)
                             elapsed = time.perf_counter() - start
-                            assert "checked" in await snapshot(), receipt
+                            after = await snapshot()
+                            assert re.search(r"\bchecked\b", after), receipt
                         elif row == "R9":
                             await call("click", ref=ref(text, '"Change title"'))
                             fresh = await snapshot()
