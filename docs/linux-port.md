@@ -1530,3 +1530,12 @@ application-sibling dialogs are still read separately. Failed queries, missing
 role coverage, unavailable event subscriptions, another window, native mutations,
 or a changed epoch require discovery again. This avoids a second structural walk
 before ordinary keys without changing input or outcome verification.
+
+When a fresh window snapshot reports that the window extends beyond the
+displays, Linux ref-resolution failures use `not_visible` with reason
+`window_beyond_display` and `next: ["window"]`. Use `window list`, then
+`window move` or `window resize`, and observe again before acting. This refusal
+also applies to an editable whose ref cannot be rematched after display-edge
+pruning; it sends no text. A click on a display-clipped ref whose effect remains
+unconfirmed returns `unverifiable` with no retry hints, since delivery may
+already have triggered the control. Confirmed effects retain their result.
