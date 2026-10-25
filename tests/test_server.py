@@ -573,7 +573,9 @@ def test_linux_canvas_fallback_button_is_not_a_pointer_click(monkeypatch) -> Non
     rt._guard_user = lambda *args, **kwargs: None
     rt._effect_after = lambda pre: ""
 
-    assert "clicked" in rt.click("e28")
+    with pytest.raises(ComputerUseError) as unknown:
+        rt.click("e28")
+    assert unknown.value.detail["reason"] == "canvas_fallback"
     assert calls["press"] == ["e28"]
     assert calls["click"] == []
 
@@ -3598,6 +3600,22 @@ def _drag_runtime(tmp_path, before: Snapshot, after: Snapshot, *, on_drag=None):
             del scope, app
             return after if _D.i else before
 
+        def retry_evidence(self, action, app, snapshot, input_target=None):
+            from a11y_computer_use.outcome import RETRY_SIGNALS, RetryEvidence
+
+            # This fake owns the complete small tree, unlike a native pruned
+            # snapshot. An unchanged model can positively establish a no-op.
+            tree = after if _D.i else before
+            rows = tuple((el.role, el.title, el.value or (), el.selected, el.focused,
+                          el.parent or (), el.bounds or ()) for el in tree.elements)
+            return RetryEvidence(
+                context=(tuple(row for row in rows if row[4]),
+                         tuple(row for row in rows if row[0] == "AXWindow"),
+                         tuple((el.ref, sum(child.parent == el.ref for child in tree.elements))
+                               for el in tree.elements)),
+                signals=tuple((name, rows) for name in sorted(set().union(*RETRY_SIGNALS.values()))),
+            )
+
         def resolve_ref(self, snap, ref, *, live=None):
             del live
             return snap.element(ref)
@@ -3638,12 +3656,16 @@ def test_drag_does_not_confirm_a_selection_or_a_scroll(tmp_path) -> None:
     selected = _drag_rows("s1", [("notes", 20, 40), ("readme.txt", 20, 68)], selected="readme.txt")
     out = _drag_runtime(tmp_path, before, selected).drag(start_ref="e3", end_ref="e2")
     assert "drop not confirmed" in out
-    assert out.outcome == "suspected_noop"
-    assert out.evidence == "the drop was not confirmed"
+    assert out.outcome == "unverifiable"
+    assert out.next == ()
+    assert "re-observe first" in out.evidence
+    assert out.evidence.startswith("the drop was not confirmed")
 
     scrolled = _drag_rows("s2", [("notes", 20, 80), ("readme.txt", 20, 108)])
     out = _drag_runtime(tmp_path, before, scrolled).drag(start_x=110, start_y=82, end_x=110, end_y=54)
-    assert out.outcome == "suspected_noop"
+    assert out.outcome == "unverifiable"
+    assert out.next == ()
+    assert "re-observe first" in out.evidence
     assert "drop not confirmed" in out
 
 
@@ -4864,7 +4886,9 @@ def test_thunar_location_return_reports_missing_path(monkeypatch, addressed, cho
     result = rt.key(chord, app="thunar" if addressed else None)
     assert calls == [chord]
     if error or not title_changed:
-        assert result.outcome == "suspected_noop"
+        assert result.outcome == "unverifiable"
+        assert result.next == ()
+        assert "re-observe first" in result.evidence
         assert result.startswith("location not opened:")
         assert "Create the missing folder from the nearest existing parent, or check the path." in result
         assert ("entry shows an error icon" in result) == error
@@ -5065,9 +5089,9 @@ def test_drag_refs_run_after_the_source_app_is_re_observed(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('before_selection,after_selection,expected', [
-    (None, None, 'suspected_noop'),
-    ((6, 16), (6, 16), 'suspected_noop'),
-    (None, ((6, 16),), 'suspected_noop'),
+    (None, None, 'unverifiable'),
+    ((6, 16), (6, 16), 'unverifiable'),
+    (None, ((6, 16),), 'unverifiable'),
     ((), ((6, 16),), 'confirmed'),
 ])
 def test_text_double_click_requires_changed_selection(
@@ -5577,8 +5601,8 @@ def test_scroll_to_find_horizontal_strip(monkeypatch, direction, delta, pinned, 
     ((), ((14, 19, 'three'),), 'confirmed'),
     (None, None, 'unverifiable'),
     (None, ((14, 19, 'three'),), 'unverifiable'),
-    ((), (), 'suspected_noop'),
-    (((14, 19, 'three'),), ((14, 19, 'three'),), 'suspected_noop'),
+    ((), (), 'unverifiable'),
+    (((14, 19, 'three'),), ((14, 19, 'three'),), 'unverifiable'),
 ])
 def test_detailed_selection_double_click_reports_text_or_no_retry(
     tmp_path, monkeypatch, before, after, expected,
@@ -5698,7 +5722,9 @@ def test_drag_utility_windows_and_title_changes_are_not_drop_evidence(tmp_path):
     utility = Element("e9", "AXWindow", "", None, Bounds(0, -99, -99, 1, 1), "s1")
     after = replace(before, elements=(replace(before.elements[0], title="new title"), *before.elements[1:], utility))
     out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e2")
-    assert out.outcome == "suspected_noop"
+    assert out.outcome == "unverifiable"
+    assert out.next == ()
+    assert "re-observe first" in out.evidence
 
 
 def test_drag_source_moved_with_unreadable_destination_has_no_retry(tmp_path):
@@ -6484,4 +6510,6 @@ def test_canvas_coordinate_click_receipt(tmp_path, monkeypatch, verify, changed,
         assert "screenshot" in result.evidence
         assert not result.next
     else:
-        assert result.outcome == "suspected_noop"
+        assert result.outcome == "unverifiable"
+        assert result.next == ()
+        assert "re-observe first" in result.evidence

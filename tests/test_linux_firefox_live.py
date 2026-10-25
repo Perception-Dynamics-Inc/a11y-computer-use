@@ -584,8 +584,8 @@ def test_firefox_type_and_key_with_app_carry_an_outcome(firefox_form, tmp_path) 
     assert pressed.evidence
 
 
-def test_firefox_second_inert_click_without_a_snapshot_is_suspected_noop(firefox_form, tmp_path) -> None:
-    """Live Firefox. A second click on Div button, with no snapshot between, is a no-op."""
+def test_firefox_second_inert_click_without_a_snapshot_is_suspected_noop(firefox_form, tmp_path, monkeypatch) -> None:
+    """Live Firefox. Retry an inert click only with complete unchanged reads."""
     driver = firefox_form
     runtime = _runtime(tmp_path, driver)
     runtime.desktop_snapshot("firefox")
@@ -593,13 +593,33 @@ def test_firefox_second_inert_click_without_a_snapshot_is_suspected_noop(firefox
     assert snap is not None
     button = next((el for el in snap.elements if el.title == "Div button" and el.clickable), None)
     assert button is not None, _dump(driver)
+    reads = []
+    native_probe = driver.retry_evidence
+
+    def capture_probe(*args, **kwargs):
+        result = native_probe(*args, **kwargs)
+        reads.append(result)
+        return result
+
+    monkeypatch.setattr(driver, "retry_evidence", capture_probe)
     first = runtime.click(button.ref)
     second = runtime.click(button.ref)
     assert str(second).startswith("clicked ")
-    assert second.outcome == "suspected_noop", (
-        first.outcome, second.outcome, getattr(second, "evidence", None),
+    assert len(reads) == 4, "both clicks must probe before and after dispatch"
+    before, after = reads[-2:]
+    # The native probe returns complete evidence or None (including when its
+    # bounded read expires). A real inert button does not make a missing read
+    # proof of no change: #1028 requires unknown effects to have no retry hints.
+    expected = "suspected_noop" if before is not None and before == after else "unverifiable"
+    assert second.outcome == expected, (
+        first.outcome, second.outcome, getattr(second, "evidence", None), before, after,
     )
     assert "did not change" in second.evidence
+    if expected == "suspected_noop":
+        assert second.next
+    else:
+        assert second.next == ()
+        assert "re-observe first" in second.evidence
 
 
 def _wait_values(driver, expected: dict[str, str], timeout_s: float = 4.0):

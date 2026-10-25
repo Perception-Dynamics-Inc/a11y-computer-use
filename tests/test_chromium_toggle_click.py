@@ -137,7 +137,10 @@ def test_runtime_skips_full_read_and_grace_only_after_toggle_change(
     assert len(grace) == (0 if changed else 1)
     assert len(clicks) == 1
     assert clicks[0][1] == dict(button=MouseButton.LEFT, count=1, modifiers=())
-    assert result.outcome == ("partial" if dead else "confirmed" if changed else "suspected_noop")
+    assert result.outcome == ("partial" if dead else "confirmed" if changed else "unverifiable")
+    if not changed and not dead:
+        assert result.next == ()
+        assert "re-observe first" in result.evidence
     if changed:
         assert rt._action_baseline["capture"] is None
     # A later click gets a fresh baseline, never the previous flip.

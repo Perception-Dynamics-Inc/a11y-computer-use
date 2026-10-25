@@ -339,7 +339,9 @@ def test_drag_and_scroll_accept_o_refs(tmp_path, monkeypatch) -> None:
     assert out == (
         "dragged o1 (text 'Telegram') -> o3 (text 'Write a message...'); drop not confirmed"
     )
-    assert out.outcome == "suspected_noop"
+    assert out.outcome == "unverifiable"
+    assert out.next == ()
+    assert "re-observe first" in out.evidence
     start, end = driver.calls["drag"][0]
     assert isinstance(start, Point) and isinstance(end, Point)
     assert rt.scroll(ref="o2", dy=3).startswith("scrolled o2 (text 'Saved Messages') by")

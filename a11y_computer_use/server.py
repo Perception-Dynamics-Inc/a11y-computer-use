@@ -539,6 +539,9 @@ def _canvas_fallback_error(element: Element, *, unconfirmed: bool = False) -> Co
             "ref": element.ref,
             "role": element.role,
             "reason": "canvas_fallback",
+            **({"outcome": "unverifiable", "next": [],
+                "evidence": "the canvas fallback activation could not be verified; re-observe first (snapshot/screenshot)"}
+               if unconfirmed else {}),
             "hint": (
                 "this control is fallback content inside a canvas and is not painted; "
                 "a coordinate click would land on the canvas"
@@ -2745,7 +2748,10 @@ class Runtime:
                 if not no_input and callable(modal_check):
                     modal_check(action, app, input_target=input_target)
                 started = time.perf_counter()
+                retry_before = self._retry_probe(action, app, input_target)
                 result = execute()
+                retry_after = self._retry_probe(action, app, input_target)
+                self._retry_reads = (app, action, retry_before, retry_after)
             # Linux can discover an unknown focused entry during implicit type.
             # Its private verification returns a count, never the buffer text.
             if isinstance(action, TypeText) and getattr(result, "private_text_verified", False) is True:
@@ -3554,6 +3560,20 @@ class Runtime:
             return None
         return (start, end)
 
+    def _retry_probe(self, action, app: str, input_target=None) -> outcome.RetryEvidence | None:
+        """Optional scoped driver reads; unsupported signals remain unknown.
+
+        This must never fall back to another window snapshot or focus walk.
+        """
+        reader = getattr(self.driver, "retry_evidence", None)
+        if not callable(reader):
+            return None
+        try:
+            evidence = reader(action, app, getattr(self, "_current", None), input_target)
+        except Exception:
+            return None
+        return evidence if isinstance(evidence, outcome.RetryEvidence) else None
+
     def _conclude(
         self,
         text: str,
@@ -3592,7 +3612,7 @@ class Runtime:
             judged, evidence = verdict
         if tool == "key" and evidence.startswith("location not opened:"):
             text = evidence
-        died = "exited after the action" in evidence
+        died = evidence == "the target process exited after the action"
         copy = tool == "key" and (key_chord or "").casefold() in {"ctrl+c", "ctrl+insert"}
         if copy and not died:
             after = self._clipboard_key_probe(key_chord)
@@ -3607,7 +3627,32 @@ class Runtime:
                 ("confirmed", "clipboard owner or targets changed") if changed else
                 ("unverifiable", "clipboard ownership change was not verified")
             )
-        no_retry = copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        reads = getattr(self, "_retry_reads", None)
+        self._retry_reads = None
+        retry_before = retry_after = None
+        toggle = False
+        if reads is not None and reads[0] == app:
+            _, action, retry_before, retry_after = reads
+            toggle = isinstance(action, Click) and bool(action.modifiers) or any(
+                probe is not None and probe.toggle for probe in (retry_before, retry_after)
+            )
+        if tool == "key":
+            toggle = toggle or (key_chord or "").casefold() in {
+                "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
+            }
+        if element is not None:
+            toggle = toggle or element.checked is not None or element.role in {
+                "AXCheckBox", "AXSwitch", "AXToggleButton", "AXRadioButton",
+            }
+        not_dispatched = evidence == "not_actionable" or (
+            tool == "menu" and evidence.startswith("no menu was open in ")
+        )
+        if tool in {"click", "key", "type", "set_value", "select", "menu", "drag", "scroll"} and not not_dispatched:
+            judged, evidence = outcome.retry_verdict(
+                (judged, evidence), retry_before, retry_after, toggle=toggle,
+                tool=tool,
+            )
+        no_retry = (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
@@ -5997,10 +6042,10 @@ class Runtime:
             verdict=verdict,
             cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
-        if opaque_target and result.outcome == "suspected_noop":
+        if opaque_target and result.outcome in {"suspected_noop", "unverifiable"}:
             result = outcome.ActionResult(
                 text, outcome="unverifiable", next=(),
-                evidence="effect unknown (opaque target); verify with a screenshot",
+                evidence="effect unknown (opaque target); verify with crop or a screenshot",
             )
         # A verified click may rename its own button (Count 0 -> Count 1).
         # Authorize that exact observed identity only when a later public
@@ -6032,7 +6077,7 @@ class Runtime:
         # while the target did not is not a click on the target.
         if (
             isinstance(result, outcome.ActionResult)
-            and result.outcome == "suspected_noop"
+            and result.outcome in {"suspected_noop", "unverifiable"}
             and result.evidence.startswith("covered by ")
             and isinstance(target, Element)
             and not activated
@@ -6047,7 +6092,7 @@ class Runtime:
             )
         # The text ref has no action of its own. "clicked" is only true when
         # the control it stands for actually changed.
-        if activated and result.outcome == "suspected_noop":
+        if activated and result.outcome in {"suspected_noop", "unverifiable"}:
             control = activated[0]
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
@@ -6058,11 +6103,14 @@ class Runtime:
                     "role": getattr(target, "role", None),
                     "reason": "not_activated",
                     "control": control.ref,
+                    "outcome": result.outcome,
+                    "next": list(result.next),
+                    "evidence": result.evidence,
                 },
             )
         # The action ran and the tree did not change. Reporting "clicked"
         # would hide a handler that never ran. No pointer was sent.
-        if canvas_fallback and result.outcome == "suspected_noop":
+        if canvas_fallback and result.outcome in {"suspected_noop", "unverifiable"}:
             raise _canvas_fallback_error(canvas_fallback[0], unconfirmed=True)
         return result
 
@@ -10137,7 +10185,11 @@ _INSTRUCTIONS = (
     "title_changed the list reordered under the ref and the candidates name the element now at "
     "that position: find(text=...) or scroll_to_find the target again, never click the slot. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
-    "and mode='diff' to re-observe after an action. When a snapshot has no "
+    "and mode='diff' to re-observe after an action. Retry hints on suspected_noop "
+    "require complete unchanged action and context evidence. Unverifiable effects "
+    "have no retry hints: re-observe first. Never blindly retry toggles such as "
+    "checkboxes, formatting chords or modifier clicks; repeating may undo success. "
+    "When a snapshot has no "
     "actionable elements (custom-drawn apps such as Telegram or After Effects), "
     "call screen_text: on-device OCR returns text lines as refs o1..oN and "
     "click(ref='o7') lands on that text, so you never guess coordinates. "
@@ -10677,17 +10729,17 @@ def build_server(
         click at the row, or the activate action, or Return on the selected
         row, only when that is how the row opens. It is confirmed only when
         the location entry or the path bar changed. A row that was only
-        selected is partial.
+        selected has an unverified effect; re-observe before another input.
         A click aimed at
         a Calc cell is confirmed only when the selected cell address, the
-        Name Box, is that cell. A different cell is partial.         A click on a
+        Name Box, is that cell. A different cell requires re-observation. A click on a
         canvas or an unnamed image is unverifiable: accessibility cannot
         see those pixels, so a tree change is not confirmation. The evidence
         says to verify with crop or a screenshot. A ref whose center is
         inside another window, dialog, sheet, or popup is still clicked at
         that center. When the only change is that cover and the target
         itself does not change, the result does not say clicked: outcome is
-        suspected_noop and the evidence names the cover. A control nested inside a
+        unverifiable and the evidence names the cover. A control nested inside a
         canvas is fallback content and is not painted: it is activated by
         its accessible action or a DOM click on that node, not by a pointer
         click, which would land on the canvas. When that activation cannot
@@ -10821,7 +10873,7 @@ def build_server(
         unsaved-change dialog buttons require confirmation, using the dialog
         present at dispatch.
         Thunar location-entry Return/KP_Enter reports
-        suspected_noop when an error icon appears or the window title stays unchanged;
+        an unverified navigation when an error icon appears or the window title stays unchanged;
         check the path or create missing folders from the nearest existing parent."""
         return _publish(await run(runtime.key, chord, app, confirm=_confirmer_for(server.get_context()),
                                   _outcome=True, _tool="key"))
