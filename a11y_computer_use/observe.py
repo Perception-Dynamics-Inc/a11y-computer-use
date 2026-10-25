@@ -257,6 +257,8 @@ class RawNode:
     row_identity: tuple = ()
     # Native window/document identity, independent of its mutable title.
     context_identity: tuple = ()
+    # Observed document URL; never re-read from an issuing native handle.
+    document_route: str | None = None
     #: Native node identity, independent of its mutable accessible name.
     node_identity: tuple = ()
     #: Linux AT-SPI only. Empty on macOS, Windows, and the browser, so those
@@ -2936,6 +2938,7 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             row_identity=node.raw.row_identity,
             context_identity=node.raw.context_identity,
+            document_route=node.raw.document_route,
             node_identity=node.raw.node_identity,
             instance_id=instance_id,
             document_id=document_id,

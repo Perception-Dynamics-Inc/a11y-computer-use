@@ -2244,6 +2244,17 @@ class LinuxDriver:
                     f"{ref} no longer belongs to the issuing window/document",
                     detail={"ref": ref, "reason": "document_changed", "outcome": "refused"},
                 )
+            old_routes = LinuxDriver._ref_routes(snap, anchor)
+            new_routes = LinuxDriver._ref_routes(live, resolved)
+            for context, old_url in old_routes.items():
+                new_url = new_routes.get(context)
+                if new_url and old_url != new_url:
+                    raise ComputerUseError(
+                        ErrorCode.STALE_REF,
+                        f"{ref} belongs to a previous page route; observe the current page again",
+                        detail={"ref": ref, "reason": "route_changed", "outcome": "refused",
+                                "old_url": old_url, "new_url": new_url},
+                    )
             from a11y_computer_use.drivers import _atspi
 
             handle = observe.ax_handle_for(live.snapshot_id, resolved.ref)
@@ -2288,9 +2299,33 @@ class LinuxDriver:
             if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") not in {
                 "app_restarted",
                 "document_changed",
+                "route_changed",
             }:
                 self._raise_if_hidden_alive(snap, ref)
             raise
+
+    @staticmethod
+    def _ref_routes(snap: Snapshot, element: Element) -> dict[tuple, str]:
+        """Observed enclosing routes, including outer documents for iframe controls.
+
+        Missing URLs alone do not establish navigation. Fragment widgets do
+        not change the route. No issuing native handle is read again here.
+        """
+        from urllib.parse import urldefrag
+
+        routes = {}
+        seen = set()
+        while element.ref not in seen:
+            seen.add(element.ref)
+            if element.context_identity and element.document_route:
+                routes[element.context_identity] = urldefrag(element.document_route)[0]
+            if element.parent is None:
+                break
+            try:
+                element = snap.element(element.parent)
+            except KeyError:
+                break
+        return routes
 
     @staticmethod
     def _ref_context(snap: Snapshot, element: Element) -> tuple:
