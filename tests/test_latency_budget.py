@@ -16,3 +16,24 @@ def test_gate_uses_median_and_preserves_every_sample():
     assert summary(samples)["maximum"] == 20.
     assert summary(samples)["samples"] == samples
     assert verdict([1.] * 7, samples)["status"] == "pass"
+
+
+def test_cli_crash_keeps_native_diagnostics_without_retry(monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from scripts.latency import sample
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=-11, stdout="", stderr="Fatal Python error: Segmentation fault")
+
+    monkeypatch.setattr(sample.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="Segmentation fault"):
+        sample.run_once_click("/opt/baseline/bin/python", SimpleNamespace(x=1237, y=453), {})
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:4] == ["/opt/baseline/bin/python", "-m", "a11y_computer_use", "run-once"]
+    assert sample.json.loads(command[4]) == dict(tool="click", x=1237, y=453)
+    assert kwargs["env"]["PYTHONFAULTHANDLER"] == "1"
