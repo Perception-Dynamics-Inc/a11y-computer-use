@@ -2209,3 +2209,28 @@ def test_radio_palette_allowance_does_not_expand_other_containers(exception) -> 
     expected = observe.DENSE_MAX_CHILDREN if exception == "table" else MAX_CHILDREN
     assert len([el for el in snap.elements if el.parent == parent.ref]) == expected
     assert "… " in render_text(snap)
+
+
+@pytest.mark.parametrize("document_scope", [False, True])
+def test_modal_scope_survives_unnamed_document_wrapper(document_scope):
+    """#1084: flattening must keep a page modal's scope off browser chrome."""
+    class Accessor(DictAccessor):
+        def read(self, node):
+            return dataclasses.replace(
+                super().read(node), modal=node.get("modal", False),
+                modal_scope_root=node.get("modal_scope_root", False),
+            )
+
+    dialog = ax("AXDialog", title="Sign in", modal=True,
+                at=(200, 150), size=(200, 150), children=[button("Close", (220, 180))])
+    document = ax("AXGroup", modal_scope_root=document_scope,
+                  at=(100, 100), size=(500, 400), children=[dialog])
+    window = ax("AXWindow", title="Browser", at=(0, 0), size=(800, 600),
+                children=[button("Back", (10, 10)), document])
+    snap = build_snapshot(window, Accessor(), scope=Scope.WINDOW,
+                          app=FIXTURE_APP, pid=101, geometry=GEOMETRY)
+    assert by_title(snap, "Back").blocked_by_modal is not document_scope
+    assert by_title(snap, "Back").clickable is document_scope
+    assert by_title(snap, "Close").clickable
+    if document_scope:
+        assert any(el.modal_scope_root for el in snap.elements)

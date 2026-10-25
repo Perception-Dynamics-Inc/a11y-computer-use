@@ -238,6 +238,8 @@ class RawNode:
     enabled: bool = True
     modal: bool = False
     blocked_by_modal: bool = False
+    # A document boundary limits descendant modals to this subtree.
+    modal_scope_root: bool = False
     focused: bool = False
     default: bool = False
     # Eligibility for automatic scrolling; does not hide snapshot/search nodes.
@@ -481,8 +483,10 @@ def _mark_modal_background(elements: list[Element]) -> list[Element]:
     for modal in elements:
         if modal.modal:
             chain = ancestry(modal)
-            window = next((ref for ref in chain if by_ref[ref].role == "AXWindow"), chain[-1])
-            modals.append((modal, window))
+            root = next((ref for ref in chain
+                         if by_ref[ref].modal_scope_root or by_ref[ref].role == "AXWindow"),
+                        chain[-1])
+            modals.append((modal, root))
     if not modals:
         return elements
     result = []
@@ -2233,7 +2237,8 @@ def _wrapper_candidate(raw: RawNode, depth: int) -> bool:
     nothing elided", known only after its subtree is pruned)."""
     # Native document/window boundaries bind refs even when unnamed. Keep
     # them so a one-control tab cannot lose its context during flattening.
-    return depth > 0 and not raw.context_identity and _noninteractive_wrapper(raw)
+    return (depth > 0 and not raw.context_identity and not raw.modal_scope_root
+            and _noninteractive_wrapper(raw))
 
 
 @dataclass
@@ -2916,6 +2921,7 @@ def _flatten(
             enabled=node.raw.enabled,
             modal=node.raw.modal,
             blocked_by_modal=node.raw.blocked_by_modal,
+            modal_scope_root=node.raw.modal_scope_root,
             focused=node.raw.focused,
             default=node.raw.default,
             form_id=node.raw.form_id,

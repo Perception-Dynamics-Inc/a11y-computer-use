@@ -4954,6 +4954,7 @@ class ATSPIAccessor:
             description=str(description),
             enabled=enabled,
             modal=is_modal(node, attrs=attrs),
+            modal_scope_root=role_str in {"document web", "document frame"},
             blocked_by_modal=outside_modals(node, self._active_modals),
             scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
@@ -21838,6 +21839,12 @@ def active_modals(root, *, fallback: bool = True) -> list:
     return list(found.values())
 
 
+def modal_document(modal):
+    """The reported web document owning a page modal, if any."""
+    return next((node for node in _ancestor_chain(modal)
+                 if _role_name(node) in {"document web", "document frame"}), None)
+
+
 def outside_modals(acc, modals: list) -> bool:
     """True unless acc belongs to every applicable modal (nested modals included)."""
     if not modals:
@@ -21846,6 +21853,13 @@ def outside_modals(acc, modals: list) -> bool:
     parents = {_ancestor_key(node) for node in chain}
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in modals:
+        document = modal_document(modal)
+        if (document is not None and _ancestor_key(document) not in parents
+                and (frame is not None or any(
+                    _role_name(node) in {"document web", "document frame"} for node in chain))):
+            # A page cannot make browser chrome or another document inert.
+            # Missing hits/ancestry do not prove a target is browser chrome.
+            continue
         owner = next((node for node in _ancestor_chain(modal)
                       if _role_name(node) in {"frame", "window"}), None)
         if (owner is not None and frame is not None
@@ -21942,6 +21956,7 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> 
             f"outside_active_modal: target is outside {names}; no input was sent",
             detail={"reason": "outside_active_modal", "outcome": "refused",
                     "hint": "Use a control inside the active modal. A single plain left click on its backdrop or empty outside area may dismiss it; background controls remain blocked.",
-                    "next": []})
+                    "next": (["Use browser Back (alt+Left) or focus the address bar (ctrl+l) to leave the page."]
+                             if all(modal_document(node) is not None for node in modals) else [])})
 
     return bool(modals)
