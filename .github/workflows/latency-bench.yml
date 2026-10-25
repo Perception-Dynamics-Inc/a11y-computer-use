@@ -19,7 +19,7 @@ jobs:
       - name: Interleaved offline native benchmark
         run: |
           mkdir -p latency-results
-          docker run --rm --network none --shm-size=2g --cpuset-cpus=0,1 -v "$PWD/latency-results:/results" a11y-latency
+          docker run --rm --network none --shm-size=2g --cpuset-cpus=0,1 -v "$PWD/latency-results:/results" a11y-latency bash scripts/latency/session.sh /opt/baseline/bin/python scripts/latency/stress.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
