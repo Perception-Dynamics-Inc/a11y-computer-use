@@ -852,6 +852,17 @@ def _call_first(obj, names, *args, default=None):
     return _atspi_events.run(invoke)
 
 
+@contextmanager
+def input_modal_cache(cache):
+    """Bind a caller-owned click cache on the native operation's thread."""
+    previous = getattr(_read_cache_local, "input_modals", None)
+    _read_cache_local.input_modals = cache
+    try:
+        yield
+    finally:
+        _read_cache_local.input_modals = previous
+
+
 def _call_first_inline(obj, names, *args, default=None):
     # _call_first already marshaled the entire getter/cache operation.
     for name in names:
@@ -859,6 +870,9 @@ def _call_first_inline(obj, names, *args, default=None):
         if method is None:
             continue
         if _is_mutator(name):
+            modal_cache = getattr(_read_cache_local, "input_modals", None)
+            if modal_cache is not None and name not in {"clear_cache", "clearCache"}:
+                modal_cache.clear()
             _drop_read_cache()
             return _safe(lambda m=method: m(*args), default, marshal=False)
         key = _cache_key(name, args)
@@ -21778,7 +21792,18 @@ def outside_modals(acc, modals: list) -> bool:
     return False
 
 
-def refuse_outside_modal(acc, root=None) -> bool:
+def input_modals(root, cache: dict | None = None) -> list:
+    """Discover once per window during a click; retain fallback identity owners."""
+    if cache is None:
+        return active_modals(root)
+    key = _ancestor_key(root)
+    if key not in cache:
+        # Keep the root alive when _ancestor_key must fall back to id().
+        cache[key] = (root, active_modals(root))
+    return cache[key][1]
+
+
+def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> bool:
     """Refuse before input when the addressed accessible is outside a modal."""
     if root is None:
         chain = list(_ancestor_chain(acc))
@@ -21794,7 +21819,7 @@ def refuse_outside_modal(acc, root=None) -> bool:
                             if _role_name(node) == "application"), None)
         root = next((node for node in chain if _role_name(node) in {"frame", "window"}),
                     application if application is not None else chain[-1] if chain else None)
-    modals = active_modals(root)
+    modals = input_modals(root, modal_cache)
     if outside_modals(acc, modals):
         names = ", ".join(repr(_node_name(node)) for node in modals)
         raise ComputerUseError(ErrorCode.UNSUPPORTED,

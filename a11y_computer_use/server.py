@@ -45,7 +45,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from functools import partial, wraps
 from threading import RLock
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
@@ -2739,11 +2739,13 @@ class Runtime:
                                            "The dialog changed before dispatch; " + latest)
             if not no_input:
                 self._reject_terminal(action, app, audit=False, input_target=input_target)
-            modal_check = getattr(self.driver, "check_modal_input", None)
-            if not no_input and callable(modal_check):
-                modal_check(action, app, input_target=input_target)
-            started = time.perf_counter()
-            result = execute()
+            input_context = getattr(self.driver, "input_context", None)
+            with input_context(action) if callable(input_context) else nullcontext():
+                modal_check = getattr(self.driver, "check_modal_input", None)
+                if not no_input and callable(modal_check):
+                    modal_check(action, app, input_target=input_target)
+                started = time.perf_counter()
+                result = execute()
             # Linux can discover an unknown focused entry during implicit type.
             # Its private verification returns a count, never the buffer text.
             if isinstance(action, TypeText) and getattr(result, "private_text_verified", False) is True:
