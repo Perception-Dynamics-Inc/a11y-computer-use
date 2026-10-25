@@ -18,8 +18,9 @@ jobs:
         run: docker build -f scripts/latency/Dockerfile -t a11y-latency .
       - name: Interleaved offline native benchmark
         run: |
+          sudo sysctl -w kernel.core_pattern=core
           mkdir -p latency-results
-          docker run --rm --network none --shm-size=2g --cpuset-cpus=0,1 -v "$PWD/latency-results:/results" a11y-latency bash scripts/latency/session.sh /opt/baseline/bin/python scripts/latency/stress.py
+          docker run --ulimit core=-1 --rm --network none --shm-size=2g --cpuset-cpus=0,1 -v "$PWD/latency-results:/results" a11y-latency bash scripts/latency/session.sh /opt/baseline/bin/python scripts/latency/stress.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
