@@ -6584,27 +6584,37 @@ class Runtime:
             },
         )
 
+    def _linux_keyboard_before(self, app: str, activated: bool) -> dict | None:
+        """Read the input window after activation, bypassing cached baselines."""
+        if not activated:
+            return self._capture(app, targeted=True)
+        snap = self._reread(app, Scope.WINDOW)
+        return self._freeze(snap) if snap is not None else None
+
     def _linux_type_text(self, text: str, identifier: str) -> str:
         bundle, chosen, candidates = self._linux_keyboard_window(identifier)
         action = TypeText(text=text)
         note: list[str] = []
         focused: list[bool] = []
 
+        before = previous = selection = None
+
         def execute() -> int:
+            nonlocal before, previous, selection
             self._guard_user(bundle)
             if self._ensure_linux_window(chosen, candidates, bundle, identifier):
                 focused.append(True)
             note.append(self._dismiss_open_menu(bundle))
+            before = self._linux_keyboard_before(bundle, bool(focused))
+            base = before["snap"] if before else None
+            focused_field = self._focused_editable(base)
+            previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
+            selection = self._active_type_selection(bundle, previous)
             typed = self.driver.type_text(text)
             if isinstance(typed, int) and not isinstance(typed, bool):
                 return typed
             return len(text)
 
-        before = self._capture(bundle, targeted=True)
-        base = before["snap"] if before else None
-        focused_field = self._focused_editable(base)
-        previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
-        selection = self._active_type_selection(bundle, previous)
         count = self._run_gated(action, bundle, execute)
         where = f" into {bundle}"
         if focused:
@@ -6620,19 +6630,23 @@ class Runtime:
         action = KeyChord(chord=chord)
         focused: list[bool] = []
 
+        before = None
+        clipboard_before = writer_before = focus_before = sheet_before = None
+
         def execute() -> None:
+            nonlocal before, clipboard_before, writer_before, focus_before, sheet_before
             self._guard_user(bundle)
             if self._ensure_linux_window(chosen, candidates, bundle, identifier):
                 focused.append(True)
+            before = self._linux_keyboard_before(bundle, bool(focused))
+            clipboard_before = self._clipboard_key_probe(chord)
+            writer_before = self._writer_key_probe(bundle, chord)
+            focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
+            sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
             target = self._open_menu_app(bundle) or bundle
             if not self._open_mnemonic_menu(target, chord):
                 self.driver.key_chord(chord)
 
-        before = self._capture(bundle, targeted=True)
-        clipboard_before = self._clipboard_key_probe(chord)
-        writer_before = self._writer_key_probe(bundle, chord)
-        focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
-        sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
         self._run_gated(action, bundle, execute, confirm=confirm)
         note = " (focused its window first)" if focused else ""
         return self._conclude(
