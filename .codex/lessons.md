@@ -558,9 +558,16 @@
 
 - 2026-10-24 (PR #1020 observation-cost merge): Chromium Collection-based list discovery and emitted-ref identity binding reduce snapshot reads independently of modal input checks. Preserve both appended regression groups when merging and run the full Linux synthetic and Runtime suites together.
 
+- 2026-10-24 (#1045): Issuing-ref namespace checks must not call Linux's whole-tree document_url discovery. Its Collection query can materialize every virtual GTK/Chrome table row even though identity comparison uses only pruned elements. Read URL metadata from emitted handles, exclude iframe-only URLs, and preserve the prior namespace when the document is absent.
+
+
+
 - 2026-10-24 (#1047): GTK 4 text ref clicks must bypass the editable grab_focus shortcut in press_element. Return an exact no-dispatch receipt so Runtime reaches the existing geometry-checked pointer path and read-only focus verification; testing LinuxDriver.click alone misses the default AX-preferred route.
 - 2026-10-24 (PR #1042 modal merge): Native context identity for title-changing refs and modal input guards protect independent behavior. Preserve both appended synthetic regression groups and both backend documentation sections when merging, and run the shared Runtime suite with Linux synthetic coverage.
 
+- 2026-10-25 (#1045 repair): A window-wide modal Collection query materializes GTK TreeView rows just like document URL discovery; removing only one query leaves the first-snapshot regression. Discover snapshot modals from application children and already-visited nodes, then mark emitted background handles after the walk. Preserve input-time discovery for actions and search-driven scrolling. The private GTK3 20k-row probe returned a full first snapshot in 0.312 s after both queries were removed from ordinary snapshots.
+
+- 2026-10-25 (PR #1049 first-find repair): Removing recursive Collection from ordinary GTK snapshots leaves a cold first-find regression if `_table_seek` still enables window-wide modal discovery. Restrict pre-reveal Collection discovery to Chromium; GTK finds collect modals through the same pruned walk as snapshots. Input-time discovery must also exclude native GTK table model cells while checking structural/application sibling dialogs: split Collection is unsupported by some GTK bridges and can otherwise produce `modal_boundary_unavailable` after a successful find. Verify a fresh 20k-row snapshot followed immediately by its first visible-row find, plus the unchanged 10k off-screen find/click tests.
 - 2026-10-25 (#1057): Opening a menu inserts new menu items into refs previously held by unrelated controls. Rebind newly exposed items on public issuance under an unchanged menu identity; retain changed-target guards for existing items and internal reads. Blanket retention across public snapshots poisons fresh menu refs.
 
 - 2026-10-25 (#1056): Calc keyboard input can target opaque toolbar panels (Name Box), not the selected cell. Identify the unreadable toolbar focus before document/grid verification; never commit an editor or read grid contents as evidence for that input. Delivery alone remains unverifiable, with a one-use app/payload-bound receipt.
