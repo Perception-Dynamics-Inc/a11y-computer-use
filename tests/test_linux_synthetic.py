@@ -19960,3 +19960,127 @@ def test_opaque_office_toolbar_preserves_input_gates(fake_atspi, monkeypatch, bl
     with pytest.raises(ComputerUseError):
         driver.type_text("E7\n")
     assert driver._opaque_toolbar_type is None
+
+
+@pytest.mark.parametrize("by_ref", [False, True])
+@pytest.mark.parametrize("iframe", [False, True])
+def test_runtime_click_discovers_modals_once(modal_boundary_tree, monkeypatch, tmp_path, by_ref, iframe):
+    """#1061: gate plus repeated dispatch checks share one fresh discovery."""
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    bg.role = "check box"
+    if iframe:
+        _adopt(frame, _adopt(_Acc("internal frame", width=600, height=400,
+                                       states=("SHOWING", "VISIBLE")), bg))
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    target = (next(el for el in snap.elements if el.title == bg.name)
+              if by_ref else Point(0, 100, 110))
+    original = _atspi.active_modals
+    discoveries = []
+    def discover(root, **kwargs):
+        discoveries.append(root)
+        return original(root, **kwargs)
+    monkeypatch.setattr(_atspi, "active_modals", discover)
+    monkeypatch.setattr(_atspi, "_accessible_at_point",
+                        lambda *args: pytest.fail("no modal: no modal hit test"))
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_system.frontmost_app_id", lambda: "modal-test")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("modal-test", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(runtime, "_reject_terminal", lambda *a, **kw: None)
+    monkeypatch.setattr(runtime, "_dialog_confirmation", lambda *a: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    def execute():
+        driver._check_modal_target(target)
+        driver._check_modal_target(target)
+        if by_ref:
+            assert driver.press_element(target)
+    runtime._run_gated(Click(target), "modal-test", execute)
+    assert len(discoveries) == 1
+    if by_ref:
+        assert calls == [bg.name]
+    # A later click must see a modal opened since the last action.
+    frame.children.append(modal)
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: bg)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        runtime._run_gated(Click(target), "modal-test", execute)
+    assert len(discoveries) == 2
+    # Refusal also expires the action cache.
+    frame.children.remove(modal)
+    runtime._run_gated(Click(target), "modal-test", execute)
+    assert len(discoveries) == 3
+
+
+def test_click_modal_cache_preserves_settled_hit_checks(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    point = Point(0, 350, 225)
+    hits = iter([bg, inside, inside, inside])
+    seen = []
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: seen.append(next(hits)) or seen[-1])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    with driver.input_context(Click(point)):
+        driver.check_modal_input(Click(point), "modal-test")
+    assert seen[0] is bg and seen[-1] is inside
+    assert len(seen) == _atspi._HIT_TRIES
+
+
+def test_click_modal_cache_invalidates_before_native_mutation(fake_atspi):
+    cache = {"window": []}
+    class Action:
+        def do_action(self, index):
+            assert cache == {}
+            return False  # A failed acknowledgement can still open a dialog.
+    with _atspi.input_modal_cache(cache):
+        assert _atspi._call_first_inline(Action(), ("do_action",), 0) is False
+
+
+def test_click_modal_cache_reaches_native_thread(modal_boundary_tree, monkeypatch):
+    """The Runtime context lives on the caller, native mutations on a worker."""
+    from concurrent.futures import ThreadPoolExecutor
+    from a11y_computer_use.drivers import _atspi_events
+    from a11y_computer_use.drivers.linux import _CLICK_MODAL_CACHE
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    monkeypatch.setattr(driver, "_run", LinuxDriver._run.__get__(driver))
+    monkeypatch.setattr(_atspi_events, "enabled", lambda: True)
+    monkeypatch.setattr(_atspi_events, "on_event_thread", lambda: False)
+    class Action:
+        def do_action(self, index):
+            return False
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(_atspi_events, "submit", lambda fn: pool.submit(fn).result())
+        with driver.input_context(Click(Point(0, 100, 110))):
+            cache = _CLICK_MODAL_CACHE.get()[1]
+            cache["window"] = []
+            driver._run(lambda: _atspi._call_first_inline(Action(), ("do_action",), 0))
+            assert cache == {}
+    assert _CLICK_MODAL_CACHE.get() is None
+
+
+def test_click_menu_dismissal_invalidates_modal_discovery(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.drivers import _linux_input, _linux_system, _linux_menus
+    from a11y_computer_use.drivers.linux import _CLICK_MODAL_CACHE
+    from a11y_computer_use.schema import Click
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda: None)
+    monkeypatch.setattr(driver, "_confirm_file_chooser", lambda chord: False)
+    sent = []
+    monkeypatch.setattr(_linux_input, "press_chord", sent.append)
+    with driver.input_context(Click(Point(0, 100, 110))):
+        cache = _CLICK_MODAL_CACHE.get()[1]
+        cache["window"] = []
+        driver.key_chord("Escape")
+        assert cache == {}
+    assert sent == ["Escape"]
+    monkeypatch.setattr(driver, "_menu_root", lambda app: frame)
+    def close(root, **kwargs):
+        assert _CLICK_MODAL_CACHE.get()[1] == {}
+        return ["File"]
+    monkeypatch.setattr(_linux_menus, "menu_close", close)
+    with driver.input_context(Click(Point(0, 100, 110))):
+        _CLICK_MODAL_CACHE.get()[1]["window"] = []
+        assert driver.menu_close("modal-test") == ["File"]
