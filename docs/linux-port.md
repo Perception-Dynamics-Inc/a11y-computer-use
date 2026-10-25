@@ -1234,6 +1234,9 @@ actions and menu-dismissal keys invalidate it before further input.
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
 and queries subtrees with more than 64 children before walking their rows.
+Firefox document-web/document-frame nodes use a complete Collection dialog
+query before walking page content, including deep pages below that threshold.
+Native sibling dialogs remain part of the boundary check.
 Native GTK table/tree-table model cells are excluded: their modal dialogs are
 structural or application siblings, which are still checked before input.
 This query threshold is independent of the unchanged 4,096-node fallback

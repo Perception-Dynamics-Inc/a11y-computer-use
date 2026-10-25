@@ -21761,6 +21761,16 @@ def active_modals(root, *, fallback: bool = True) -> list:
                 # content. Walking Writer paragraphs adds a whole-document
                 # scan to every scoped key, just as Calc materializes cells.
                 continue
+            if (_role_name(node) in {"document web", "document frame"}
+                    and _gecko_app(node)):
+                # Deep Gecko pages never reach the wide-child threshold below.
+                # Query all dialog descendants at the document boundary instead.
+                descendants = _modal_collection(node)
+                if descendants is not None:
+                    candidates.extend(descendants)
+                    continue
+                # Failed Collection is not evidence of no modal: retain the
+                # bounded traversal and refusal on exhaustion.
             if (_role_name(node) in {"table", "tree table"}
                     and "gtk" in _toolkit_name(node)
                     and not _chromium_app(node) and not _gecko_app(node)):

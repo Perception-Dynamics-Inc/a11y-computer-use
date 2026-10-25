@@ -573,3 +573,5 @@
 - 2026-10-25 (#1056): Calc keyboard input can target opaque toolbar panels (Name Box), not the selected cell. Identify the unreadable toolbar focus before document/grid verification; never commit an editor or read grid contents as evidence for that input. Delivery alone remains unverifiable, with a one-use app/payload-bound receipt.
 
 - 2026-10-25 (#1061): Runtime and Linux driver modal checks can repeat whole-window discovery during one click. Share discovery only within that action and native window, skip modal hit settlement when no modal exists, and retain ancestry checks for open modals. Bind the caller-owned cache on the native worker thread and invalidate before semantic mutations or menu-dismissal input; a failed action acknowledgement can still open a dialog.
+
+- 2026-10-25 (#1067): Firefox document trees can be deep with no wide node, so the modal discovery child-count threshold still walks entire pages. Query Gecko document Collection before content traversal; retain native sibling dialogs and the bounded fail-closed fallback when Collection is unavailable. Per-click caching from #1061 alone does not remove this first-discovery cost.
