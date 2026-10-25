@@ -2695,38 +2695,58 @@ class LinuxDriver:
             if app is None:
                 return None
 
-            def children():
-                count = _atspi._raw_child_count(app)
-                if count < 0 or _atspi.call_went_unanswered():
-                    return None
-                dialogs = {}
-                for index in range(count):
-                    child = _atspi._child_at(app, index)
-                    if child is None:
-                        return None
-                    _atspi._refresh_event_cache(child)
-                    role = _atspi._role_name(child)
-                    if not role:
-                        return None
-                    if (_atspi._is_dialog_role(role)
-                            and _atspi._state_has(child, "SHOWING")):
-                        name = child.get_name()
-                        if not name:
-                            return None
-                        identity = _atspi._atspi_wrapper_key(child)
-                        if identity is None:
-                            return None
-                        dialogs[identity] = str(name)
-                    if _atspi.call_went_unanswered():
-                        return None
-                return dialogs
-
-            return _atspi._without_child_cache(app, children)
+            return self._visible_dialog_state(app)
 
         try:
             return self._run(read)
         except Exception:
             return None
+
+    def menu_dialog_state(self, app: str) -> dict | None:
+        """Fresh top-level dialog identities for the addressed menu app."""
+        from a11y_computer_use.drivers import _atspi
+
+        def read():
+            root = _atspi.find_root(app, Scope.APP)
+            return self._visible_dialog_state(root) if root is not None else None
+
+        try:
+            return self._run(read)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _visible_dialog_state(app) -> dict | None:
+        """Complete uncached native evidence shared by menu and click receipts."""
+        from a11y_computer_use.drivers import _atspi
+
+        def children():
+            count = _atspi._raw_child_count(app)
+            if count < 0 or _atspi.call_went_unanswered():
+                return None
+            dialogs = {}
+            for index in range(count):
+                child = _atspi._child_at(app, index)
+                if child is None:
+                    return None
+                _atspi._refresh_event_cache(child)
+                role = _atspi._role_name(child)
+                if not role:
+                    return None
+                if (_atspi._is_dialog_role(role)
+                        and _atspi._state_has(child, "SHOWING")):
+                    name = child.get_name()
+                    if not name:
+                        return None
+                    identity = _atspi._atspi_wrapper_key(child)
+                    if identity is None:
+                        return None
+                    dialogs[identity] = str(name)
+                if _atspi.call_went_unanswered():
+                    return None
+            return dialogs
+
+        return _atspi._without_child_cache(app, children)
 
     def verify_click_fallback(self, element: Element, app: str) -> Element:
         """Require a fresh, showing ref and an exact native hit after a failed press.
