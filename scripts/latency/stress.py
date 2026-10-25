@@ -24,4 +24,7 @@ def click(python, point, env):
 
 
 sample.run_once_click = click
-asyncio.run(sample.sample('R2', False))
+result = asyncio.run(sample.sample('R2', False))
+from pathlib import Path
+build = Path(sys.prefix).name
+Path(f'/results/{build}-stress.json').write_text(json.dumps(dict(build=build, clicks=200, result=result)))
