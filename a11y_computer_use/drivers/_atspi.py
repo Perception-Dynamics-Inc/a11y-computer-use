@@ -13283,6 +13283,138 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
+def retry_evidence(action, target, focus):
+    """Read retry signals with the native application child cache bypassed."""
+    from a11y_computer_use.schema import Click, Element, KeyChord
+
+    formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
+        "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
+    }
+    label = isinstance(action, Click) and isinstance(action.target, Element) and action.target.role == "AXStaticText"
+    if target is None or not (formatting or label):
+        return None
+    return _without_child_cache(target, lambda: _retry_evidence(action, target, focus))
+
+
+def _retry_evidence(action, target, focus):
+    """Scoped evidence for formatting and inert labels; unknown elsewhere.
+
+    No Collection query, descendant traversal, hit test, or focus discovery is
+    allowed here. Unsupported signals remain None, never an empty success.
+    The two reads share a 0.1 s traversal budget (native IPC can still fail).
+    """
+    from a11y_computer_use.outcome import RetryEvidence
+    from a11y_computer_use.schema import Click, Element, KeyChord
+
+    if target is None:
+        return None
+    deadline = time.monotonic() + 0.04
+    formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
+        "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
+    }
+    element = action.target if isinstance(action, Click) and isinstance(action.target, Element) else None
+    if not formatting and (element is None or element.role != "AXStaticText"):
+        return None
+    try:
+        _drop_cached_properties(target)
+        if is_secure(target):
+            return None
+        if formatting:
+            if not _state_has(target, "FOCUSED"):
+                return RetryEvidence(toggle=True, reason="the focused text owner could not be resolved")
+            api = _atspi().Text
+            caret = api.get_caret_offset(target)
+            selections = api.get_n_selections(target)
+            if type(caret) is not int or caret < 0 or type(selections) is not int or selections < 0:
+                return RetryEvidence(toggle=True)
+            if selections:
+                span = _selection_bounds(api.get_selection(target, 0))
+                if span is None:
+                    return RetryEvidence(toggle=True)
+                caret = span[0]
+            attributes, start, end = api.get_attribute_run(target, caret, False)
+            attribute = {"b": "weight", "i": "style", "u": "underline"}[action.chord[-1].lower()]
+            value = attributes.get(attribute)
+            if value is None or not start <= caret < end or time.monotonic() >= deadline:
+                return RetryEvidence(toggle=True, reason="formatting attributes could not be read")
+            return RetryEvidence(
+                toggle=True, effect=(target, caret, attribute, value),
+                effect_reason="the selected text formatting attribute changed",
+            )
+        # Only a genuinely inert label has a complete click signal set here.
+        # Clickable labels, documents, nested containers and web frames need
+        # additional signals; their absence cannot authorize retry.
+        actions = _call_first(target, ("get_action_iface",))
+        if actions is not None:
+            count = _call_first(actions, ("get_n_actions",))
+            if count != 0:
+                return None
+        parent = _call_first(target, ("get_parent", "getParent"))
+        application = _call_first(target, ("get_application", "getApplication"))
+        if parent is None or application is None or focus is None:
+            return None
+        if not _call_first(parent, ("get_name", "getName")):
+            return None  # The nearest named container has not been read.
+        if _chromium_app(target) or _gecko_app(target):
+            return None  # Document URL and cross-frame effects are not read.
+        def identity(node):
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            _drop_cached_properties(node)
+            name = _call_first(node, ("get_name", "getName"))
+            role = _call_first(node, ("get_role_name", "getRoleName"))
+            states = _call_first(node, ("get_state_set",))
+            flags = _call_first(states, ("get_states",))
+            if name is None or role is None or flags is None:
+                raise ValueError("unreadable identity/state")
+            if role in {"canvas", "drawing area"} or role == "image" and not name:
+                raise ValueError("opaque signal")
+            return node, role, name, tuple(str(flag) for flag in flags)
+        focus_identity = identity(focus)
+        if not any("FOCUSED" in flag for flag in focus_identity[3]):
+            return None
+        parent_identity = identity(parent)
+        if parent_identity[1] not in {"panel", "filler", "section"}:
+            return None  # A text child of a control is not an inert label.
+        def child_count(node):
+            count = _call_first(node, ("get_child_count", "getChildCount"))
+            if type(count) is not int or count < 0:
+                raise ValueError("unreadable child count")
+            return count
+        parent_count = child_count(parent)
+        window_count = child_count(application)
+        if parent_count > 8 or window_count > 8:
+            return None
+        windows = []
+        siblings = []
+        for owner, count, rows in ((application, window_count, windows), (parent, parent_count, siblings)):
+            for index in range(count):
+                node = _call_first(owner, ("get_child_at_index", "getChildAtIndex"), index)
+                if node is None:
+                    return None
+                rows.append(identity(node))
+                if owner is parent and child_count(node) != 0:
+                    return None  # A pruned subtree is not an unchanged subtree.
+        owner = _call_first(parent, ("get_parent", "getParent"))
+        if owner is None or not any(owner == row[0] for row in windows):
+            return None  # Unread ancestors can contain a toggle/control.
+        state = identity(target)
+        if state[1] not in {"label", "static", "paragraph", "heading"}:
+            return None
+        text = _full_text(target)
+        if text is None or time.monotonic() >= deadline:
+            return None
+        return RetryEvidence(
+            context=(focus_identity, tuple(windows), (parent, parent_count)),
+            signals=(("target_identity", target), ("target_states", state[3]),
+                     ("target_name", state[2]), ("target_value", text),
+                     ("target_text", text), ("parent_selection", tuple(siblings)),
+                     ("container_children", tuple(siblings)), ("document", tuple(windows))),
+        )
+    except Exception:
+        return None
+
+
 def writer_key_state(
     app: str, previous: tuple | None = None, *, structure: bool = False,
     selection: bool = False,

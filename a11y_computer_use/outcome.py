@@ -9,8 +9,10 @@ structured content. The agent loop reads the attributes.
 
 - ``confirmed`` — a read-back, a state change, or a still-living window/process
   showed the action landed.
-- ``suspected_noop`` — the call returned and nothing observable changed.
-- ``unverifiable`` — there was no state to compare.
+- ``suspected_noop`` — every required action/context signal was readable and
+  unchanged, and repeating the action is not a toggle.
+- ``unverifiable`` — the requested effect or complete no-change evidence was
+  unavailable; re-observe before deciding whether to repeat input.
 - ``partial`` — something landed, but not the requested effect. A process that
   exits after a click is this case: the click was delivered and the app is gone,
   so the result is not ``confirmed``.
@@ -31,6 +33,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from collections.abc import Sequence
 
 OUTCOMES = frozenset({
@@ -43,6 +46,89 @@ OUTCOMES = frozenset({
 })
 
 STRATEGIES = ("ref", "coordinates", "cdp", "keyboard", "foreground")
+
+# A provider cannot authorize retry by simply omitting an inconvenient signal.
+# Non-applicable signals must be positively known empty, not missing/None.
+RETRY_SIGNALS = {
+    "click": frozenset({"target_identity", "target_states", "target_name", "target_value",
+                        "target_text", "parent_selection", "container_children", "document"}),
+    "type": frozenset({"focused_owner", "text", "caret", "selection", "value"}),
+    "key": frozenset({"focused_owner", "text", "caret", "selection", "text_attributes",
+                      "toolbar_toggles", "clipboard", "modified"}),
+    "drag": frozenset({"source_identity", "source_parent", "source_bounds", "drop_children",
+                       "document_children", "selection", "status"}),
+    "scroll": frozenset({"scroll_value", "visible_children", "target_bounds"}),
+    "select": frozenset({"selection", "combo_value", "popup_frames", "windows",
+                         "document_children", "window_title"}),
+}
+RETRY_SIGNALS["set_value"] = RETRY_SIGNALS["type"]
+RETRY_SIGNALS["menu"] = RETRY_SIGNALS["select"]
+
+
+@dataclass(frozen=True)
+class RetryEvidence:
+    """Complete scoped reads, rather than a tree digest's absence of change.
+
+    ``None`` means unreadable; an empty tuple is a readable empty set. Drivers
+    must include every signal required by the action, including explicit None
+    entries for effects they cannot observe. Signals are (name, frozen value)
+    pairs using RETRY_SIGNALS. Context contains focus identity,
+    top-level frames/titles, and the target parent's native child count.
+    """
+
+    context: tuple | None = None
+    signals: tuple | None = None
+    reason: str = "required action or context signals could not be read"
+    toggle: bool = False
+    opaque: bool = False
+    effect: tuple | None = None
+    effect_reason: str = "the action-specific effect changed"
+
+
+def retry_verdict(
+    verdict: tuple[str, str], before: RetryEvidence | None,
+    after: RetryEvidence | None, *, toggle: bool = False, tool: str = "click",
+) -> tuple[str, str]:
+    """The single gate from a candidate no-op to permission to suggest retry.
+
+    Positive verification remains authoritative. Missing evidence is never
+    evidence of no change, and toggles never authorize a blind retry.
+    """
+    judged, reason = verdict
+    if judged not in {"suspected_noop", "unverifiable", "partial"} or reason == "the target process exited after the action":
+        return verdict
+    if (before is not None and after is not None
+            and not before.opaque and not after.opaque
+            and before.effect is not None and after.effect is not None
+            and before.effect[:-1] == after.effect[:-1]
+            and before.effect[-1:] != after.effect[-1:]):
+        return "confirmed", after.effect_reason
+    if toggle or any(probe is not None and probe.toggle for probe in (before, after)):
+        return "unverifiable", reason + "; re-observe first; a retry may undo a toggle"
+    if judged == "unverifiable":
+        return judged, reason + "; re-observe first (snapshot/screenshot)"
+    for probe in (before, after):
+        if probe is None:
+            return "unverifiable", reason + "; required action or context signals could not be read; re-observe first (snapshot/screenshot)"
+        if probe.opaque or probe.context is None or not probe.signals:
+            return "unverifiable", reason + "; " + probe.reason + "; re-observe first (snapshot/screenshot)"
+        def readable(value):
+            return value is not None and (not isinstance(value, tuple) or all(readable(part) for part in value))
+        if len(probe.context) != 3 or not readable(probe.context + probe.signals):
+            return "unverifiable", reason + "; " + probe.reason + "; re-observe first (snapshot/screenshot)"
+        try:
+            names = dict(probe.signals)
+        except (TypeError, ValueError):
+            names = {}
+        missing = RETRY_SIGNALS.get(tool, frozenset()) - names.keys()
+        if missing or len(names) != len(probe.signals) or tool not in RETRY_SIGNALS:
+            return "unverifiable", reason + "; required signals missing: " + ", ".join(sorted(missing)) + "; re-observe first (snapshot/screenshot)"
+    if before.context != after.context or before.signals != after.signals:
+        # A changed context is not proof that the requested effect succeeded.
+        return "unverifiable", reason + "; action or context readings differ; re-observe first (snapshot/screenshot)"
+    if judged == "partial":
+        return "unverifiable", reason + "; the requested effect is unverified; re-observe first (snapshot/screenshot)"
+    return verdict
 
 # Errors where repeating the same action, or sending Escape, is the wrong move.
 _NO_RETRY = frozenset({
@@ -111,11 +197,12 @@ def suggest_next(
     """Strategies to try after ``outcome``, most specific first.
 
     Confirmed actions and dialog dispatches have nothing to escalate.
+    Unknown effects require re-observation, never an alternate input route.
     A dead process is not retried
     at the same coordinates. A refusal that already names its own ``next``
     (a hidden document wants the tab in front) is supplied by the caller.
     """
-    if outcome in {"confirmed", "dispatched"}:
+    if outcome in {"confirmed", "dispatched", "unverifiable"}:
         return ()
     if process_died:
         return ("ref", "foreground")
@@ -133,6 +220,8 @@ def suggest_next(
 def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
     """Escalation for a raised error. Empty when retrying would repeat a refusal."""
     info = detail or {}
+    if info.get("outcome") == "unverifiable":
+        return ()
     if info.get("reason") in {"fallback_target_unverified", "outside_active_modal"}:
         return ()
     named = info.get("next")

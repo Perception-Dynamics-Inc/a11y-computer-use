@@ -44,8 +44,40 @@ uses native window rectangles only, without another accessibility tree walk.
 When the source disappears without readable destination evidence, text selection
 cannot be read, or the target is an opaque painted surface, the result is
 `unverifiable` with `next: []`. Re-observe before another action: repeating old
-coordinates can drag the row that replaced the original source. An unchanged,
-readable row drag remains `suspected_noop`.
+coordinates can drag the row that replaced the original source. `suspected_noop`
+requires complete unchanged action and context reads, not just a stationary row.
+
+### Retry evidence
+
+The shared Runtime conclusion gate authorizes retry hints only when every
+action-specific signal and the shared context were readable before and after
+input and stayed equal. Shared context includes focus identity, all top-level
+frames (including unnamed popups) and titles, and the target parent's native
+child count. Missing or opaque signals produce `unverifiable`, `next: []`, and
+evidence directing the caller to re-observe first. Incomplete partial-effect
+checks also require re-observation. Verified positive effects remain confirmed.
+Checkboxes, switches, formatting chords and modifier clicks never receive
+retry hints; an unchanged toggle is unverifiable because retrying can undo it.
+Known no-input paths, such as a hidden tab with no bounds, remain no-ops.
+
+Linux's optional scoped retry probe currently supports complete reads for
+inert labels in small named containers directly under an application frame,
+with leaf children. It bypasses native
+child caches and rejects missing counts, states, children, or names. It can
+also confirm an observed formatting attribute transition on the same focused
+text owner and offset. Missing focus handles and unsupported signal sets,
+including coordinate-source tracking, drawing internals and cross-frame
+effects, remain unknown rather than inviting another input. Other backends
+without a complete retry-evidence provider also use the shared conservative
+result. No extra whole-window snapshot, Collection query or focus walk is
+performed by this probe.
+
+`scripts/box/benchmark_retry_evidence.py` compares an inert-label XTEST click
+with and without the scoped native read pair in a private GTK/Xvfb session.
+It requires all 50 read pairs to establish a genuine unchanged no-op and
+asserts that each pair's added cost is at most 0.1 seconds. The native probe
+also stops scoped traversal after 40 ms per read; this does not preempt a
+stalled native IPC call or establish a latency guarantee for other machines.
 
 ## What's already shared (no per-OS work)
 
@@ -681,7 +713,8 @@ after clicking. No scrolling or alternate action is substituted for the ref clic
 
 After Return or KP_Enter in a focused Thunar toolbar location textfield, the
 runtime checks the post-action snapshot. A `dialog-error-symbolic` image child
-or an unchanged window title returns `suspected_noop` with `location not opened`
+or an unchanged window title reports `location not opened`; without complete
+retry evidence the outcome is `unverifiable`, with no retry hints,
 and guidance to check the path or create missing folders from the nearest
 existing parent. An unchanged title alone does not prove that an error icon
 exists, so the result names the observed evidence. Successful navigation keeps
@@ -1182,8 +1215,9 @@ annotations do not establish an empty selection when a read is unavailable.
 Text-field double clicks use the same reader and poll briefly for asynchronous
 selection updates. Changed readable selections report `confirmed` with text and
 offsets. Unreadable selections report `unverifiable` with `next: []`, so a caller
-does not repeat a click that may already have selected the word. Readable
-unchanged selections retain `suspected_noop`. No alternate input is substituted.
+does not repeat a click that may already have selected the word. An unchanged
+selection alone cannot establish a no-op when context signals are unreadable.
+No alternate input is substituted.
 
 Drag verification refreshes pre-stroke evidence rather than relying only on the
 previous action's read-back. This matters when a region-selection overlay appears after
