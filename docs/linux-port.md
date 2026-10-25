@@ -1408,3 +1408,16 @@ readable replacement so partially delivered text is not duplicated. A different 
 peer field still refuses before text input. Ordinary stale-ref identity checks
 remain in effect. This handoff is synthetic-tested and live-verified in Chrome
 on a local input-swapping page through both LinuxDriver and Runtime.
+
+
+### Safety-probe latency budget
+
+Modal discovery queries browser documents through Collection and inspects native
+structural/application siblings; it does not enumerate browser page content
+unless Collection fails. An action shares discovery and pointer-hit settlement
+while retaining a fresh hit/ancestry check before dispatch. A functioning AT-SPI
+listener permits reuse across actions until window, document, children, state or
+property events; without a listener reuse is limited to the immediate action.
+Native mutations invalidate discoveries even before their events arrive.
+The separate [latency gate](../scripts/latency/README.md) compares native MCP/CLI
+calls with the pinned 0.4.76 wheel and blocks release publishing on regressions.
