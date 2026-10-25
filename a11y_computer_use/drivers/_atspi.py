@@ -4954,6 +4954,7 @@ class ATSPIAccessor:
             description=str(description),
             enabled=enabled,
             modal=is_modal(node, attrs=attrs),
+            modal_scope_root=role_str in {"document web", "document frame"},
             blocked_by_modal=outside_modals(node, self._active_modals),
             scroll_candidate=not chromium_closed_menu_model(node),
             focused=focused,
@@ -16701,6 +16702,29 @@ def _chromium_contenteditable(acc) -> bool:
     }
 
 
+def _refuse_model_editor_replace(acc) -> None:
+    """Refuse known Chromium model editors before any replace mutation.
+
+    The clear-and-type path can delete their paragraphs, then mistake the
+    remaining object placeholder for uncleared text and never insert. Native
+    text/selection restoration cannot restore the editor model
+    or its formatting. Match exact class tokens reported by AT-SPI, including
+    empty editors, rather than treating every ARIA textbox as a model editor.
+    """
+    classes = set(str(_get_attributes(acc).get("class") or "").split())
+    if not classes & {"ql-editor", "ck-editor__editable"}:
+        return
+    if not _chromium_contenteditable(acc):
+        return
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "set_value cannot safely replace this rich-text editor's document model; "
+        "nothing was changed. Focus the editor, select the intended text with "
+        "keyboard shortcuts, then use type to replace the selection; verify the result",
+        detail={"reason": "rich_text_replace_unsafe", "unchanged": True},
+    )
+
+
 def _clear_contenteditable(acc) -> bool:
     """Empty a Chrome contenteditable. True only when the read is blank.
 
@@ -17073,6 +17097,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     """
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
+    _refuse_model_editor_replace(acc)
     saved = _capture_text_points(acc)
     try:
         ok = _set_text_body(acc, text, force=force)
@@ -21946,6 +21971,12 @@ def active_modals(root, *, fallback: bool = True) -> list:
     return list(found.values())
 
 
+def modal_document(modal):
+    """The reported web document owning a page modal, if any."""
+    return next((node for node in _ancestor_chain(modal)
+                 if _role_name(node) in {"document web", "document frame"}), None)
+
+
 def outside_modals(acc, modals: list) -> bool:
     """True unless acc belongs to every applicable modal (nested modals included)."""
     if not modals:
@@ -21954,6 +21985,13 @@ def outside_modals(acc, modals: list) -> bool:
     parents = {_ancestor_key(node) for node in chain}
     frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in modals:
+        document = modal_document(modal)
+        if (document is not None and _ancestor_key(document) not in parents
+                and (frame is not None or any(
+                    _role_name(node) in {"document web", "document frame"} for node in chain))):
+            # A page cannot make browser chrome or another document inert.
+            # Missing hits/ancestry do not prove a target is browser chrome.
+            continue
         owner = next((node for node in _ancestor_chain(modal)
                       if _role_name(node) in {"frame", "window"}), None)
         if (owner is not None and frame is not None
@@ -22050,6 +22088,7 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> 
             f"outside_active_modal: target is outside {names}; no input was sent",
             detail={"reason": "outside_active_modal", "outcome": "refused",
                     "hint": "Use a control inside the active modal. A single plain left click on its backdrop or empty outside area may dismiss it; background controls remain blocked.",
-                    "next": []})
+                    "next": (["Use browser Back (alt+Left) or focus the address bar (ctrl+l) to leave the page."]
+                             if all(modal_document(node) is not None for node in modals) else [])})
 
     return bool(modals)

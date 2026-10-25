@@ -1240,6 +1240,13 @@ coordinate hit tests when a modal is open; waypoints do not repeat discovery.
 
 Showing dialogs with AT-SPI `MODAL` state or a reported `modal=true` /
 `aria-modal=true` attribute block input to controls outside their subtree.
+A page modal is scoped to its nearest reported web document, including an
+owning iframe, rather than the browser window. Browser toolbar, address bar,
+tabs and window controls remain actionable in interactive snapshots. With
+only page modals open, browser `alt+Left`, `ctrl+l`, `ctrl+w` and `ctrl+Tab`
+shortcuts retain native browser routing. Native browser dialogs still enforce
+the window boundary. Page-background refusals suggest Back or the address bar;
+these hints do not dispatch an action or replace the caller's requested input.
 Snapshots label the dialog `(modal)` and background controls
 `(outside_active_modal)` without click/edit actionability; `find` uses the
 same flags. Closing the dialog restores background actionability.
@@ -1378,3 +1385,23 @@ pixel-settle loops in the explicit line-scroll path. Unchanged rows still stop
 or reverse the search; changed pixels with stale rows request another snapshot.
 Budget reports name the requested no-progress budget; the independent 120-second
 hard limit is identified separately with a continuation hint.
+
+### Model-managed rich-text replacement
+
+On Chromium, `set_value` refuses Quill (`ql-editor`) and CKEditor 5
+(`ck-editor__editable`) surfaces before writing, with reason
+`rich_text_replace_unsafe` and `unchanged: true`. Their AT-SPI Text represents
+paragraphs as object placeholders. The clear-and-type path can delete the
+paragraphs, then fail its blank check on the remaining placeholder and stop
+before insertion. Its raw-text restoration also fails to recover the document;
+native text cannot restore the original document model or formatting.
+This also applies to empty-string replacements and empty editors. Ordinary
+inputs, textareas and plain contenteditable textboxes retain their existing
+replacement paths. The guard uses exact native class tokens; it does not claim
+to identify every model-managed editor.
+
+To replace text in these editors, explicitly focus the editor, select the
+intended text using keyboard shortcuts, and type the replacement, then inspect
+the result. Quill's separate typing outcome/read-back limitation is tracked in
+#1080; a retry after unconfirmed typing can duplicate text. Iframe editor
+eligibility is tracked separately in #1079.

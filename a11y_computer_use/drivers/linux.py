@@ -2990,8 +2990,17 @@ class LinuxDriver:
                 root = self._run(lambda: _atspi.find_root(app, Scope.WINDOW))
                 # Focus discovery can walk the whole document. It is needed
                 # only when a fresh modal boundary actually exists.
-                if not self._run(lambda: _atspi.active_modals(root)):
+                modals = self._run(lambda: _atspi.active_modals(root))
+                if not modals:
                     return
+                if isinstance(action, KeyChord):
+                    from a11y_computer_use.schema import canonical_chord
+                    chord = canonical_chord(action.chord).lower()
+                    if (chord in {"alt+left", "ctrl+l", "ctrl+w", "ctrl+tab"}
+                            and self._run(lambda: (
+                                (_atspi._chromium_app(root) or _atspi._gecko_app(root))
+                                and all(_atspi.modal_document(node) is not None for node in modals)))):
+                        return
                 focused, _ = self._run(lambda: _atspi._focused_node(app))
                 self._run(lambda: _atspi.refuse_outside_modal(focused, root))
             except ImportError:
@@ -3656,6 +3665,9 @@ class LinuxDriver:
 
     def _apply_set_value(self, element: Element, value: str, handle) -> bool:
         from a11y_computer_use.drivers import _atspi, _cdp_forms
+
+        if handle is not None:
+            self._run(lambda: _atspi._refuse_model_editor_replace(handle))
 
         # Form controls on an opted-in Chrome or Electron window are written
         # in the DOM. None keeps the AT-SPI writer, including GTK and a
