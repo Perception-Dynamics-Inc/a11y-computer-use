@@ -1484,3 +1484,12 @@ property events; without a listener reuse is limited to the immediate action.
 Native mutations invalidate discoveries even before their events arrive.
 The separate [latency gate](../scripts/latency/README.md) compares native MCP/CLI
 calls with the pinned 0.4.76 wheel and blocks release publishing on regressions.
+
+For Linux `type(app=...)` without a ref and `key(app=...)`, when Runtime
+activates the addressed window, it reads a fresh before-state after activation
+and before input. The previous action’s cached snapshot cannot supply that
+baseline: GTK may expose no focused editor while its window is inactive.
+Key caret/selection probes also run after activation. Unreadable evidence
+retains the shared `unverifiable` result with re-observation guidance and no
+retry hints. `scripts/box/verify_gtk_app_keyboard.py` exercises the focus switch
+in Mousepad, GTK3 Entry, and Chrome on a private X11 desktop.
