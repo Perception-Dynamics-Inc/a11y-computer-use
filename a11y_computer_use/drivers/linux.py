@@ -1761,6 +1761,7 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
+                    accessor._modal_ancestry.clear()
                     # Only Chromium needs pre-reveal descendant discovery.
                     # A GTK find uses the same pruned walk as a snapshot;
                     # querying Collection here materializes the entire model
@@ -1771,7 +1772,8 @@ class LinuxDriver:
                         else _atspi.snapshot_top_level_modals(node)
                     )
                     # Discovery/search must not scroll the inert background.
-                    blocked = _atspi.outside_modals(node, accessor._active_modals)
+                    blocked = _atspi.outside_modals(node, accessor._active_modals,
+                                                     cache=accessor._modal_ancestry)
                     accessor._table_seek = None if blocked else self._table_seek
                     document_matches: list = []
                     if seek and not blocked and _atspi._chromium_app(node):
@@ -1805,7 +1807,7 @@ class LinuxDriver:
                             replace(el, blocked_by_modal=True, clickable=False, editable=False)
                             if _atspi.outside_modals(
                                 observe.ax_handle_for(snap.snapshot_id, el.ref),
-                                accessor._active_modals,
+                                accessor._active_modals, cache=accessor._modal_ancestry,
                             ) else el for el in snap.elements
                         ))
                     _atspi.note_browser_bar(node, snap.elements)
@@ -2899,10 +2901,11 @@ class LinuxDriver:
 
     @contextmanager
     def input_context(self, action):
-        """Share modal discovery only within one immediate Runtime click."""
-        from a11y_computer_use.schema import Click
+        """Share modal discovery across all checks for one Runtime input."""
+        from a11y_computer_use.schema import Click, Hover, Drag, Scroll, TypeText, KeyChord
 
-        token = _CLICK_MODAL_CACHE.set((self, {})) if isinstance(action, Click) else None
+        token = (_CLICK_MODAL_CACHE.set((self, {}))
+                 if isinstance(action, (Click, Hover, Drag, Scroll, TypeText, KeyChord)) else None)
         try:
             yield
         finally:
@@ -2957,13 +2960,19 @@ class LinuxDriver:
         if not isinstance(target, Point):
             probe()
             return
+        from a11y_computer_use.drivers import _atspi_events
+        generation = _atspi_events.modal_epoch() if _atspi_events.listening() else None
+        settled_key = ("settled_hit", generation, target, dismiss)
+        settled = cache is not None and settled_key in cache
         # Chromium's first hit is approximate and starts an asynchronous
         # renderer hit test. Read its settled answer before allowing input.
         # Wait on the caller so the AT-SPI event thread remains available.
         for attempt in range(_atspi._HIT_TRIES):
             try:
                 modal_open = probe()
-                if not modal_open or attempt + 1 == _atspi._HIT_TRIES:
+                if not modal_open or settled or attempt + 1 == _atspi._HIT_TRIES:
+                    if cache is not None:
+                        cache[settled_key] = True
                     return
             except ComputerUseError as exc:
                 if (exc.detail.get("reason") != "outside_active_modal"
@@ -2994,7 +3003,9 @@ class LinuxDriver:
                 root = self._run(lambda: _atspi.find_root(app, Scope.WINDOW))
                 # Focus discovery can walk the whole document. It is needed
                 # only when a fresh modal boundary actually exists.
-                modals = self._run(lambda: _atspi.active_modals(root))
+                context = _CLICK_MODAL_CACHE.get()
+                cache = context[1] if context is not None and context[0] is self else {}
+                modals = self._run(lambda: _atspi.input_modals(root, cache))
                 if not modals:
                     return
                 if isinstance(action, KeyChord):
@@ -3018,7 +3029,10 @@ class LinuxDriver:
                             detail={"reason": "native_dialog_open_focus_moved", "outcome": "refused",
                                     "hint": "Use an explicit ref to type into the active page modal.",
                                     "next": []})
-                self._run(lambda: _atspi.refuse_outside_modal(focused, root))
+                def check_focus():
+                    with _atspi.input_modal_cache(cache):
+                        return _atspi.refuse_outside_modal(focused, root)
+                self._run(check_focus)
             except ImportError:
                 return  # No semantic transport; keys use native window routing.
 
@@ -5754,6 +5768,8 @@ class LinuxDriver:
             raise _wayland_input_error("key_chord")
         from a11y_computer_use.drivers import _linux_system
 
+        from a11y_computer_use.drivers import _atspi
+        self._run(_atspi._modal_discoveries.clear)
         context = _CLICK_MODAL_CACHE.get()
         if context is not None and context[0] is self:
             context[1].clear()  # A menu-dismissal key can change modal presence.
@@ -6708,6 +6724,8 @@ class LinuxDriver:
         def read() -> dict:
             return self._run(lambda: _linux_menus.menu_state(root))
 
+        from a11y_computer_use.drivers import _atspi
+        self._run(_atspi._modal_discoveries.clear)
         context = _CLICK_MODAL_CACHE.get()
         if context is not None and context[0] is self:
             context[1].clear()

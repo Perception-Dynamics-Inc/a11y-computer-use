@@ -1,0 +1,20 @@
+[
+  {
+    "file": "seven-summits.html.gz",
+    "url": "https://en.wikipedia.org/w/index.php?title=Seven_Summits&printable=yes",
+    "retrieved": "2026-10-25",
+    "sha256": "7914f13d547ab0aa703dd4de535465efc309a4e0c54e6cf04849a572480ad76f"
+  },
+  {
+    "file": "python-library.html.gz",
+    "url": "https://docs.python.org/3/library/index.html",
+    "retrieved": "2026-10-25",
+    "sha256": "f122cf828eda3bac715419299224b57df41cda798f053ede394c3fe3033224d0"
+  },
+  {
+    "file": "seven-summits.css.gz",
+    "url": "https://en.wikipedia.org/w/load.php?lang=en&modules=ext.cite.parsoid.styles%7Cext.cite.styles%7Cext.uls.interlanguage%7Cext.visualEditor.desktopArticleTarget.noscript%7Cext.wikimediaBadges%7Cext.wikimediaBadges.ulsV2%7Cext.wikimediamessages.styles%7Cjquery.makeCollapsible.styles%7Cjquery.tablesorter.styles%7Cmediawiki.skins.legacy%7Cskins.vector.icons%2Cstyles%7Cskins.vector.search.codex.styles%7Cwikibase.client.init&only=styles&skin=vector-2022",
+    "retrieved": "2026-10-25",
+    "sha256": "9adb00cc4536f1d9c77a326d9027fe620f5b54896b039962981e0805431b4cab"
+  }
+]

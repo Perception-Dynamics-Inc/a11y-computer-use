@@ -1459,3 +1459,16 @@ At input time, if a split Chromium modal Collection query fails on a wide
 subtree, Linux also tries a complete query on that same subtree before bounded
 enumeration. Both query failures still leave the boundary unknown and refuse
 input if enumeration cannot finish within the existing safety bound.
+
+
+### Safety-probe latency budget
+
+Modal discovery queries browser documents through Collection and inspects native
+structural/application siblings; it does not enumerate browser page content
+unless Collection fails. An action shares discovery and pointer-hit settlement
+while retaining a fresh hit/ancestry check before dispatch. A functioning AT-SPI
+listener permits reuse across actions until window, document, children, state or
+property events; without a listener reuse is limited to the immediate action.
+Native mutations invalidate discoveries even before their events arrive.
+The separate [latency gate](../scripts/latency/README.md) compares native MCP/CLI
+calls with the pinned 0.4.76 wheel and blocks release publishing on regressions.
