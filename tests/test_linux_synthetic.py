@@ -20084,3 +20084,53 @@ def test_click_menu_dismissal_invalidates_modal_discovery(modal_boundary_tree, m
     with driver.input_context(Click(Point(0, 100, 110))):
         _CLICK_MODAL_CACHE.get()[1]["window"] = []
         assert driver.menu_close("modal-test") == ["File"]
+
+
+@pytest.mark.parametrize("page_modal", [False, True])
+def test_gecko_modal_discovery_queries_documents_not_content(fake_atspi, monkeypatch, page_modal):
+    background = _Acc("push button", name="Background")
+    dialog = _adopt(_Acc("dialog", states=("SHOWING", "MODAL")),
+                    _Acc("push button", name="Inside"))
+    documents = [_adopt(_Acc("document web"), background), _Acc("document frame")]
+    frame = _adopt(_Acc("frame"), *documents)
+    sibling = _Acc("dialog", states=("SHOWING", "MODAL"))
+    app = _adopt(_Acc("application"), frame, sibling)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: app.children)
+    queries = []
+    def collection(node, *, split=False):
+        assert node in documents and not split
+        queries.append(node)
+        return [dialog] if page_modal and node is documents[0] else []
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    for document in documents:
+        document.get_child_count = lambda: pytest.fail("must not enumerate Firefox page content")
+    if page_modal:
+        dialog.parent = documents[0]
+    assert _atspi.active_modals(frame) == ([dialog, sibling] if page_modal else [sibling])
+    assert queries == documents
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(background, frame)
+    app.children.remove(sibling)
+    if page_modal:
+        assert _atspi.refuse_outside_modal(dialog.children[0], frame)
+    else:
+        assert not _atspi.refuse_outside_modal(background, frame)
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_gecko_modal_collection_failure_keeps_bounded_fallback(fake_atspi, monkeypatch, oversized):
+    dialog = _Acc("dialog", states=("SHOWING", "MODAL"))
+    document = _adopt(_Acc("document web"), dialog)
+    frame = _adopt(_Acc("frame"), document)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_modal_collection", lambda *args, **kwargs: None)
+    if oversized:
+        document.get_child_count = lambda: 5000
+        with pytest.raises(ComputerUseError) as caught:
+            _atspi.active_modals(frame)
+        assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+    else:
+        assert _atspi.active_modals(frame) == [dialog]
