@@ -3844,6 +3844,8 @@ class LinuxDriver:
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,
               dry_run: bool = False) -> object:
+        import time
+        time.sleep(1)  # Deliberate negative-control build; never merge.
         if dry_run:
             return None
         if _on_wayland():
