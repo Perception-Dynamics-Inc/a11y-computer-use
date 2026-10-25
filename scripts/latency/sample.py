@@ -167,7 +167,8 @@ async def sample(row, head):
                             elapsed = time.perf_counter() - start
                             assert "Drag completed" in await snapshot(), receipt
                         elif row in {"R1", "R1-iframe"}:
-                            target = ref(text, '"Agree box"')
+                            found = await call("find", app=app, text="Agree box")
+                            target = ref(found, '"Agree box"')
                             start = time.perf_counter()
                             receipt = await call("click", ref=target)
                             elapsed = time.perf_counter() - start
