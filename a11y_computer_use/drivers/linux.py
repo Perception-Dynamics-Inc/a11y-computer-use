@@ -3627,6 +3627,9 @@ class LinuxDriver:
     def _apply_set_value(self, element: Element, value: str, handle) -> bool:
         from a11y_computer_use.drivers import _atspi, _cdp_forms
 
+        if handle is not None:
+            self._run(lambda: _atspi._refuse_model_editor_replace(handle))
+
         # Form controls on an opted-in Chrome or Electron window are written
         # in the DOM. None keeps the AT-SPI writer, including GTK and a
         # Chrome that was not started with a debugging port. The window

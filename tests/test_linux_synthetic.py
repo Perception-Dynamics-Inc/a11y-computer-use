@@ -20508,3 +20508,71 @@ def test_modal_dismiss_missing_owner_retains_hit_ancestry_guard(modal_boundary_t
     with pytest.raises(ComputerUseError, match="outside_active_modal"):
         driver.check_modal_input(Click(Point(0, 100, 110)), "modal-test")
     assert calls == []
+
+
+@pytest.mark.parametrize("classes,role", [
+    ("ql-editor", "section"),
+    ("ck ck-content ck-editor__editable ck-editor__editable_inline", "entry"),
+])
+@pytest.mark.parametrize("original", ["\ufffc\ufffc", "Existing single paragraph", ""])
+@pytest.mark.parametrize("replacement", ["Replaced by agent", ""])
+def test_model_editor_replace_refuses_before_any_mutation(
+    fake_atspi, monkeypatch, classes, role, original, replacement,
+) -> None:
+    """Model-editor refusal preserves text and selection, even for clear/empty edits."""
+    field = _chrome_contenteditable(_KeyClearedWebField(original))
+    field.attrs["class"] = classes
+    field.get_role_name = lambda: role
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("unsafe replacement reached a mutating or restoration path")
+
+    # The native adapter can report success while failing to insert into the
+    # editor model. No adapter write, selection, focus, clear, key or rollback
+    # may be attempted; rolling back text would also lose original formatting.
+    for name in ("_replace_editable_text", "_set_text_body", "_capture_text_points",
+                 "_restore_text_points", "_select_range", "grab_focus",
+                 "_clear_contenteditable", "_type_into_target"):
+        monkeypatch.setattr(_atspi, name, unexpected)
+    monkeypatch.setattr(_linux_input, "press_chord", unexpected)
+    monkeypatch.setattr(_linux_input, "type_string", unexpected)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(field, replacement)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail == {"reason": "rich_text_replace_unsafe", "unchanged": True}
+    assert "nothing was changed" in str(exc.value)
+    assert "select" in str(exc.value) and "type" in str(exc.value)
+    assert field.text == original
+
+
+def test_model_editor_driver_refuses_before_dom_or_native_write(fake_atspi, monkeypatch) -> None:
+    """The Linux set_value implementation cannot fall back to a destructive writer."""
+    from a11y_computer_use.drivers import _cdp_forms
+
+    field = _chrome_contenteditable(_KeyClearedWebField("\ufffc\ufffc"))
+    field.attrs["class"] = "ql-editor"
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("model editor reached a writer")
+
+    monkeypatch.setattr(_cdp_forms, "write_element", unexpected)
+    monkeypatch.setattr(_atspi, "set_text", unexpected)
+    element = Element("e1", "AXGroup", "", None, Bounds(0, 0, 0, 200, 40),
+                      "snap-1", editable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver()._apply_set_value(element, "replacement", field)
+    assert exc.value.detail["reason"] == "rich_text_replace_unsafe"
+    assert field.text == "\ufffc\ufffc"
+
+
+@pytest.mark.parametrize("tag,classes", [
+    ("input", "ql-editor"), ("textarea", "ck-editor__editable"),
+    ("div", "ql-editor-preview ck-editor__editable-wrapper"), ("div", ""),
+])
+def test_model_editor_guard_preserves_plain_control_paths(
+    fake_atspi, tag, classes,
+) -> None:
+    """Only exact editor-surface tokens on Chromium contenteditables are refused."""
+    field = _chrome_contenteditable(_KeyClearedWebField("original"))
+    field.attrs.update(tag=tag, **{"class": classes})
+    _atspi._refuse_model_editor_replace(field)
