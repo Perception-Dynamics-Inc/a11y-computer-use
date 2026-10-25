@@ -444,3 +444,18 @@ def test_parent_application_sharing_requires_native_parent_and_bus(monkeypatch, 
         _atspi._drop_read_cache()
         assert _atspi._call_first(child, ("get_application",)) is owner
     assert len(calls) == (1 if relation == "same-native" else 2)
+
+
+def test_native_identity_layouts_are_reused_but_values_are_fresh(monkeypatch):
+    import ctypes
+    obj_type, app_type = _atspi._atspi_identity_layouts()
+    assert _atspi._atspi_identity_layouts() == (obj_type, app_type)
+    app = app_type()
+    app.bus_name = b":1.42"
+    obj = obj_type()
+    obj.app = ctypes.addressof(app)
+    obj.path = b"/org/a11y/atspi/accessible/1"
+    monkeypatch.setattr(_atspi, "_gobject_pointer", lambda _: ctypes.addressof(obj))
+    assert _atspi._atspi_wrapper_key(object()) == (":1.42", "/org/a11y/atspi/accessible/1")
+    obj.path = b"/org/a11y/atspi/accessible/2"
+    assert _atspi._atspi_wrapper_key(object()) == (":1.42", "/org/a11y/atspi/accessible/2")

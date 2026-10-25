@@ -3300,8 +3300,8 @@ class LinuxDriver:
             return False
         if (element.editable
                 and element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
-                and self._run(lambda: bool(_atspi._gtk4_app(handle)))):
-            # GTK 4 grab_focus/activate can acknowledge without moving focus.
+                and self._run(lambda: bool(_atspi._gtk4_app(handle) or _atspi._chromium_app(handle)))):
+            # GTK 4 focus may fail; Chromium focus omits page pointer handlers.
             # No native action was sent: let Runtime use the measured pointer
             # click, whose geometry and observed-focus checks remain mandatory.
             self._click_without_press = element
@@ -4843,7 +4843,8 @@ class LinuxDriver:
     def type_into(self, element: Element, text: str) -> int:
         """Type ``text`` into ``element`` only after focus is confirmed on it.
 
-        ``grab_focus`` runs first. A later read has to show keyboard focus on
+        Chromium text fields receive a checked pointer click first; other
+        fields use ``grab_focus``. A later read has to show keyboard focus on
         that accessible, or on a descendant inside it. Anything else raises
         ``focus_lost`` and does not insert and does not send keystrokes, so
         the characters cannot land in a different field. A confirmed field
@@ -4872,7 +4873,18 @@ class LinuxDriver:
         # type(ref=...) shows the same overlay as click/scroll/set_value.
         self._visible_action(element, "Type")
         context = self._run(lambda: _atspi.web_entry_context(handle))
-        if self._run(lambda: _atspi.drawing_text_editable(handle)):
+        if (element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
+                and self._run(lambda: _atspi._chromium_app(handle))):
+            # Accessibility focus bypasses page pointer handlers, including
+            # custom-value radios. Use the geometry-checked pointer path.
+            self.click(element)
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                if context is None:
+                    raise self._focus_lost_on(element)
+                handle = self._focus_web_entry(
+                    element, handle, context=context, request_focus=False,
+                )
+        elif self._run(lambda: _atspi.drawing_text_editable(handle)):
             # The paragraph often has no Component. Focus lands on it or on
             # the shape panel, and EditableText inserts on the paragraph.
             # A paragraph that was not already editing reports caret 0. Move

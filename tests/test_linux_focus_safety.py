@@ -390,3 +390,48 @@ def test_xtest_type_returns_the_count_when_the_readback_matches(focus_driver) ->
     _atspi.focused_text = lambda app: state["text"]
     _atspi.focused_editable = lambda app: None
     assert driver.type_text("Hello") == 5
+
+
+@pytest.mark.parametrize("focused", [True, False])
+def test_chromium_ref_type_presses_field_before_inserting(focus_driver, monkeypatch, focused):
+    driver, _, field, handle, _, _ = focus_driver
+    events = []
+    for name in ("_check_modal_target", "_refuse_hidden", "_raise_handle_window", "_visible_action"):
+        monkeypatch.setattr(driver, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda h: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda h: True)
+    monkeypatch.setattr(_atspi, "web_entry_context", lambda h: None)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda h: {})
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda h: focused)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda h: pytest.fail("must deliver a pointer press"))
+    monkeypatch.setattr(driver, "click", lambda target: events.append(("pointer", target)))
+    monkeypatch.setattr(driver, "_focus_web_entry", lambda element, h, **kwargs: h)
+    monkeypatch.setattr(driver, "_type_confirmed_handle", lambda h, text: events.append(("type", text)) or len(text))
+    if focused:
+        assert driver.type_into(field, "abc") == 3
+        assert events == [("pointer", field), ("type", "abc")]
+    else:
+        with pytest.raises(ComputerUseError) as error:
+            driver.type_into(field, "abc")
+        assert error.value.code is ErrorCode.FOCUS_LOST
+        assert events == [("pointer", field)]
+
+
+def test_chromium_field_press_defers_to_checked_pointer_path(focus_driver, monkeypatch):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    driver, _, field, _, _, _ = focus_driver
+    for name in ("_check_modal_target", "_verify_chromium_row_target", "_refuse_hidden",
+                 "_refuse_calendar_click", "_refuse_expander_click", "_refuse_gnumeric_go_jump",
+                 "_refuse_unverified_pdf_thumbnail"):
+        monkeypatch.setattr(driver, name, lambda *args: None)
+    monkeypatch.setattr(driver, "_dom_window_title", lambda h: None)
+    monkeypatch.setattr(driver, "_dom_pids", lambda h: [])
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda h: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda h: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda h: pytest.fail("focus is not a click"))
+    monkeypatch.setattr(_atspi, "do_press", lambda h: pytest.fail("must use pointer"))
+    assert driver.press_element(field) is False
+    assert driver.verify_click_fallback(field, "chrome") is field
+    assert driver._focused_editable is None
