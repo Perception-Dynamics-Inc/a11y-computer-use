@@ -1273,6 +1273,29 @@ blocking after the walk, without a recursive Collection query or a separate
 search through table, tree, or list rows. Chromium document searches retain
 pre-reveal descendant modal discovery. Input-time modal checks remain in effect.
 
+Page modal pointer checks use the owning document's reported screen rectangle.
+A point outside that area remains browser chrome even if Chrome returns no hit
+or a text wrapper with unknown ancestry. Missing document geometry retains the
+modal check; native browser dialogs remain window-wide. Ref targets with missing
+ancestry use fresh native bounds, never guessed toolbar dimensions.
+Chrome input outside the measured page area skips that document's descendants
+during modal discovery, while retaining native browser-dialog checks.
+Ref-less typing while focus is inside a page modal is refused with
+`native_dialog_open_focus_moved` before sending any text or newline. Typing into
+that modal requires an explicit ref; browser address-bar focus remains eligible.
+
+The standalone live reproduction uses the local ARIA/native fixture, checks
+address-bar focus and text read-back three times per modal kind, and verifies
+that implicit typing sends no input to the modal:
+
+```sh
+DISPLAY=:197 XDG_CACHE_HOME=/tmp/page-modal-cache A11Y_VISIBLE_ACTIONS=0 \
+  dbus-run-session -- python scripts/check_chromium_page_modals.py
+```
+
+Use an unused display. The script terminates only processes it started.
+Its `--baseline` option measures 0.4.76 without expecting the new typing guard.
+
 Within one Runtime click, modal discovery is shared by the gate and driver
 checks for the same native window. With no modal, coordinates need no modal
 hit test or settlement retries. Open modals still require settled target
@@ -1282,8 +1305,10 @@ actions and menu-dismissal keys invalidate it before further input.
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
 and queries subtrees with more than 64 children before walking their rows.
-Firefox document-web/document-frame nodes use a complete Collection dialog
-query before walking page content, including deep pages below that threshold.
+Firefox and Chromium document-web/document-frame nodes use a complete Collection
+dialog query before walking page content, including deep pages below that
+threshold. This also avoids requiring Collection support from virtual table
+subtrees when their owning web document can report all modal descendants.
 Native sibling dialogs remain part of the boundary check.
 Native GTK table/tree-table model cells are excluded: their modal dialogs are
 structural or application siblings, which are still checked before input.
