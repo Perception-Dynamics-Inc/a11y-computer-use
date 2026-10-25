@@ -6438,3 +6438,47 @@ def test_opaque_toolbar_type_has_no_retry_hint(tmp_path, monkeypatch):
     assert result.outcome == "unverifiable"
     assert result.next == ()
     assert driver._opaque_toolbar_type is None
+
+
+@pytest.mark.parametrize("verify", [False, True])
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("location", ["inside", "outside", "other_display"])
+def test_canvas_coordinate_click_receipt(tmp_path, monkeypatch, verify, changed, location):
+    """Paint-only toggles have unknown effects; readable changes still confirm."""
+    from dataclasses import replace
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    snap = build_synthetic_snapshot(app="editor")
+    canvas = Element("canvas", "opaque_region", "Drawing canvas", None,
+                     Bounds(2 if location == "other_display" else 1, 240, 140, 120, 56),
+                     snap.snapshot_id)
+    snap = replace(snap, elements=[canvas])
+    painted = []
+
+    def click(target, **kwargs):
+        driver.clicked.append(target)
+        painted.append(True)
+
+    driver.click = click
+    driver.snapshot = lambda *args, **kwargs: replace(
+        snap, elements=[canvas, Element("status", "AXStaticText", "Playing", None,
+                                       None, snap.snapshot_id)]
+    ) if changed and painted else snap
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = snap
+    point = Point(1, 250 if location != "outside" else 400, 150)
+    result = rt.click(x=point.x, y=point.y, display_id=1, verify=verify)
+    assert driver.clicked == [point]
+    assert painted == [True]
+    if changed:
+        assert result.outcome == "confirmed"
+    elif location == "inside":
+        assert result.outcome == "unverifiable"
+        assert "opaque target" in result.evidence
+        assert "screenshot" in result.evidence
+        assert not result.next
+    else:
+        assert result.outcome == "suspected_noop"

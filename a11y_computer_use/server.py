@@ -3608,7 +3608,8 @@ class Runtime:
                 ("unverifiable", "clipboard ownership change was not verified")
             )
         no_retry = copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
-            tool == "click" and judged == "unverifiable" and "text selection" in evidence
+            tool == "click" and judged == "unverifiable"
+            and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
             tool == "type" and judged == "unverifiable"
             and evidence == "keys sent to an unreadable toolbar control; effect unverified"
@@ -3672,11 +3673,17 @@ class Runtime:
         )
         # A newly observed document starts a new ref namespace. A title is
         # mutable UI state, so use a reported URL rather than window labels.
-        document_url = (
-            self.current_document_url()
-            if any(el.instance_id or el.document_id for el in snap.elements) or self._resolves_apps()
-            else None
-        )
+        snapshot_url = getattr(self.driver, "snapshot_document_url", None)
+        if callable(snapshot_url):
+            # Issuing refs must not start another native tree/Collection walk.
+            # Linux reads only the handles already retained by this snapshot.
+            document_url = snapshot_url(snap)
+        else:
+            document_url = (
+                self.current_document_url()
+                if any(el.instance_id or el.document_id for el in snap.elements) or self._resolves_apps()
+                else None
+            )
         previous_url = getattr(self, "_issued_document_url", None)
         document_changed = bool(previous_url and document_url and previous_url != document_url)
         self._issued_document_url = document_url or (
@@ -5919,13 +5926,14 @@ class Runtime:
         # qualifies the receipt, without deriving a day or another target.
         opaque_roles = {"opaque_region", "AXCalendar"}
         opaque_target = isinstance(target, Element) and target.role in opaque_roles
-        if isinstance(target, Point) and pre is not None and pre.app == app:
+        opaque_snapshot = before.get("snap") if isinstance(before, dict) else None
+        if isinstance(target, Point) and isinstance(opaque_snapshot, Snapshot) and opaque_snapshot.app == app:
             opaque_target = any(
                 el.role in opaque_roles and el.bounds is not None
                 and el.bounds.display_id == target.display_id
                 and el.bounds.x <= target.x < el.bounds.x + el.bounds.width
                 and el.bounds.y <= target.y < el.bounds.y + el.bounds.height
-                for el in pre.elements
+                for el in opaque_snapshot.elements
             )
         opaque_unchanged = opaque_target and effect.endswith("\n  (no change)")
         if opaque_unchanged:
@@ -5989,6 +5997,11 @@ class Runtime:
             verdict=verdict,
             cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
+        if opaque_target and result.outcome == "suspected_noop":
+            result = outcome.ActionResult(
+                text, outcome="unverifiable", next=(),
+                evidence="effect unknown (opaque target); verify with a screenshot",
+            )
         # A verified click may rename its own button (Count 0 -> Count 1).
         # Authorize that exact observed identity only when a later public
         # snapshot issues it. Internal effect reads must not rebind old refs.
@@ -10606,8 +10619,8 @@ def build_server(
         is not verified effect. Inspect a fresh snapshot before continuing.
         Linux whole-calendar refs are refused because their centers do not
         identify a day. Use keyboard navigation or screenshot-chosen x/y.
-        With verify=true, an unchanged tree at an opaque target reports effect
-        unknown; verify its pixels with a screenshot.
+        An unchanged tree at an opaque target reports effect unknown, including
+        coordinate clicks without verify; inspect a screenshot before retrying.
         Linux text ref double-clicks require a changed, nonempty native text
         selection for confirmation; caret movement alone does not confirm.
         GTK table rows marked selection-only report a partial single-click

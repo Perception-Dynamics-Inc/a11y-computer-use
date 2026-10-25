@@ -1133,10 +1133,13 @@ date are unavailable. No month, date, or day-cell geometry is inferred.
 
 A whole-calendar ref click is refused before input: its center can select an
 arbitrary date. Use keyboard focus and navigation, or explicit x/y from a
-screenshot, then visually verify the selected date. For `verify=true` clicks
-on an observed calendar or opaque region, an unchanged accessibility tree
-reports `effect unknown (opaque target)` rather than `(no change)`. This is
-uncertainty reporting, not pixel comparison or verified date selection.
+screenshot, then visually verify the selected date. Coordinate clicks inside
+an observed calendar or opaque region report `unverifiable` when the
+accessibility tree is unchanged, with or without `verify=true`. The evidence
+says `effect unknown (opaque target)` and recommends a screenshot, with no
+automatic retry hints: repeating a landed click could undo a painted toggle.
+Readable state changes can still confirm the effect. This is uncertainty
+reporting, not pixel comparison or verified date selection.
 
 Native AT-SPI `page tab` controls retain the `AXTab` role (rendered as `tab`),
 with `page tab list` retained as `AXTabGroup`. Use `find(text="Advanced",
@@ -1216,6 +1219,12 @@ does not retry a modal refusal through another input method. If the bounded
 native fallback cannot establish the modal boundary, input is refused with
 `modal_boundary_unavailable`.
 
+Snapshots and GTK table finds inspect application top-level children and collect modal
+candidates from nodes the pruned walk already reads. They apply background
+blocking after the walk, without a recursive Collection query or a separate
+search through table, tree, or list rows. Chromium document searches retain
+pre-reveal descendant modal discovery. Input-time modal checks remain in effect.
+
 Within one Runtime click, modal discovery is shared by the gate and driver
 checks for the same native window. With no modal, coordinates need no modal
 hit test or settlement retries. Open modals still require settled target
@@ -1228,6 +1237,8 @@ and queries subtrees with more than 64 children before walking their rows.
 Firefox document-web/document-frame nodes use a complete Collection dialog
 query before walking page content, including deep pages below that threshold.
 Native sibling dialogs remain part of the boundary check.
+Native GTK table/tree-table model cells are excluded: their modal dialogs are
+structural or application siblings, which are still checked before input.
 This query threshold is independent of the unchanged 4,096-node fallback
 safety budget: ordinary web lists must not add hundreds of remote reads to
 every input. Failed queries still use the bounded walk or refuse. LibreOffice uses
@@ -1258,7 +1269,11 @@ values do not identify a child control. An unnamed, non-actionable layout placeh
 refresh to a newly populated control; previously actionable controls retain
 the changed-target refusal. A fresh observation with a different reported
 document URL starts a new ref namespace, as does an observed process restart.
-A missing URL does not clear the refusal. This does not change modal input policy.
+A missing URL does not clear the refusal. Issuing-ref bookkeeping reads URL
+metadata only from handles already emitted by the pruned snapshot; it does not
+run another Collection query or traverse unseen table rows (#1045). An iframe
+URL alone does not establish top-document navigation. This does not change
+modal input policy.
 
 A standalone Chrome/AT-SPI check (not a pytest live file) opens a native modal
 from an iframe and verifies both snapshot modes send no input for the old ref:
