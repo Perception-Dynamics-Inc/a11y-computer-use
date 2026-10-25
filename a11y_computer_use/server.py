@@ -6654,7 +6654,9 @@ class Runtime:
             if self._ensure_linux_window(chosen, candidates, bundle, identifier):
                 focused.append(True)
             note.append(self._dismiss_open_menu(bundle))
-            before = self._linux_keyboard_before(bundle, bool(focused))
+            # Outside edits can invalidate even an active window’s cached baseline.
+            snap = self._reread(bundle, Scope.WINDOW)
+            before = self._freeze(snap) if snap is not None else None
             base = before["snap"] if before else None
             focused_field = self._focused_editable(base)
             previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
@@ -6876,8 +6878,15 @@ class Runtime:
         front = self._frontmost()
 
         def execute() -> int:
+            nonlocal before, previous, selection
             self._guard_user(front)
             note.append(self._dismiss_open_menu(front))
+            if getattr(self.driver, "name", None) == "linux":
+                snap = self._reread(front, Scope.WINDOW)
+                before = self._freeze(snap) if snap is not None else None
+                field = self._focused_editable(snap)
+                previous = None if field is None or field.value is None else str(field.value)
+                selection = self._active_type_selection(front, previous)
             typed = self.driver.type_text(text)
             if isinstance(typed, int) and not isinstance(typed, bool):
                 return typed
