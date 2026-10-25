@@ -1498,3 +1498,11 @@ Key caret/selection probes also run after activation. Unreadable evidence
 retains the shared `unverifiable` result with re-observation guidance and no
 retry hints. `scripts/box/verify_gtk_app_keyboard.py` exercises the focus switch
 in Mousepad, GTK3 Entry, and Chrome on a private X11 desktop.
+
+Menu press outcomes compare fresh top-level native dialog identities for the
+addressed app before and after dispatch. A newly showing, named dialog confirms
+the menu command and appears by name in the evidence, even when a whole-window
+snapshot is unavailable. An already open dialog or incomplete native read does
+not establish that the command opened a dialog. Unverifiable outcomes carry no
+alternate-input retry hints. These cases are covered by hermetic driver and
+Runtime tests; this receipt has not been live-verified in LibreOffice.

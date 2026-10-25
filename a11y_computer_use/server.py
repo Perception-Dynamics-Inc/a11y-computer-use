@@ -9608,10 +9608,30 @@ class Runtime:
             before_menu = self.driver.menu_state(bundle)
         except Exception:
             before_menu = None
-        before = self._capture()
+        dialog_reader = getattr(self.driver, "menu_dialog_state", None)
+
+        def read_dialogs():
+            try:
+                return dialog_reader(bundle) if callable(dialog_reader) else None
+            except Exception:
+                return None
+
+        dialogs_before = read_dialogs()
+        before = self._capture(bundle)
         title = self._run_gated(MenuOp(verb=verb, app=bundle, path=path), bundle,
                                 lambda: self.driver.menu_press(app, path), confirm=confirm)
         text = f"pressed menu item {title!r} in {bundle}"
+        dialogs_after = read_dialogs()
+        if dialogs_before is not None and dialogs_after is not None:
+            names = [name for identity, name in dialogs_after.items()
+                     if identity not in dialogs_before]
+            if names:
+                evidence = "opened dialog " + ", ".join(
+                    json.dumps(name, ensure_ascii=False) for name in names
+                )
+                return self._conclude(
+                    text, tool="menu", app=bundle, verdict=("confirmed", evidence),
+                )
         try:
             after_menu = self.driver.menu_state(bundle)
         except Exception:
@@ -11274,7 +11294,10 @@ def build_server(
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
         (AT-SPI menu bar). Windows and the browser return unsupported. The text
-        is unchanged. Structured content adds outcome, next, and evidence."""
+        is unchanged. Structured content adds outcome, next, and evidence.
+        On Linux, a newly observed native dialog confirms the menu command
+        and is named in evidence. Unverifiable effects require a fresh
+        observation before further input."""
         return _publish(await run(
             runtime.menu, app, path, action,
             confirm=_confirmer_for(server.get_context()),
