@@ -59,7 +59,7 @@ async def sample(row, head):
                              + b"<style>" + gzip.decompress((FIXTURES / "seven-summits.css.gz").read_bytes()) + b"</style>"
                              + b"<script>" + (FIXTURES / "offline-sort.js").read_bytes() + b"</script>")
             (home / "user.js").write_text('user_pref("browser.aboutwelcome.enabled",false);user_pref("browser.shell.checkDefaultBrowser",false);user_pref("browser.startup.homepage_override.mstone","ignore");user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification",true);')
-            args = [os.environ.get("FIREFOX", "firefox"), "--no-remote", "--profile", temp, page.as_uri()]
+            args = [os.environ.get("FIREFOX", "firefox"), "--no-remote", "--width", "1280", "--height", "800", "--profile", temp, page.as_uri()]
         else:
             args = [os.environ.get("CHROME", "google-chrome"), "--no-sandbox", "--force-renderer-accessibility",
                     "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--disable-gpu",
@@ -149,8 +149,11 @@ async def sample(row, head):
                             assert "refused" not in reply.stdout
                             # The fixture changes this native window title only
                             # after the real table row order actually changes.
-                            assert any("Offline sort confirmed" in w.get("title", "")
-                                       for w in _linux_system.windows()), reply.stdout
+                            settled = time.monotonic() + 2
+                            while not any("Offline sort confirmed" in w.get("title", "")
+                                          for w in _linux_system.windows()):
+                                assert time.monotonic() < settled, reply.stdout
+                                await asyncio.sleep(.05)
                         elif row == "R8":
                             driver = LinuxDriver()
                             snap = driver.snapshot(Scope.WINDOW, app)

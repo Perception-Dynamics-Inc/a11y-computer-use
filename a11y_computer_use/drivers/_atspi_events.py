@@ -46,7 +46,9 @@ _STANDING_EVENTS = (
     "window:activate",
     "window:",
     "document:",
-    "object:property-change",
+    "object:attributes-changed",
+    "object:property-change:accessible-attributes",
+    "object:property-change:accessible-role",
 )
 
 _thread: threading.Thread | None = None
@@ -265,7 +267,7 @@ def _on_event(event) -> bool:
         kind = getattr(event, "type", "")
         if kind.startswith(("window:", "document:", "object:children-changed",
                             "object:state-changed",
-                            "object:property-change")):
+                            "object:property-change", "object:attributes-changed")):
             _modal_epoch += 1
         _seq += 1
         _events.append((_seq, getattr(event, "type", ""),
@@ -288,7 +290,9 @@ def _run() -> None:
         # Same bound as `_atspi._atspi`: 300ms per call, no 15s startup grace.
         Atspi.set_timeout(300, 0)
         global _listener, _modal_events_ready
-        required = {"window:", "document:", "object:property-change",
+        required = {"window:", "document:", "object:attributes-changed",
+                    "object:property-change:accessible-attributes",
+                    "object:property-change:accessible-role",
                     "object:children-changed", "object:state-changed"}
         registered = set()
         _listener = Atspi.EventListener.new(_on_event)

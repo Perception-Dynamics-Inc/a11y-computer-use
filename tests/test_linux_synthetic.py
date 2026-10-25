@@ -20775,7 +20775,7 @@ def test_web_focus_remount_identity(fake_atspi, monkeypatch, case, operation):
 
 @pytest.mark.parametrize("event", ["window:create", "window:destroy", "document:reload",
                                   "document:load-complete", "object:children-changed:add",
-                                  "object:state-changed:modal",
+                                  "object:state-changed:modal", "object:attributes-changed",
                                   "object:property-change:accessible-attributes"])
 def test_modal_discovery_event_cache_refuses_new_modal(modal_boundary_tree, monkeypatch, event):
     from a11y_computer_use.drivers import _atspi_events
@@ -20868,3 +20868,16 @@ def test_page_toolbar_modal_keeps_collection_failure_fallback(fake_atspi, monkey
     monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
     monkeypatch.setattr(_atspi, "_modal_collection", lambda *args, **kwargs: None)
     assert _atspi.active_modals(frame) == [dialog]
+
+
+def test_modal_cache_does_not_outlive_incomplete_listener(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    monkeypatch.setattr(_atspi_events, "_modal_events_ready", False)
+    assert _atspi.input_modals(frame, {}) == []
+    frame.children.append(modal)
+    # No event can be assumed when a required subscription failed.
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        _atspi.refuse_outside_modal(bg, frame, modal_cache={})
