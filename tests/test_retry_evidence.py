@@ -168,6 +168,7 @@ def test_native_missing_reads_never_become_empty_sets(monkeypatch, failure):
             self.name, self.role, self.children, self.count = name, role, [], 0
             self.states = ("SHOWING", "VISIBLE")
 
+        def get_interfaces(self): return ()
         def get_name(self): return self.name
         def get_role_name(self): return self.role
         def get_state_set(self): return SimpleNamespace(get_states=lambda: self.states)
@@ -255,3 +256,123 @@ def test_unverified_fallback_error_keeps_unknown_outcome_without_retry_hints():
 
 def test_error_conversion_cannot_reintroduce_retry_routes_for_unknown_effects():
     assert outcome.next_for_error("unsupported", {"outcome": "unverifiable", "next": ["coordinates"]}) == ()
+
+
+@pytest.fixture
+def readable_native_button(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    class Node:
+        def __init__(self, name, role, parent=None, interfaces=()):
+            self.name, self.role, self.parent = name, role, parent
+            self.children, self.interfaces = [], interfaces
+            self.url = "file:///form.html"
+            self.states = ("VISIBLE", "SHOWING")
+            if parent is not None:
+                parent.children.append(self)
+
+        def get_name(self): return self.name
+        def get_role_name(self): return self.role
+        def get_state_set(self): return SimpleNamespace(get_states=lambda: self.states)
+        def get_child_count(self): return len(self.children)
+        def get_child_at_index(self, index): return self.children[index]
+        def get_parent(self): return self.parent
+        def get_application(self): return app
+        def get_interfaces(self): return self.interfaces
+        def get_document_iface(self): return self
+        def get_document_attributes(self): return {"DocURL": self.url}
+
+    app = Node("application", "application")
+    window = Node("Window", "frame", app)
+    document = Node("file:///form.html", "document web", window)
+    parent = Node("", "section", document)
+    button = Node("Div button", "push button", parent)
+    button.states += ("FOCUSED",)
+    monkeypatch.setattr(_atspi, "_drop_cached_properties", lambda node: None)
+    monkeypatch.setattr(_atspi, "is_secure", lambda node: False)
+    monkeypatch.setattr(_atspi, "_without_child_cache", lambda node, fn: fn())
+    action = Click(Element("e1", "AXButton", "Div button", None, None, "s"))
+    return _atspi, action, button, document, Node
+
+
+def test_native_button_with_unnamed_web_parent_has_complete_noop_evidence(readable_native_button):
+    native, action, button, document, _ = readable_native_button
+    before = native.retry_evidence(action, button, None)
+    after = native.retry_evidence(action, button, None)
+    assert outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)[0] == "suspected_noop"
+    document.url = "file:///changed.html"
+    changed = native.retry_evidence(action, button, None)
+    assert outcome.retry_verdict(("suspected_noop", "unchanged"), before, changed)[0] == "unverifiable"
+
+
+@pytest.mark.parametrize("failure", ["text", "value", "capabilities", "document", "opaque", "subtree"])
+def test_native_button_incomplete_scoped_reads_cannot_authorize_retry(readable_native_button, monkeypatch, failure):
+    native, action, button, document, Node = readable_native_button
+    before = native.retry_evidence(action, button, None)
+    assert before is not None
+    if failure == "text":
+        button.interfaces = ("Text",)
+        monkeypatch.setattr(native, "_full_text", lambda node: None)
+    elif failure == "value":
+        button.interfaces = ("Value",)
+    elif failure == "capabilities":
+        button.interfaces = None
+    elif failure == "document":
+        document.get_document_attributes = lambda: None
+    elif failure == "opaque":
+        Node("", "drawing area", button.parent)
+    else:
+        for index in range(33):
+            Node(str(index), "label", button.parent)
+    after = native.retry_evidence(action, button, None)
+    assert after is None
+    assert outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)[0] == "unverifiable"
+
+
+def test_verified_row_selection_stays_partial_without_retry_advice():
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = SimpleNamespace(name="linux")
+    evidence = "the row was selected and activates on double-click"
+    before = outcome.RetryEvidence(effect=("row", "outline_selection", False))
+    after = outcome.RetryEvidence(effect=("row", "outline_selection", True))
+    runtime._retry_reads = ("geany", Click(None), before, after)
+    result = runtime._conclude("clicked", tool="click", app="geany", verdict=("partial", evidence))
+    assert result.outcome == "partial"
+    assert result.evidence == evidence
+    assert result.next == ()
+
+
+def test_native_button_reads_target_text_without_reading_unrelated_fields(readable_native_button, monkeypatch):
+    native, action, button, document, Node = readable_native_button
+    button.interfaces = ("Text",)
+    Node("Unrelated field", "text", button.parent, interfaces=("Text",))
+    calls = []
+
+    def read_text(node):
+        assert node is button, "unrelated text is not a required click signal"
+        calls.append(node)
+        return "Div button"
+
+    monkeypatch.setattr(native, "_full_text", read_text)
+    before = native.retry_evidence(action, button, None)
+    after = native.retry_evidence(action, button, None)
+    assert outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)[0] == "suspected_noop"
+    assert calls == [button, button]
+    Node("New challenge", "section", document)
+    changed = native.retry_evidence(action, button, None)
+    assert outcome.retry_verdict(("suspected_noop", "unchanged"), before, changed)[0] == "unverifiable"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_native_outline_partial_requires_selected_state(readable_native_button, selected):
+    native, _action, button, _document, _Node = readable_native_button
+    element = Element("e1", "AXCell", "Symbol", None, None, "s", note="activates on double-click")
+    action = Click(element)
+    before = native.retry_evidence(action, button, None)
+    if selected:
+        button.states += ("SELECTED",)
+    after = native.retry_evidence(action, button, None)
+    verdict = ("partial", "the row was selected and activates on double-click")
+    assert outcome.retry_verdict(verdict, before, after)[0] == ("partial" if selected else "unverifiable")
+    button.states = None
+    assert native.retry_evidence(action, button, None) is None

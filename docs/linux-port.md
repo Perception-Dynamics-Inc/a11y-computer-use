@@ -1405,3 +1405,14 @@ intended text using keyboard shortcuts, and type the replacement, then inspect
 the result. Quill's separate typing outcome/read-back limitation is tracked in
 #1080; a retry after unconfirmed typing can duplicate text. Iframe editor
 eligibility is tracked separately in #1079.
+
+Retry evidence (#1028) uses native capabilities rather than requiring a static
+label role or a named parent immediately below a window. Buttons and labels
+can supply complete evidence through a bounded container read, fresh ancestor
+metadata, document attributes (including URL), application frames/titles and
+a still-focused accessible. Unnamed layout wrappers use the nearest named
+container or document without walking the application window. Missing native
+Text/Value interfaces are readable absences; failed reads of supported
+interfaces remain unknown. Oversized, opaque or timed-out reads never authorize
+retry hints. A verified Geany row selection retains its partial receipt without
+retry advice; opaque ref clicks retain crop/screenshot guidance.

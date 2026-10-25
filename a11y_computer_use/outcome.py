@@ -97,6 +97,16 @@ def retry_verdict(
     judged, reason = verdict
     if judged not in {"suspected_noop", "unverifiable", "partial"} or reason == "the target process exited after the action":
         return verdict
+    # This receipt already verifies the selection effect; activation requires
+    # a different, explicitly requested gesture. It is not a candidate no-op.
+    if (tool == "click" and judged == "partial"
+            and reason == "the row was selected and activates on double-click"
+            and not toggle and before is not None and after is not None
+            and not before.opaque and not after.opaque
+            and before.effect is not None and after.effect is not None
+            and before.effect[:-1] == after.effect[:-1]
+            and after.effect[-2:] == ("outline_selection", True)):
+        return verdict
     if (before is not None and after is not None
             and not before.opaque and not after.opaque
             and before.effect is not None and after.effect is not None

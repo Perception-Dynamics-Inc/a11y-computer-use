@@ -3652,7 +3652,7 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
-        no_retry = not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        no_retry = (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
@@ -6045,7 +6045,7 @@ class Runtime:
         if opaque_target and result.outcome in {"suspected_noop", "unverifiable"}:
             result = outcome.ActionResult(
                 text, outcome="unverifiable", next=(),
-                evidence="effect unknown (opaque target); verify with a screenshot",
+                evidence="effect unknown (opaque target); verify with crop or a screenshot",
             )
         # A verified click may rename its own button (Count 0 -> Count 1).
         # Authorize that exact observed identity only when a later public
