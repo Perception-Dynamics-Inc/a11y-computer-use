@@ -21819,7 +21819,7 @@ def snapshot_top_level_modals(root) -> list:
     return [node for node in candidates if is_modal(node)]
 
 
-def active_modals(root, *, fallback: bool = True) -> list:
+def active_modals(root, *, fallback: bool = True, point=None) -> list:
     """Fresh modal descendants before pruning, including native modal windows.
 
     Collection avoids walking whole web pages merely to discover dialogs. The
@@ -21855,6 +21855,15 @@ def active_modals(root, *, fallback: bool = True) -> list:
                     "Cannot establish the active modal boundary; no input was sent",
                     detail={"reason": "modal_boundary_unavailable"})
             candidates.append(node)
+            if point is not None and _role_name(node) in {"document web", "document frame"}:
+                box = _raw_rect(node, "SCREEN")
+                if box is not None and box[2] > 0 and box[3] > 0:
+                    x, y = point
+                    left, top, width, height = box
+                    if not (left <= x < left + width and top <= y < top + height):
+                        # Page descendants cannot cover browser chrome. Still
+                        # inspect structural siblings for native browser dialogs.
+                        continue
             if libreoffice and _role_name(node) in {
                 "table", "document spreadsheet", "document text",
                 "tool bar", "menu bar", "status bar",
@@ -21948,14 +21957,16 @@ def outside_modals(acc, modals: list) -> bool:
     return False
 
 
-def input_modals(root, cache: dict | None = None) -> list:
+def input_modals(root, cache: dict | None = None, *, point=None) -> list:
     """Discover once per window during a click; retain fallback identity owners."""
+    def discover():
+        return active_modals(root) if point is None else active_modals(root, point=point)
     if cache is None:
-        return active_modals(root)
+        return discover()
     key = _ancestor_key(root)
     if key not in cache:
         # Keep the root alive when _ancestor_key must fall back to id().
-        cache[key] = (root, active_modals(root))
+        cache[key] = (root, discover())
     return cache[key][1]
 
 
@@ -22010,7 +22021,7 @@ def modal_dismiss_hit(acc, root, x: int, y: int, *, modal_cache=None) -> bool:
     return False
 
 
-def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> bool:
+def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, point=None) -> bool:
     """Refuse before input when the addressed accessible is outside a modal."""
     if root is None:
         chain = list(_ancestor_chain(acc))
@@ -22026,8 +22037,38 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None) -> 
                             if _role_name(node) == "application"), None)
         root = next((node for node in chain if _role_name(node) in {"frame", "window"}),
                     application if application is not None else chain[-1] if chain else None)
-    modals = input_modals(root, modal_cache)
-    if outside_modals(acc, modals):
+        if chain and not any(_role_name(node) in {
+                "frame", "window", "application", "document web", "document frame"} for node in chain):
+            # An explicit ref may also lose its Chrome wrapper ancestry. Do
+            # not mistake that orphan for a window with no active modals.
+            from a11y_computer_use.drivers import _linux_system
+            from a11y_computer_use.schema import Scope
+            root = find_root(_linux_system.frontmost_app_id(), Scope.WINDOW)
+            box = _raw_rect(acc, "SCREEN")
+            if point is None and box is not None and box[2] > 0 and box[3] > 0:
+                point = (box[0] + box[2] / 2, box[1] + box[3] / 2)
+    modals = input_modals(root, modal_cache, point=point)
+    point_blocked = False
+    if point is not None:
+        # Chrome can return an ancestry-less address-bar text object or no hit.
+        # Only measured document geometry can exclude its modal for that point.
+        applicable = []
+        for modal in modals:
+            document = modal_document(modal)
+            box = _raw_rect(document, "SCREEN") if document is not None else None
+            if box is not None and box[2] > 0 and box[3] > 0:
+                x, y = point
+                left, top, width, height = box
+                if not (left <= x < left + width and top <= y < top + height):
+                    continue
+                # An approximate hit with browser ancestry cannot authorize
+                # input at a point inside the page behind its modal.
+                if not any(_ancestor_key(n) == _ancestor_key(modal)
+                           for n in _ancestor_chain(acc)):
+                    point_blocked = True
+            applicable.append(modal)
+        modals = applicable
+    if point_blocked or outside_modals(acc, modals):
         names = ", ".join(repr(_node_name(node)) for node in modals)
         raise ComputerUseError(ErrorCode.UNSUPPORTED,
             f"outside_active_modal: target is outside {names}; no input was sent",

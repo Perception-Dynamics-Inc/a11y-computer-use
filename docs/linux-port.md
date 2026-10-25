@@ -1239,6 +1239,29 @@ blocking after the walk, without a recursive Collection query or a separate
 search through table, tree, or list rows. Chromium document searches retain
 pre-reveal descendant modal discovery. Input-time modal checks remain in effect.
 
+Page modal pointer checks use the owning document's reported screen rectangle.
+A point outside that area remains browser chrome even if Chrome returns no hit
+or a text wrapper with unknown ancestry. Missing document geometry retains the
+modal check; native browser dialogs remain window-wide. Ref targets with missing
+ancestry use fresh native bounds, never guessed toolbar dimensions.
+Chrome input outside the measured page area skips that document's descendants
+during modal discovery, while retaining native browser-dialog checks.
+Ref-less typing while focus is inside a page modal is refused with
+`native_dialog_open_focus_moved` before sending any text or newline. Typing into
+that modal requires an explicit ref; browser address-bar focus remains eligible.
+
+The standalone live reproduction uses the local ARIA/native fixture, checks
+address-bar focus and text read-back three times per modal kind, and verifies
+that implicit typing sends no input to the modal:
+
+```sh
+DISPLAY=:197 XDG_CACHE_HOME=/tmp/page-modal-cache A11Y_VISIBLE_ACTIONS=0 \
+  dbus-run-session -- python scripts/check_chromium_page_modals.py
+```
+
+Use an unused display. The script terminates only processes it started.
+Its `--baseline` option measures 0.4.76 without expecting the new typing guard.
+
 Within one Runtime click, modal discovery is shared by the gate and driver
 checks for the same native window. With no modal, coordinates need no modal
 hit test or settlement retries. Open modals still require settled target

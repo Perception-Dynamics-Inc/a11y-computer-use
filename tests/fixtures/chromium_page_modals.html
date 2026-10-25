@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Modal Lab</title>
+<p id="st">bg=0 inside=0</p>
+<button onclick="bg++;up()">Background action</button>
+<dialog id="dn"><p>Native dialog</p><button onclick="ins++;up()">Inside native</button> <button onclick="this.parentNode.close()">Close native</button></dialog>
+<div id="da" role="dialog" aria-modal="true" aria-label="Aria dialog" hidden
+     style="position:fixed;top:200px;left:300px;background:#eef;border:2px solid #339;padding:20px">
+  <p>Aria dialog</p><button onclick="ins++;up()">Inside aria</button> <button onclick="da.hidden=true">Close aria</button></div>
+<script>let bg=0,ins=0;function up(){st.textContent='bg='+bg+' inside='+ins;document.title='Modal Lab bg='+bg+' inside='+ins}
+if(location.hash=='#n')dn.showModal();if(location.hash=='#a')da.hidden=false</script>
