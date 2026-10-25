@@ -133,7 +133,7 @@ def suggest_next(
 def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
     """Escalation for a raised error. Empty when retrying would repeat a refusal."""
     info = detail or {}
-    if info.get("reason") == "fallback_target_unverified":
+    if info.get("reason") in {"fallback_target_unverified", "outside_active_modal"}:
         return ()
     named = info.get("next")
     if isinstance(named, (list, tuple)) and named:

@@ -1,0 +1,17 @@
+<!doctype html>
+<title>Lightbox open</title>
+<style>
+  /* Leave the background button uncovered to exercise real control hits. */
+  #bd { position: fixed; inset: 0 0 0 200px; background: rgba(0, 0, 0, .45); }
+  #dl { position: fixed; top: 200px; left: 340px; width: 420px;
+        background: #fff; padding: 20px; }
+</style>
+<button style="position:fixed;left:30px;top:100px"
+        onclick="document.title='BACKGROUND ACTIVATED'">Background Action</button>
+<h1>Gallery</h1>
+<p>Click outside the photo to close it.</p>
+<div id="bd" onclick="bd.remove();dl.remove();document.title='Lightbox closed'"></div>
+<div id="dl" role="dialog" aria-modal="true" aria-label="Photo viewer">
+  <p>Photo 1 of 12</p>
+  <button>Next photo</button>
+</div>

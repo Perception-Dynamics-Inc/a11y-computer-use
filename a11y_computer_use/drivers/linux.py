@@ -2795,7 +2795,7 @@ class LinuxDriver:
             if token is not None:
                 _CLICK_MODAL_CACHE.reset(token)
 
-    def _check_modal_target(self, target, *, app: str | None = None) -> None:
+    def _check_modal_target(self, target, *, app: str | None = None, dismiss: bool = False) -> None:
         """Check live native ancestry before any ref or pointer input."""
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi, _linux_system
@@ -2810,14 +2810,17 @@ class LinuxDriver:
             if isinstance(target, Element) and handle is None and app is None:
                 return  # press_element cannot dispatch without a native handle.
             if isinstance(target, Point):
-                if cache is not None:
+                if cache is not None or dismiss:
                     owner = app or _linux_system.frontmost_app_id()
                     root = _atspi.find_root(owner, Scope.WINDOW)
                     # No modal means no boundary hit test or settlement wait.
-                    if not _atspi.input_modals(root, cache):
+                    if root is not None and not _atspi.input_modals(root, cache):
                         return False
                 x, y = _point_of(target)
                 handle = _atspi._accessible_at_point(int(x), int(y))
+                if dismiss and _atspi.modal_dismiss_hit(
+                        handle, root, int(x), int(y), modal_cache=cache):
+                    return True
             if handle is None:
                 owner = app or _linux_system.frontmost_app_id()
                 root = _atspi.find_root(owner, Scope.WINDOW)
@@ -2856,7 +2859,10 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         if isinstance(action, (Click, Hover, Scroll)):
-            self._check_modal_target(action.target, app=app)
+            self._check_modal_target(
+                action.target, app=app, dismiss=(isinstance(action, Click)
+                    and action.button == MouseButton.LEFT and action.count == 1
+                    and not action.modifiers))
         elif isinstance(action, Drag):
             # Waypoints are part of one pressed stroke, not independent
             # input targets. Keep fresh, settled boundary checks at both
@@ -3678,7 +3684,8 @@ class LinuxDriver:
             raise _wayland_input_error("click")
         from a11y_computer_use.drivers import _atspi, _linux_input
 
-        self._check_modal_target(target)
+        self._check_modal_target(
+            target, dismiss=(button == MouseButton.LEFT and count == 1 and not modifiers))
         self._focused_editable = None
         handle = None
         notification = None
@@ -3817,7 +3824,9 @@ class LinuxDriver:
                 )
         modal_target = (target.bounds.center if isinstance(target, Element)
                         and handle is None and target.bounds is not None else target)
-        self._check_modal_target(modal_target)
+        self._check_modal_target(
+            modal_target, dismiss=(isinstance(target, Point) and button == MouseButton.LEFT
+                                   and count == 1 and not modifiers))
         with _linux_input.held(modifiers):
             _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
         if select_parent is not None:

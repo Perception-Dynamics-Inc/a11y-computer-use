@@ -20296,3 +20296,86 @@ def test_gecko_modal_collection_failure_keeps_bounded_fallback(fake_atspi, monke
         assert caught.value.detail["reason"] == "modal_boundary_unavailable"
     else:
         assert _atspi.active_modals(frame) == [dialog]
+
+
+@pytest.mark.parametrize("kind", [
+    "empty", "backdrop", "control", "control_child", "missing", "small",
+    "native", "missing_bounds", "foreign_document", "zero_modal_bounds",
+])
+def test_modal_single_coordinate_dismiss_boundary(modal_boundary_tree, monkeypatch, kind):
+    from a11y_computer_use.schema import Click, Drag, Scroll, MouseButton
+    from a11y_computer_use import outcome
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    doc = _Acc("document web", width=800, height=600,
+               states=("SHOWING", "VISIBLE", "FOCUSABLE"))
+    backdrop = _Acc("section", width=800, height=600,
+                    states=("SHOWING", "VISIBLE"))
+    _adopt(doc, bg, backdrop, modal)
+    _adopt(frame, doc)
+    if kind in {"backdrop", "small"}:
+        backdrop.get_action_iface = bg.get_action_iface
+    if kind == "small":
+        _place_row(backdrop, 0, 0, 200, 150)
+    if kind == "native":
+        doc.role = "panel"
+    if kind == "control_child":
+        _adopt(bg, backdrop)
+    if kind == "missing_bounds":
+        backdrop.get_component_iface = lambda: None
+    if kind == "foreign_document":
+        _adopt(frame, doc, modal)
+    if kind == "zero_modal_bounds":
+        _place_row(modal, 300, 200, 0, 0)
+    hit = bg if kind == "control" else None if kind == "missing" else backdrop
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: hit)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    point = Point(0, 100, 110)
+    if kind in {"empty", "backdrop"}:
+        driver.check_modal_input(Click(point), "modal-test")
+    else:
+        # Preserve the #1013 background-control refusal on every attempt.
+        for _ in range(3):
+            with pytest.raises(ComputerUseError, match="outside_active_modal") as caught:
+                driver.check_modal_input(Click(point), "modal-test")
+            assert outcome.next_for_error("unsupported", caught.value.detail) == ()
+    for action in (Click(point, count=2), Click(point, button=MouseButton.RIGHT),
+                   Click(point, modifiers=("ctrl",)), Scroll(point), Drag(point, point)):
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            driver.check_modal_input(action, "modal-test")
+    assert calls == []
+
+
+def test_modal_dismiss_sends_exactly_one_requested_pointer_click(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.drivers import _linux_input, _linux_system
+    from a11y_computer_use.schema import Click
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    doc = _Acc("document web", width=800, height=600,
+               states=("SHOWING", "VISIBLE", "FOCUSABLE"))
+    _adopt(doc, bg, modal)
+    _adopt(frame, doc)
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: doc)
+    monkeypatch.setattr(_linux_system, "frontmost_app_id", lambda: "modal-test")
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    sent = []
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **kw: sent.append((x, y, kw)))
+    point = Point(0, 100, 110)
+    with driver.input_context(Click(point)):
+        driver.check_modal_input(Click(point), "modal-test")
+        driver.click(point)
+    assert sent == [(100, 110, {"button": "left", "count": 1})]
+    assert calls == []
+
+
+def test_modal_dismiss_missing_owner_retains_hit_ancestry_guard(modal_boundary_tree, monkeypatch):
+    from a11y_computer_use.schema import Click
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: None)
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: bg)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    with pytest.raises(ComputerUseError, match="outside_active_modal"):
+        driver.check_modal_input(Click(Point(0, 100, 110)), "modal-test")
+    assert calls == []
