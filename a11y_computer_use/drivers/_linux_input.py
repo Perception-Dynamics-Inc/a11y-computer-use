@@ -635,12 +635,15 @@ def _hops(x1: int, y1: int, x2: int, y2: int) -> list[tuple[int, int]]:
 WHEEL_NOTCH_INTERVAL_S = 0.12
 
 
-def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
+def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0,
+           notch_interval_s: float = WHEEL_NOTCH_INTERVAL_S) -> None:
     """Wheel-notch input: X buttons 4/5 vertical, 6/7 horizontal.
 
     One tap per integer line unit, not a verified pixel or row distance.
     Sync each tap before pacing the next so Qt Quick does not coalesce
-    a queued burst. Positive dy scrolls content up (wheel down).
+    a queued burst. Search-only Chromium bursts may request shorter pacing;
+    their caller verifies fresh visible rows after the burst. Positive dy
+    scrolls content up (wheel down).
     """
     from Xlib import X
 
@@ -649,7 +652,7 @@ def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
     for delta, positive, negative in ((dy, 5, 4), (dx, 7, 6)):
         for _ in range(abs(int(delta))):
             if not first:
-                _wheel_sleep(WHEEL_NOTCH_INTERVAL_S)
+                _wheel_sleep(notch_interval_s)
             button = positive if delta > 0 else negative
             _fake(X.ButtonPress, button)
             _fake(X.ButtonRelease, button)

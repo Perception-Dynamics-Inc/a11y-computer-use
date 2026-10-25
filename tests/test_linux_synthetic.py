@@ -20248,6 +20248,16 @@ def test_click_menu_dismissal_invalidates_modal_discovery(modal_boundary_tree, m
         assert driver.menu_close("modal-test") == ["File"]
 
 
+def test_chromium_search_burst_keeps_each_notch_synced(xtest_recorder, monkeypatch):
+    events, _display = xtest_recorder
+    timeline = []
+    monkeypatch.setattr(_linux_input, "_flush", lambda: timeline.append(("sync", len(events))))
+    monkeypatch.setattr(_linux_input, "_wheel_sleep", lambda seconds: timeline.append(("sleep", seconds)))
+    _linux_input.scroll(100, 200, dy=3, notch_interval_s=0.008)
+    assert timeline == [("sync", 3), ("sleep", 0.008), ("sync", 5), ("sleep", 0.008), ("sync", 7)]
+    assert [event[1] for event in events if event[0] == _X_BPRESS] == [5, 5, 5]
+
+
 @pytest.mark.parametrize("page_modal", [False, True])
 def test_gecko_modal_discovery_queries_documents_not_content(fake_atspi, monkeypatch, page_modal):
     background = _Acc("push button", name="Background")

@@ -2486,7 +2486,8 @@ def test_scroll_to_find_stops_a_list_that_makes_no_progress(monkeypatch) -> None
     assert scrolls == [-5]
 
 
-def test_scroll_to_find_stops_at_the_hard_ceiling_while_still_moving(monkeypatch) -> None:
+@pytest.mark.parametrize("requested_budget", [15, 90])
+def test_scroll_to_find_stops_at_the_hard_ceiling_while_still_moving(monkeypatch, requested_budget) -> None:
     """Synthetic snapshots, not a live Chrome page.
 
     Every step reveals a new head, so the 15s no-progress cap keeps
@@ -2520,8 +2521,10 @@ def test_scroll_to_find_stops_at_the_hard_ceiling_while_still_moving(monkeypatch
     monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
     monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
 
-    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
-    assert out.startswith("not found after 12 scroll(s) (time budget 120s)")
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=requested_budget)
+    assert out.startswith(f"not found after 12 scroll(s) (time budget {requested_budget}s)")
+    assert "120s hard limit" in out
+    assert "call again to continue" in out
     assert "ITEM-388 scroll-row" in out
     assert len(scrolls) == 12
     assert clock["t"] == 1120.0
