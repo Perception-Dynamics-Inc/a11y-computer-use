@@ -55,3 +55,21 @@ baseline must be equal or faster in every row. Updating app pins or promoting
 the PR job to required needs a calibration report; two weeks without false
 failures is the spec's promotion target. This repository cannot configure
 GitHub branch-protection settings through a workflow.
+
+The Wikipedia stylesheet is frozen alongside its HTML. The loopback server
+sends a CSP that blocks external requests, including on a provisioned box where
+Docker's network isolation is unavailable. The R2 effect check reads the native
+window title set by the sorter after a changed row order; it does not require an
+unrelated second full-page snapshot from the old baseline after DOM reordering.
+
+For a separate five-sample Runtime modal diagnostic and a Return-key profile:
+
+```bash
+bash scripts/latency/session.sh /path/to/head/bin/python \
+  scripts/latency/modal_probe.py --profile-return /tmp/return.prof
+```
+
+Use `--unsafe-baseline` with the 0.4.76 wheel. To measure pre-fix main with the
+same fixture, run the script with `PYTHONPATH` pointing to that checkout. This
+diagnostic reports every sample and verifies each click's effect; its timings
+are separate from the seven-sample MCP/CLI gate.

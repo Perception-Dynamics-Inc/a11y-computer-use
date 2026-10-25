@@ -56,6 +56,7 @@ async def sample(row, head):
         elif row == "R2":
             page = home / "seven-summits.html"
             page.write_bytes(gzip.decompress((FIXTURES / "seven-summits.html.gz").read_bytes())
+                             + b"<style>" + gzip.decompress((FIXTURES / "seven-summits.css.gz").read_bytes()) + b"</style>"
                              + b"<script>" + (FIXTURES / "offline-sort.js").read_bytes() + b"</script>")
             (home / "user.js").write_text('user_pref("browser.aboutwelcome.enabled",false);user_pref("browser.shell.checkDefaultBrowser",false);user_pref("browser.startup.homepage_override.mstone","ignore");user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification",true);')
             args = [os.environ.get("FIREFOX", "firefox"), "--no-remote", "--profile", temp, page.as_uri()]
@@ -67,6 +68,12 @@ async def sample(row, head):
         class QuietHandler(http.server.SimpleHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def end_headers(self):
+                self.send_header("Content-Security-Policy",
+                    "default-src 'none'; script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline'; img-src data:; frame-src 'self'")
+                super().end_headers()
         shutil.copyfile(FIXTURES / "controls.html", home / "controls.html")
         http_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
             functools.partial(QuietHandler, directory=temp))
@@ -140,7 +147,10 @@ async def sample(row, head):
                                                    env=env, capture_output=True, text=True, check=True)
                             elapsed = time.perf_counter() - start
                             assert "refused" not in reply.stdout
-                            assert "Offline sort confirmed" in await snapshot(), reply.stdout
+                            # The fixture changes this native window title only
+                            # after the real table row order actually changes.
+                            assert any("Offline sort confirmed" in w.get("title", "")
+                                       for w in _linux_system.windows()), reply.stdout
                         elif row == "R8":
                             driver = LinuxDriver()
                             snap = driver.snapshot(Scope.WINDOW, app)
