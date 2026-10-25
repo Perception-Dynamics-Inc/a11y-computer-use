@@ -6585,3 +6585,65 @@ def test_display_clipped_ref_click_never_advises_retry(tmp_path, monkeypatch, ve
         assert result.outcome == "unverifiable"
         assert result.next == ()
         assert "display-clipped" in result.evidence
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("change", ["hidden", "clipped", "recycled", "missing_identity", "previously_refused"])
+def test_snapshot_rebinds_renumbered_surviving_controls(
+    monkeypatch, mocked_driver, store, audit_dir, mode, change,
+):
+    """Fresh printed refs work after pruning, without authorizing recycled rows."""
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Hide Probe", None, None, "before")
+    controls = tuple(
+        Element(f"e{i}", "AXButton" if title else "AXTextField", title, "" if not title else None,
+                Bounds(1, 10, i * 30, 150, 25), "before", parent="e1",
+                clickable=bool(title), editable=not title,
+                node_identity=(":1.2", f"/accessible/{i}"))
+        for i, title in enumerate(("Alpha", "Beta", "Gamma", ""), 2)
+    )
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, *controls))
+    surviving = tuple(dataclasses.replace(
+        el, ref=f"e{i}", snapshot_id="after",
+        bounds=Bounds(1, 20, i * 25, 120, 20) if change == "clipped" else el.bounds,
+        node_identity=() if change == "missing_identity" else el.node_identity,
+        row_identity=(("row", "replacement"),) if change in {"recycled", "previously_refused"} else el.row_identity,
+    ) for i, el in enumerate((controls[0], controls[2], controls[3]), 2))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(window, *surviving))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        focused = []
+        monkeypatch.setattr(runtime.driver, "focus_for_type", lambda el: focused.append(el) or True)
+        runtime.desktop_snapshot(APP, mode=mode)
+        if change == "previously_refused":
+            current[0] = dataclasses.replace(before, snapshot_id="recycled", elements=(
+                window, *controls[:2],
+                dataclasses.replace(controls[2], row_identity=(("row", "replacement"),)),
+                controls[3],
+            ))
+            runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = after
+        for _ in range(2):
+            rendered = runtime.desktop_snapshot(APP, mode=mode)
+            if change in {"recycled", "missing_identity", "previously_refused"}:
+                with pytest.raises(ComputerUseError) as caught:
+                    runtime.click(ref="e3")
+                assert caught.value.detail["reason"] == "target_changed"
+                assert mocked_driver["click"] == []
+                return
+            if mode != "diff":
+                assert 'e3 button "Gamma"' in rendered
+                assert 'e4 textfield' in rendered
+            for element in surviving:
+                assert runtime._anchor(element.ref) == (after, element)
+            runtime.click(ref="e2")
+            runtime.click(ref="e3")
+            runtime.type_text(text="hi", ref="e4")
+        assert [target.title for target, _ in mocked_driver["click"]] == [
+            "Alpha", "Gamma", "Alpha", "Gamma",
+        ]
+        assert mocked_driver["type"] == ["hi", "hi"]
+        assert focused == [surviving[-1], surviving[-1]]

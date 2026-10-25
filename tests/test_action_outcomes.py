@@ -9,6 +9,7 @@ the pid has to really exit.
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
 import sys
 import time
@@ -445,6 +446,8 @@ def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path,
 
     driver = TreeDriver()
     driver.name = "linux"
+    # Keep liveness checks independent of unrelated host processes at PID 4242.
+    driver.pid = os.getpid()
 
     def press(element: Element) -> bool:
         driver.calls.append(("press", element.ref))
