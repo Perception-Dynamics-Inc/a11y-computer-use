@@ -1416,3 +1416,21 @@ Text/Value interfaces are readable absences; failed reads of supported
 interfaces remain unknown. Oversized, opaque or timed-out reads never authorize
 retry hints. A verified Geany row selection retains its partial receipt without
 retry advice; opaque ref clicks retain crop/screenshot guidance.
+
+For web search entries that replace themselves on focus, Linux `type(ref)` and
+`set_value(ref)` can continue on the focused replacement after their own focus
+request. The original must be detached; the replacement must have the same
+native role and accessible name, overlap the original measured bounds, and be
+showing, editable, non-secure, and inside the same native document and window.
+The write and text read-back use the replacement, and the next snapshot/find
+walk reads the live child tree. A later focus-loss refusal can use the captured
+identity to recover a delayed remount; retrying insertion requires an empty,
+readable replacement so partially delivered text is not duplicated. A different name, document, window, or existing
+peer field still refuses before text input. Ordinary stale-ref identity checks
+remain in effect. This handoff is synthetic-tested and live-verified in Chrome
+on a local input-swapping page through both LinuxDriver and Runtime.
+
+At input time, if a split Chromium modal Collection query fails on a wide
+subtree, Linux also tries a complete query on that same subtree before bounded
+enumeration. Both query failures still leave the boundary unknown and refuse
+input if enumeration cannot finish within the existing safety bound.

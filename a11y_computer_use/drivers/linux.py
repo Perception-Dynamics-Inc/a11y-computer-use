@@ -3749,6 +3749,8 @@ class LinuxDriver:
         if self._run(lambda: _atspi._blocks_text_replace(handle)):
             restore()
             raise _not_editable(element)
+        context = self._run(lambda: _atspi.web_entry_context(handle))
+        handle = self._focus_web_entry(element, handle, context=context)
         # EditableText replace, or X11 clear-and-type when that interface is
         # missing. Success is the snapshot text read (Text.get_text 0, -1),
         # not a bounded read that can echo the request. A write that does not
@@ -3757,7 +3759,15 @@ class LinuxDriver:
         # A failed write restores the pre-call caret after set_text's own
         # restore, which can itself select the document.
         try:
-            success = self._run(lambda: _atspi.set_text(handle, value))
+            try:
+                success = self._run(lambda: _atspi.set_text(handle, value))
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                    raise
+                handle = self._focus_web_entry(
+                    element, handle, context=context, request_focus=False,
+                )
+                success = self._run(lambda: _atspi.set_text(handle, value))
         except Exception:
             restore()
             raise
@@ -4755,7 +4765,9 @@ class LinuxDriver:
         is written through EditableText on that accessible. When that
         interface is missing or leaves the field unchanged, keystrokes are
         sent only while focus stays on it, and the read-back is that same
-        accessible.
+        accessible. A detached web entry may hand off to a focused, editable
+        replacement with the same role/name, document/window identity and
+        overlapping measured bounds; read-back then uses that replacement.
         """
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -4773,6 +4785,7 @@ class LinuxDriver:
         # Ref typing goes through type_into, not type_text; announce here so
         # type(ref=...) shows the same overlay as click/scroll/set_value.
         self._visible_action(element, "Type")
+        context = self._run(lambda: _atspi.web_entry_context(handle))
         if self._run(lambda: _atspi.drawing_text_editable(handle)):
             # The paragraph often has no Component. Focus lands on it or on
             # the shape panel, and EditableText inserts on the paragraph.
@@ -4795,9 +4808,14 @@ class LinuxDriver:
                 _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
             ))
             if not math_focused:
+                handle = self._focus_web_entry(element, handle, context=context)
                 self._run(lambda: _atspi.grab_focus(handle))
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
-                raise self._focus_lost_on(element)
+                if context is None:
+                    raise self._focus_lost_on(element)
+                handle = self._focus_web_entry(
+                    element, handle, context=context, request_focus=False,
+                )
         self._focused_editable = handle
         peers: dict = {}
         try:
@@ -4805,12 +4823,39 @@ class LinuxDriver:
         except Exception:
             peers = {}
         try:
-            count = self._type_confirmed_handle(handle, text)
+            try:
+                count = self._type_confirmed_handle(handle, text)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                    raise
+                replacement = self._focus_web_entry(
+                    element, handle, context=context, request_focus=False,
+                )
+                # Retrying insertion is safe only on an empty remount; never
+                # duplicate a partially delivered payload in a surviving field.
+                if self._run(lambda: _atspi._full_text(replacement)) != "":
+                    raise self._focus_lost_on(element)
+                handle = replacement
+                self._focused_editable = handle
+                count = self._type_confirmed_handle(handle, text)
         except ComputerUseError as exc:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
         self._raise_if_peers_changed(handle, peers, element)
         return count
+
+    def _focus_web_entry(self, element: Element, handle, *, context=None,
+                         request_focus: bool = True):
+        """Bind this operation's read-back to a verified focus replacement."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        live = self._run(lambda: _atspi.focus_web_entry(
+            handle, context=context, request_focus=request_focus,
+        ))
+        if live is not handle:
+            observe._HANDLES.get(element.snapshot_id, {})[element.ref] = live
+        return live
 
     def _focus_lost_on(self, element: Element) -> ComputerUseError:
         return ComputerUseError(
