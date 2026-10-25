@@ -22,7 +22,7 @@ structured content. The agent loop reads the attributes.
   disabled or secure control, a failed confirmation).
 
 ``next`` is an ordered list drawn from ``ref``, ``coordinates``, ``cdp``,
-``keyboard``, and ``foreground``.
+``keyboard``, ``foreground``, and ``window``.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ OUTCOMES = frozenset({
     "refused",
 })
 
-STRATEGIES = ("ref", "coordinates", "cdp", "keyboard", "foreground")
+STRATEGIES = ("ref", "coordinates", "cdp", "keyboard", "foreground", "window")
 
 # A provider cannot authorize retry by simply omitting an inconvenient signal.
 # Non-applicable signals must be positively known empty, not missing/None.

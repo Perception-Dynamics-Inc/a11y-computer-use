@@ -608,3 +608,5 @@
 - 2026-10-25 (PR #1107 repair): Synthetic Linux Runtime tests that exercise process-liveness checks must use a controlled PID. A fixed fake PID can belong to an unrelated short-lived macOS CI process and turn an unchanged caret verdict into a process-exit receipt. Use the test process PID when the scenario requires a live target.
 
 - 2026-10-26 (PR #1107 CI repair): A bounded worker must recompute remaining time after Thread.start; scheduler delay during startup otherwise gets added to the original join budget. For modal snapshot marking, reported containment in every active modal proves membership without window/document classification; retain the full classification for outside targets and refresh ancestry on each traversal.
+
+- 2026-10-26 (PR #1115 repair): Display-edge ref recovery and fresh public ref rebinding protect different cases. Preserve both regression groups when merging: unresolved old refs need measured overflow guidance, while newly issued surviving refs must remain usable after pruning renumbers them.
