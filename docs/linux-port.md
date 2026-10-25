@@ -1514,3 +1514,12 @@ snapshot is unavailable. An already open dialog or incomplete native read does
 not establish that the command opened a dialog. Unverifiable outcomes carry no
 alternate-input retry hints. These cases are covered by hermetic driver and
 Runtime tests; this receipt has not been live-verified in LibreOffice.
+
+When a fresh window snapshot reports that the window extends beyond the
+displays, Linux ref-resolution failures use `not_visible` with reason
+`window_beyond_display` and `next: ["window"]`. Use `window list`, then
+`window move` or `window resize`, and observe again before acting. This refusal
+also applies to an editable whose ref cannot be rematched after display-edge
+pruning; it sends no text. A click on a display-clipped ref whose effect remains
+unconfirmed returns `unverifiable` with no retry hints, since delivery may
+already have triggered the control. Confirmed effects retain their result.

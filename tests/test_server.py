@@ -6557,3 +6557,31 @@ def test_menu_capture_uses_addressed_app(monkeypatch, store, audit_dir, mocked_d
     monkeypatch.setattr(rt, "_reread", lambda *args: None)
     rt.menu(APP, "Tools > Options...")
     assert captures == [APP]
+
+
+@pytest.mark.parametrize("clipped", [True, False])
+@pytest.mark.parametrize("verdict", ["suspected_noop", "partial", "confirmed"])
+def test_display_clipped_ref_click_never_advises_retry(tmp_path, monkeypatch, verdict, clipped):
+    from dataclasses import replace
+    from a11y_computer_use import outcome
+
+    driver = _HoverDriver()
+    snap = build_synthetic_snapshot(app="editor")
+    target = Element("e2", "AXButton", "Tile Two", None,
+                     Bounds(0, 1270 if clipped else 300, 150, 80, 30), snap.snapshot_id, clickable=True)
+    from a11y_computer_use.schema import Display
+    snap = replace(snap, elements=(target,), displays=(Display(0, 1280, 800, 1., True),))
+    driver.snapshot = lambda *args, **kwargs: snap
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = snap
+    monkeypatch.setattr(rt, "_run_gated", lambda action, app, execute, **kw: driver.click(action.target) or "clicked e2")
+    monkeypatch.setattr(rt, "_conclude", lambda text, **kw: outcome.ActionResult(
+        text, outcome=verdict, next=("coordinates",), evidence="scoped read"))
+    result = rt.click(ref="e2")
+    assert driver.clicked == [target]
+    if verdict == "confirmed" or not clipped:
+        assert result.outcome == verdict
+    else:
+        assert result.outcome == "unverifiable"
+        assert result.next == ()
+        assert "display-clipped" in result.evidence

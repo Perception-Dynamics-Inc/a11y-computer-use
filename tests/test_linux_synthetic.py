@@ -21256,3 +21256,46 @@ def test_spa_outer_route_change_refuses_iframe_control(monkeypatch):
         LinuxDriver().resolve_ref(old, button.ref, live=live)
     assert caught.value.detail["reason"] == "route_changed"
     assert caught.value.detail["old_url"] == outer.document_route
+
+
+@pytest.mark.parametrize("role,title,occupant", [
+    ("AXButton", "Beta", "Alpha"),
+    ("AXTextField", "", None),
+])
+@pytest.mark.parametrize("window_changed", [True, False])
+@pytest.mark.parametrize("overflow", [True, False])
+def test_linux_clipped_window_ref_failure_names_window_recovery(
+    monkeypatch, role, title, occupant, overflow, window_changed,
+):
+    from dataclasses import replace
+    from a11y_computer_use import outcome
+
+    window = Element("e1", "AXWindow", "Geom Probe", None,
+                     Bounds(0, 300, 100, 560, 420), "old",
+                     context_identity=("frame", ":1.42", "/window"))
+    target = Element("e2", role, title, None, Bounds(0, 400, 200, 100, 30),
+                     "old", parent="e1", path=(0,))
+    old = Snapshot("old", Scope.WINDOW, "python3", 42, 0., (), (window, target))
+    note = ("window extends beyond the displays; off-screen controls may be omitted. "
+            "Use window list, then window resize or window move to bring them on screen")
+    current_window = replace(
+        window, snapshot_id="live", content_note=note if overflow else "",
+        context_identity=("frame", ":1.42", "/other") if window_changed else window.context_identity,
+    )
+    elements = (current_window,)
+    if occupant is not None:
+        elements += (replace(target, snapshot_id="live", title=occupant),)
+    live = replace(old, snapshot_id="live", elements=elements)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *args: None)
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(old, "e2", live=live)
+    error = caught.value
+    if overflow and not window_changed:
+        assert error.code is ErrorCode.NOT_VISIBLE
+        assert error.detail["reason"] == "window_beyond_display"
+        assert "window resize or window move" in str(error)
+        assert "reordered" not in str(error)
+        assert outcome.next_for_error(error.code.value, error.detail) == ("window",)
+    else:
+        assert error.code is ErrorCode.STALE_REF
