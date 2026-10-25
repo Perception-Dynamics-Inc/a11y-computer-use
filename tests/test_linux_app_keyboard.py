@@ -320,3 +320,70 @@ def test_omitted_app_still_types_into_the_frontmost_window(tmp_path, no_bus, mon
     assert rt.type_text("hi") == "typed 2 characters"
     assert driver.focused == []
     assert driver.typed == ["hi"]
+
+
+@pytest.mark.parametrize("verb", ["type", "key"])
+@pytest.mark.parametrize("app", ["python3", "chrome"])
+def test_addressed_input_reads_after_activation_despite_cached_baseline(
+    tmp_path, monkeypatch, no_bus, verb, app,
+):
+    from dataclasses import replace
+    from tests.test_action_outcomes import _tree
+
+    driver = _LinuxKeys(_rows(), active_id=1)
+    rt = _runtime(tmp_path, driver, app)
+    values = [""]
+    caret = [0]
+    reads = []
+
+    def snapshot(scope, target):
+        reads.append(driver.active_id)
+        elements = _tree()
+        elements[2] = replace(elements[2], value=values[0], focused=driver.active_id != 1)
+        return Snapshot(snapshot_id="fresh", app=target, scope=scope, elements=tuple(elements),
+                        pid=0, created_at=0.0, displays=())
+
+    driver.snapshot = snapshot
+    stale = snapshot(Scope.WINDOW, app)
+    rt._current = stale
+    rt._remember_baseline(stale)
+    monkeypatch.setattr(rt, "_guard_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rt, "_active_type_selection", lambda *args: None)
+    monkeypatch.setattr(rt, "_key_focus_probe", lambda *args: (
+        values[0], caret[0], 0, 0, None,
+    ) if driver.active_id != 1 else None)
+    monkeypatch.setattr(rt, "_writer_key_probe", lambda *args: None)
+    monkeypatch.setattr(rt, "_sheet_key_probe", lambda *args: None)
+
+    def deliver(payload):
+        assert driver.active_id != 1
+        assert reads[-1] == driver.active_id
+        if verb == "type":
+            values[0] += "x"
+        else:
+            caret[0] = 1
+        return 1
+
+    driver.type_text = deliver
+    driver.key_chord = deliver
+    result = rt.type_text("x", app=app) if verb == "type" else rt.key("x", app=app)
+    assert result.outcome == "confirmed", result.evidence
+    assert result.next == ()
+    assert values == (["x"] if verb == "type" else [""])
+    assert driver.focused == ([2] if app == "chrome" else [4])
+
+
+@pytest.mark.parametrize("verb", ["type", "key"])
+def test_addressed_input_with_unreadable_activated_window_has_no_retry(
+    tmp_path, monkeypatch, no_bus, verb,
+):
+    driver = _LinuxKeys(_rows(), active_id=1)
+    rt = _runtime(tmp_path, driver, "chrome")
+    monkeypatch.setattr(rt, "_reread", lambda *args: None)
+    monkeypatch.setattr(rt, "_key_focus_probe", lambda *args: None)
+    result = rt.type_text("x", app="chrome") if verb == "type" else rt.key("End", app="chrome")
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert "re-observe first" in result.evidence
+    assert driver.typed == (["x"] if verb == "type" else [])
+    assert driver.chords == (["End"] if verb == "key" else [])
