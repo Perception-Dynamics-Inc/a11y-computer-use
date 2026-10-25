@@ -10621,7 +10621,9 @@ def build_server(
         screen_text (o7: the screen is re-read and the text re-found), or a raw
         x/y point in physical pixels (display_id defaults to the main display).
         Linux refuses ref and coordinate input outside a showing native or ARIA
-        modal with outside_active_modal; close it or use controls inside it.
+        modal with outside_active_modal, except one plain left coordinate click
+        on a measured web backdrop or empty outside area in the same document.
+        Background control hits remain refused, with no automatic retry hints.
         On Linux text-field double clicks verify exact selected text and offsets;
         unreadable selection outcomes are unverifiable with no retry hints.
         On Linux a declined accessibility press permits pointer fallback only
