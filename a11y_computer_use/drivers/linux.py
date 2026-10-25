@@ -21,6 +21,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 from a11y_computer_use.schema import (
@@ -40,6 +41,9 @@ from a11y_computer_use.schema import (
     Target,
     WaitCondition,
 )
+
+
+_CLICK_MODAL_CACHE = ContextVar("linux_click_modal_cache", default=None)
 
 
 _ISSUE_ROW_IDENTITIES = ContextVar("linux_issue_row_identities", default=True)
@@ -1291,9 +1295,12 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi, _atspi_events, _dbus_guard
 
+        context = _CLICK_MODAL_CACHE.get()
+        modal_cache = context[1] if context is not None and context[0] is self else None
+
         def once():
             def wrapped():
-                with _atspi.read_cache():
+                with _atspi.input_modal_cache(modal_cache), _atspi.read_cache():
                     return fn()
 
             # The cache opt-in routes every call. A wait that has started the
@@ -2776,10 +2783,25 @@ class LinuxDriver:
             },
         )
 
+    @contextmanager
+    def input_context(self, action):
+        """Share modal discovery only within one immediate Runtime click."""
+        from a11y_computer_use.schema import Click
+
+        token = _CLICK_MODAL_CACHE.set((self, {})) if isinstance(action, Click) else None
+        try:
+            yield
+        finally:
+            if token is not None:
+                _CLICK_MODAL_CACHE.reset(token)
+
     def _check_modal_target(self, target, *, app: str | None = None) -> None:
         """Check live native ancestry before any ref or pointer input."""
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi, _linux_system
+
+        context = _CLICK_MODAL_CACHE.get()
+        cache = context[1] if context is not None and context[0] is self else None
 
         def check():
             handle = (observe.ax_handle_for(target.snapshot_id, target.ref)
@@ -2788,12 +2810,20 @@ class LinuxDriver:
             if isinstance(target, Element) and handle is None and app is None:
                 return  # press_element cannot dispatch without a native handle.
             if isinstance(target, Point):
+                if cache is not None:
+                    owner = app or _linux_system.frontmost_app_id()
+                    root = _atspi.find_root(owner, Scope.WINDOW)
+                    # No modal means no boundary hit test or settlement wait.
+                    if not _atspi.input_modals(root, cache):
+                        return False
                 x, y = _point_of(target)
                 handle = _atspi._accessible_at_point(int(x), int(y))
             if handle is None:
                 owner = app or _linux_system.frontmost_app_id()
                 root = _atspi.find_root(owner, Scope.WINDOW)
-            return _atspi.refuse_outside_modal(handle, root)
+            if cache is None:
+                return _atspi.refuse_outside_modal(handle, root)
+            return _atspi.refuse_outside_modal(handle, root, modal_cache=cache)
 
         def probe():
             try:
@@ -5461,6 +5491,9 @@ class LinuxDriver:
             raise _wayland_input_error("key_chord")
         from a11y_computer_use.drivers import _linux_system
 
+        context = _CLICK_MODAL_CACHE.get()
+        if context is not None and context[0] is self:
+            context[1].clear()  # A menu-dismissal key can change modal presence.
         _linux_system.refuse_unviewable_input()
         # Return in a file chooser's location entry closes the dialog and
         # leaves the file unchosen. Activate Open or Save instead, and do
@@ -6412,6 +6445,9 @@ class LinuxDriver:
         def read() -> dict:
             return self._run(lambda: _linux_menus.menu_state(root))
 
+        context = _CLICK_MODAL_CACHE.get()
+        if context is not None and context[0] is self:
+            context[1].clear()
         return _linux_menus.menu_close(root, state=read)
 
     def file_dialog(self, verb: object, path: str, app: str) -> dict:

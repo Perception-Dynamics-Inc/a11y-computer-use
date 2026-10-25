@@ -1222,6 +1222,12 @@ blocking after the walk, without a recursive Collection query or a separate
 search through table, tree, or list rows. Chromium document searches retain
 pre-reveal descendant modal discovery. Input-time modal checks remain in effect.
 
+Within one Runtime click, modal discovery is shared by the gate and driver
+checks for the same native window. With no modal, coordinates need no modal
+hit test or settlement retries. Open modals still require settled target
+ancestry checks. The cache ends with the click (including errors); native
+actions and menu-dismissal keys invalidate it before further input.
+
 Collection discovery is scoped to the addressed window, with native sibling
 windows checked separately. At input time, discovery walks structural containers
 and queries subtrees with more than 64 children before walking their rows.
