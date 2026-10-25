@@ -8200,6 +8200,42 @@ def _poll_typed_text(
     return seen
 
 
+def opaque_office_toolbar_focus(app: str) -> bool:
+    """Identify unreadable embedded toolbar controls, including Calc's Name Box.
+
+    Missing or truncated focus discovery is not evidence of this shape.
+    These keystrokes must not be verified as selected-cell edits.
+    """
+    if not libreoffice_app(app):
+        return False
+    try:
+        acc, truncated = _focused_node(app)
+        if truncated or acc is None or _role_name(acc) not in {"panel", "combo box"}:
+            return False
+        if is_secure(acc):
+            return False
+        interfaces = _call_first(acc, ("get_interfaces",))
+        has_text = interfaces is None or any(
+            str(interface).rsplit(".", 1)[-1] in {"Text", "EditableText"}
+            for interface in interfaces
+        )
+        # libatspi may return an empty sentinel even without a Text interface.
+        if has_text and _readable_text(acc) is not None:
+            return False
+        for _ in range(12):
+            acc = _parent_of(acc)
+            if acc is None:
+                return False
+            role = _role_name(acc)
+            if role == "tool bar":
+                return True
+            if role not in {"panel", "combo box", "filler"}:
+                return False
+    except Exception:
+        return False
+    return False
+
+
 def focused_editable(app: str, *, max_nodes: int = 400):
     """The focused node when `type` can insert into it, else None.
 

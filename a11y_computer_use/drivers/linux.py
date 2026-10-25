@@ -1259,6 +1259,7 @@ class LinuxDriver:
         # frame could be read. The outcome judge consumes these once.
         self._drawing_type_before: str | None = None
         self._drawing_type_state: str | None = None
+        self._opaque_toolbar_type: tuple[str, str] | None = None
         self._type_unverified: bool = False
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
@@ -4683,6 +4684,7 @@ class LinuxDriver:
         self._drawing_type_before = None
         self._drawing_type_state = None
         self._type_unverified = False
+        self._opaque_toolbar_type = None
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -4710,6 +4712,20 @@ class LinuxDriver:
             except Exception:
                 import logging
                 logging.getLogger(__name__).debug("Visible typing feedback failed", exc_info=True)
+        if (
+            handle is None and app_id
+            and self._run(lambda: _atspi.opaque_office_toolbar_focus(app_id))
+        ):
+            if _on_wayland():
+                raise _wayland_input_error("type_text (opaque toolbar control)")
+            self._refuse_xtest_password_focus()
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.type_string(text)
+            # Delivery is not effect verification. Bind this one-use receipt
+            # to the app/payload so Runtime cannot compare a different cell.
+            self._opaque_toolbar_type = (app_id, text)
+            return len(text)
         if app_id:
             # The find field latches this process even when the open bar is
             # not in a snapshot. scroll_to_find types and closes it first.

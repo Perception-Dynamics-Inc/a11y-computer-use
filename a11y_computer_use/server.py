@@ -3045,6 +3045,16 @@ class Runtime:
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
     ) -> tuple[str, str]:
+        opaque = getattr(self.driver, "_opaque_toolbar_type", None)
+        if opaque is not None:
+            self.driver._opaque_toolbar_type = None
+        if (
+            getattr(self.driver, "name", None) == "linux"
+            and requested is not None and opaque == (app, requested.replace("\r\n", "\n"))
+        ):
+            if self._process_died(before):
+                return "partial", "the target process exited after the action"
+            return "unverifiable", "keys sent to an unreadable toolbar control; effect unverified"
         settled = getattr(self.driver, "_math_type_readback", None)
         if settled is not None:
             self.driver._math_type_readback = None
@@ -3597,6 +3607,9 @@ class Runtime:
             )
         no_retry = copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable" and "text selection" in evidence
+        ) or (
+            tool == "type" and judged == "unverifiable"
+            and evidence == "keys sent to an unreadable toolbar control; effect unverified"
         )
         browser = getattr(self.driver, "name", None) == "browser"
         return outcome.ActionResult(
@@ -10707,7 +10720,10 @@ def build_server(
         a ref: the focused editable is looked up and inserted with the same
         helper. A CRLF is one newline; the reported count is the number of
         characters the field read back, and a mismatch is an error rather
-        than success.         LibreOffice Calc is confirmed from the open cell
+        than success. Unreadable LibreOffice toolbar controls (including the
+        opaque Calc Name Box) send the requested keys once and return
+        unverifiable without grid-edit polling. LibreOffice Calc is otherwise
+        confirmed from the open cell
         editor or the selected cell's text. A tab or newline grid is read
         back from every cell it touched, starting at the cell that was
         active before typing. The read waits until those cells publish
