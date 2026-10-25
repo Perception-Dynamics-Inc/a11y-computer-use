@@ -1,0 +1,1485 @@
+{
+  "base": "e09b18e8d970b117593a1b48f6e61b67f87b0010",
+  "patched_atspi_sha256": "4e3353314852affd18b10179e5a50a3b5dbc2719d86154fed17b17415a7092ef",
+  "wheel_sha256": "b3081933c90b824a56e2df7d1405a5d304713c1937a51bedd1ef87a1c599b262",
+  "note": "Pre-fix main and patched source each paired with the fixed wheel in separate interleaved runs. Pre-fix CPUs 2,3; patched CPUs 0,1. Every completed distribution and the aborted Chrome warm-up are preserved. Absolute timings vary; use paired ratios.",
+  "pre_fix": {
+    "baseline": "0.4.76",
+    "commit": "e09b18e8d970b117593a1b48f6e61b67f87b0010",
+    "samples": 7,
+    "warmups": 2,
+    "rows": {
+      "R12-find": {
+        "baseline": {
+          "median": 1.1818133679917082,
+          "minimum": 1.035752133000642,
+          "maximum": 1.5496294290060177,
+          "iqr": 0.11689438548637554,
+          "samples": [
+            1.286427589977393,
+            1.2408230360015295,
+            1.5496294290060177,
+            1.1658153460011818,
+            1.1818133679917082,
+            1.1276465090049896,
+            1.035752133000642
+          ]
+        },
+        "head": {
+          "median": 2.360496110020904,
+          "minimum": 2.1621654070040677,
+          "maximum": 2.605707781011006,
+          "iqr": 0.16381083348824177,
+          "samples": [
+            2.510963848006213,
+            2.3155553420074284,
+            2.605707781011006,
+            2.360496110020904,
+            2.2468536450178362,
+            2.1621654070040677,
+            2.379066805995535
+          ]
+        },
+        "ratio": 1.9973509980109359,
+        "status": "fail",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 1.286427589977393,
+                "outcome": null
+              },
+              {
+                "seconds": 1.2408230360015295,
+                "outcome": null
+              },
+              {
+                "seconds": 1.5496294290060177,
+                "outcome": null
+              },
+              {
+                "seconds": 1.1658153460011818,
+                "outcome": null
+              },
+              {
+                "seconds": 1.1818133679917082,
+                "outcome": null
+              },
+              {
+                "seconds": 1.1276465090049896,
+                "outcome": null
+              },
+              {
+                "seconds": 1.035752133000642,
+                "outcome": null
+              }
+            ],
+            "head": [
+              {
+                "seconds": 2.510963848006213,
+                "outcome": null
+              },
+              {
+                "seconds": 2.3155553420074284,
+                "outcome": null
+              },
+              {
+                "seconds": 2.605707781011006,
+                "outcome": null
+              },
+              {
+                "seconds": 2.360496110020904,
+                "outcome": null
+              },
+              {
+                "seconds": 2.2468536450178362,
+                "outcome": null
+              },
+              {
+                "seconds": 2.1621654070040677,
+                "outcome": null
+              },
+              {
+                "seconds": 2.379066805995535,
+                "outcome": null
+              }
+            ]
+          }
+        ]
+      },
+      "R12-click": {
+        "baseline": {
+          "median": 1.384923826000886,
+          "minimum": 1.2677687920222525,
+          "maximum": 1.4436404790030792,
+          "iqr": 0.1323943384923041,
+          "samples": [
+            1.4436404790030792,
+            1.4011916860181373,
+            1.384923826000886,
+            1.4335334030038211,
+            1.3013761000183877,
+            1.2677687920222525,
+            1.2685603120189626
+          ]
+        },
+        "head": {
+          "median": 2.6801443489966914,
+          "minimum": 2.6222301549860276,
+          "maximum": 3.026570982008707,
+          "iqr": 0.2822036260185996,
+          "samples": [
+            2.9609151059994474,
+            3.026570982008707,
+            2.885060846019769,
+            2.6801443489966914,
+            2.623968542990042,
+            2.6576001569919754,
+            2.6222301549860276
+          ]
+        },
+        "ratio": 1.9352287098243457,
+        "status": "fail",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 1.4436404790030792,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.4011916860181373,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.384923826000886,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.4335334030038211,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.3013761000183877,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.2677687920222525,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.2685603120189626,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              }
+            ],
+            "head": [
+              {
+                "seconds": 2.9609151059994474,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 3.026570982008707,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.885060846019769,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.6801443489966914,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.623968542990042,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.6576001569919754,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.6222301549860276,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "R13-key": {
+        "baseline": {
+          "median": 0.46756352798547596,
+          "minimum": 0.45955180600867607,
+          "maximum": 0.6005704349954613,
+          "iqr": 0.01996267549111508,
+          "samples": [
+            0.48365471899160184,
+            0.46650080001563765,
+            0.6005704349954613,
+            0.45955180600867607,
+            0.46575232801842503,
+            0.46756352798547596,
+            0.488523760024691
+          ]
+        },
+        "head": {
+          "median": 0.5632158590015024,
+          "minimum": 0.55488334299298,
+          "maximum": 0.5928362109989394,
+          "iqr": 0.0061576034931931645,
+          "samples": [
+            0.55488334299298,
+            0.5632158590015024,
+            0.5564771259960253,
+            0.5662410399818327,
+            0.5616400360013358,
+            0.5928362109989394,
+            0.5641913290019147
+          ]
+        },
+        "ratio": 1.2045761170212526,
+        "status": "pass",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 0.48365471899160184,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.46650080001563765,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.6005704349954613,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.45955180600867607,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.46575232801842503,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.46756352798547596,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.488523760024691,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              }
+            ],
+            "head": [
+              {
+                "seconds": 0.55488334299298,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5632158590015024,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5564771259960253,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5662410399818327,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5616400360013358,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5928362109989394,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5641913290019147,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "correctness": {
+      "R9": {
+        "correct": true
+      },
+      "R10": {
+        "correct": true,
+        "refusals": 3,
+        "shortcuts_not_refused": [
+          "ctrl+l"
+        ]
+      }
+    },
+    "versions": {
+      "python": "3.13.5 (main, Aug 10 2026, 12:06:59) [GCC 14.2.0]",
+      "platform": "Linux-6.12.94+-x86_64-with-glibc2.41",
+      "native": "at-spi2-core=2.56.2-1+deb13u2\ngir1.2-gtk-3.0=3.24.49-3\nmousepad=0.6.3-1\nxfwm4=4.20.0-1\n",
+      "chrome": "Google Chrome 155.0.8059.84 ",
+      "firefox": "Mozilla Firefox 158.0.1",
+      "mousepad": "Mousepad 0.6.3"
+    },
+    "error": {
+      "build": "head",
+      "row": "R13-click",
+      "stderr": "Traceback (most recent call last):\n  File \"/tmp/ship1095-before/scripts/latency/sample.py\", line 258, in <module>\n    print(json.dumps(asyncio.run(sample(args.row, args.head))))\n                     ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.13/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ~~~~~~~~~~^^^^^^\n  File \"/usr/lib/python3.13/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\n  File \"/usr/lib/python3.13/asyncio/base_events.py\", line 725, in run_until_complete\n    return future.result()\n           ~~~~~~~~~~~~~^^\n  File \"/tmp/ship1095-before/scripts/latency/sample.py\", line 98, in sample\n    raise AssertionError((\"app registration\", log.name, process.poll()))\nAssertionError: ('app registration', '/tmp/a11y-latency-zifspm57/app.log', None)\n",
+      "stdout": ""
+    }
+  },
+  "patched_initial_run": {
+    "baseline": "0.4.76",
+    "commit": "e09b18e8d970b117593a1b48f6e61b67f87b0010",
+    "samples": 7,
+    "warmups": 2,
+    "rows": {
+      "R12-find": {
+        "baseline": {
+          "median": 1.6739564149756916,
+          "minimum": 1.2157838350103702,
+          "maximum": 2.757797968981322,
+          "iqr": 0.9951204094977584,
+          "samples": [
+            2.008572204009397,
+            1.6739564149756916,
+            2.757797968981322,
+            1.316226358001586,
+            1.2157838350103702,
+            1.2762188960041385,
+            2.5741138689918444
+          ]
+        },
+        "head": {
+          "median": 1.9093642180087045,
+          "minimum": 1.2904391899937764,
+          "maximum": 2.947735234978609,
+          "iqr": 1.114423703533248,
+          "samples": [
+            1.8078041329863481,
+            1.9093642180087045,
+            2.947735234978609,
+            2.947674448019825,
+            2.480827779014362,
+            1.2904391899937764,
+            1.3918506869813427
+          ]
+        },
+        "ratio": 1.140629589233619,
+        "status": "pass",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 2.008572204009397
+              },
+              {
+                "seconds": 1.6739564149756916
+              },
+              {
+                "seconds": 2.757797968981322
+              },
+              {
+                "seconds": 1.316226358001586
+              },
+              {
+                "seconds": 1.2157838350103702
+              },
+              {
+                "seconds": 1.2762188960041385
+              },
+              {
+                "seconds": 2.5741138689918444
+              }
+            ],
+            "head": [
+              {
+                "seconds": 1.8078041329863481
+              },
+              {
+                "seconds": 1.9093642180087045
+              },
+              {
+                "seconds": 2.947735234978609
+              },
+              {
+                "seconds": 2.947674448019825
+              },
+              {
+                "seconds": 2.480827779014362
+              },
+              {
+                "seconds": 1.2904391899937764
+              },
+              {
+                "seconds": 1.3918506869813427
+              }
+            ]
+          }
+        ]
+      },
+      "R12-click": {
+        "baseline": {
+          "median": 1.9207891039841343,
+          "minimum": 1.2449325369962025,
+          "maximum": 3.5511830520117655,
+          "iqr": 0.34415364496817347,
+          "samples": [
+            1.5638395830173977,
+            1.2449325369962025,
+            3.5511830520117655,
+            1.9962565599998925,
+            1.7371573200216517,
+            1.9207891039841343,
+            1.9930476329755038
+          ]
+        },
+        "head": {
+          "median": 2.30950346798636,
+          "minimum": 1.7011683579767123,
+          "maximum": 3.6885263019939885,
+          "iqr": 1.5118829680141062,
+          "samples": [
+            1.7011683579767123,
+            2.1706823839922436,
+            1.9663178359915037,
+            3.547439509013202,
+            3.6885263019939885,
+            3.6133266469987575,
+            2.30950346798636
+          ]
+        },
+        "ratio": 1.202372224621614,
+        "status": "pass",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 1.5638395830173977,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.2449325369962025,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 3.5511830520117655,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.9962565599998925,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.7371573200216517,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.9207891039841343,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.9930476329755038,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [
+                    "ref",
+                    "coordinates",
+                    "keyboard",
+                    "foreground"
+                  ],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              }
+            ],
+            "head": [
+              {
+                "seconds": 1.7011683579767123,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.1706823839922436,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 1.9663178359915037,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 3.547439509013202,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 3.6885263019939885,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 3.6133266469987575,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              },
+              {
+                "seconds": 2.30950346798636,
+                "outcome": {
+                  "outcome": "partial",
+                  "next": [],
+                  "evidence": "the row was selected and activates on double-click"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "R13-key": {
+        "baseline": {
+          "median": 0.48578253597952425,
+          "minimum": 0.46820277301594615,
+          "maximum": 0.5439867610111833,
+          "iqr": 0.014262990502174944,
+          "samples": [
+            0.4824476960056927,
+            0.46820277301594615,
+            0.48578253597952425,
+            0.4881933729921002,
+            0.5439867610111833,
+            0.5017085750005208,
+            0.4789282709825784
+          ]
+        },
+        "head": {
+          "median": 0.5934772010077722,
+          "minimum": 0.5669101490057074,
+          "maximum": 1.2068935049755964,
+          "iqr": 0.08382042699668091,
+          "samples": [
+            0.5934772010077722,
+            0.5669101490057074,
+            0.7003468630136922,
+            0.5756748740095645,
+            0.6291267210035585,
+            0.5861578560143244,
+            1.2068935049755964
+          ]
+        },
+        "ratio": 1.2216931590821687,
+        "status": "pass",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 0.4824476960056927,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.46820277301594615,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.48578253597952425,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.4881933729921002,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5439867610111833,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5017085750005208,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.4789282709825784,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              }
+            ],
+            "head": [
+              {
+                "seconds": 0.5934772010077722,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5669101490057074,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.7003468630136922,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5756748740095645,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.6291267210035585,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 0.5861578560143244,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              },
+              {
+                "seconds": 1.2068935049755964,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the Chromium page anchor or window changed"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "correctness": {
+      "R9": {
+        "correct": true
+      },
+      "R10": {
+        "correct": true,
+        "refusals": 3,
+        "shortcuts_not_refused": [
+          "ctrl+l"
+        ]
+      }
+    },
+    "versions": {
+      "python": "3.13.5 (main, Aug 10 2026, 12:06:59) [GCC 14.2.0]",
+      "platform": "Linux-6.12.94+-x86_64-with-glibc2.41",
+      "native": "at-spi2-core=2.56.2-1+deb13u2\ngir1.2-gtk-3.0=3.24.49-3\nmousepad=0.6.3-1\nxfwm4=4.20.0-1\n",
+      "chrome": "Google Chrome 155.0.8059.84 ",
+      "firefox": "Mozilla Firefox 158.0.1",
+      "mousepad": "Mousepad 0.6.3"
+    },
+    "error": {
+      "build": "head",
+      "row": "R13-click",
+      "stderr": "Processing request of type CallToolRequest\nProcessing request of type ListToolsRequest\nProcessing request of type CallToolRequest\n  + Exception Group Traceback (most recent call last):\n  |   File \"/tmp/ship-1095/scripts/latency/sample.py\", line 261, in <module>\n  |     print(json.dumps(asyncio.run(sample(args.row, args.head))))\n  |                      ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  |   File \"/usr/lib/python3.13/asyncio/runners.py\", line 195, in run\n  |     return runner.run(main)\n  |            ~~~~~~~~~~^^^^^^\n  |   File \"/usr/lib/python3.13/asyncio/runners.py\", line 118, in run\n  |     return self._loop.run_until_complete(task)\n  |            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^\n  |   File \"/usr/lib/python3.13/asyncio/base_events.py\", line 725, in run_until_complete\n  |     return future.result()\n  |            ~~~~~~~~~~~~~^^\n  |   File \"/tmp/ship-1095/scripts/latency/sample.py\", line 107, in sample\n  |     async with stdio_client(params) as (read, write):\n  |                ~~~~~~~~~~~~^^^^^^^^\n  |   File \"/usr/lib/python3.13/contextlib.py\", line 235, in __aexit__\n  |     await self.gen.athrow(value)\n  |   File \"/workspace/a11y-venv-codex/lib/python3.13/site-packages/mcp/client/stdio/__init__.py\", line 183, in stdio_client\n  |     anyio.create_task_group() as tg,\n  |     ~~~~~~~~~~~~~~~~~~~~~~~^^\n  |   File \"/workspace/a11y-venv-codex/lib/python3.13/site-packages/anyio/_backends/_asyncio.py\", line 847, in __aexit__\n  |     raise BaseExceptionGroup(\n  |         \"unhandled errors in a TaskGroup\", self._exceptions\n  |     ) from None\n  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)\n  +-+---------------- 1 ----------------\n    | Exception Group Traceback (most recent call last):\n    |   File \"/workspace/a11y-venv-codex/lib/python3.13/site-packages/mcp/client/stdio/__init__.py\", line 189, in stdio_client\n    |     yield read_stream, write_stream\n    |   File \"/tmp/ship-1095/scripts/latency/sample.py\", line 108, in sample\n    |     async with ClientSession(read, write) as session:\n    |                ~~~~~~~~~~~~~^^^^^^^^^^^^^\n    |   File \"/workspace/a11y-venv-codex/lib/python3.13/site-packages/mcp/shared/session.py\", line 238, in __aexit__\n    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)\n    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |   File \"/workspace/a11y-venv-codex/lib/python3.13/site-packages/anyio/_backends/_asyncio.py\", line 847, in __aexit__\n    |     raise BaseExceptionGroup(\n    |         \"unhandled errors in a TaskGroup\", self._exceptions\n    |     ) from None\n    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)\n    +-+---------------- 1 ----------------\n      | Traceback (most recent call last):\n      |   File \"/tmp/ship-1095/scripts/latency/sample.py\", line 178, in sample\n      |     assert outcomes[-1] and outcomes[-1][\"outcome\"] == \"confirmed\", (receipt, outcomes[-1])\n      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n      | AssertionError: (\"clicked e34 (AXButton 'Go') via AT-SPI doAction(press)\\n[slow call: click took 382.5 s. If this repeats and the app was not busy, report it: report_issue(kind='bottleneck', tool='click', ...)]\", {'outcome': 'unverifiable', 'next': [], 'evidence': 'the accessibility state could not be read; re-observe first (snapshot/screenshot)'})\n      +------------------------------------\n",
+      "stdout": ""
+    }
+  },
+  "patched_chrome_fresh_run": {
+    "baseline": "0.4.76",
+    "commit": "e09b18e8d970b117593a1b48f6e61b67f87b0010",
+    "working_tree_dirty": true,
+    "atspi_sha256": "4e3353314852affd18b10179e5a50a3b5dbc2719d86154fed17b17415a7092ef",
+    "samples": 7,
+    "warmups": 2,
+    "rows": {
+      "R13-click": {
+        "baseline": {
+          "median": 2.7545763100206386,
+          "minimum": 2.333119866991183,
+          "maximum": 3.318221495981561,
+          "iqr": 0.14715494051051792,
+          "samples": [
+            2.77356681402307,
+            2.707287267985521,
+            2.7545763100206386,
+            3.318221495981561,
+            2.5718431929999497,
+            2.333119866991183,
+            2.7998735279834364
+          ]
+        },
+        "head": {
+          "median": 2.7964021139778197,
+          "minimum": 2.6396233379782643,
+          "maximum": 3.0564334130031057,
+          "iqr": 0.1037536220101174,
+          "samples": [
+            2.7964021139778197,
+            3.0564334130031057,
+            2.712464360985905,
+            2.7692160260048695,
+            2.823986164003145,
+            2.6396233379782643,
+            2.8652014670078643
+          ]
+        },
+        "ratio": 1.0151841151777232,
+        "status": "pass",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 2.77356681402307,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.707287267985521,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.7545763100206386,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 3.318221495981561,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.5718431929999497,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.333119866991183,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.7998735279834364,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              }
+            ],
+            "head": [
+              {
+                "seconds": 2.7964021139778197,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 3.0564334130031057,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.712464360985905,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.7692160260048695,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.823986164003145,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.6396233379782643,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              },
+              {
+                "seconds": 2.8652014670078643,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "the accessibility state changed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "R13-type": {
+        "baseline": {
+          "median": 3.114312627003528,
+          "minimum": 2.9086024209973402,
+          "maximum": 3.842194508004468,
+          "iqr": 0.16204787000606302,
+          "samples": [
+            3.1726209800108336,
+            3.0123505490191747,
+            3.114312627003528,
+            3.202491825009929,
+            2.9086024209973402,
+            3.038666515989462,
+            3.842194508004468
+          ]
+        },
+        "head": {
+          "median": 3.3697061800048687,
+          "minimum": 3.3002251660218462,
+          "maximum": 181.68479458999354,
+          "iqr": 0.07089295049081556,
+          "samples": [
+            3.3699805439973716,
+            3.3554776899982244,
+            181.68479458999354,
+            3.4578481599746738,
+            3.33056511299219,
+            3.3697061800048687,
+            3.3002251660218462
+          ]
+        },
+        "ratio": 1.082006395500207,
+        "status": "pass",
+        "attempts": [
+          {
+            "baseline": [
+              {
+                "seconds": 3.1726209800108336,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.0123505490191747,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.114312627003528,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.202491825009929,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 2.9086024209973402,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.038666515989462,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.842194508004468,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              }
+            ],
+            "head": [
+              {
+                "seconds": 3.3699805439973716,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.3554776899982244,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 181.68479458999354,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.4578481599746738,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.33056511299219,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.3697061800048687,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              },
+              {
+                "seconds": 3.3002251660218462,
+                "outcome": {
+                  "outcome": "confirmed",
+                  "next": [],
+                  "evidence": "read back 'world'"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "correctness": {
+      "R9": {
+        "correct": true
+      },
+      "R10": {
+        "correct": true,
+        "refusals": 3,
+        "shortcuts_not_refused": [
+          "ctrl+l"
+        ]
+      }
+    },
+    "versions": {
+      "python": "3.13.5 (main, Aug 10 2026, 12:06:59) [GCC 14.2.0]",
+      "platform": "Linux-6.12.94+-x86_64-with-glibc2.41",
+      "native": "at-spi2-core=2.56.2-1+deb13u2\ngir1.2-gtk-3.0=3.24.49-3\nlibreoffice-gtk3=4:25.2.3-2+deb13u8\nlibreoffice-writer=4:25.2.3-2+deb13u8\nmousepad=0.6.3-1\nxfwm4=4.20.0-1\n",
+      "chrome": "Google Chrome 155.0.8059.84 ",
+      "firefox": "Mozilla Firefox 158.0.1",
+      "mousepad": "Mousepad 0.6.3"
+    }
+  },
+  "profiles": {
+    "wheel": {
+      "find": {
+        "seconds": 2.258830956008751,
+        "receipt": "[snap-7] soffice.bin: 1 match(es)\n  e15 cell \"Fonts\" =\"Fonts\" (click) (activates on double-click) [220x23 @0:160,251]",
+        "dispatched_adapter_methods": 11439,
+        "native_worker": {
+          "_call_first_inline": {
+            "calls": 20288,
+            "cumulative_seconds": 1.2809081690000002
+          },
+          "find_root": {
+            "calls": 1,
+            "cumulative_seconds": 0.016562803
+          },
+          "_fresh_application_children": {
+            "calls": 4,
+            "cumulative_seconds": 0.0034192650000000003
+          },
+          "snapshot_window_list": {
+            "calls": 1,
+            "cumulative_seconds": 0.0023639480000000003
+          },
+          "build_snapshot": {
+            "calls": 2,
+            "cumulative_seconds": 2.179692755
+          }
+        }
+      },
+      "click": {
+        "seconds": 2.0801578249956947,
+        "receipt": "clicked e15 (AXCell 'Fonts') (activates on double-click)",
+        "dispatched_adapter_methods": 11852,
+        "native_worker": {
+          "_call_first_inline": {
+            "calls": 20751,
+            "cumulative_seconds": 1.1195786140000001
+          },
+          "find_root": {
+            "calls": 4,
+            "cumulative_seconds": 0.07331069600000001
+          },
+          "_fresh_application_children": {
+            "calls": 12,
+            "cumulative_seconds": 0.007763321
+          },
+          "snapshot_window_list": {
+            "calls": 1,
+            "cumulative_seconds": 0.001765967
+          },
+          "build_snapshot": {
+            "calls": 2,
+            "cumulative_seconds": 1.631419187
+          }
+        }
+      }
+    },
+    "before": {
+      "find": {
+        "seconds": 3.584683622000739,
+        "receipt": "[snap-7] soffice.bin: 1 match(es)\n  e15 cell \"Fonts\" =\"Fonts\" (click) (activates on double-click) [220x23 @0:160,251]",
+        "dispatched_adapter_methods": 12696,
+        "native_worker": {
+          "_call_first_inline": {
+            "calls": 40425,
+            "cumulative_seconds": 1.464923417
+          },
+          "build_snapshot": {
+            "calls": 2,
+            "cumulative_seconds": 3.049305904
+          },
+          "find_root": {
+            "calls": 1,
+            "cumulative_seconds": 0.011639783
+          },
+          "outside_modals": {
+            "calls": 895,
+            "cumulative_seconds": 1.604108053
+          },
+          "_fresh_application_children": {
+            "calls": 6,
+            "cumulative_seconds": 0.0035638370000000003
+          },
+          "snapshot_window_list": {
+            "calls": 1,
+            "cumulative_seconds": 0.002104915
+          }
+        }
+      },
+      "click": {
+        "seconds": 4.281288616999518,
+        "receipt": "clicked e15 (AXCell 'Fonts') (activates on double-click)",
+        "dispatched_adapter_methods": 13827,
+        "native_worker": {
+          "_call_first_inline": {
+            "calls": 42697,
+            "cumulative_seconds": 1.728971043
+          },
+          "build_snapshot": {
+            "calls": 2,
+            "cumulative_seconds": 3.247010105
+          },
+          "find_root": {
+            "calls": 4,
+            "cumulative_seconds": 0.069960652
+          },
+          "active_modals": {
+            "calls": 1,
+            "cumulative_seconds": 0.17409863
+          },
+          "outside_modals": {
+            "calls": 898,
+            "cumulative_seconds": 1.5788001150000002
+          },
+          "_fresh_application_children": {
+            "calls": 14,
+            "cumulative_seconds": 0.008918777000000001
+          },
+          "snapshot_window_list": {
+            "calls": 1,
+            "cumulative_seconds": 0.002266746
+          }
+        }
+      }
+    },
+    "after": {
+      "find": {
+        "seconds": 2.053965789003996,
+        "receipt": "[snap-7] soffice.bin: 1 match(es)\n  e15 cell \"Fonts\" =\"Fonts\" (click) (activates on double-click) [220x23 @0:160,251]",
+        "native_worker": {
+          "build_snapshot": {
+            "calls": 2,
+            "cumulative_seconds": 1.9610882980000002
+          },
+          "_call_first_inline": {
+            "calls": 29770,
+            "cumulative_seconds": 1.261368249
+          },
+          "find_root": {
+            "calls": 1,
+            "cumulative_seconds": 0.010136917
+          },
+          "outside_modals": {
+            "calls": 895,
+            "cumulative_seconds": 0.291454092
+          },
+          "_fresh_application_children": {
+            "calls": 6,
+            "cumulative_seconds": 0.0034043650000000003
+          },
+          "snapshot_window_list": {
+            "calls": 1,
+            "cumulative_seconds": 0.001857939
+          }
+        },
+        "dispatched_adapter_methods": 12678
+      },
+      "click": {
+        "seconds": 2.455098951002583,
+        "receipt": "clicked e15 (AXCell 'Fonts') (activates on double-click)",
+        "native_worker": {
+          "build_snapshot": {
+            "calls": 2,
+            "cumulative_seconds": 1.9281009160000002
+          },
+          "_call_first_inline": {
+            "calls": 32042,
+            "cumulative_seconds": 1.385096893
+          },
+          "find_root": {
+            "calls": 4,
+            "cumulative_seconds": 0.044989106
+          },
+          "active_modals": {
+            "calls": 1,
+            "cumulative_seconds": 0.11711338600000001
+          },
+          "outside_modals": {
+            "calls": 898,
+            "cumulative_seconds": 0.29596278600000003
+          },
+          "_fresh_application_children": {
+            "calls": 14,
+            "cumulative_seconds": 0.009389859
+          },
+          "snapshot_window_list": {
+            "calls": 1,
+            "cumulative_seconds": 0.0017547930000000002
+          }
+        },
+        "dispatched_adapter_methods": 13809
+      }
+    }
+  },
+  "safety": {
+    "1013_background_click_refusals": 3,
+    "1084_native_implicit_type_refusals": 3,
+    "1084_aria_implicit_type_refusals": 3,
+    "1097_parent_click_refusals": 3,
+    "1097_parent_type_refusals": 3,
+    "1097_parent_set_value_refusals": 3,
+    "1097_parent_unchanged": true,
+    "1097_inside_type_outcome": "confirmed"
+  },
+  "libreoffice_versions": "libreoffice-gtk3=4:25.2.3-2+deb13u8\nlibreoffice-writer=4:25.2.3-2+deb13u8\n"
+}

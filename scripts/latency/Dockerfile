@@ -3,7 +3,7 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git xz-utils python3 python3-venv python3-gi \
     gir1.2-atspi-2.0 gir1.2-gtk-3.0 at-spi2-core=2.56.2-1+deb13u2 \
-    mousepad=0.6.3-1 xfwm4=4.20.0-1 xvfb xauth dbus-x11 xdotool \
+    libreoffice-writer=4:25.2.3-2+deb13u8 libreoffice-gtk3=4:25.2.3-2+deb13u8 mousepad=0.6.3-1 xfwm4=4.20.0-1 xvfb xauth dbus-x11 xdotool \
     fonts-liberation libasound2t64 libdbus-glib-1-2 libgtk-3-0 libnss3 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_155.0.8059.84-1_amd64.deb -o /tmp/chrome.deb \

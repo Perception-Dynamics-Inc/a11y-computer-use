@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,10 +10,13 @@ import subprocess
 import sys
 import platform
 
-from compare import verdict
+if __package__:
+    from .compare import verdict
+else:
+    from compare import verdict
 
 ROOT = Path(__file__).resolve().parents[2]
-ROWS = ("R1", "R1-iframe", "R2", "R5", "R7", "R8")
+ROWS = ("R1", "R1-iframe", "R2", "R5", "R7", "R8", "R12-find", "R12-click", "R13-click", "R13-type", "R13-key")
 
 
 def main():
@@ -25,10 +29,12 @@ def main():
     if hasattr(os, "sched_setaffinity"):
         os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
     report = dict(baseline="0.4.76", commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                  working_tree_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
+                  atspi_sha256=hashlib.sha256((ROOT / "a11y_computer_use/drivers/_atspi.py").read_bytes()).hexdigest(),
                   samples=7, warmups=2, rows={}, correctness={},
                   versions={"python": sys.version, "platform": platform.platform(),
                             "native": subprocess.check_output(["dpkg-query", "-W", "-f=${Package}=${Version}\n",
-                                "at-spi2-core", "mousepad", "xfwm4", "gir1.2-gtk-3.0"], text=True)})
+                                "at-spi2-core", "mousepad", "xfwm4", "gir1.2-gtk-3.0", "libreoffice-writer", "libreoffice-gtk3"], text=True)})
     for app, command in {"chrome": [os.environ.get("CHROME", "google-chrome"), "--version"],
                          "firefox": [os.environ.get("FIREFOX", "firefox"), "--version"],
                          "mousepad": ["mousepad", "--version"]}.items():

@@ -1,0 +1,11 @@
+<!doctype html><title>Latency Lab</title>
+<h1>Latency Lab</h1><p id="st">clicks=0 submits=0</p>
+<form onsubmit="event.preventDefault();s++;up()"><label>Name <input id="nm" aria-label="Name" type="text" oninput="up()"></label></form>
+<button id="go" onclick="c++;up()">Go</button>
+<nav aria-label="Site" style="display:flex;flex-wrap:wrap;gap:4px"></nav><ul></ul>
+<script>
+let c=0,s=0;
+function up(){st.textContent='clicks='+c+' submits='+s+' name='+nm.value;document.title='Latency Lab c='+c+' s='+s}
+for(let i=0;i<60;i++){let a=document.createElement('a');a.href='#n'+i;a.textContent='Nav '+i;document.querySelector('nav').append(a)}
+for(let i=0;i<1500;i++){let li=document.createElement('li');li.innerHTML='<a href="#i'+i+'">Link item '+i+'</a> text '+i;document.querySelector('ul').append(li)}
+</script>

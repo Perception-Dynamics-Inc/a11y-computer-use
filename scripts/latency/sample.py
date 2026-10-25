@@ -54,14 +54,18 @@ async def sample(row, head):
         home = Path(temp)
         env = dict(os.environ, HOME=temp, XDG_CACHE_HOME=str(home / "cache"),
                    A11Y_VISIBLE_ACTIONS="0", NO_AT_BRIDGE="0", GTK_MODULES="gail:atk-bridge")
-        app = "bigtree" if row == "R5" else "mousepad" if row == "R7" else "firefox" if row == "R2" else "chrome"
+        app = ("soffice.bin" if row.startswith("R12-") else "bigtree" if row == "R5"
+               else "mousepad" if row == "R7" else "firefox" if row == "R2" else "chrome")
         store = safety.PermissionStore(home / ".a11y-computer-use" / "permissions.json")
         for alias in (app, "firefox-bin" if app == "firefox" else app,
                       "python3" if app == "bigtree" else app,
                       "python3.13" if app == "bigtree" else app,
                       "python" if app == "bigtree" else app):
             store.set_tier(alias, safety.Tier.FULL)
-        if row == "R5":
+        if row.startswith("R12-"):
+            args = ["libreoffice", "-env:UserInstallation=" + (home / "lo").as_uri(),
+                    "--writer", "--norestore"]
+        elif row == "R5":
             args = [sys.executable, str(FIXTURES / "bigtree.py"), "20000"]
         elif row == "R7":
             args = ["mousepad", "--disable-server"]
@@ -92,7 +96,8 @@ async def sample(row, head):
             functools.partial(QuietHandler, directory=temp))
         threading.Thread(target=http_server.serve_forever, daemon=True).start()
         if app in {"chrome", "firefox"}:
-            page_name = {"R2": "seven-summits.html", "R1": "top.html", "R1-iframe": "ifr.html"}.get(row, "controls.html")
+            page_name = {"R2": "seven-summits.html", "R1": "top.html", "R1-iframe": "ifr.html",
+                         **{f"R13-{op}": "latbig.html" for op in ("click", "type", "key")}}.get(row, "controls.html")
             args[-1] = f"http://127.0.0.1:{http_server.server_port}/{page_name}"
         with open(home / "app.log", "w") as log:
             process = subprocess.Popen(args, env=env, stdout=log, stderr=log, start_new_session=True)
@@ -114,10 +119,13 @@ async def sample(row, head):
                 async with stdio_client(params) as (read, write):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
+                        outcomes = []
                         async def call(tool, **kwargs):
                             reply = await session.call_tool(tool, kwargs)
                             text = "\n".join(getattr(c, "text", "") for c in reply.content)
                             assert not reply.isError, (tool, kwargs, text)
+                            if tool in {"click", "type", "key"}:
+                                outcomes.append(getattr(reply, "structuredContent", None))
                             return text
                         async def snapshot():
                             return await call("desktop_snapshot", app=app, scope="window", mode="full")
@@ -139,7 +147,49 @@ async def sample(row, head):
                             assert len(children) == 1, children
                             return dict(seconds=elapsed, rss_kib=children[0])
                         text = await snapshot()
-                        if row == "R7":
+                        if row.startswith("R12-"):
+                            # Fixture setup only: use the real Tools > Options menu.
+                            await call("app", name=app, action="focus")
+                            subprocess.run(["xdotool", "key", "--clearmodifiers", "alt+t"], check=True)
+                            await asyncio.sleep(.5)
+                            subprocess.run(["xdotool", "key", "o"], check=True)
+                            ready = time.monotonic() + 15
+                            while True:
+                                text = await snapshot()
+                                if 'dialog "Options' in text:
+                                    break
+                                assert time.monotonic() < ready, text
+                                await asyncio.sleep(.1)
+                            if row == "R12-find":
+                                start = time.perf_counter()
+                                receipt = await call("find", app=app, text="Fonts", role="cell")
+                                elapsed = time.perf_counter() - start
+                                assert 'cell "Fonts"' in receipt, receipt
+                            else:
+                                found = await call("find", app=app, text="Fonts", role="cell")
+                                start = time.perf_counter()
+                                receipt = await call("click", ref=ref(found, 'cell "Fonts"'))
+                                elapsed = time.perf_counter() - start
+                                after = await snapshot()
+                                assert re.search(r'cell "Fonts"[^\n]*selected', after), (receipt, after)
+                                assert outcomes[-1] and outcomes[-1]["outcome"] == "partial", (receipt, outcomes[-1])
+                        elif row.startswith("R13-"):
+                            if row == "R13-key":
+                                await call("type", ref=ref(text, 'textfield "Name"'), text="hello")
+                            start = time.perf_counter()
+                            if row == "R13-click":
+                                receipt = await call("click", ref=ref(text, 'button "Go"'))
+                                expected = "c=1 s=0"
+                            elif row == "R13-type":
+                                receipt = await call("type", ref=ref(text, 'textfield "Name"'), text="world")
+                                expected = "name=world"
+                            else:
+                                receipt = await call("key", app=app, chord="Return")
+                                expected = "c=0 s=1"
+                            elapsed = time.perf_counter() - start
+                            assert outcomes[-1] and outcomes[-1]["outcome"] == "confirmed", (receipt, outcomes[-1])
+                            assert expected in await snapshot(), receipt
+                        elif row == "R7":
                             await call("click", ref=ref(text, '"Help"'))
                             text = await snapshot()
                             target = ref(text, '"About')
@@ -201,7 +251,7 @@ async def sample(row, head):
                             return dict(correct=True, refusals=3, shortcuts_not_refused=["ctrl+l"])
                         else:
                             raise ValueError(row)
-                        return dict(seconds=elapsed)
+                        return dict(seconds=elapsed, outcome=outcomes[-1] if outcomes else None)
             finally:
                 import signal
                 try:
