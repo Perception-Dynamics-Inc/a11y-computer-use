@@ -2163,9 +2163,11 @@ class LinuxDriver:
 
         def read():
             root = handle
+            document = False
             for _ in range(32):
                 role = _atspi._role_name(root)
                 if role.startswith("document"):
+                    document = True
                     break
                 parent = _atspi._parent_of(root)
                 if parent is None or _atspi._role_name(parent) in {"frame", "window", "application"}:
@@ -2174,7 +2176,10 @@ class LinuxDriver:
                 if _atspi.is_secure(parent):
                     return None
                 root = parent
-            return _atspi.read_text_selections(root)
+            # Without a document, read only the focused node (#1181): a
+            # focused 20k-row native tree would spend the whole budget
+            # walking rows and still be unreadable.
+            return _atspi.read_text_selections(root, subtree=document)
 
         rows = self._run(read)
         if not rows:
