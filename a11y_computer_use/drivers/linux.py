@@ -3720,6 +3720,7 @@ class LinuxDriver:
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None:
+            self._run(lambda: _atspi._refuse_gecko_date_segment_replace(handle))
             self._raise_handle_window(handle)
         peers: dict = {}
         if handle is not None:

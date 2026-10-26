@@ -10403,6 +10403,33 @@ _DATE_SEGMENT_POLLS = 16
 _DATE_SEGMENT_PAUSE_S = 0.05
 
 
+def _refuse_gecko_date_segment_replace(acc) -> None:
+    """Refuse Firefox date/time segment replacement before any mutation.
+
+    These spin buttons advertise EditableText and Value, but generic text
+    replacement can clear the segment and emit an empty input/change value.
+    Time inputs use a panel parent, not the date editor role. Identify the
+    native input type, never localized segment names or displayed digits.
+    """
+    if _role_name(acc) != "spin button" or not _gecko_app(acc):
+        return
+    for node in _ancestor_chain(acc, 8):
+        role = _role_name(node)
+        attrs = _get_attributes(node)
+        kind = str(attrs.get("text-input-type") or "").lower()
+        if role == "date editor" or (
+            str(attrs.get("tag") or "").lower() == "input"
+            and kind in _DATE_INPUT_TYPES
+        ):
+            raise _text_mismatch(
+                "unsafe_date_segment_replace",
+                "Firefox date/time segments cannot safely be replaced with set_value; "
+                "no value was written. Use type(ref, digits) and verify the complete date/time",
+            )
+        if role in {"document web", "document frame", "frame", "application"}:
+            break
+
+
 def _chrome_date_segment(acc) -> bool:
     """True for one segment of a Chrome date, time, or month input.
 
@@ -15382,6 +15409,7 @@ def set_numeric_value(acc, value: str) -> bool | str:
     percent literal is refused and the Value range is named. No keystrokes
     are sent for any of these.
     """
+    _refuse_gecko_date_segment_replace(acc)
     if value == "" and _number_input(acc):
         if _clear_number_input(acc):
             return True
@@ -17313,6 +17341,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     node and its document ancestors before the write. That restore sends
     no keys. Success leaves the caret where the write put it.
     """
+    _refuse_gecko_date_segment_replace(acc)
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
     _refuse_model_editor_replace(acc)
