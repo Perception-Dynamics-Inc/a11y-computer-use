@@ -21812,3 +21812,38 @@ def test_chrome_select_option_click_waits_for_late_expanded_clear(fake_atspi, mo
     _atspi.finish_chrome_select_option_click(item)
     assert keys == ["Escape"] * 4
     assert sum(sleeps) <= 0.8
+
+
+def test_chromium_collection_timeout_waits_for_the_app_before_walking(fake_atspi, monkeypatch):
+    """#1169: a 10,000-button Chrome page came back as one disabled window.
+
+    The native role query timed out after 300ms while Chrome kept filling
+    the document, so every walk read that followed also timed out. After a
+    timed-out query the app must answer a ping before the walk, and list
+    discovery must not ask that app's Collection again. Synthetic doubles.
+    """
+    roles = _NS(**{name: name for name in (
+        "LIST", "LIST_BOX", "TABLE", "TREE", "TREE_TABLE",
+        "DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER")})
+    api = _NS(Role=roles, StateSet=_NS(new=lambda states: states),
+              CollectionMatchType=_NS(NONE=0, ANY=1),
+              CollectionSortOrder=_NS(CANONICAL=0),
+              MatchRule=_NS(new=lambda *args: args))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: api)
+    monkeypatch.setattr(_atspi, "_COLLECTION_TIMED_OUT", set())
+    window = _Acc("frame")
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: (":1.9", "/w") if node is window else None)
+    events = []
+    def query(*args):
+        events.append("query")
+        raise RuntimeError("timeout from dbind")
+    window.get_collection_iface = lambda: _NS(get_matches=query)
+    monkeypatch.setattr(_atspi, "_ping_answers", lambda node: events.append(("ping", node)) or True)
+    _atspi._list_containers(window)
+    assert events == ["query", ("ping", window)]
+    events.clear()
+    _atspi._list_containers(window)
+    assert "query" not in events
+    events.clear()
+    assert _atspi._modal_collection(window) is None
+    assert events == ["query", ("ping", window)]
