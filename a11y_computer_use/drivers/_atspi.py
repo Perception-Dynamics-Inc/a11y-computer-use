@@ -22326,7 +22326,7 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
 
 
 def read_text_selections(
-    root: object, *, budget: float = 0.15,
+    root: object, *, budget: float = 0.15, subtree: bool = True,
 ) -> tuple[tuple[object, int, int, str], ...] | None:
     """Read native ranges and text in a caller-scoped subtree, without input.
 
@@ -22334,6 +22334,7 @@ def read_text_selections(
     readable empty selection, or None for incomplete/unavailable reads.
     The deadline bounds traversal between D-Bus calls, not a hung call.
     Secure subtrees and masked text sentinels are never read at offsets.
+    ``subtree=False`` reads ``root`` alone, without walking its children.
     """
     deadline = time.monotonic() + budget
     try:
@@ -22406,6 +22407,8 @@ def read_text_selections(
             if isinstance(count, int) and count > 0:
                 return None
         count = None
+        if not subtree:
+            break
         n = _call_first(node, ("get_child_count",), default=0) or 0
         for index in range(n):
             if time.monotonic() >= deadline:

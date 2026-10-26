@@ -196,14 +196,14 @@ def test_snapshot_selection_scoped_to_focused_document(native, monkeypatch):
     handles = {'e1': paragraph, 'e2': doc}
     monkeypatch.setattr(observe, 'ax_handle_for', lambda sid, ref: handles[ref])
     roots = []
-    def read(root):
-        roots.append(root)
+    def read(root, subtree=True):
+        roots.append((root, subtree))
         return ((paragraph, 6, 16, 'DRAGWORDK5'),)
     monkeypatch.setattr(_atspi, 'read_text_selections', read)
     el = replace(element(), focused=True)
     snap = Snapshot('range-test', Scope.WINDOW, 'editor', 1, 0, (), (el, replace(el, ref='e2', focused=False)))
     changed = driver(monkeypatch)._snapshot_selections(snap)
-    assert roots == [doc]
+    assert roots == [(doc, True)]
     assert "selection=[6, 16) 'DRAGWORDK5'" in changed.elements[0].note
     assert changed.elements[1] is snap.elements[1]
 
@@ -273,3 +273,26 @@ def test_selection_under_app_root_sharing_the_desktop_path_is_read(monkeypatch):
 def test_selection_ancestor_cycle_on_one_bus_is_still_unreadable(monkeypatch):
     text = _bus_path_tree(monkeypatch, ':1.5')
     assert _atspi.read_text_selections(text, budget=1) is None
+
+
+def test_native_snapshot_selection_reads_only_the_focused_node(native, monkeypatch):
+    # A focused native 20k-row tree has no document ancestor (#1181, R5).
+    frame = NS(get_role_name=lambda: 'frame')
+    pane = NS(get_role_name=lambda: 'scroll pane', get_parent=lambda: frame)
+    rows = [NS(get_role_name=lambda: 'table cell', get_child_count=lambda: 0) for _ in range(5)]
+    tree = NS(get_role_name=lambda: 'tree table', get_parent=lambda: pane,
+              get_child_count=lambda: pytest.fail('focused native tree rows walked'),
+              get_child_at_index=lambda i: rows[i])
+    monkeypatch.setattr(observe, 'ax_handle_for', lambda sid, ref: tree)
+    binding = NS(Text=NS())
+    monkeypatch.setattr(_atspi, '_atspi', lambda: binding)
+    monkeypatch.setattr(_atspi, 'is_secure', lambda node: False)
+    reads = []
+    def count(node):
+        reads.append(node)
+        raise NotImplementedError('no Text')
+    binding.Text.get_n_selections = count
+    el = replace(element(), focused=True)
+    snap = Snapshot('range-test', Scope.WINDOW, 'bigtree', 1, 0, (), (el,))
+    assert driver(monkeypatch)._snapshot_selections(snap) is snap
+    assert reads == [tree]
