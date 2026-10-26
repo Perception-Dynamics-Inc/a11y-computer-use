@@ -21781,3 +21781,34 @@ def test_gecko_select_in_dialog_closes_popup_without_escape(fake_atspi, monkeypa
         monkeypatch.setattr(_linux_input, "press_chord", press)
         _atspi._close_combo_popup(select)
         assert keys == ["Escape"]
+
+
+def test_chrome_select_option_click_waits_for_late_expanded_clear(fake_atspi, monkeypatch):
+    """Flake in test_linux_chrome_optgroup_select_click_closes_the_popup.
+
+    Chrome can clear the select's EXPANDED state a beat after the popup has
+    closed. After the close attempts, the state is re-read for a bounded time
+    with no further keys, so a late collapse is not reported as popup_open.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    item = _Acc("menu item", name="Lemon")
+    menu = _adopt(_Acc("menu"), item)
+    select = _adopt(_Acc("combo box", states=("SHOWING", "EXPANDED")), menu)
+    _adopt(_Acc("frame"), _adopt(_Acc("document web"), select))
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda node: False)
+    monkeypatch.setattr(_atspi, "_chromium_control", lambda node: True)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_do_action_named", lambda *a, **k: False)
+    keys, sleeps = [], []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 6:  # the collapse lands after the 4 close attempts
+            select.states.discard("EXPANDED")
+
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    _atspi.finish_chrome_select_option_click(item)
+    assert keys == ["Escape"] * 4
+    assert sum(sleeps) <= 0.8
