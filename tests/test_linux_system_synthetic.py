@@ -1844,3 +1844,22 @@ def test_active_transient_dialog_requires_exact_native_relationship(monkeypatch,
     _active_display(monkeypatch, wins, parent.id if change == "inactive" else child.id)
     assert _linux_system.active_transient_dialog(
         pid=200, title="Settings Modal", parent_title="Parent") is (change is None)
+
+
+@pytest.mark.parametrize("change", [None, "no-parent", "foreign", "duplicate-child", "duplicate-parent", "self"])
+def test_transient_parent_resolves_inactive_dialog_without_geometry(monkeypatch, change):
+    parent = _ClassWin(0x21, 200, title="Document B")
+    child = _ClassWin(0x22, 200, title="Go To")
+    other = _ClassWin(0x23, 200, title="Document A")
+    original = child.get_full_property
+    child.get_full_property = lambda atom, kind: (
+        None if change == "no-parent" else _NS(value=[child.id if change == "self" else parent.id])
+    ) if atom == "WM_TRANSIENT_FOR" else original(atom, kind)
+    if change == "foreign":
+        parent = _ClassWin(0x21, 999, title="Document B")
+    wins = [parent, child, other]
+    if change in {"duplicate-child", "duplicate-parent"}:
+        wins.append(_ClassWin(0x24, 200, title="Go To" if change == "duplicate-child" else "Document B"))
+    _active_display(monkeypatch, wins, other.id)
+    assert _linux_system.transient_parent_title(pid=200, title="Go To") == (
+        "Document B" if change is None else None)

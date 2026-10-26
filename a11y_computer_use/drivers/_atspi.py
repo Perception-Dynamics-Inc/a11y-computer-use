@@ -22171,6 +22171,53 @@ def _modal_collection(root, *, split: bool = False):
     return None
 
 
+def _native_modal_parent(modal):
+    """Reported owner of a native sibling modal, never inferred from overlap."""
+    parent = _chromium_modal_parent(modal)
+    if parent is not None:
+        return parent
+    chain = list(_ancestor_chain(modal))
+    # Embedded/page dialogs already have an ancestor boundary. Do not apply
+    # native window ownership to browser document modals.
+    if any(_role_name(node) in {"frame", "window", "document web", "document frame"}
+           for node in chain[1:]):
+        return None
+    key = ("native_modal_parent", ())
+    cached = _lookup_read_cache(modal, key)
+    if cached is not _CACHE_MISS:
+        return cached
+    parents = _relation_targets(modal, "subwindow_of")
+    parents = [node for node in parents if _role_name(node) in {"frame", "window", "dialog"}
+               and _ancestor_key(node) != _ancestor_key(modal)]
+    parent = parents[0] if len(parents) == 1 else None
+    if parent is None:
+        application = next((node for node in chain if _role_name(node) == "application"), None)
+        pid = pid_of(modal)
+        if application is not None and pid:
+            from a11y_computer_use.drivers import _linux_system
+            title = _linux_system.transient_parent_title(pid=pid, title=_node_name(modal))
+            if title:
+                matches = [node for node in _fresh_application_children(application)
+                           if _role_name(node) in {"frame", "window", "dialog"}
+                           and _node_name(node) == title and pid_of(node) == pid]
+                if len(matches) == 1:
+                    parent = matches[0]
+    _store_read_cache(modal, key, parent)
+    return parent
+
+
+def _modal_in_window(modal, root) -> bool:
+    """Exclude only a positively resolved, different native parent window."""
+    parent = _native_modal_parent(modal)
+    if parent is None:
+        return True
+    chain = list(_ancestor_chain(root))
+    keys = {_ancestor_key(node) for node in chain}
+    if _ancestor_key(modal) in keys or _ancestor_key(parent) in keys:
+        return True
+    return not any(_role_name(node) in {"frame", "window"} for node in chain)
+
+
 def snapshot_top_level_modals(root) -> list:
     """Inspect only the root and its application's immediate children.
 
@@ -22188,7 +22235,7 @@ def snapshot_top_level_modals(root) -> list:
                               if (child := _child_at(application, i)) is not None)
         else:
             candidates.extend(_fresh_application_children(application))
-    return [node for node in candidates if is_modal(node)]
+    return [node for node in candidates if is_modal(node) and _modal_in_window(node, root)]
 
 
 def active_modals(root, *, fallback: bool = True, point=None) -> list:
@@ -22309,7 +22356,7 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
     found = {}
     for node in candidates:
         key = _ancestor_key(node)
-        if key not in found and is_modal(node):
+        if key not in found and is_modal(node) and _modal_in_window(node, root):
             found[key] = node
     return list(found.values())
 
@@ -22410,7 +22457,7 @@ def _outside_modals(acc, modals, *, cache):
         context = cache.get(context_key) if cache is not None else None
         if context is None:
             modal_chain = _modal_chain(modal, cache)
-            context = (modal, _chromium_modal_parent(modal),
+            context = (modal, _native_modal_parent(modal),
                        next((node for node in modal_chain
                              if _role_name(node) in {"document web", "document frame"}), None),
                        next((node for node in modal_chain
