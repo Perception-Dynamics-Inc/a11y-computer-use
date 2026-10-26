@@ -21812,3 +21812,35 @@ def test_chrome_select_option_click_waits_for_late_expanded_clear(fake_atspi, mo
     _atspi.finish_chrome_select_option_click(item)
     assert keys == ["Escape"] * 4
     assert sum(sleeps) <= 0.8
+
+
+def test_chromium_tree_band_keeps_nested_items_under_their_rows(fake_atspi, monkeypatch):
+    """#1168: an 8-level Chrome ARIA tree listed 36 rows instead of 8.
+
+    Collection discovery (#1043) let the tree's in-view band take every
+    nested treeitem as a direct tree child, so each subtree was emitted
+    again. Only the tree's own rows may be re-parented. Synthetic chain.
+    """
+    tree = _Acc("tree", name="Files", width=400, height=200)
+    chain = []
+    parent = tree
+    for depth in range(1, 9):
+        item = _Acc("tree item", name="F" + ".1" * depth, width=400, height=16)
+        if parent is tree:
+            _adopt(tree, item)
+        else:
+            group = _Acc("panel")
+            _adopt(parent, group)
+            _adopt(group, item)
+        chain.append(item)
+        parent = item
+    sibling = _Acc("tree item", name="F.2", width=400, height=16)
+    _adopt(tree, sibling)
+    band = [(acc, (12, 100 + 16 * i), (400, 12)) for i, acc in enumerate(chain + [sibling])]
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_list_containers", lambda root: [tree])
+    monkeypatch.setattr(_atspi, "_shown_or_probe", lambda container: list(band))
+    accessor = _atspi.ATSPIAccessor()
+    accessor.refresh_visible(_Acc("frame"))
+    assert accessor._visible_children[id(tree)] == [chain[0], sibling]
+    assert id(chain[1]) not in accessor._visible_bounds
