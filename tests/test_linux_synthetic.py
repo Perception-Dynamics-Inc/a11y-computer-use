@@ -21480,3 +21480,29 @@ def test_fresh_confirmation_collection_supersedes_derived_modal_discovery(
     probe.hits.clear()
     assert probe.probe() == []
     assert _atspi.input_modals(probe.frame, {}) == []
+
+
+@pytest.mark.parametrize("path", [
+    b"/org/a11y/atspi/accessible/7",
+    b"/org/gtk/application/unknown/a11y/4c3cfe47_a3d2_4ae2_b040_37921f9e4e35",
+    b"/org/example/Editor/a11y/7",
+])
+def test_native_ref_identity_accepts_gtk4_application_paths(monkeypatch, path):
+    """#1130: GTK4 paths must supply real bus/object continuity for rebinding."""
+    import ctypes
+
+    object_type, application_type = _atspi._atspi_identity_layouts()
+    application = application_type()
+    application.bus_name = b":1.42"
+    native = object_type()
+    native.app = ctypes.addressof(application)
+    native.path = path
+    monkeypatch.setattr(_atspi, "_gobject_pointer", lambda handle: ctypes.addressof(native))
+    assert _atspi._atspi_wrapper_key(object()) == (":1.42", path.decode())
+    application.bus_name = b":1.43"
+    assert _atspi._atspi_wrapper_key(object()) == (":1.43", path.decode())
+    application.bus_name = b""
+    assert _atspi._atspi_wrapper_key(object()) is None
+    application.bus_name = b":1.42"
+    native.path = b""
+    assert _atspi._atspi_wrapper_key(object()) is None

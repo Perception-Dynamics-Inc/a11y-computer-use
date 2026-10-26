@@ -5810,7 +5810,11 @@ def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
     try:
         obj = _AtspiObject.from_address(pointer)
         raw_path = obj.path or b""
-        if not raw_path.startswith(b"/org/a11y/atspi/") or not obj.app:
+        # GTK4 exports accessibles below its application path (for example
+        # /org/gtk/application/.../a11y/UUID), not the ATK bridge prefix.
+        # The libatspi object already owns this D-Bus path; pair it with the
+        # unique bus name rather than discarding GTK4's native identity.
+        if not raw_path.startswith(b"/") or not obj.app:
             return None
         raw_bus = _AtspiApplication.from_address(obj.app).bus_name or b""
         if not raw_bus.startswith(b":"):
