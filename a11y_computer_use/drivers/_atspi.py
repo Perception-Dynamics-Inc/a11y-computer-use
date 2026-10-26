@@ -3531,11 +3531,103 @@ def _qt_character_viewport_text(acc, box=None) -> str | None:
 
 def _evince_page(node) -> bool:
     """Evince PDF pages have reliable SHOWING state, but drifting extents."""
-    if _role_name(node) != "page":
-        return False
+    return _role_name(node) == "page" and _evince_app(node)
+
+
+def _evince_app(node) -> bool:
     app = _application_of(node)
     name = _call_first(app, ("get_name",), default="") if app is not None else ""
-    return str(name).strip().lower() == "evince"
+    return str(name).strip().casefold() in {"evince", "org.gnome.evince"}
+
+
+def evince_search_scroll(acc, dy: int) -> bool | None:
+    """Step the PDF viewport's Value, returning verified movement or end.
+
+    None means this is not an Evince scroll pane with a readable vertical
+    scrollbar. This is search-only; explicit wheel requests stay unchanged.
+    """
+    if not dy or _role_name(acc) != "scroll pane" or not _evince_app(acc):
+        return None
+    _position, size = _extents(acc)
+    bar = _viewport_vertical_bar(acc)
+    found = _bar_range(bar) if bar is not None else None
+    if size is None or not math.isfinite(size[1]) or size[1] <= 0 or found is None:
+        return None
+    refuse_outside_modal(acc)
+    before, minimum, maximum = found
+    # GTK's scroll adjustment is in pixels. Overlap successive viewports so
+    # a line at either edge can be fully visible on the next observation.
+    delta = max(1, int(size[1] * .8)) * (1 if dy > 0 else -1)
+    if not _nudge_scrollbar(bar, delta, current=before):
+        after = _read_value(bar)
+        limit = maximum if dy > 0 else minimum
+        if after == before and abs(before - limit) < .5:
+            return False
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "PDF scrollbar movement could not be verified")
+    after = _read_value(bar)
+    if after is None:
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "PDF scrollbar read-back is unavailable")
+    if abs(after - before) >= .5:
+        return True
+    if abs(before - (maximum if dy > 0 else minimum)) < .5:
+        return False
+    raise ComputerUseError(ErrorCode.UNSUPPORTED, "PDF scrollbar movement could not be verified")
+
+
+def _evince_visible_text(acc):
+    """Visible PDF lines and their measured Text box, never page extents.
+
+    SHOWING identifies candidate pages; partially visible pages still contain
+    off-screen lines. None preserves the bounds-free fallback when unreadable.
+    """
+    viewport = _viewport_box(acc)
+    if viewport is None:
+        return None
+    (x, y), (width, height) = viewport
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    text = _safe(lambda: Atspi.Text.get_text(acc, 0, min(count, _PAGE_TEXT_CHARS)))
+    if not isinstance(text, str) or _OBJECT_REPLACEMENT in text:
+        return None
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+
+    def extent(start, end):
+        return _safe(lambda: Atspi.Text.get_range_extents(acc, start, end, coord))
+
+    def inside(rect):
+        return (rect is not None
+                and all(math.isfinite(v) for v in (rect.x, rect.y, rect.width, rect.height))
+                and rect.width > 0 and rect.height > 0
+                and x <= rect.x and y <= rect.y
+                and rect.x + rect.width <= x + width
+                and rect.y + rect.height <= y + height)
+
+    # Fully visible text needs one range read, not a D-Bus call per line.
+    whole = extent(0, len(text))
+    if inside(whole):
+        return text.replace("\u00a0", " ").strip(), (whole.x, whole.y), (whole.width, whole.height)
+    if whole is None:
+        return None
+    lines, boxes = [], []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if content:
+            rect = extent(offset, offset + len(content))
+            if rect is None:
+                return None
+            if inside(rect):
+                lines.append(content)
+                boxes.append(rect)
+        offset += len(line)
+    if not boxes:
+        return "", None, None
+    left, top = min(r.x for r in boxes), min(r.y for r in boxes)
+    right = max(r.x + r.width for r in boxes)
+    bottom = max(r.y + r.height for r in boxes)
+    return "\n".join(lines).replace("\u00a0", " "), (left, top), (right - left, bottom - top)
 
 
 def _page_text(acc) -> str | None:
@@ -4718,11 +4810,17 @@ class ATSPIAccessor:
             page_text = _page_text(node)
             if page_text:
                 value = page_text
-                if _evince_page(node) and _state_has(node, "SHOWING"):
+                if _evince_page(node):
                     # Evince's page boxes drift after scrolling. Keep the
                     # visible text without offering those boxes for targeting.
                     position, size = None, None
                     unallocated = True
+                    visible_text = (
+                        _evince_visible_text(node) if _state_has(node, "SHOWING") else None
+                    )
+                    if visible_text is not None:
+                        value, position, size = visible_text
+                        unallocated = position is None
             else:
                 role = "AXGroup"
                 value = None
@@ -14336,6 +14434,14 @@ def _close_combo_popup(acc) -> None:
         if not is_open(acc):
             return
         time.sleep(0.04)
+    # Chrome's accessibility cache can publish the collapse a beat after the
+    # popup has really closed (seen on a loaded CI runner). Re-read for a
+    # bounded ~0.5 s before the caller reports popup_open. No more keys are
+    # sent, and this only runs when the popup still reads open.
+    for _ in range(10):
+        if not is_open(acc):
+            return
+        time.sleep(0.05)
 
 
 def _chrome_select_owner(acc):

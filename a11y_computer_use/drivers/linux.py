@@ -4309,9 +4309,10 @@ class LinuxDriver:
 
     def scroll_search_step(self, target: Element, *, snapshot: Snapshot,
                            text: str | None, dy: int) -> bool:
-        """Wheel a Chromium overflow list, verifying fresh row movement.
+        """Search-step an Evince PDF or wheel a Chromium overflow list.
 
-        False means unsupported with no input. This search-only path avoids
+        Evince uses verified scrollbar Value movement; Chromium verifies
+        fresh row movement. False means unsupported with no input. This search-only path avoids
         line-scroll's Value/scroll_to/track fallback and repeated pixel waits.
         It never reports a target found: Runtime confirms real snapshot refs.
         """
@@ -4321,6 +4322,17 @@ class LinuxDriver:
         if _on_wayland() or not dy:
             return False
         handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        if handle is not None and self._run(lambda: _atspi._evince_app(handle)):
+            self._raise_handle_window(handle)
+            moved = self._run(lambda: _atspi.evince_search_scroll(handle, dy))
+            if moved is False:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED, "the PDF scrollbar is at the document end",
+                    detail={"reason": "page_unchanged", "surface": "document"},
+                )
+            if moved is True:
+                self._focused_editable = None
+                return True
         # This shortcut relies on fresh libatspi/GObject row discovery.
         # Other transports keep the ordinary driver scroll contract.
         if handle is None or not self._run(lambda: hasattr(handle, "__gpointer__")):
