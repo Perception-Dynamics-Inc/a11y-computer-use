@@ -5311,6 +5311,11 @@ class Runtime:
             warning = warning_reader(snap) if callable(warning_reader) else ""
             if warning and warning not in rendered:
                 rendered += "\n" + warning
+            miss_hint = getattr(self.driver, "find_miss_hint", None)
+            if not matches and callable(miss_hint):
+                hint = miss_hint(snap)
+                if hint:
+                    rendered += "\n" + hint
             if hidden_buffer and not matches:
                 rendered += (
                     "\ntext is in the document buffer and not in the visible text"
@@ -7684,6 +7689,10 @@ class Runtime:
         search with only statusbar hits and an opaque content surface refuses
         with ``statusbar_only_match`` rather than returning a content ref.
 
+        Linux terminals page their native scrollbar with two rows of overlap.
+        A confirmed terminal edge turns immediately; the per-direction allowance
+        covers the reported bar range, subject to the same time budgets.
+
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
         (``page_unchanged``) is tried once more in that same direction: the
@@ -8027,7 +8036,9 @@ class Runtime:
             # name has dropped out of the tree again. A list never sets
             # this: its correction stays five lines.
             seen_document = False
-            limit = max_scrolls
+            direction_limit = max_scrolls
+            limit = direction_limit
+            range_checked = False
             started = time.monotonic()
             stall_deadline = started + budget_s
             hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
@@ -8613,6 +8624,13 @@ class Runtime:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
+                if not range_checked and anchor_now is not None and not horizontal and max_scrolls > 0:
+                    range_checked = True
+                    range_limit = getattr(self.driver, "scroll_search_limit", None)
+                    native_limit = range_limit(anchor_now) if callable(range_limit) else None
+                    if native_limit is not None:
+                        direction_limit = max(max_scrolls, native_limit)
+                        limit = direction_limit
                 if table_runs_past(snap, last_anchor):
                     document_ran_past = True
                 note_progress(snap, last_anchor)
@@ -8911,16 +8929,16 @@ class Runtime:
                 # A large GTK table pages its own bar. The five-line wheel
                 # stays for Chromium and for a table this driver cannot page.
                 page_scroll = getattr(self.driver, "scroll_viewport_page", None)
-                if not horizontal and callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
-                    issued += 1
-                    stalls = 0
-                    continue
-                # Scrolling is a pointer action too: the container can move,
-                # disappear, become secure or be covered between iterations.
+                def page_or_wheel():
+                    if not horizontal and callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
+                        return
+                    inject_scroll(anchor, wheel)
+
+                # Native pages need the same permission/recheck/audit as wheels,
+                # and their edge reports use the same turn handler.
                 try:
                     self._run_gated(
-                        scroll_action(anchor, wheel), bundle,
-                        partial(inject_scroll, anchor, wheel),
+                        scroll_action(anchor, wheel), bundle, page_or_wheel,
                         recheck=partial(self._recheck_target, target=anchor),
                     )
                 except ComputerUseError as exc:
@@ -8935,7 +8953,7 @@ class Runtime:
                         raise
                     issued += 1
                     stalls += 1
-                    if stalls == 1:
+                    if stalls == 1 and exc.detail.get("surface") != "terminal":
                         # The rows can still be the pre-scroll tree. One more
                         # step in this direction before turning or stopping.
                         # The last budgeted step still gets that retry.
@@ -8952,7 +8970,7 @@ class Runtime:
                         raise
                     turned = True
                     step = -abs(dy) if step > 0 else abs(dy)
-                    limit = issued + max_scrolls
+                    limit = issued + direction_limit
                     continue
                 issued += 1
                 stalls = 0
@@ -10749,7 +10767,9 @@ def build_server(
         Linux GTK text matches use verified native character-range bounds.
         Missing or clipped screen ranges are refused. A terminal's shown value
         is the on-screen text; a match only in the
-        scrolled-off buffer is still returned and marked above the view. role =
+        scrolled-off buffer is still returned and marked above the view when
+        the terminal exposes it. A terminal miss with earlier scrollback names
+        that scrollback and suggests scroll_to_find direction=up. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
         'checkbox', 'link'); editable/clickable = keep only elements with that
         capability. Give at least one filter. Returns each match's ref, role,
@@ -11265,7 +11285,7 @@ def build_server(
         text past the 200 characters a snapshot keeps) and/or role. When a
         cell, row, or other control has that exact name, the match is that
         control. A label counts only when its own title is the text. Scrolls `direction`
-        ('down'|'up'|'left'|'right') up to max_scrolls times, re-observing each step; returns the
+        ('down'|'up'|'left'|'right') up to max_scrolls times per direction, re-observing each step; returns the
         matching ref(s) or a not-found note. Automatic selection prefers an
         Kate editor or an editor with unavailable visible text over sibling
         lists. Kate uses native character visibility; unavailable text returns
@@ -11278,6 +11298,9 @@ def build_server(
         unsupported statusbar_only_match error. Linux Chrome overflow-list
         searches use viewport-sized wheel bursts, with larger bursts toward
         distant ordinal labels; only real visible matches are returned.
+        Linux terminal scrollback uses overlapping native scrollbar pages and
+        turns immediately at an edge. Its page allowance covers the bar range
+        when max_scrolls is positive; zero remains observation-only.
         Budget messages name the requested budget and any hard limit separately.
         budget_s is how long the
         search may go without the on-screen rows or the scroll offset
