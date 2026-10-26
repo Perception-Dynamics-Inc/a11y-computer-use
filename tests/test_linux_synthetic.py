@@ -21745,3 +21745,39 @@ def test_unexposed_native_modal_probe_is_one_x11_pass_and_skips_non_windows(fake
     assert _atspi.unexposed_native_modals(_Acc("panel", name="Main")) == []
     assert _atspi.unexposed_native_modals(None) == []
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("container", ["dialog", "alert", "document web"])
+def test_gecko_select_in_dialog_closes_popup_without_escape(fake_atspi, monkeypatch, container):
+    """#1150: a collapsed Firefox select inside a dialog gets no Escape.
+
+    Firefox 158 keeps the option menu SHOWING under a modal ``<dialog>`` or
+    ARIA dialog while the select is collapsed. That is not an open popup, so
+    no Escape is sent: four of them closed the dialog. Outside a dialog the
+    SHOWING menu still counts, and an EXPANDED select inside one still closes.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    menu = _Acc("menu", states=("SHOWING", "VISIBLE"))
+    select = _adopt(_Acc("combo box", states=("SHOWING", "FOCUSED")), menu)
+    _adopt(_Acc("frame"), _adopt(_Acc(container), select))
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_do_action_named", lambda *a, **k: False)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda s: None)
+    keys = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    _atspi._close_combo_popup(select)
+    if container == "document web":
+        assert keys == ["Escape"] * 4
+    else:
+        assert keys == []
+        select.states.add("EXPANDED")
+
+        def press(chord):
+            keys.append(chord)
+            select.states.discard("EXPANDED")
+
+        monkeypatch.setattr(_linux_input, "press_chord", press)
+        _atspi._close_combo_popup(select)
+        assert keys == ["Escape"]

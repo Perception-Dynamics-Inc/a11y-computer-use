@@ -14263,6 +14263,11 @@ def _gecko_popup_open(acc) -> bool:
     """
     if _state_has(acc, "EXPANDED"):
         return True
+    if _in_dialog(acc):
+        # Inside a modal <dialog> or ARIA dialog Firefox 158 keeps the
+        # collapsed select's option menu SHOWING. Only EXPANDED is the open
+        # popup there; an Escape for a closed popup dismisses the dialog (#1150).
+        return False
     count = min(_child_count(acc), 8)
     for index in range(count):
         child = _child_at(acc, index)
@@ -14275,6 +14280,26 @@ def _gecko_popup_open(acc) -> bool:
     return False
 
 
+def _in_dialog(acc) -> bool:
+    """Whether a dialog or alert encloses ``acc`` inside its window.
+
+    Escape that reaches such a dialog closes it, so a popup close must not
+    send one unless the popup itself is open and takes the key.
+    """
+    node = acc
+    for _ in range(32):
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return False
+        role = _role_name(parent)
+        if role in {"dialog", "alert", "file chooser"}:
+            return True
+        if role in {"frame", "window", "application"}:
+            return False
+        node = parent
+    return False
+
+
 def _close_combo_popup(acc) -> None:
     """Close a popup this call opened. A combo that is not expanded is left alone.
 
@@ -14284,10 +14309,12 @@ def _close_combo_popup(acc) -> None:
     receive a key. A collapsed Firefox select is left alone: its menu stays
     VISIBLE, and Escape would undo a selection that already landed.
     """
-    if _gecko_app(acc) and not _gecko_popup_open(acc):
+    gecko = _gecko_app(acc)
+    if gecko and not _gecko_popup_open(acc):
         return
+    is_open = _gecko_popup_open if gecko else _popup_open
     for attempt in range(4):
-        if not _popup_open(acc):
+        if not is_open(acc):
             # Chrome can set EXPANDED after select_child has already returned.
             # One beat covers that. A GTK combo that is not expanded stays put.
             if attempt > 0 or not _chromium_control(acc):
@@ -14295,11 +14322,11 @@ def _close_combo_popup(acc) -> None:
             time.sleep(0.05)
             continue
         _do_action_named(acc, frozenset({"collapse", "close", "hide"}))
-        if _popup_open(acc) and _x11_keys_available():
+        if is_open(acc) and _x11_keys_available():
             from a11y_computer_use.drivers import _linux_input
 
             _linux_input.press_chord("Escape")
-        if not _popup_open(acc):
+        if not is_open(acc):
             return
         time.sleep(0.04)
 
