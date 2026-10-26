@@ -4561,6 +4561,10 @@ class ATSPIAccessor:
             return
         for container in _list_containers(root):
             rows = _shown_or_probe(container)
+            if _role_name(container) in {"tree", "tree table"}:
+                # A nested treeitem is already reached through its parent row.
+                # Re-parenting it under the tree listed every subtree again.
+                rows = [row for row in rows if not _nested_row(row[0], container)]
             if len(_row_names(rows)) < 2:
                 continue
             self._visible_children[id(container)] = [acc for acc, _pos, _size in rows]
@@ -21633,6 +21637,27 @@ def list_screen_box(container) -> tuple[int, int, int, int] | None:
     if pos is None:
         return None
     return (int(pos[0]), int(pos[1]), int(size[0]), int(size[1]))
+
+
+_NESTED_ROW_ROLES = frozenset({"list item", "list box item", "table row", "tree item"})
+
+
+def _nested_row(acc, container) -> bool:
+    """True when a row sits inside another row below ``container``.
+
+    Chrome publishes ARIA tree items nested in their parent items. Only the
+    tree's own rows may be shown as its children; deeper rows stay under
+    the row that owns them.
+    """
+    stop = _ancestor_key(container)
+    node = _call_first(acc, ("get_parent", "getParent"))
+    for _ in range(64):
+        if node is None or node is container or _ancestor_key(node) == stop:
+            return False
+        if _role_name(node) in _NESTED_ROW_ROLES:
+            return True
+        node = _call_first(node, ("get_parent", "getParent"))
+    return False
 
 
 def _shown_or_probe(container) -> list:
