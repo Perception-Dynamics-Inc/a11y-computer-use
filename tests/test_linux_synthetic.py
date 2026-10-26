@@ -21382,6 +21382,65 @@ def test_contained_modal_target_needs_no_window_classification(fake_atspi, monke
     assert _atspi.outside_modals(button, [outer], cache={})
 
 
+@pytest.mark.parametrize("text", [
+    "Cafe\u0301", "n\u0303 a\u0308 ok", "a\u200db", "\u2764\ufe0f!",
+    "x\u20dd", "👨‍👩‍👧‍👦 🏳️‍🌈 👩‍💻",
+])
+@pytest.mark.parametrize("offsets_available", [False, True])
+def test_qt_viewport_preserves_zero_width_characters(monkeypatch, text, offsets_available):
+    """#1118: native zero-advance glyphs must survive snapshot read-back."""
+    import unicodedata
+
+    app = _NS(get_toolkit_name=lambda: "Qt 6.8.2")
+    editor = _NS(get_application=lambda: app)
+    geometry = {"x": 25, "y": 40, "height": 16}
+
+    def rectangle(acc, offset, coord):
+        zero_width = unicodedata.category(text[offset]) in {"Mn", "Me", "Cf"}
+        return _NS(**geometry, width=0 if zero_width else 8)
+
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0),
+        Text=_NS(
+            get_offset_at_point=lambda acc, x, y, coord: (
+                (0 if y == 30 else len(text) - 1) if offsets_available else -1
+            ),
+            get_character_count=lambda acc: len(text),
+            get_text=lambda acc, start, end: text[start:end],
+            get_character_extents=rectangle,
+        ),
+    ))
+    value = _atspi._qt_viewport_text(editor)
+    assert value == text
+    raw = RawNode(role="AXTextArea", value=value)
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="featherpad", pid=1, geometry=_geometry())
+    assert snap.elements[0].value == text
+    # A subsequent scroll must still exclude offscreen marks and bases.
+    geometry["y"] = 900
+    assert _atspi._qt_viewport_text(editor) == ""
+    geometry.update(y=40, height=0)
+    assert _atspi._qt_viewport_text(editor) == ""
+
+
+@pytest.mark.parametrize("x,expected", [(19, "a\nb"), (20, "a\u200db"),
+                                        (819, "a\u200db"), (820, "a\nb")])
+def test_qt_zero_width_glyph_requires_measured_horizontal_visibility(monkeypatch, x, expected):
+    text = "a\u200db"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0),
+        Text=_NS(
+            get_offset_at_point=lambda *args: -1,
+            get_character_count=lambda acc: len(text),
+            get_text=lambda acc, start, end: text[start:end],
+            get_character_extents=lambda acc, offset, coord: _NS(
+                x=x if offset == 1 else 30, y=40,
+                width=0 if offset == 1 else 8, height=16,
+            ),
+        ),
+    ))
+    assert _atspi._qt_character_viewport_text(object(), (20, 30, 800, 400)) == expected
 @pytest.fixture
 def confirmation_modal_collection(fake_atspi, monkeypatch):
     from a11y_computer_use.drivers import _atspi_events, _browser_dialog
