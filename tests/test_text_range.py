@@ -253,7 +253,7 @@ def _bus_path_tree(monkeypatch, desktop_bus):
     monkeypatch.setattr(_atspi, '_atspi_wrapper_key', lambda acc: ids.get(id(acc)))
     monkeypatch.setattr(_atspi, '_atspi_object_path', lambda acc: ids.get(id(acc), (None, None))[1])
     monkeypatch.setattr(_atspi, 'is_secure', lambda node: False)
-    binding = _atspi._atspi()
+    binding = NS(Text=NS())
     monkeypatch.setattr(_atspi, '_atspi', lambda: binding)
     binding.Text.get_n_selections = lambda node: 1
     binding.Text.get_selection = lambda node, i: (18, 22)
