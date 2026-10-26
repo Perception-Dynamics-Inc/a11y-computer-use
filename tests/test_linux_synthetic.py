@@ -21651,6 +21651,102 @@ def test_native_ref_identity_accepts_gtk4_application_paths(monkeypatch, path):
     assert _atspi._atspi_wrapper_key(object()) is None
 
 
+@pytest.mark.parametrize("exposed", [False, True])
+def test_unexposed_native_message_box_blocks_only_its_parent_refs(
+    modal_boundary_tree, monkeypatch, exposed,
+):
+    """#1146: Electron's showMessageBox(win) is an X11-only GTK modal."""
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import Click, KeyChord, TypeText
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)  # No AT-SPI modal: the box has no accessible.
+    unrelated = _Acc("frame", name="Other", states=("SHOWING",))
+    other_button = _outline_cell("Other Action", ["press"])
+    other_button.role = "push button"
+    _adopt(unrelated, other_button)
+    children = [frame, unrelated]
+    if exposed:
+        children.append(_Acc("dialog", name="Confirm Change", states=("SHOWING",)))
+    application = _adopt(_Acc("application", name="electron"), *children)
+    for node in (application, frame, bg, unrelated, other_button, *children):
+        node.get_application = lambda: application
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 321)
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: list(node.children))
+    box = {"window_id": 0x600003, "title": "Confirm Change",
+           "bounds": {"display_id": 0, "x": 550, "y": 410, "width": 180, "height": 83}}
+    open_box = [True]
+    probes = []
+
+    def windows(*, pid, parent_title):
+        probes.append((pid, parent_title))
+        return [box] if open_box[0] and pid == 321 and parent_title == frame.name else []
+
+    monkeypatch.setattr(_linux_system, "transient_modal_windows", windows)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in snap.elements if el.title == bg.name)
+    dialogs = [el for el in snap.elements if el.title == "Confirm Change"]
+    if exposed:
+        # A modal transient AT-SPI exposes stays with the reported-state guards.
+        assert not [el for el in dialogs if el.role == "AXDialog" and el.content_note]
+        assert not background.blocked_by_modal
+        driver.press_element(background)
+        assert calls == [bg.name]
+        return
+    assert len(dialogs) == 1 and dialogs[0].modal and dialogs[0].role == "AXDialog"
+    assert not dialogs[0].clickable and dialogs[0].bounds.width == 180
+    assert "outside the accessibility tree" in dialogs[0].content_note
+    assert background.blocked_by_modal and not background.clickable
+    assert "outside_active_modal" in observe.render_matches(snap, (background,))
+    for invoke in (
+        lambda: driver.press_element(background),
+        lambda: driver.set_value(background, "banana"),
+        lambda: driver.type_into(background, "zz"),
+        lambda: driver.check_modal_input(Click(background), "modal-test"),
+        lambda: driver.check_modal_input(TypeText("zz"), "modal-test", input_target=background),
+    ):
+        with pytest.raises(ComputerUseError, match="outside_active_modal") as caught:
+            invoke()
+        assert "Confirm Change" in str(caught.value)
+        assert caught.value.detail["modal_windows"][0]["window_id"] == 0x600003
+    assert calls == []
+    # Keys and coordinate clicks follow native routing and can answer the box.
+    driver.check_modal_input(KeyChord("ctrl+l"), "modal-test")
+    driver.check_modal_input(TypeText("y"), "modal-test")
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: bg)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _: None)
+    driver.check_modal_input(Click(Point(0, 600, 450)), "modal-test")
+    # Another window of the same app is not owned by the box (#1139/#1140).
+    assert _atspi.unexposed_native_modals(unrelated) == []
+    _atspi.refuse_unexposed_native_modal(other_button)
+    # Closing the box restores input with no cached refusal.
+    open_box[0] = False
+    restored = driver.snapshot(Scope.WINDOW, "modal-test")
+    again = next(el for el in restored.elements if el.title == bg.name)
+    assert not again.blocked_by_modal
+    assert not [el for el in restored.elements if el.title == "Confirm Change"]
+    driver.press_element(again)
+    assert calls == [bg.name]
+
+
+def test_unexposed_native_modal_probe_is_one_x11_pass_and_skips_non_windows(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _linux_system
+    calls = []
+    monkeypatch.setattr(_linux_system, "transient_modal_windows",
+                        lambda **kw: calls.append(kw) or [])
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 321)
+    monkeypatch.setattr(_atspi, "_fresh_application_children",
+                        lambda node: pytest.fail("no AT-SPI read without an X11 modal"))
+    frame = _Acc("frame", name="Main", states=("SHOWING",))
+    button = _adopt(frame, _Acc("push button", name="Go")).children[0]
+    assert _atspi.unexposed_native_modals(frame) == []
+    _atspi.refuse_unexposed_native_modal(button)
+    assert calls == [{"pid": 321, "parent_title": "Main"}] * 2
+    assert _atspi.unexposed_native_modals(_Acc("panel", name="Main")) == []
+    assert _atspi.unexposed_native_modals(None) == []
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("container", ["dialog", "alert", "document web"])
 def test_gecko_select_in_dialog_closes_popup_without_escape(fake_atspi, monkeypatch, container):
     """#1150: a collapsed Firefox select inside a dialog gets no Escape.
