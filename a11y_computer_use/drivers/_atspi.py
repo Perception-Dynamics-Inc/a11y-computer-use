@@ -14329,6 +14329,14 @@ def _close_combo_popup(acc) -> None:
         if not is_open(acc):
             return
         time.sleep(0.04)
+    # Chrome's accessibility cache can publish the collapse a beat after the
+    # popup has really closed (seen on a loaded CI runner). Re-read for a
+    # bounded ~0.5 s before the caller reports popup_open. No more keys are
+    # sent, and this only runs when the popup still reads open.
+    for _ in range(10):
+        if not is_open(acc):
+            return
+        time.sleep(0.05)
 
 
 def _chrome_select_owner(acc):
