@@ -107,6 +107,77 @@ def chromium_process(pid: int | None) -> bool:
     return os.path.isfile(os.path.join(os.path.dirname(exe), "chrome_100_percent.pak"))
 
 
+#: Share of wall time a renderer must spend on CPU between the before and
+#: after retry reads for the page to look hung (a busy loop reads ~1.0; an
+#: idle or merely repainting renderer reads well under 0.1).
+BUSY_SHARE = 0.6
+BUSY = ("page renderer was busy throughout the action (it may not be responding); "
+        "accessibility tree may be stale; input may be queued; re-observe before retrying")
+
+
+def renderer_ticks(pid: int | None) -> dict[int, int] | None:
+    """CPU clock ticks (user+system) of each Chromium renderer under ``pid``.
+
+    Reads /proc only: no CDP, no input, no AT-SPI. A renderer stuck in a
+    script busy loop keeps answering nothing over CDP, while the browser's
+    accessibility cache keeps answering AT-SPI reads, so its own CPU use is
+    the remaining readable liveness signal (#1092). None means unknown.
+    """
+    import os
+
+    if type(pid) is not int or pid <= 0:
+        return None
+    ticks: dict[int, int] = {}
+    pending, seen = [pid], set()
+    try:
+        while pending and len(seen) < 512:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            try:
+                with open(f"/proc/{current}/task/{current}/children", encoding="ascii") as handle:
+                    pending.extend(int(child) for child in handle.read().split())
+            except FileNotFoundError:
+                if current == pid:
+                    return None
+                continue
+            if current == pid:
+                continue
+            try:
+                with open(f"/proc/{current}/cmdline", "rb") as handle:
+                    if b"--type=renderer" not in handle.read():
+                        continue
+                with open(f"/proc/{current}/stat", encoding="ascii", errors="replace") as handle:
+                    fields = handle.read().rsplit(")", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError, IndexError):
+                continue
+            ticks[current] = int(fields[11]) + int(fields[12])
+    except (OSError, ValueError):
+        return None
+    return ticks
+
+
+def renderer_busy(before: tuple[float, dict[int, int]] | None,
+                  after: tuple[float, dict[int, int]] | None) -> bool | None:
+    """True when one renderer ran on CPU for most of the interval, else False/None."""
+    import os
+
+    if before is None or after is None:
+        return None
+    elapsed = after[0] - before[0]
+    if elapsed < 0.3:
+        return None  # Too short for 10 ms clock ticks to separate busy from idle.
+    try:
+        hertz = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, OSError, ValueError):
+        return None
+    shared = set(before[1]) & set(after[1])
+    if not shared:
+        return None
+    return any((after[1][pid] - before[1][pid]) / hertz >= BUSY_SHARE * elapsed for pid in shared)
+
+
 def refusal() -> ComputerUseError:
     return ComputerUseError(ErrorCode.APP_NOT_RESPONDING, UNRESPONSIVE,
                             detail={"reason": "page_not_responding", "next": [],

@@ -3652,7 +3652,19 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
-        no_retry = (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        hung = False
+        if tool == "click" and judged == "suspected_noop" and reads is not None and reads[0] == app:
+            # A hung page overrides an unchanged readable signal: the click may
+            # be queued in the renderer, so a retry could double-press (#1092).
+            reader = getattr(self.driver, "renderer_hung_since", None)
+            try:
+                why = reader(reads[1]) if callable(reader) else None
+            except Exception:
+                why = None
+            if isinstance(why, str) and why:
+                hung = True
+                judged, evidence = "unverifiable", evidence + "; " + why
+        no_retry = hung or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (

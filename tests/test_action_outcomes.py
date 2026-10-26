@@ -2566,6 +2566,9 @@ def test_writer_key_carries_scoped_evidence_without_calc_or_window_reads(tmp_pat
     from a11y_computer_use.drivers import _atspi
 
     driver = TreeDriver()
+    # Process-exit verification must observe a live, controlled process.
+    driver.pid = os.getpid()
+    driver.apps[0]["pid"] = driver.pid
     runtime = _runtime(tmp_path, driver)
     driver.name = "linux"
     state = [0]
