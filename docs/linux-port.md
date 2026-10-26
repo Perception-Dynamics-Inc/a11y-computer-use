@@ -1251,6 +1251,18 @@ Snapshots label the dialog `(modal)` and background controls
 `(outside_active_modal)` without click/edit actionability; `find` uses the
 same flags. Closing the dialog restores background actionability.
 
+Native window-modal dialogs are scoped to their reported parent window, using
+AT-SPI `SUBWINDOW_OF` or an exact same-process X11 `WM_TRANSIENT_FOR` match.
+A Mousepad Go To dialog on document B therefore leaves document A actionable,
+even while A is active. Controls behind the dialog in B remain refused. Native
+parent matching never infers ownership from overlapping rectangles or duplicate
+titles; an unresolved parent does not establish that a window is independent.
+The standalone `scripts/check_native_window_modal.py --head` probe exercises
+two Mousepad windows, checks six input paths on A, and requires three refused
+typing attempts with unchanged text on B. Run it through
+`scripts/latency/session.sh`; omit `--head` with a 0.4.76 interpreter for the
+same operation timings on the baseline. It does not run pytest live files.
+
 The Runtime checks native modal ancestry after permission and focus checks,
 including agent and `act` batch calls. Ref presses, value writes, and pointer
 clicks also check at the Linux driver boundary. An outside target returns
