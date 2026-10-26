@@ -1529,6 +1529,15 @@ not establish that the command opened a dialog. Unverifiable outcomes carry no
 alternate-input retry hints. These cases are covered by hermetic driver and
 Runtime tests; this receipt has not been live-verified in LibreOffice.
 
+
+A complete native browser-confirmation role query also supplies candidates to
+modal discovery while the same subscribed boundary-event epoch remains current.
+The query includes file choosers; modal state is still checked and native
+application-sibling dialogs are still read separately. Failed queries, missing
+role coverage, unavailable event subscriptions, another window, native mutations,
+or a changed epoch require discovery again. This avoids a second structural walk
+before ordinary keys without changing input or outcome verification.
+
 When a fresh window snapshot reports that the window extends beyond the
 displays, Linux ref-resolution failures use `not_visible` with reason
 `window_beyond_display` and `next: ["window"]`. Use `window list`, then
