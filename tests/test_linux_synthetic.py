@@ -21995,7 +21995,8 @@ def test_chromium_tree_band_keeps_nested_items_under_their_rows(fake_atspi, monk
         chain.append(item)
         parent = item
     sibling = _Acc("tree item", name="F.2", width=400, height=16)
-    _adopt(tree, sibling)
+    # _adopt replaces children: the tree owns both F.1 and F.2.
+    _adopt(tree, chain[0], sibling)
     band = [(acc, (12, 100 + 16 * i), (400, 12)) for i, acc in enumerate(chain + [sibling])]
     monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
     monkeypatch.setattr(_atspi, "_list_containers", lambda root: [tree])
@@ -22039,3 +22040,51 @@ def test_chromium_collection_timeout_waits_for_the_app_before_walking(fake_atspi
     events.clear()
     assert _atspi._modal_collection(window) is None
     assert events == ["query", ("ping", window)]
+
+
+def test_chromium_tree_with_one_own_row_skips_the_hit_probe(fake_atspi, monkeypatch):
+    """#1168 perf: a cold 8-level Chrome tree snapshot was 2.3x 0.4.76.
+
+    Collection discovery (#1043) now finds the tree, which has one own row
+    and seven nested ones. The band filter keeps only own rows, so a tree
+    with fewer than two can never be banded, yet each cold snapshot spent
+    ~0.9s hit-testing it. No probe may run for it. A tree with two own rows
+    is still banded through the probe, and wrappers between the tree and
+    its rows are opened while counting. Synthetic chain.
+    """
+    tree = _Acc("tree", name="Files", width=400, height=200)
+    parent = tree
+    for depth in range(1, 9):
+        item = _Acc("tree item", name="F" + ".1" * depth, width=400, height=16)
+        if parent is tree:
+            _adopt(tree, item)
+        else:
+            group = _Acc("panel")
+            _adopt(parent, group)
+            _adopt(group, item)
+        parent = item
+    probed = []
+
+    def probe(container):
+        probed.append(container)
+        return []
+
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_list_containers", lambda root: [tree])
+    monkeypatch.setattr(_atspi, "_shown_or_probe", probe)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.refresh_visible(_Acc("frame"))
+    assert probed == []
+    assert id(tree) not in accessor._visible_children
+
+    wrapped = _Acc("tree", name="Two", width=400, height=200)
+    section = _Acc("panel")
+    _adopt(wrapped, section)
+    own = [_Acc("tree item", name=f"R{i}", width=400, height=16) for i in (1, 2)]
+    _adopt(section, *own)
+    band = [(acc, (12, 100 + 16 * i), (400, 12)) for i, acc in enumerate(own)]
+    monkeypatch.setattr(_atspi, "_list_containers", lambda root: [wrapped])
+    monkeypatch.setattr(_atspi, "_shown_or_probe", lambda c: probed.append(c) or list(band))
+    accessor.refresh_visible(_Acc("frame"))
+    assert probed == [wrapped]
+    assert accessor._visible_children[id(wrapped)] == own
