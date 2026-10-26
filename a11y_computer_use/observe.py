@@ -3251,6 +3251,41 @@ def touch_epoch(snapshot_id: str) -> None:
             store.move_to_end(snapshot_id)
 
 
+def attach_native_modal_windows(snap: Snapshot, windows: Sequence[dict], *, note: str) -> Snapshot:
+    """Expose X11-only modal windows and block the window they own (#1146).
+
+    The dialog row has no accessible handle, so it is not actionable; its
+    ``content_note`` says how to answer it. Every element walked from the
+    owning window is outside the modal and is marked blocked.
+    """
+    if not windows:
+        return snap
+    elements = [dataclasses.replace(el, blocked_by_modal=True, clickable=False, editable=False)
+                for el in snap.elements]
+    root = elements[0] if elements else None
+    for window in windows:
+        box = window.get("bounds") or None
+        bounds = None
+        if box:
+            bounds = Bounds(display_id=int(box.get("display_id", 0)), x=int(box["x"]),
+                            y=int(box["y"]), width=int(box["width"]), height=int(box["height"]))
+        elements.append(Element(
+            ref=f"e{len(elements) + 1}",
+            role="AXDialog",
+            title=str(window.get("title") or ""),
+            value=None,
+            bounds=bounds,
+            snapshot_id=snap.snapshot_id,
+            parent=root.ref if root is not None else None,
+            path=(root.path if root is not None else ()) + ("AXDialog",),
+            modal=True,
+            content_note=note,
+            instance_id=root.instance_id if root is not None else None,
+            document_id=root.document_id if root is not None else None,
+        ))
+    return dataclasses.replace(snap, elements=tuple(elements))
+
+
 def attach_offscreen_matches(
     snap: Snapshot,
     found: Sequence[tuple[object, RawNode, object | None]],

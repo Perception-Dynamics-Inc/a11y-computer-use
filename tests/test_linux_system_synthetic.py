@@ -1863,3 +1863,54 @@ def test_transient_parent_resolves_inactive_dialog_without_geometry(monkeypatch,
     _active_display(monkeypatch, wins, other.id)
     assert _linux_system.transient_parent_title(pid=200, title="Go To") == (
         "Document B" if change is None else None)
+
+
+@pytest.mark.parametrize("change", [None, "not-modal", "no-parent", "other-parent", "foreign",
+                                    "duplicate-parent", "unmapped", "hidden"])
+def test_transient_modal_windows_require_modal_state_and_exact_parent(monkeypatch, change):
+    """#1146: an X11-only modal names one same-process parent and says MODAL."""
+    parent = _ClassWin(0x31, 200, title="Msgbox Parent")
+    other = _ClassWin(0x32, 200, title="Other Window")
+    child = _ClassWin(0x33, 300 if change == "foreign" else 200, title="Confirm Change")
+    original = child.get_full_property
+
+    def prop(atom, kind):
+        if atom == "_NET_WM_STATE":
+            states = ["_NET_WM_STATE_SKIP_TASKBAR"]
+            if change != "not-modal":
+                states.append("_NET_WM_STATE_MODAL")
+            if change == "hidden":
+                states.append("_NET_WM_STATE_HIDDEN")
+            return _NS(value=states)
+        if atom == "_NET_WM_WINDOW_TYPE":
+            return _NS(value=["_NET_WM_WINDOW_TYPE_DIALOG"])
+        if atom == "WM_TRANSIENT_FOR":
+            if change == "no-parent":
+                return None
+            return _NS(value=[other.id if change == "other-parent" else parent.id])
+        return original(atom, kind)
+
+    child.get_full_property = prop
+    if change == "unmapped":
+        child.get_attributes = lambda: _NS(map_state=0)
+    wins = [parent, other, child]
+    if change == "duplicate-parent":
+        wins.append(_ClassWin(0x34, 200, title="Msgbox Parent"))
+    _active_display(monkeypatch, wins, child.id)
+    found = _linux_system.transient_modal_windows(pid=200, parent_title="Msgbox Parent")
+    if change is None:
+        assert [(w["window_id"], w["title"]) for w in found] == [(child.id, "Confirm Change")]
+        assert found[0]["bounds"]["width"] == 200
+    else:
+        assert found == []
+    # Only the exact transient parent is blocked (#1139/#1140 scoping).
+    sibling = _linux_system.transient_modal_windows(pid=200, parent_title="Other Window")
+    assert [w["title"] for w in sibling] == (["Confirm Change"] if change == "other-parent" else [])
+
+
+def test_transient_modal_windows_fail_open_without_display(monkeypatch):
+    def broken():
+        raise OSError("no display")
+    monkeypatch.setattr(_linux_system, "_display", broken)
+    assert _linux_system.transient_modal_windows(pid=200, parent_title="Parent") == []
+    assert _linux_system.transient_modal_windows(pid=0, parent_title="Parent") == []
