@@ -95,8 +95,9 @@ def test_unknown_chromium_snapshot_marks_tree_stale(monkeypatch):
     monkeypatch.setattr(driver, "_snapshot_selections", lambda snap: snap)
     monkeypatch.setattr(_page_health, "probe", lambda *args: None)
     monkeypatch.setattr(_cdp_forms, "overlay_snapshot", lambda snap: snap)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: object())
-    monkeypatch.setattr(_atspi, "_chromium_app", lambda handle: True)
+    monkeypatch.setattr(_page_health, "chromium_process", lambda pid: True)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *args: pytest.fail("no AT-SPI read in snapshot"))
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda handle: pytest.fail("no AT-SPI read in snapshot"))
     result = driver._snapshot(Scope.WINDOW, "Chrome")
     assert _page_health.STALE_TREE in result.elements[0].content_note
     assert driver.observation_warning(result) == _page_health.STALE_TREE
@@ -107,3 +108,9 @@ def test_unknown_chromium_snapshot_marks_tree_stale(monkeypatch):
 def test_unknown_process_is_not_a_renderer_diagnosis(monkeypatch, pid):
     monkeypatch.setattr(_cdp_forms, "port_for_pid", lambda pid: pytest.fail("unknown owner"))
     assert _page_health.probe(pid, "Busy Lab") is None
+
+
+def test_chromium_process_reads_proc_only(tmp_path, monkeypatch):
+    import os
+    assert _page_health.chromium_process(None) is False
+    assert _page_health.chromium_process(os.getpid()) is False  # python

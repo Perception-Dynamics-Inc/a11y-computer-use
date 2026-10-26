@@ -13478,16 +13478,17 @@ def _retry_evidence(action, target, focus):
         _drop_cached_properties(target)
         if is_secure(target):
             return None
-        # Restore d2de2e2's conservative web evidence rule, including field
-        # clicks: Chromium's browser cache can answer while input is queued.
-        if (element is not None and _chromium_app(target)
-                and any(_role_name(node) in {"document web", "document frame"}
-                        for node in _ancestor_chain(target))):
-            from a11y_computer_use.drivers._page_health import UNKNOWN
-            return RetryEvidence(reason=UNKNOWN)
-        if time.monotonic() >= deadline:
-            return None
         if not formatting and not outline and (element is None or element.role not in {"AXStaticText", "AXButton"}):
+            # No readable no-op signal exists for this click. In a Chromium
+            # page that is unknown, and the browser cache can answer while
+            # renderer input is queued, so say so (re-observe, never retry).
+            if (element is not None and _chromium_app(target)
+                    and any(_role_name(node) in {"document web", "document frame"}
+                            for node in _ancestor_chain(target))):
+                from a11y_computer_use.drivers._page_health import UNKNOWN
+                return RetryEvidence(reason=UNKNOWN)
+            return None
+        if time.monotonic() >= deadline:
             return None
         if outline:
             states = _call_first(target, ("get_state_set",))

@@ -1620,15 +1620,13 @@ class LinuxDriver:
             health = _page_health.probe(snap.pid, _cdp_forms._window_title(snap), snap.url)
             if health is False:
                 raise _page_health.refusal()
-            if health is None:
-                from a11y_computer_use import observe
-                from a11y_computer_use.drivers import _atspi
-                handles = [observe.ax_handle_for(el.snapshot_id, el.ref) for el in documents]
-                if self._run(lambda: any(h is not None and _atspi._chromium_app(h) for h in handles)):
-                    snap = replace(snap, elements=tuple(
-                        replace(el, content_note="; ".join(filter(None, (el.content_note, _page_health.STALE_TREE))))
-                        if el.modal_scope_root else el for el in snap.elements
-                    ))
+            # No AT-SPI reads here: post-walk reads on the document handles
+            # made Chromium row identities go stale before a click (#1138).
+            if health is None and _page_health.chromium_process(snap.pid):
+                snap = replace(snap, elements=tuple(
+                    replace(el, content_note="; ".join(filter(None, (el.content_note, _page_health.STALE_TREE))))
+                    if el.modal_scope_root else el for el in snap.elements
+                ))
         return self._snapshot_selections(_cdp_forms.overlay_snapshot(snap))
 
     def observation_warning(self, snapshot: Snapshot) -> str:
@@ -2434,9 +2432,14 @@ class LinuxDriver:
         focus_handle = observe.ax_handle_for(focused.snapshot_id, focused.ref) if focused else None
         evidence = self._run(lambda: _atspi.retry_evidence(action, handle, focus_handle))
         from a11y_computer_use.drivers import _cdp_forms, _page_health
-        if evidence is not None and evidence.reason == _page_health.UNKNOWN:
-            if _page_health.probe(snapshot.pid, _cdp_forms._window_title(snapshot), snapshot.url) is False:
-                return replace(evidence, reason=_page_health.UNRESPONSIVE)
+        from a11y_computer_use.outcome import RetryEvidence
+        # A confirmed-unchanged readable signal keeps suspected_noop unless the
+        # renderer probe shows the page hung; then the browser cache may be
+        # answering for a page with queued input, so nothing authorizes retry.
+        if (evidence is not None and isinstance(action, Click)
+                and self._run(lambda: _atspi._chromium_app(handle))
+                and _page_health.probe(snapshot.pid, _cdp_forms._window_title(snapshot), snapshot.url) is False):
+            return RetryEvidence(reason=_page_health.UNRESPONSIVE)
         return evidence
 
     def toggle_click_probe(self, target: Target):

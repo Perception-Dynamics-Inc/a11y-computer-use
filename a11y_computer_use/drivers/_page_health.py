@@ -84,6 +84,29 @@ def probe(pid: int | None, title: str, url: str | None = None) -> bool | None:
             transport.close()
 
 
+def chromium_process(pid: int | None) -> bool:
+    """True when ``pid`` runs a Chromium-family binary (Chrome, Chromium, Electron).
+
+    Reads /proc only. Snapshot-time AT-SPI reads on the document after the
+    walk perturbed Chromium's row pool binding (stale row identity, #1138).
+    """
+    import os
+
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        exe = os.path.realpath(f"/proc/{pid}/exe")
+        with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as handle:
+            comm = handle.read().strip().lower()
+    except OSError:
+        return False
+    base = os.path.basename(exe).lower()
+    if "chrom" in base or "chrom" in comm:
+        return True
+    # Electron and other Chromium embedders ship Chromium's resource packs.
+    return os.path.isfile(os.path.join(os.path.dirname(exe), "chrome_100_percent.pak"))
+
+
 def refusal() -> ComputerUseError:
     return ComputerUseError(ErrorCode.APP_NOT_RESPONDING, UNRESPONSIVE,
                             detail={"reason": "page_not_responding", "next": [],
