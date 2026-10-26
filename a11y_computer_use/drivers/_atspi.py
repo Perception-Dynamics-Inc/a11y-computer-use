@@ -531,7 +531,10 @@ def call_went_unanswered() -> bool:
 
 def _safe(fn, default=None, *, marshal=True):
     watch = _current_watch()
-    start = time.monotonic()
+    # perf_counter, not monotonic: Windows' monotonic clock ticks every
+    # ~15.6ms, so a 260ms miss could read as 0.234s and slip under the
+    # 250ms unanswered threshold.
+    start = time.perf_counter()
     failed = False
     try:
         # Direct native calls (e.g. Table.get_accessible_at) need the same
@@ -545,7 +548,7 @@ def _safe(fn, default=None, *, marshal=True):
     except Exception:
         failed = True
         result = default
-    elapsed = time.monotonic() - start
+    elapsed = time.perf_counter() - start
     _reply_local.last_failed = failed
     _reply_local.last_elapsed = elapsed
     if watch is not None:
