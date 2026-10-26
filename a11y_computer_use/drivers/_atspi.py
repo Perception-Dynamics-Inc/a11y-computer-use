@@ -11418,6 +11418,9 @@ def replace_writer_cell_text(
                 continue
             pending_count = None
         live = run(lambda: _writer_paragraphs(acc))
+        # Re-read at once after an edit; sleep only when nothing was sent,
+        # so a slow runner's oversleep does not eat the settle bound.
+        acted = False
         if live and all(isinstance(part, str) for part in parts):
             # First remove excess paragraphs, including empty ones. Keeping
             # the first paragraph also handles a freshly rebuilt child.
@@ -11428,6 +11431,7 @@ def replace_writer_cell_text(
                 if run(lambda: _full_text(child)) == "":
                     pending_count = len(parts)
                     run(lambda: _writer_cell_boundary(acc, child, 0, "backspace"))
+                    acted = True
             else:
                 mismatch = next((i for i, part in enumerate(parts)
                                  if part != wanted[i]), None)
@@ -11439,10 +11443,13 @@ def replace_writer_cell_text(
                         run(lambda: set_text(live[mismatch], wanted[mismatch], force=True))
                         last_write_index = mismatch
                         next_write = time.monotonic() + 0.4
+                        acted = True
                 elif len(parts) < len(wanted):
                     pending_count = len(parts)
                     run(lambda: _writer_cell_boundary(acc, live[-1], len(parts[-1]), "return"))
-        time.sleep(0.05)
+                    acted = True
+        if not acted:
+            time.sleep(0.05)
     failed_parts = run(lambda: _writer_cell_parts(acc))
     failed = "\n".join(part or "" for part in failed_parts)
     # Restore characters only when the original paragraph structure remains.
