@@ -4560,8 +4560,14 @@ class ATSPIAccessor:
         if root is None or not _chromium_app(root):
             return
         for container in _list_containers(root):
+            tree = _role_name(container) in {"tree", "tree table"}
+            if tree and _own_row_count(container, 2) < 2:
+                # Only the tree's own rows survive the filter below, so with
+                # fewer than two of them no probe can band this tree. The
+                # hit-test probe cost a cold 8-level tree 0.9s (#1168).
+                continue
             rows = _shown_or_probe(container)
-            if _role_name(container) in {"tree", "tree table"}:
+            if tree:
                 # A nested treeitem is already reached through its parent row.
                 # Re-parenting it under the tree listed every subtree again.
                 rows = [row for row in rows if not _nested_row(row[0], container)]
@@ -21658,6 +21664,41 @@ def _nested_row(acc, container) -> bool:
             return True
         node = _call_first(node, ("get_parent", "getParent"))
     return False
+
+
+_OWN_ROW_WALK_CAP = 64  #: wrapper nodes read while counting a tree's own rows
+
+
+def _own_row_count(container, enough: int) -> int:
+    """Rows of ``container`` not nested in another row, stopping at ``enough``.
+
+    Wrappers between the tree and its rows are opened; rows are not, so a
+    nested subtree costs nothing. A walk that reaches ``_OWN_ROW_WALK_CAP``
+    nodes, or a child count it cannot read, returns ``enough``: the caller
+    then probes as before rather than trusting a partial count.
+    """
+    found = 0
+    queue = [container]
+    seen = 0
+    while queue:
+        node = queue.pop(0)
+        count = _call_first(node, ("get_child_count",), default=None)
+        if not isinstance(count, int) or count < 0:
+            return enough
+        for index in range(count):
+            seen += 1
+            if seen > _OWN_ROW_WALK_CAP:
+                return enough
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is None:
+                return enough
+            if _role_name(child) in _NESTED_ROW_ROLES:
+                found += 1
+                if found >= enough:
+                    return found
+            else:
+                queue.append(child)
+    return found
 
 
 def _shown_or_probe(container) -> list:
