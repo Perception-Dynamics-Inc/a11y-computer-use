@@ -6824,3 +6824,105 @@ def test_surface_rebind_requires_a_new_surface(
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
         assert mocked_driver["click"] == []
+
+
+def _gtk4_popup_case(kind, *, expanded=True):
+    """#1142 live GTK4 shape: the popover is a list box or menu child of the
+    expanded DropDown/MenuButton owner, neither modal nor AXPopover."""
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "GTK4 Lab", None, None, "before",
+                     node_identity=(":1.2", "/window/1"))
+    controls = tuple(
+        Element(f"e{i}", "AXStaticText" if i % 2 else "AXButton", title, None,
+                Bounds(1, 10, i * 30, 150, 25), "before", parent="e1",
+                clickable=not i % 2, node_identity=(":1.2", f"/control/{i}"))
+        for i, title in enumerate(("Country", "Argentina", "Actions", "Advanced options"), 2)
+    )
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, *controls))
+    if kind == "dropdown":
+        owner = Element("e2", "AXComboBox", "Argentina", None, Bounds(1, 10, 60, 150, 25), "after",
+                        parent="e1", clickable=True, expanded=expanded,
+                        node_identity=(":1.2", "/combo/1"))
+        root = Element("e3", "AXList", "", None, Bounds(1, 10, 90, 200, 300), "after",
+                       parent="e2", node_identity=(":1.2", "/combo/1/popover"))
+        inner = (Element("e4", "AXTextField", "", "", Bounds(1, 20, 95, 180, 25), "after",
+                         parent="e3", editable=True, node_identity=(":1.2", "/combo/1/search")),
+                 Element("e5", "AXRow", "Kazakhstan", None, Bounds(1, 20, 130, 180, 25), "after",
+                         parent="e3", clickable=True, node_identity=(":1.2", "/combo/1/row/10")))
+    else:  # MenuButton + PopoverMenu
+        owner = Element("e2", "AXButton", "Actions", None, Bounds(1, 10, 60, 150, 25), "after",
+                        parent="e1", clickable=True, expanded=expanded,
+                        node_identity=(":1.2", "/menubutton/1"))
+        root = Element("e3", "AXMenu", "Actions", None, Bounds(1, 10, 90, 200, 120), "after",
+                       parent="e2", node_identity=(":1.2", "/menubutton/1/menu"))
+        inner = (Element("e4", "AXMenuItem", "Open Report", None, Bounds(1, 20, 95, 180, 25), "after",
+                         parent="e3", clickable=True, node_identity=(":1.2", "/menu/open")),
+                 Element("e5", "AXMenuItem", "Dense Mode", None, Bounds(1, 20, 130, 180, 25), "after",
+                         parent="e3", clickable=True, node_identity=(":1.2", "/menu/dense")))
+    moved = tuple(dataclasses.replace(el, ref=f"e{i}", snapshot_id="after")
+                  for i, el in enumerate(controls, 6))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(
+        dataclasses.replace(window, snapshot_id="after"), owner, root, *inner, *moved))
+    return before, after, inner
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("kind", ["dropdown", "menu"])
+def test_fresh_refs_inside_gtk4_popup_of_expanded_owner_are_issued(
+    monkeypatch, mocked_driver, store, audit_dir, mode, kind,
+):
+    """#1142 (GTK4): the DropDown search field and PopoverMenu items bind."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, after, (first, second) = _gtk4_popup_case(kind)
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = after
+        for _ in range(2):
+            runtime.desktop_snapshot(APP, mode=mode)
+            assert runtime._anchor("e4") == (after, first)
+            assert runtime._anchor("e5") == (after, second)
+        target = second if kind == "dropdown" else first
+        runtime.click(ref=target.ref, verify=True)
+        assert mocked_driver["click"][-1][0] == target
+        # The owner and the popup root took old refs; they are not inside a
+        # new surface, so the #1021 refusal still holds for both.
+        for ref, title in (("e2", "Country"), ("e3", "Argentina")):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref=ref)
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert caught.value.detail["reason"] == "target_changed"
+            assert caught.value.detail["anchor"]["title"] == title
+        assert len(mocked_driver["click"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["dropdown", "menu"])
+@pytest.mark.parametrize("change", ["collapsed_owner", "already_open"])
+def test_gtk4_popup_rebind_requires_expanded_new_popup(
+    monkeypatch, mocked_driver, store, audit_dir, kind, change,
+):
+    """A list/menu under a collapsed owner, or a popup already issued, is not new."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, after, (first, second) = _gtk4_popup_case(kind, expanded=change == "already_open")
+    opened = None
+    if change == "already_open":
+        opened = after
+        replaced = dataclasses.replace(first, title="Replaced", snapshot_id="changed",
+                                       node_identity=(":1.2", "/replacement"))
+        after = dataclasses.replace(after, snapshot_id="changed", elements=tuple(
+            replaced if el.ref == "e4" else dataclasses.replace(el, snapshot_id="changed")
+            for el in after.elements))
+    current = [opened or before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        runtime.desktop_snapshot(APP)
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e4", verify=True)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert mocked_driver["click"] == []
