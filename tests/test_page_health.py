@@ -118,7 +118,7 @@ def test_chromium_process_reads_proc_only(tmp_path, monkeypatch):
 
 def test_renderer_busy_needs_most_of_the_interval_on_cpu(monkeypatch):
     import os
-    monkeypatch.setattr(os, "sysconf", lambda name: 100)
+    monkeypatch.setattr(os, "sysconf", lambda name: 100, raising=False)
     busy = _page_health.renderer_busy((0.0, {5: 10, 6: 3}), (1.0, {5: 105, 6: 4}))
     idle = _page_health.renderer_busy((0.0, {5: 10, 6: 3}), (1.0, {5: 14, 6: 8}))
     assert busy is True and idle is False
@@ -132,7 +132,7 @@ def test_renderer_busy_needs_most_of_the_interval_on_cpu(monkeypatch):
 ])
 def test_renderer_busy_unknown_inputs_are_not_a_hang(monkeypatch, before, after):
     import os
-    monkeypatch.setattr(os, "sysconf", lambda name: 100)
+    monkeypatch.setattr(os, "sysconf", lambda name: 100, raising=False)
     assert _page_health.renderer_busy(before, after) is None
 
 
@@ -158,3 +158,10 @@ def test_renderer_ticks_reads_only_renderer_descendants(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "open", fake)
     assert _page_health.renderer_ticks(1) == {4: 100}
     assert _page_health.renderer_ticks(0) is None
+
+
+def test_renderer_busy_without_sysconf_is_unknown(monkeypatch):
+    import os
+
+    monkeypatch.delattr(os, "sysconf", raising=False)
+    assert _page_health.renderer_busy((0.0, {5: 0}), (1.0, {5: 100})) is None

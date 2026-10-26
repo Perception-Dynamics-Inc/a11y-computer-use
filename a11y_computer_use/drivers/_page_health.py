@@ -170,7 +170,7 @@ def renderer_busy(before: tuple[float, dict[int, int]] | None,
         return None  # Too short for 10 ms clock ticks to separate busy from idle.
     try:
         hertz = os.sysconf("SC_CLK_TCK")
-    except (OSError, ValueError):
+    except (AttributeError, OSError, ValueError):
         return None
     shared = set(before[1]) & set(after[1])
     if not shared:

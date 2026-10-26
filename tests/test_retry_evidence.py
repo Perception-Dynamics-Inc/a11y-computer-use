@@ -489,7 +489,7 @@ def test_linux_renderer_hang_compares_the_pre_dispatch_sample(monkeypatch):
     import os
     monkeypatch.setattr(_page_health, "renderer_ticks", lambda pid: {7: 200})
     monkeypatch.setattr(linux.time, "monotonic", lambda: 11.0)
-    monkeypatch.setattr(os, "sysconf", lambda name: 100)
+    monkeypatch.setattr(os, "sysconf", lambda name: 100, raising=False)
     driver._renderer_sample = (action, 42, 10.0, {7: 100})
     assert driver.renderer_hung_since(action) == _page_health.BUSY
     # One verdict per sample: a second read, or another action, is unknown.
