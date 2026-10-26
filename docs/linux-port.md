@@ -1605,3 +1605,19 @@ a segment and emit an empty `input`/`change` value. Use an explicit
 `type(ref, digits)` and verify the complete date/time afterward. This refusal
 also applies to empty replacement strings; ordinary text and number inputs
 retain their existing write paths.
+
+### Evince PDF visibility
+
+Evince application names `evince` and `org.gnome.Evince` share the PDF-page
+visibility path. Pages must report AT-SPI `SHOWING`; their Component extents
+are not used as text bounds. Native Text range extents inside the scroll
+viewport determine which lines are searchable and supply their measured bounds.
+If range geometry is unavailable, page text retains the bounds-free, off-screen
+fallback instead of inheriting Evince's drifting page rectangle.
+
+`scroll_to_find` can step an Evince scroll pane's vertical scrollbar through
+AT-SPI Value. Each step uses the measured viewport height with overlap and
+requires Value read-back; the refreshed snapshot must expose the requested
+text before search reports success. A verified stationary endpoint stops the
+search. An ignored or unreadable write elsewhere is an error. Explicit scroll
+and click requests keep their existing action paths.
