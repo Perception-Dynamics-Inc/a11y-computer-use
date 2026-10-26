@@ -389,3 +389,37 @@ def test_native_retry_deadline_exhaustion_remains_unknown(readable_native_button
     verdict = outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)
     assert verdict[0] == "unverifiable"
     assert outcome.suggest_next("click", verdict[0]) == ()
+
+
+@pytest.mark.parametrize("role", ["AXTextField", "AXCheckBox"])
+def test_chromium_click_without_readable_signal_is_unknown_page_state(readable_native_button, monkeypatch, role):
+    native, action, button, document, _ = readable_native_button
+    action = replace(action, target=replace(action.target, role=role))
+    monkeypatch.setattr(native, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(native, "_ancestor_chain", lambda node: iter((button, document)))
+    before = native.retry_evidence(action, button, None)
+    after = native.retry_evidence(action, button, None)
+    judged, evidence = outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)
+    assert judged == "unverifiable"
+    assert outcome.suggest_next("click", judged) == ()
+    assert "page may not be responding" in evidence
+    assert "input may be queued" in evidence
+
+
+@pytest.mark.parametrize("role", ["AXButton", "AXStaticText"])
+def test_chromium_confirmed_unchanged_signal_keeps_suspected_noop(readable_native_button, monkeypatch, role):
+    native, action, button, document, _ = readable_native_button
+    action = replace(action, target=replace(action.target, role=role))
+    monkeypatch.setattr(native, "_chromium_app", lambda node: True)
+    before = native.retry_evidence(action, button, None)
+    after = native.retry_evidence(action, button, None)
+    assert outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)[0] == "suspected_noop"
+
+
+def test_hung_chromium_page_overrides_unchanged_signal():
+    from a11y_computer_use.drivers import _page_health
+    hung = outcome.RetryEvidence(reason=_page_health.UNRESPONSIVE)
+    judged, evidence = outcome.retry_verdict(("suspected_noop", "unchanged"), hung, hung)
+    assert judged == "unverifiable"
+    assert outcome.suggest_next("click", judged) == ()
+    assert "page not responding" in evidence
