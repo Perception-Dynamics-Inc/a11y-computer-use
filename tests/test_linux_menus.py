@@ -102,6 +102,19 @@ def named_popup_app():
     return Acc("application", "gedit", [Acc("frame", "gedit", [bar], states={"active"})])
 
 
+def test_shortcut_binding_keeps_digit_accelerators() -> None:
+    """#1177: GTK3 View > Small reports ``s;<Alt>v:s;<Primary>1``.
+
+    A digit key with a modifier is a real chord (Ctrl+1, Ctrl+0, Alt+1).
+    Only a bare number, as in keycode-style bindings, is not a key.
+    """
+    assert _linux_menus.shortcut_from_binding("s;<Alt>v:s;<Primary>1") == "ctrl+1"
+    assert _linux_menus.shortcut_from_binding("<Primary>0") == "ctrl+0"
+    assert _linux_menus.shortcut_from_binding("<Alt>1") == "alt+1"
+    assert _linux_menus.shortcut_from_binding("<Primary><Shift>2") == "ctrl+shift+2"
+    assert _linux_menus.shortcut_from_binding("n;37;4") == "n"
+    assert _linux_menus.shortcut_from_binding("0;0;0") is None
+
 def test_shortcut_binding_renders_gtk_tags() -> None:
     assert _linux_menus.shortcut_from_binding("<Control>n") == "ctrl+n"
     assert _linux_menus.shortcut_from_binding("<Primary><Shift>O") == "ctrl+shift+o"

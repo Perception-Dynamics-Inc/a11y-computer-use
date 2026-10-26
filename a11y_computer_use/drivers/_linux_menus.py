@@ -256,7 +256,7 @@ def _render_chord(chosen: str) -> str | None:
                 mapped = _MOD_TAGS.get(bit)
                 if mapped and mapped not in found:
                     found.append(mapped)
-    if not key or key.isdigit():
+    if not key or (key.isdigit() and not found):
         return None
     ordered = [name for name in _MOD_ORDER if name in found]
     return "+".join([*ordered, key])
