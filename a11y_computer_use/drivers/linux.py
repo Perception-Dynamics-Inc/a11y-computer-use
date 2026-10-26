@@ -4477,7 +4477,7 @@ class LinuxDriver:
             return None
 
     def scroll_viewport_page(self, target: Element, direction: int) -> bool:
-        """Page a large GTK table by one painted viewport. False otherwise.
+        """Page a large GTK table or terminal by one painted viewport.
 
         ``direction`` is positive to go down. The vertical bar moves by the
         painted row count. Chromium and a line-sized ``scroll`` stay on
@@ -4494,10 +4494,54 @@ class LinuxDriver:
             return False
         if handle is None:
             return False
-        try:
-            return bool(self._run(lambda: _atspi.scroll_gtk_viewport_page(handle, int(direction))))
-        except Exception:
-            return False
+
+        def page():
+            try:
+                if _atspi.scroll_gtk_viewport_page(handle, int(direction)):
+                    return True
+            except Exception:
+                # Preserve the existing optional GTK paging fallback.
+                pass
+            result = _atspi.scroll_terminal_viewport(handle, int(direction))
+            if result == "at_end":
+                state = _atspi.terminal_scrollbar(handle)
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED, "terminal viewport is already at its edge",
+                    detail={"reason": "page_unchanged", "surface": "terminal",
+                            "scroll_position": state[4] if state else None},
+                )
+            return result == "moved"
+
+        return self._run(page)
+
+    def scroll_search_limit(self, target: Element) -> int | None:
+        """Range-derived page allowance for a terminal; other surfaces keep defaults."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        return self._run(lambda: _atspi.terminal_scroll_search_limit(handle))
+
+    def find_miss_hint(self, snapshot: Snapshot) -> str:
+        """Explain off-screen terminal scrollback on a find miss."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def read():
+            for element in snapshot.elements:
+                if element.subrole != "terminal":
+                    continue
+                handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+                state = _atspi.terminal_scrollbar(handle)
+                if state and state[4] > state[2]:
+                    return (
+                        "terminal shows only visible rows; "
+                        f"{state[4] - state[2]:g} earlier lines are in scrollback — "
+                        "use scroll_to_find direction=up"
+                    )
+            return ""
+
+        return self._run(read)
 
     def latch_chromium_find(self, app: str) -> bool:
         """Remember this Chrome process before the post-find snapshot.

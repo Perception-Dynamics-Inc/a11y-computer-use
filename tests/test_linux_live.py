@@ -14469,3 +14469,47 @@ def test_linux_chrome_click_during_renderer_freeze_is_unverifiable_without_cdp(t
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
+
+
+def test_xfce4_terminal_scroll_to_find_turns_up_from_bottom(tmp_path) -> None:
+    """Real VTE scrollback: default direction reaches early output via Value."""
+    import shutil
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = shutil.which("xfce4-terminal")
+    if binary is None:
+        pytest.skip("xfce4-terminal is not installed")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_xfce_terminal(binary, [
+        "--disable-server", "--hide-menubar", "--geometry=80x30", "--hold",
+        "--command=seq -f LINE-%04g 1 400",
+    ], tmp_path)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "xfce4-terminal")
+                if any(el.subrole == "terminal" and "LINE-0400" in (el.value or "") for el in snap.elements):
+                    break
+            except ComputerUseError:
+                pass
+            time.sleep(0.05)
+        else:
+            pytest.fail("terminal did not expose the end of seq output")
+        runtime = _runtime_for(tmp_path, driver, "xfce4-terminal")
+        miss = runtime.find("xfce4-terminal", text="LINE-0005")
+        assert "scrollback" in miss and "scroll_to_find direction=up" in miss
+        started = time.monotonic()
+        result = runtime.scroll_to_find("xfce4-terminal", text="LINE-0005")
+        elapsed = time.monotonic() - started
+        assert "found after" in result and "not found" not in result, result
+        assert "LINE-0005" in result
+        final = driver.snapshot(Scope.WINDOW, "xfce4-terminal")
+        assert any("LINE-0005" in (el.value or "") for el in final.elements)
+        # Same private desktop: 0.4.76 upward search (max_scrolls=40)
+        # median 14.47s for this 400-line, 80x30 fixture. Keep the 1.25x gate.
+        assert elapsed < 1.25 * 14.47
+        print(f"terminal default-direction search: {elapsed:.3f}s", flush=True)
+    finally:
+        _stop_group(proc)

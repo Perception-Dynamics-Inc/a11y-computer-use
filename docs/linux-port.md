@@ -1606,6 +1606,21 @@ a segment and emit an empty `input`/`change` value. Use an explicit
 also applies to empty replacement strings; ordinary text and number inputs
 retain their existing write paths.
 
+### Terminal scrollback search
+
+For VTE terminals with a readable vertical AT-SPI Value scrollbar,
+`scroll_to_find` pages by the visible text row count minus two rows, preserving
+an overlap. Each write is read back. A confirmed edge reverses the search
+immediately, including a default downward search starting at the bottom.
+The per-direction page allowance covers the reported scrollbar range; the
+existing progress budget and hard time cap still apply. A zero `max_scrolls`
+remains observation-only. Missing Value metadata keeps the existing wheel path;
+ordinary text editors do not use terminal paging.
+
+A `find` miss on a terminal with earlier scrollback names that scrollback and
+suggests `scroll_to_find direction=up`. Paging uses the scrollbar, without
+sending shell commands or changing terminal text.
+
 ### Evince PDF visibility
 
 Evince application names `evince` and `org.gnome.Evince` share the PDF-page
