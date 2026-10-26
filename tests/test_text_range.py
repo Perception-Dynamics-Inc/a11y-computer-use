@@ -238,3 +238,38 @@ def test_selection_reader_without_optional_native_binding(monkeypatch):
         raise ImportError('gi unavailable on this platform')
     monkeypatch.setattr(_atspi, '_atspi', missing)
     assert _atspi.read_text_selections(object()) is None
+
+
+def _bus_path_tree(monkeypatch, desktop_bus):
+    """text -> application -> desktop, as Mousepad publishes them (#1181)."""
+    desktop = NS(get_role_name=lambda: 'desktop frame', get_parent=lambda: None)
+    app = NS(get_role_name=lambda: 'application', get_parent=lambda: desktop)
+    text = NS(get_role_name=lambda: 'text', get_parent=lambda: app, get_child_count=lambda: 0)
+    ids = {
+        id(text): (':1.5', '/org/a11y/atspi/accessible/317'),
+        id(app): (':1.5', '/org/a11y/atspi/accessible/root'),
+        id(desktop): (desktop_bus, '/org/a11y/atspi/accessible/root'),
+    }
+    monkeypatch.setattr(_atspi, '_atspi_wrapper_key', lambda acc: ids.get(id(acc)))
+    monkeypatch.setattr(_atspi, '_atspi_object_path', lambda acc: ids.get(id(acc), (None, None))[1])
+    monkeypatch.setattr(_atspi, 'is_secure', lambda node: False)
+    binding = _atspi._atspi()
+    monkeypatch.setattr(_atspi, '_atspi', lambda: binding)
+    binding.Text.get_n_selections = lambda node: 1
+    binding.Text.get_selection = lambda node, i: (18, 22)
+    raw = 'MPDRAG_0042 alpha beta\nsecond line'
+    binding.Text.get_text = lambda node, start, end: raw if end == -1 else raw[start:end]
+    return text
+
+
+def test_selection_under_app_root_sharing_the_desktop_path_is_read(monkeypatch):
+    # The app root and the registry desktop share a path on different buses.
+    text = _bus_path_tree(monkeypatch, ':1.0')
+    rows = _atspi.read_text_selections(text, budget=1)
+    assert rows is not None
+    assert [row[1:] for row in rows] == [(18, 22, 'beta')]
+
+
+def test_selection_ancestor_cycle_on_one_bus_is_still_unreadable(monkeypatch):
+    text = _bus_path_tree(monkeypatch, ':1.5')
+    assert _atspi.read_text_selections(text, budget=1) is None

@@ -22342,17 +22342,22 @@ def read_text_selections(
         return None
     # A ref may address static text inside a protected editor. Recheck
     # its native ancestors rather than trusting only the issued ref flag.
+    # Key on bus name and path (#1181): an application root and the
+    # registry desktop both publish /org/a11y/atspi/accessible/root on
+    # different connections, and a path-only key read that as a cycle.
     ancestor = root
     ancestors = set()
+    pinned = []
     for _ in range(32):
         if ancestor is None:
             break
         if time.monotonic() >= deadline:
             return None
-        key = _frame_cache_key(ancestor)
+        key = _ancestor_key(ancestor)
         if key in ancestors or is_secure(ancestor):
             return None
         ancestors.add(key)
+        pinned.append(ancestor)
         if _role_name(ancestor).startswith("document"):
             break
         ancestor = _parent_of(ancestor)
