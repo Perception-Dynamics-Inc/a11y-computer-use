@@ -1539,3 +1539,38 @@ also applies to an editable whose ref cannot be rematched after display-edge
 pruning; it sends no text. A click on a display-clipped ref whose effect remains
 unconfirmed returns `unverifiable` with no retry hints, since delivery may
 already have triggered the control. Confirmed effects retain their result.
+
+### Chromium renderer stalls and retry safety
+
+Chromium can serve a complete AT-SPI tree from its browser-side cache while
+its page renderer is busy or stopped. Those unchanged cached readings do not
+prove that a click was a no-op. Page clicks with no verified effect return
+`unverifiable`, no retry strategies, and a warning that input may be queued.
+Wait for recovery and re-observe before deciding whether another input is needed.
+
+When the owning process already exposes a local CDP debugging port, a bounded,
+read-only renderer probe can diagnose `page_not_responding`. It binds to a unique
+page URL or window title; discovery failures and ambiguous tabs remain unknown.
+A timed-out renderer probe prevents `find`/snapshot from returning a stale tree
+as a fresh observation. It does not enable debugging, reload, interrupt script,
+or substitute another input action. A reply only establishes responsiveness at
+that instant; it does not by itself authorize an action retry.
+
+Without that signal, snapshots and filtered `find` results explicitly mark
+Chromium renderer responsiveness as unverified and the tree as potentially
+stale. This is not a claim that every such page is hung. Addressed typing uses
+one bounded focus wait for the original field or a verified detached replacement;
+it never re-grabs focus after the pointer press. Failed page focus reports that
+nothing was typed and input may be queued, without offering another input route.
+
+The manual busy-loop regression launches its own browser/profile and window
+manager, checks recovery and the click counter, and terminates only processes it
+started. Run from the checkout (requires Chrome, Xvfb, xfwm4, xdotool and native
+AT-SPI dependencies):
+
+```bash
+PYTHONPATH=. XDG_CACHE_HOME=$(mktemp -d) dbus-run-session -- xvfb-run -a \
+  /workspace/a11y-venv-codex/bin/python scripts/box/benchmark_hung_chrome.py
+PYTHONPATH=. XDG_CACHE_HOME=$(mktemp -d) dbus-run-session -- xvfb-run -a \
+  /workspace/a11y-venv-codex/bin/python scripts/box/benchmark_hung_chrome.py --cdp
+```

@@ -389,3 +389,18 @@ def test_native_retry_deadline_exhaustion_remains_unknown(readable_native_button
     verdict = outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)
     assert verdict[0] == "unverifiable"
     assert outcome.suggest_next("click", verdict[0]) == ()
+
+
+@pytest.mark.parametrize("role", ["AXButton", "AXTextField", "AXStaticText"])
+def test_chromium_browser_cache_cannot_authorize_retry(readable_native_button, monkeypatch, role):
+    native, action, button, document, _ = readable_native_button
+    action = replace(action, target=replace(action.target, role=role))
+    monkeypatch.setattr(native, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(native, "_ancestor_chain", lambda node: iter((button, document)))
+    before = native.retry_evidence(action, button, None)
+    after = native.retry_evidence(action, button, None)
+    judged, evidence = outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)
+    assert judged == "unverifiable"
+    assert outcome.suggest_next("click", judged) == ()
+    assert "page may not be responding" in evidence
+    assert "input may be queued" in evidence

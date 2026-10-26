@@ -1613,9 +1613,30 @@ class LinuxDriver:
         # DOM values merge onto this tree only when the process opted into
         # CDP. Bounds, refs, and a snapshot with no port stay as AT-SPI
         # built them. Windows, menus, and native dialogs are untouched.
-        from a11y_computer_use.drivers import _cdp_forms
+        from a11y_computer_use.drivers import _cdp_forms, _page_health
 
+        documents = [el for el in snap.elements if el.modal_scope_root]
+        if documents:
+            health = _page_health.probe(snap.pid, _cdp_forms._window_title(snap), snap.url)
+            if health is False:
+                raise _page_health.refusal()
+            if health is None:
+                from a11y_computer_use import observe
+                from a11y_computer_use.drivers import _atspi
+                handles = [observe.ax_handle_for(el.snapshot_id, el.ref) for el in documents]
+                if self._run(lambda: any(h is not None and _atspi._chromium_app(h) for h in handles)):
+                    snap = replace(snap, elements=tuple(
+                        replace(el, content_note="; ".join(filter(None, (el.content_note, _page_health.STALE_TREE))))
+                        if el.modal_scope_root else el for el in snap.elements
+                    ))
         return self._snapshot_selections(_cdp_forms.overlay_snapshot(snap))
+
+    def observation_warning(self, snapshot: Snapshot) -> str:
+        """Keep unknown renderer freshness visible even in filtered find results."""
+        from a11y_computer_use.drivers import _page_health
+        return (_page_health.STALE_TREE if any(
+            _page_health.STALE_TREE in el.content_note for el in snapshot.elements
+        ) else "")
 
     def _snapshot_resolved(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use.drivers import _atspi
@@ -2411,7 +2432,12 @@ class LinuxDriver:
             # accessors cannot establish that libatspi reads are available.
             return None
         focus_handle = observe.ax_handle_for(focused.snapshot_id, focused.ref) if focused else None
-        return self._run(lambda: _atspi.retry_evidence(action, handle, focus_handle))
+        evidence = self._run(lambda: _atspi.retry_evidence(action, handle, focus_handle))
+        from a11y_computer_use.drivers import _cdp_forms, _page_health
+        if evidence is not None and evidence.reason == _page_health.UNKNOWN:
+            if _page_health.probe(snapshot.pid, _cdp_forms._window_title(snapshot), snapshot.url) is False:
+                return replace(evidence, reason=_page_health.UNRESPONSIVE)
+        return evidence
 
     def toggle_click_probe(self, target: Target):
         """Capture a page toggle or GTK dialog selection before the click."""
@@ -4899,15 +4925,36 @@ class LinuxDriver:
         context = self._run(lambda: _atspi.web_entry_context(handle))
         if (element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
                 and self._run(lambda: _atspi._chromium_app(handle))):
+            if context is not None:
+                from a11y_computer_use.drivers import _page_health
+                pid, title, url = self._run(lambda: (
+                    _atspi.pid_of(handle),
+                    _atspi._node_name(context[3]), _atspi._doc_url(context[2]),
+                ))
+                if _page_health.probe(pid, title, url) is False:
+                    raise _page_health.refusal()
             # Accessibility focus bypasses page pointer handlers, including
             # custom-value radios. Use the geometry-checked pointer path.
             self.click(element)
-            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
-                if context is None:
-                    raise self._focus_lost_on(element)
-                handle = self._focus_web_entry(
-                    element, handle, context=context, request_focus=False,
-                )
+            if context is not None:
+                # One wait checks the original entry and a detached remount.
+                # Do not re-grab focus after the requested pointer press.
+                try:
+                    handle = self._focus_web_entry(
+                        element, handle, context=context, request_focus=False,
+                    )
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.FOCUS_LOST:
+                        raise
+                    from a11y_computer_use.drivers import _page_health
+                    raise ComputerUseError(
+                        ErrorCode.FOCUS_LOST,
+                        "focus did not arrive; nothing was typed; " + _page_health.UNKNOWN,
+                        detail={"reason": "page_focus_unverified", "outcome": "unverifiable",
+                                "next": [], "evidence": _page_health.UNKNOWN},
+                    ) from exc
+            elif not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                raise self._focus_lost_on(element)
         elif self._run(lambda: _atspi.drawing_text_editable(handle)):
             # The paragraph often has no Component. Focus lands on it or on
             # the shape panel, and EditableText inserts on the paragraph.

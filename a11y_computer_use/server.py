@@ -5204,6 +5204,10 @@ class Runtime:
                 self._current = snap
             self._note_issued(snap, {el.ref for el in matches})
             rendered = observe.render_matches(snap, matches, text=text)
+            warning_reader = getattr(self.driver, "observation_warning", None)
+            warning = warning_reader(snap) if callable(warning_reader) else ""
+            if warning and warning not in rendered:
+                rendered += "\n" + warning
             if hidden_buffer and not matches:
                 rendered += (
                     "\ntext is in the document buffer and not in the visible text"
@@ -10612,6 +10616,9 @@ def build_server(
         changed elements), rendered in the view you last asked for; use it to
         re-observe after an action. '(no change)' means the accessibility tree
         is unchanged; it does not establish that opaque pixels are unchanged.
+        Linux Chromium trees warn when renderer responsiveness is unverified.
+        A timed-out renderer probe reports page_not_responding; queued input
+        may land after recovery, so re-observe before retrying.
         budget=N caps the reply at about N tokens. One window
         replaces the tail with a marker counting the omitted element lines.
         Several windows share that budget, and a window past its share ends
@@ -10647,7 +10654,9 @@ def build_server(
         refs (e1..eN) are the current epoch — act on them promptly and re-observe
         after the UI changes. Refs omitted from a later find in the same observed
         application instance keep their earlier binding and must still resolve
-        against the live tree before input.
+        against the live tree before input. Linux Chromium results warn if
+        renderer responsiveness is unverified and refuse a timed-out renderer
+        probe as page_not_responding. Input may be queued; re-observe before retrying.
         scope='window'|'app'. Tier 'read'.
 
         ocr=true searches the TEXT ON SCREEN instead of the accessibility tree

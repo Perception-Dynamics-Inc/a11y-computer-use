@@ -9923,7 +9923,7 @@ def focus_web_entry(acc, *, context=None, request_focus: bool = True):
     for attempt in range(_FOCUS_CONFIRM_POLLS):
         # A startup placeholder may briefly report focus before its async
         # handler mounts the editable input (Wikipedia's header does this).
-        if request_focus and _focus_on_target(acc) is True and _state_has(acc, "EDITABLE"):
+        if _focus_on_target(acc) is True and _state_has(acc, "EDITABLE"):
             return acc
         # Collection is document-local, so browser chrome and other tabs
         # cannot become candidates, even if they carry the same name.
@@ -13409,11 +13409,8 @@ def retry_evidence(action, target, focus):
     formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
         "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
     }
-    label = isinstance(action, Click) and isinstance(action.target, Element) and action.target.role in {"AXStaticText", "AXButton"}
-    outline = (isinstance(action, Click) and isinstance(action.target, Element)
-               and action.target.note == "activates on double-click"
-               and action.count == 1 and not action.modifiers)
-    if target is None or not (formatting or label or outline):
+    ref_click = isinstance(action, Click) and isinstance(action.target, Element)
+    if target is None or not (formatting or ref_click):
         return None
     return _without_child_cache(target, lambda: _retry_evidence(action, target, focus))
 
@@ -13439,11 +13436,20 @@ def _retry_evidence(action, target, focus):
     element = action.target if isinstance(action, Click) and isinstance(action.target, Element) else None
     outline = (element is not None and element.note == "activates on double-click"
                and action.count == 1 and not action.modifiers)
-    if not formatting and not outline and (element is None or element.role not in {"AXStaticText", "AXButton"}):
-        return None
     try:
         _drop_cached_properties(target)
         if is_secure(target):
+            return None
+        # Restore d2de2e2's conservative web evidence rule, including field
+        # clicks: Chromium's browser cache can answer while input is queued.
+        if (element is not None and _chromium_app(target)
+                and any(_role_name(node) in {"document web", "document frame"}
+                        for node in _ancestor_chain(target))):
+            from a11y_computer_use.drivers._page_health import UNKNOWN
+            return RetryEvidence(reason=UNKNOWN)
+        if time.monotonic() >= deadline:
+            return None
+        if not formatting and not outline and (element is None or element.role not in {"AXStaticText", "AXButton"}):
             return None
         if outline:
             states = _call_first(target, ("get_state_set",))
