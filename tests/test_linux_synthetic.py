@@ -21783,6 +21783,166 @@ def test_gecko_select_in_dialog_closes_popup_without_escape(fake_atspi, monkeypa
         assert keys == ["Escape"]
 
 
+@pytest.fixture
+def terminal_scrollback(fake_atspi, monkeypatch):
+    """Thirty visible VTE rows with a sibling Value bar; no native desktop."""
+    from dataclasses import replace
+
+    terminal, bar, _horizontal = _scrolled_text()
+    terminal.role = "terminal"
+    bar.minimum, bar.maximum, bar.visual_max, bar.value = 0, 373, 373, 373
+    calls = []
+
+    def paint():
+        terminal.text = "\n".join(f"LINE-{i:04}" for i in range(int(bar.value) + 1, int(bar.value) + 31))
+
+    def write(acc, value):
+        calls.append(value)
+        acc.value = value
+        paint()
+        return True
+
+    paint()
+    bar.on_value = write
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "ensure_trusted", lambda: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: terminal)
+    monkeypatch.setattr(_atspi, "_invalidate_tree_cache", lambda node: None)
+    monkeypatch.setattr(driver, "scroll", lambda *args, **kwargs: pytest.fail("unexpected wheel"))
+    monkeypatch.setattr(driver, "scroll_search_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(driver, "text_match_target", lambda el, text: el)
+    monkeypatch.setattr(driver, "supports_in_page_find", lambda app: False)
+    element = replace(_body(), subrole="terminal")
+
+    def snapshot(scope, app):
+        return Snapshot("snap-1", scope, app, None, 0.0, (Display(0, 1280, 800, 1.0, True),), (replace(element, value=terminal.text),))
+
+    monkeypatch.setattr(driver, "snapshot", snapshot)
+    runtime = _runtime_for(driver, monkeypatch)
+    return terminal, bar, calls, driver, runtime
+
+
+@pytest.mark.parametrize("target", ["LINE-0200", "LINE-0005"])
+def test_terminal_scroll_to_find_turns_at_bottom(terminal_scrollback, target):
+    terminal, bar, calls, driver, runtime = terminal_scrollback
+    assert _atspi.scroll_terminal_viewport(terminal, 1) == "at_end"
+    assert calls == []
+    out = runtime.scroll_to_find("chrome", text=target)
+    assert "found after" in out and "not found" not in out
+    assert target in terminal.text
+    assert calls == [max(0, 373 - 28 * step) for step in range(1, len(calls) + 1)]
+
+
+def test_terminal_scroll_to_find_both_ends_not_found(terminal_scrollback):
+    _terminal, bar, calls, driver, runtime = terminal_scrollback
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.scroll_to_find("chrome", text="ABSENT")
+    assert caught.value.detail == {"reason": "page_unchanged", "surface": "terminal", "scroll_position": 0}
+    assert len(calls) + 2 <= math.ceil(373 / 28) + 2
+    assert bar.value == 0
+
+
+def test_terminal_viewport_step_overlaps(terminal_scrollback):
+    terminal, bar, calls, _driver, _runtime = terminal_scrollback
+    previous = terminal.text.splitlines()
+    assert _atspi.scroll_terminal_viewport(terminal, -1) == "moved"
+    assert calls == [345]
+    assert terminal.text.splitlines()[-2:] == previous[:2]
+
+
+def test_terminal_without_value_keeps_wheel(terminal_scrollback, monkeypatch):
+    terminal, bar, calls, driver, runtime = terminal_scrollback
+    monkeypatch.setattr(_atspi, "_read_value", lambda bar: None)
+    assert _atspi.scroll_terminal_viewport(terminal, -1) is None
+    wheels = []
+    monkeypatch.setattr(driver, "scroll", lambda *args, **kwargs: wheels.append(kwargs))
+    runtime.scroll_to_find("chrome", text="ABSENT", max_scrolls=1)
+    assert len(wheels) == 1
+    assert calls == []
+
+
+def test_non_terminal_textarea_unchanged(terminal_scrollback):
+    terminal, bar, calls, driver, _runtime = terminal_scrollback
+    terminal.role = "text"
+    assert _atspi.scroll_terminal_viewport(terminal, -1) is None
+    assert driver.scroll_viewport_page(_body(), -1) is False
+    assert calls == []
+
+
+def test_find_terminal_miss_names_scrollback(terminal_scrollback):
+    _terminal, bar, calls, driver, runtime = terminal_scrollback
+    out = runtime.find("chrome", text="ABSENT")
+    assert "373 earlier lines are in scrollback" in out
+    assert "scroll_to_find direction=up" in out
+    bar.value = 0
+    assert "scrollback" not in runtime.find("chrome", text="ABSENT")
+    assert calls == []
+
+
+@pytest.mark.parametrize("case", ["single", "ambiguous", "deep"])
+def test_terminal_viewport_requires_single_nearby_terminal(terminal_scrollback, case):
+    terminal, bar, calls, driver, runtime = terminal_scrollback
+    wrapper = terminal.parent.parent
+    if case == "ambiguous":
+        _adopt(wrapper, *wrapper.children, _Acc("terminal"))
+    elif case == "deep":
+        wrapper = _adopt(_Acc("panel"), wrapper)
+    assert _atspi.scroll_terminal_viewport(wrapper, -1) == ("moved" if case == "single" else None)
+    assert bool(calls) == (case == "single")
+
+
+def test_terminal_viewport_readback_required(terminal_scrollback, monkeypatch):
+    terminal, bar, calls, driver, runtime = terminal_scrollback
+    bar.on_value = lambda acc, value: True
+    assert _atspi.scroll_terminal_viewport(terminal, -1) == "at_end"
+    reads = iter([373, None])
+    monkeypatch.setattr(_atspi, "_read_value", lambda bar: next(reads))
+    with pytest.raises(ComputerUseError, match="could not be verified"):
+        _atspi.scroll_terminal_viewport(terminal, -1)
+
+
+@pytest.mark.parametrize("kwargs", [{"max_scrolls": 0}, {"budget_s": 0}])
+def test_terminal_search_respects_zero_budget(terminal_scrollback, kwargs):
+    _terminal, _bar, calls, _driver, runtime = terminal_scrollback
+    out = runtime.scroll_to_find("chrome", text="ABSENT", **kwargs)
+    assert "not found" in out
+    assert calls == []
+
+
+def test_terminal_page_respects_scroll_gate(terminal_scrollback):
+    from a11y_computer_use.schema import Scroll
+
+    _terminal, _bar, calls, _driver, runtime = terminal_scrollback
+
+    def gate(action, app, execute, **kwargs):
+        if isinstance(action, Scroll):
+            raise ComputerUseError(ErrorCode.UNSUPPORTED, "scroll denied")
+        return execute()
+
+    runtime._run_gated = gate
+    with pytest.raises(ComputerUseError, match="scroll denied"):
+        runtime.scroll_to_find("chrome", text="LINE-0005", direction="up")
+    assert calls == []
+
+
+def test_terminal_bar_probe_stops_before_unrelated_ancestors(terminal_scrollback):
+    terminal, bar, calls, _driver, _runtime = terminal_scrollback
+    frame = _adopt(_Acc("frame"), terminal.parent.parent)
+    visited = []
+    frame.get_child_count = lambda: visited.append("frame") or 1
+    assert _atspi.terminal_scrollbar(terminal)[1] is bar
+    assert visited == []
+
+
+@pytest.mark.parametrize("attribute", ["minimum", "maximum", "value"])
+def test_terminal_unreadable_bar_metadata_keeps_fallback(terminal_scrollback, attribute):
+    terminal, bar, calls, _driver, _runtime = terminal_scrollback
+    setattr(bar, attribute, math.nan)
+    assert _atspi.scroll_terminal_viewport(terminal, -1) is None
+    assert calls == []
+
+
 def test_chrome_select_option_click_waits_for_late_expanded_clear(fake_atspi, monkeypatch):
     """Flake in test_linux_chrome_optgroup_select_click_closes_the_popup.
 
