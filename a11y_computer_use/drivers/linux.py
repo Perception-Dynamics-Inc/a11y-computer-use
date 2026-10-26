@@ -2479,6 +2479,8 @@ class LinuxDriver:
             return _page_health.BUSY
         return None
 
+    _LO_TOGGLE_POLLS = 12
+
     def toggle_click_probe(self, target: Target):
         """Capture a page toggle or GTK dialog selection before the click."""
         from a11y_computer_use import observe
@@ -2500,6 +2502,9 @@ class LinuxDriver:
             if state is None:
                 reader = _atspi.gtk_dialog_toggle_state
                 state = reader(handle)
+            if state is None:
+                reader = _atspi.libreoffice_toggle_state
+                state = reader(handle)
             return (handle, state, reader) if state is not None else None
 
         try:
@@ -2514,21 +2519,42 @@ class LinuxDriver:
         if probe is None:
             return None
         handle, previous, reader = probe
+        office = reader is _atspi.libreoffice_toggle_state
         # XSync acknowledges delivery, not the application's event handler. Keep
         # these short waits outside the AT-SPI thread so state events run.
-        for attempt in range(3):
-            try:
-                current = self._run(lambda: reader(handle))
-            except Exception:
-                return None
-            if current is None:
-                return None
-            if current != previous:
-                if reader is _atspi.gtk_dialog_toggle_state:
-                    return "the clicked GTK dialog control's selected/checked state changed"
-                return "the clicked toggle's checked/pressed state changed"
-            if attempt < 2:
-                time.sleep(0.01)
+        # LibreOffice runs the sidebar deck switch from its own event loop,
+        # so it gets a longer poll before the retry below.
+        attempts, pause = (self._LO_TOGGLE_POLLS, 0.05) if office else (3, 0.01)
+
+        def flipped() -> bool | None:
+            for attempt in range(attempts):
+                try:
+                    current = self._run(lambda: reader(handle))
+                except Exception:
+                    return None
+                if current is None:
+                    return None
+                if current != previous:
+                    return True
+                if attempt < attempts - 1:
+                    time.sleep(pause)
+            return False
+
+        changed = flipped()
+        if changed:
+            if reader is _atspi.gtk_dialog_toggle_state:
+                return "the clicked GTK dialog control's selected/checked state changed"
+            return "the clicked toggle's checked/pressed state changed"
+        if not office or changed is None:
+            return None
+        # A LibreOffice sidebar tab can ignore the pointer click while its own
+        # click action works (#1184). Retry once through that action.
+        try:
+            acted = self._run(lambda: _atspi.do_named_action(handle, "click"))
+        except Exception:
+            return None
+        if acted and flipped():
+            return "the toggle's checked state changed after its own click action"
         return None
 
     def button_click_evidence(self, element: Element) -> str | None:

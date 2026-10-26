@@ -22088,3 +22088,89 @@ def test_chromium_tree_with_one_own_row_skips_the_hit_probe(fake_atspi, monkeypa
     accessor.refresh_visible(_Acc("frame"))
     assert probed == [wrapped]
     assert accessor._visible_children[id(wrapped)] == own
+
+
+def _lo_sidebar_tab(*, pressed=False, siblings=0):
+    """LibreOffice gtk3 sidebar: toolbar > panel(description) > unnamed toggle (#1184)."""
+    toggle = _Acc("toggle button", states={"ENABLED", "SENSITIVE", "SHOWING", "VISIBLE", "FOCUSABLE"}
+                  | ({"CHECKED"} if pressed else set()))
+    panel = _Acc("panel")
+    panel.get_description = lambda: "Properties (Alt+1)"
+    _adopt(panel, toggle, *[_Acc("push button", name=f"x{i}") for i in range(siblings)])
+    _adopt(_Acc("tool bar", name="Properties"), panel)
+    return panel, toggle
+
+
+@pytest.mark.parametrize("pressed", [False, True])
+def test_libreoffice_sidebar_toggle_is_named_and_checkable(fake_atspi, monkeypatch, pressed) -> None:
+    """Synthetic (#1184). The unnamed tab takes its panel's description and reads checked."""
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((1240.0, 180.0), (22.0, 22.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("click",))
+    _panel, toggle = _lo_sidebar_tab(pressed=pressed)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    raw = accessor.read(toggle)
+    assert raw.title == "Properties (Alt+1)"
+    assert raw.checked is pressed
+
+
+def test_libreoffice_label_needs_a_sole_child_and_other_toggles_keep_none(fake_atspi, monkeypatch) -> None:
+    """Synthetic (#1184). A shared parent names nothing; a push button's checked stays None."""
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((1240.0, 180.0), (22.0, 22.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("click",))
+    _panel, toggle = _lo_sidebar_tab(siblings=1)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    assert accessor.read(toggle).title == ""
+    _panel, button = _lo_sidebar_tab()
+    button.role = "push button"
+    assert accessor.read(button).checked is None
+
+
+def _lo_toggle_driver(monkeypatch, toggle, *, clicks_work):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Bounds, Element
+
+    element = Element("e29", "AXButton", "Properties (Alt+1)", None, Bounds(0, 1240, 180, 22, 22),
+                      "lo-toggle", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: toggle})
+    driver = LinuxDriver(visible_actions=False)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_LO_TOGGLE_POLLS", 2)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda s: None)
+    monkeypatch.setattr(_atspi, "_libreoffice_node", lambda acc: acc is toggle)
+    actions = []
+
+    def do_named_action(acc, name):
+        actions.append((acc, name))
+        if clicks_work:
+            toggle.states.symmetric_difference_update({"CHECKED"})
+        return True
+
+    monkeypatch.setattr(_atspi, "do_named_action", do_named_action)
+    return driver, element, actions
+
+
+def test_libreoffice_toggle_click_is_verified_by_checked_flip(fake_atspi, monkeypatch) -> None:
+    """Synthetic (#1184). A pointer click that flips CHECKED is confirmed with no retry."""
+    _panel, toggle = _lo_sidebar_tab()
+    driver, element, actions = _lo_toggle_driver(monkeypatch, toggle, clicks_work=True)
+    probe = driver.toggle_click_probe(element)
+    assert probe is not None
+    toggle.states.add("CHECKED")
+    assert driver.toggle_click_evidence(probe) == "the clicked toggle's checked/pressed state changed"
+    assert actions == []
+
+
+@pytest.mark.parametrize("clicks_work", [True, False])
+def test_libreoffice_toggle_retries_once_with_its_click_action(fake_atspi, monkeypatch, clicks_work) -> None:
+    """Synthetic (#1184). An ignored pointer click retries the node's click action once."""
+    _panel, toggle = _lo_sidebar_tab()
+    driver, element, actions = _lo_toggle_driver(monkeypatch, toggle, clicks_work=clicks_work)
+    probe = driver.toggle_click_probe(element)
+    evidence = driver.toggle_click_evidence(probe)
+    assert actions == [(toggle, "click")]
+    if clicks_work:
+        assert evidence == "the toggle's checked state changed after its own click action"
+    else:
+        assert evidence is None
