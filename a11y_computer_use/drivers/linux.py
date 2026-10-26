@@ -1761,6 +1761,10 @@ class LinuxDriver:
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
+                    with _atspi.walk_parent_memo():
+                        return _walk_tree_inner(node)
+
+                def _walk_tree_inner(node: object) -> Snapshot:
                     accessor._modal_ancestry.clear()
                     # Only Chromium needs pre-reveal descendant discovery.
                     # A GTK find uses the same pruned walk as a snapshot;

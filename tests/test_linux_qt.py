@@ -1982,3 +1982,14 @@ def test_gtk_combo_names_preserve_names_without_matching_value_and_label(atspi, 
         children.append(_Node("label", "Other:", toolkit=toolkit, x=10, y=50, w=120))
     _Node("panel", children=children, toolkit=toolkit)
     assert _read(combo).title == name
+
+
+def test_combo_entry_rejects_child_owned_by_another_parent(atspi):
+    # A stale child list once handed a Firefox <select> the focused Notes
+    # textarea; set_value then wrote there and reported "set".
+    notes = _Node("entry", states={"ENABLED", "SENSITIVE", "FOCUSABLE"})
+    form = _Node("section", children=[notes])
+    combo = _Node("combo box", children=[])
+    combo.children.append(notes)
+    assert notes.get_parent() is form
+    assert _atspi._combo_entry(combo) is None
