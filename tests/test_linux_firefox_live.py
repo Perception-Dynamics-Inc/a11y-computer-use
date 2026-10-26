@@ -1422,3 +1422,100 @@ def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
     finally:
         _stop(proc)
         proc._log.close()
+
+
+_MODAL_SELECT = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>ffmodal1150</title></head>
+    <body>
+    <button type="button" id="behind">Behind</button>
+    <dialog id="nd" aria-label="Native box">
+      <label>Native color <select id="ns" aria-label="Native color">
+        <option>Red</option><option>Green</option><option>Blue</option></select></label>
+      <button type="button">Native ok</button>
+      <p class="log">escapes=0</p>
+    </dialog>
+    <div id="ad" role="dialog" aria-modal="true" aria-label="Aria box" hidden
+         style="position:fixed;top:260px;left:40px;border:1px solid;padding:8px;background:#fff">
+      <label>Aria color <select id="as" aria-label="Aria color">
+        <option>Red</option><option>Green</option><option>Blue</option></select></label>
+      <button type="button">Aria ok</button>
+      <p class="log">escapes=0</p>
+    </div>
+    <script>
+    var escapes = 0;
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Escape") return;
+      escapes += 1;
+      document.querySelectorAll(".log").forEach(function (p) { p.textContent = "escapes=" + escapes; });
+      if (location.hash === "#aria") document.getElementById("ad").hidden = true;
+    }, true);
+    if (location.hash === "#aria") {
+      document.getElementById("ad").hidden = false;
+      document.getElementById("as").focus();
+    } else {
+      document.getElementById("nd").showModal();
+    }
+    </script>
+    </body>
+    </html>
+    """
+)
+
+
+@pytest.mark.parametrize("kind", ["native", "aria"])
+def test_linux_firefox_set_value_on_select_in_modal_dialog_keeps_it_open(tmp_path, kind) -> None:
+    """#1150: set_value on a select inside a modal dialog sends no Escape.
+
+    Firefox 158 applied the value, then the popup close pressed Escape four
+    times, which dismissed the dialog, and the read-back reported
+    text_mismatch. The value is read from the select itself, the dialog
+    stays open, the page saw no Escape, and the call reports success.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "modal.html"
+    page.write_text(_MODAL_SELECT)
+    title = "Native color" if kind == "native" else "Aria color"
+    box = "Native ok" if kind == "native" else "Aria ok"
+    proc = _launch_firefox(tmp_path, page.as_uri() + ("#aria" if kind == "aria" else ""))
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 40
+        snap = None
+        select = None
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "firefox")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            if snap is not None:
+                select = next(
+                    (el for el in snap.elements if el.title == title and el.role == "AXComboBox"), None
+                )
+                if select is not None:
+                    break
+            time.sleep(0.4)
+        assert select is not None, observe.render_text(snap) if snap is not None else "no snapshot"
+        runtime._current = snap
+        started = time.monotonic()
+        result = runtime.set_value(select.ref, "Green")
+        elapsed = time.monotonic() - started
+        print(f"#1150 {kind} set_value took {elapsed:.2f}s: {result}")
+        after = driver.snapshot(Scope.WINDOW, "firefox")
+        rendered = observe.render_text(after)
+        assert result.startswith("set "), rendered
+        assert any(_shown(el) == "escapes=0" for el in after.elements), rendered
+        assert any(el.title == box or _shown(el) == box for el in after.elements), rendered
+        now = next(el for el in after.elements if el.title == title and el.role == "AXComboBox")
+        assert _shown(now) == "Green", rendered
+        assert elapsed < 5.0, elapsed
+    finally:
+        _stop(proc)
+        proc._log.close()  # type: ignore[attr-defined]
