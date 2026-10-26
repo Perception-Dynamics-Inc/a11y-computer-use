@@ -1426,6 +1426,13 @@ before input, even if the same native button survives. Observe the new route to
 obtain a current ref. Fragment-only changes and missing URL reads alone do not
 establish a route change. This guard has synthetic regression coverage.
 
+Explicit Chromium list line scrolls interleave paint samples with fresh native
+row reads. Two agreeing changed heads end the paint wait even when sparse text
+keeps the pixel difference below the normal threshold. The existing low-mean
+line-distance check still applies before rows are committed. Pixel-only scrolls
+retain their paint threshold. This optimization has synthetic regression coverage;
+it does not establish a live latency measurement.
+
 For `scroll_to_find` only, Chromium overflow lists use a separate wheel path.
 The burst starts from the measured viewport size. Consistent numbered labels
 in that container allow larger bursts (at most 24 notches) and correction
