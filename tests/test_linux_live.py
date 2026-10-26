@@ -14375,3 +14375,97 @@ def test_linux_writer_key_scoped_timing(tmp_path) -> None:
     finally:
         _stop_group(proc)
         _kill_libreoffice()
+
+
+def test_linux_chrome_click_during_renderer_freeze_is_unverifiable_without_cdp(tmp_path) -> None:
+    """Live Chrome, no CDP (#1092). A ref click while the renderer busy-loops.
+
+    The browser's accessibility cache reads the Go button as unchanged, but
+    the press is queued in the frozen renderer. The click must not be
+    suspected_noop with retry hints (a retry double-presses once the page
+    recovers): it is unverifiable with no next step, and exactly one press
+    lands after recovery.
+    """
+    import shutil
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the renderer-freeze test")
+    if shutil.which("xdotool") is None:
+        pytest.skip("xdotool is needed to start the freeze outside the runtime")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    page = tmp_path / "busy.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>Busy Lab c=0</title>"
+        "<style>button{margin:30px;padding:20px}</style>"
+        "<button onclick=\"setTimeout(()=>{const end=performance.now()+7000;"
+        "while(performance.now()<end){}},0)\">Freeze</button>"
+        "<button onclick=\"document.title='Busy Lab c='+(++window.count)\">Go</button>"
+        "<script>window.count=0</script>"
+    )
+    profile = tmp_path / "chrome-busy"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic", f"--user-data-dir={profile}", "--window-size=900,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline and snap is None:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if {"Freeze", "Go"} <= {el.title for el in shot.elements}:
+                    snap = shot
+            time.sleep(0.4)
+        assert snap is not None, "Chrome did not expose the Freeze and Go buttons"
+        # Refs come from the agent-facing snapshot, as in Tester's repro.
+        runtime.desktop_snapshot("google-chrome")
+        current = runtime._current
+        freeze = next(el for el in current.elements if el.title == "Freeze")
+        go = next(el for el in current.elements if el.title == "Go")
+        box = freeze.bounds
+        subprocess.run(
+            ["xdotool", "mousemove", str(int(box.x + box.width / 2)),
+             str(int(box.y + box.height / 2)), "click", "1"],
+            check=True, timeout=10,
+        )
+        time.sleep(0.5)
+        result = runtime.click(ref=go.ref)
+        assert result.outcome == "unverifiable", (result.outcome, result.next, result.evidence)
+        assert result.next == (), result.next
+        assert "re-observe" in result.evidence, result.evidence
+        # The queued press lands once, after the freeze ends.
+        deadline = time.monotonic() + 20
+        titles: list[str] = []
+        while time.monotonic() < deadline:
+            titles = [el.title or "" for el in driver.snapshot(Scope.WINDOW, "chrome").elements]
+            if any("Busy Lab c=1" in title for title in titles):
+                break
+            time.sleep(0.5)
+        assert any("Busy Lab c=1" in title for title in titles), titles
+        assert not any("Busy Lab c=2" in title for title in titles), titles
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()

@@ -2436,11 +2436,39 @@ class LinuxDriver:
         # A confirmed-unchanged readable signal keeps suspected_noop unless the
         # renderer probe shows the page hung; then the browser cache may be
         # answering for a page with queued input, so nothing authorizes retry.
-        if (evidence is not None and isinstance(action, Click)
-                and self._run(lambda: _atspi._chromium_app(handle))
+        if not (isinstance(action, Click) and self._run(lambda: _atspi._chromium_app(handle))):
+            return evidence
+        # Keep the first (pre-dispatch) renderer CPU sample for this action;
+        # renderer_hung_since compares it once the verdict is a candidate no-op.
+        previous = getattr(self, "_renderer_sample", None)
+        if previous is None or previous[0] is not action:
+            self._renderer_sample = (action, snapshot.pid, time.monotonic(),
+                                     _page_health.renderer_ticks(snapshot.pid))
+        if (evidence is not None
                 and _page_health.probe(snapshot.pid, _cdp_forms._window_title(snapshot), snapshot.url) is False):
             return RetryEvidence(reason=_page_health.UNRESPONSIVE)
         return evidence
+
+    def renderer_hung_since(self, action) -> str | None:
+        """Why a Chromium page looks hung since ``action``'s pre-dispatch read.
+
+        AT-SPI reads of a Chromium page come from the browser's accessibility
+        cache, which still reads "unchanged" while a busy-looping renderer
+        holds the click queued. Without CDP (or with it unanswered) the
+        renderer's own CPU time over the action is the readable hang signal
+        (#1092). /proc reads only; None means no hang was seen.
+        """
+        from a11y_computer_use.drivers import _page_health
+
+        sample = getattr(self, "_renderer_sample", None)
+        self._renderer_sample = None
+        if sample is None or sample[0] is not action or sample[3] is None:
+            return None
+        pid = sample[1]
+        now = (time.monotonic(), _page_health.renderer_ticks(pid))
+        if _page_health.renderer_busy((sample[2], sample[3]), now):
+            return _page_health.BUSY
+        return None
 
     def toggle_click_probe(self, target: Target):
         """Capture a page toggle or GTK dialog selection before the click."""

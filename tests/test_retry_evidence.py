@@ -423,3 +423,78 @@ def test_hung_chromium_page_overrides_unchanged_signal():
     assert judged == "unverifiable"
     assert outcome.suggest_next("click", judged) == ()
     assert "page not responding" in evidence
+
+
+def _chromium_runtime(hung):
+    runtime = server.Runtime.__new__(server.Runtime)
+    action = Click(Element("e32", "AXButton", "Go", None, None, "s"))
+    seen = []
+    def reader(probed):
+        seen.append(probed)
+        return hung
+    runtime.driver = SimpleNamespace(name="linux", renderer_hung_since=reader)
+    runtime._retry_reads = ("chrome", action, READ, READ)
+    return runtime, action, seen
+
+
+def test_hung_renderer_overrides_unchanged_click_signal_without_retry_hints():
+    """#1092: no CDP, renderer busy-looping, browser cache reads unchanged."""
+    from a11y_computer_use.drivers import _page_health
+    runtime, action, seen = _chromium_runtime(_page_health.BUSY)
+    result = runtime._conclude("clicked", tool="click", app="chrome",
+                               verdict=("suspected_noop", "the accessibility state did not change"))
+    assert seen == [action]
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert "input may be queued" in result.evidence
+    assert "re-observe" in result.evidence
+
+
+def test_live_renderer_keeps_suspected_noop_for_unchanged_click_signal():
+    runtime, _action, seen = _chromium_runtime(None)
+    result = runtime._conclude("clicked", tool="click", app="chrome",
+                               verdict=("suspected_noop", "the accessibility state did not change"))
+    assert len(seen) == 1
+    assert result.outcome == "suspected_noop"
+    assert result.next
+
+
+def test_hang_reader_is_not_consulted_for_confirmed_clicks_or_other_apps():
+    runtime, _action, seen = _chromium_runtime("busy")
+    result = runtime._conclude("clicked", tool="click", app="chrome",
+                               verdict=("confirmed", "the accessibility state changed"))
+    assert result.outcome == "confirmed"
+    runtime, _action, seen2 = _chromium_runtime("busy")
+    runtime._conclude("clicked", tool="click", app="other",
+                      verdict=("suspected_noop", "unchanged"))
+    assert seen == [] and seen2 == []
+
+
+def test_hang_reader_failure_does_not_change_the_verdict():
+    runtime, _action, _ = _chromium_runtime(None)
+    def fail(probed):
+        raise OSError("proc unavailable")
+    runtime.driver = SimpleNamespace(name="linux", renderer_hung_since=fail)
+    result = runtime._conclude("clicked", tool="click", app="chrome",
+                               verdict=("suspected_noop", "unchanged"))
+    assert result.outcome == "suspected_noop"
+
+
+def test_linux_renderer_hang_compares_the_pre_dispatch_sample(monkeypatch):
+    from a11y_computer_use.drivers import _page_health, linux
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver.__new__(LinuxDriver)
+    action = Click(Element("e32", "AXButton", "Go", None, None, "s"))
+    import os
+    monkeypatch.setattr(_page_health, "renderer_ticks", lambda pid: {7: 200})
+    monkeypatch.setattr(linux.time, "monotonic", lambda: 11.0)
+    monkeypatch.setattr(os, "sysconf", lambda name: 100)
+    driver._renderer_sample = (action, 42, 10.0, {7: 100})
+    assert driver.renderer_hung_since(action) == _page_health.BUSY
+    # One verdict per sample: a second read, or another action, is unknown.
+    assert driver.renderer_hung_since(action) is None
+    driver._renderer_sample = (action, 42, 10.0, {7: 100})
+    assert driver.renderer_hung_since(Click(None)) is None
+    driver._renderer_sample = (action, 42, 10.0, {7: 199})
+    assert driver.renderer_hung_since(action) is None  # idle renderer
