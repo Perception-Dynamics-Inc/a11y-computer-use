@@ -6647,3 +6647,76 @@ def test_snapshot_rebinds_renumbered_surviving_controls(
         ]
         assert mocked_driver["type"] == ["hi", "hi"]
         assert focused == [surviving[-1], surviving[-1]]
+
+
+@pytest.mark.parametrize("mode,change", [
+    (mode, change)
+    for mode in ("full", "interactive", "diff")
+    for change in ("pruned", "replacement", "missing_identity", "row", "document", "named_parent")
+] + [("find", "pruned")])
+def test_textarea_ref_after_scroll_wrapper_pruning(
+    monkeypatch, mocked_driver, store, audit_dir, mode, change,
+):
+    """#1130: actual single-child pruning must not poison the newly issued ref."""
+    from tests.fixtures.trees import DictAccessor, GEOMETRY, ax
+
+    class NativeAccessor(DictAccessor):
+        def read(self, node):
+            return dataclasses.replace(
+                super().read(node), node_identity=node.get("node_identity", ()),
+                row_identity=node.get("row_identity", ()),
+                document_id=node.get("document_id", "window-1"),
+            )
+
+    text = ax("AXTextArea", at=(10, 10), size=(300, 200), value="long",
+              node_identity=("bus", "text"))
+    scrollbar = ax("AXScrollBar", at=(310, 10), size=(20, 200), value=0)
+    wrapper = ax("AXScrollArea", at=(10, 10), size=(320, 200),
+                 children=[text, scrollbar], title="Section" if change == "named_parent" else "")
+    tree = ax("AXWindow", title="TVLab", at=(0, 0), size=(400, 300), children=[wrapper])
+
+    def snapshot():
+        return observe.build_snapshot(tree, NativeAccessor(), scope=Scope.WINDOW,
+                                      app=APP, pid=1, geometry=GEOMETRY)
+
+    before = snapshot()
+    assert before.element("e2").role == "AXScrollArea"
+    assert before.element("e3").role == "AXTextArea"
+    text["value"] = "y"
+    wrapper["children"] = [text]
+    if change == "replacement":
+        text["node_identity"] = ("bus", "replacement")
+    elif change == "missing_identity":
+        text["node_identity"] = ()
+    elif change == "row":
+        text["row_identity"] = (("row", "replacement"),)
+    elif change == "document":
+        text["document_id"] = "window-2"
+    elif change == "named_parent":
+        tree["children"] = [text]  # Actual reparenting out of semantic context.
+    after = snapshot()
+    assert after.element("e2").role == "AXTextArea"
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *a, **kw: current[0])
+    store.set_tier(APP, safety.Tier.FULL)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        focused = []
+        monkeypatch.setattr(runtime.driver, "focus_for_type", lambda el: focused.append(el) or True)
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        # Exercise both external changes and internal effect reads before issuance.
+        runtime._current = after
+        assert runtime._anchor("e3")[0] is before
+        runtime.desktop_snapshot(APP, mode="full" if mode == "find" else mode)
+        if mode == "find":
+            runtime.find(APP, role="textarea")
+        if change != "pruned":
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.type_text(text="x", ref="e2")
+            assert caught.value.detail["reason"] == "target_changed"
+            assert not focused and not mocked_driver["type"]
+            return
+        assert runtime._anchor("e2") == (after, after.element("e2"))
+        runtime.type_text(text="x", ref="e2")
+        assert focused == [after.element("e2")]
+        assert mocked_driver["type"] == ["x"]
