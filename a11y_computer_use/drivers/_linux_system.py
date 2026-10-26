@@ -955,6 +955,37 @@ def window_id_for_toplevel(*, title: str, pid: int | None, extents,
     return _window_overlapping(rows, extents)
 
 
+def transient_parent_title(*, pid: int, title: str) -> str | None:
+    """Resolve a managed window's exact same-process WM_TRANSIENT_FOR parent.
+
+    Require unique titles on both sides to map back to AT-SPI without geometry
+    guesses. The dialog need not be active: another document can accept input.
+    This relationship establishes ownership, not modality.
+    """
+    if not pid or not title:
+        return None
+    try:
+        with _open_display() as d:
+            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            children = [win for win in owned if _win_title(win, d) == title]
+            if len(children) != 1:
+                return None
+            child = children[0]
+            transient = _prop(child, d, "WM_TRANSIENT_FOR")
+            if transient is None or len(transient) != 1:
+                return None
+            parents = [win for win in owned if win.id == int(transient[0])
+                       and win.id != child.id]
+            if len(parents) != 1:
+                return None
+            name = _win_title(parents[0], d)
+            if name and sum(_win_title(win, d) == name for win in owned) == 1:
+                return name
+    except Exception:
+        pass
+    return None
+
+
 def active_transient_dialog(*, pid: int, title: str, parent_title: str) -> bool:
     """Match an active X11 dialog to its exact same-process transient parent.
 

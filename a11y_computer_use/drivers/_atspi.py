@@ -5817,7 +5817,11 @@ def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
     try:
         obj = _AtspiObject.from_address(pointer)
         raw_path = obj.path or b""
-        if not raw_path.startswith(b"/org/a11y/atspi/") or not obj.app:
+        # GTK4 exports accessibles below its application path (for example
+        # /org/gtk/application/.../a11y/UUID), not the ATK bridge prefix.
+        # The libatspi object already owns this D-Bus path; pair it with the
+        # unique bus name rather than discarding GTK4's native identity.
+        if not raw_path.startswith(b"/") or not obj.app:
             return None
         raw_bus = _AtspiApplication.from_address(obj.app).bus_name or b""
         if not raw_bus.startswith(b":"):
@@ -10401,6 +10405,33 @@ _MONTH_NAMES = (
 )
 _DATE_SEGMENT_POLLS = 16
 _DATE_SEGMENT_PAUSE_S = 0.05
+
+
+def _refuse_gecko_date_segment_replace(acc) -> None:
+    """Refuse Firefox date/time segment replacement before any mutation.
+
+    These spin buttons advertise EditableText and Value, but generic text
+    replacement can clear the segment and emit an empty input/change value.
+    Time inputs use a panel parent, not the date editor role. Identify the
+    native input type, never localized segment names or displayed digits.
+    """
+    if _role_name(acc) != "spin button" or not _gecko_app(acc):
+        return
+    for node in _ancestor_chain(acc, 8):
+        role = _role_name(node)
+        attrs = _get_attributes(node)
+        kind = str(attrs.get("text-input-type") or "").lower()
+        if role == "date editor" or (
+            str(attrs.get("tag") or "").lower() == "input"
+            and kind in _DATE_INPUT_TYPES
+        ):
+            raise _text_mismatch(
+                "unsafe_date_segment_replace",
+                "Firefox date/time segments cannot safely be replaced with set_value; "
+                "no value was written. Use type(ref, digits) and verify the complete date/time",
+            )
+        if role in {"document web", "document frame", "frame", "application"}:
+            break
 
 
 def _chrome_date_segment(acc) -> bool:
@@ -15388,6 +15419,7 @@ def set_numeric_value(acc, value: str) -> bool | str:
     percent literal is refused and the Value range is named. No keystrokes
     are sent for any of these.
     """
+    _refuse_gecko_date_segment_replace(acc)
     if value == "" and _number_input(acc):
         if _clear_number_input(acc):
             return True
@@ -17319,6 +17351,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     node and its document ancestors before the write. That restore sends
     no keys. Success leaves the caret where the write put it.
     """
+    _refuse_gecko_date_segment_replace(acc)
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
     _refuse_model_editor_replace(acc)
@@ -22144,6 +22177,53 @@ def _modal_collection(root, *, split: bool = False):
     return None
 
 
+def _native_modal_parent(modal):
+    """Reported owner of a native sibling modal, never inferred from overlap."""
+    parent = _chromium_modal_parent(modal)
+    if parent is not None:
+        return parent
+    chain = list(_ancestor_chain(modal))
+    # Embedded/page dialogs already have an ancestor boundary. Do not apply
+    # native window ownership to browser document modals.
+    if any(_role_name(node) in {"frame", "window", "document web", "document frame"}
+           for node in chain[1:]):
+        return None
+    key = ("native_modal_parent", ())
+    cached = _lookup_read_cache(modal, key)
+    if cached is not _CACHE_MISS:
+        return cached
+    parents = _relation_targets(modal, "subwindow_of")
+    parents = [node for node in parents if _role_name(node) in {"frame", "window", "dialog"}
+               and _ancestor_key(node) != _ancestor_key(modal)]
+    parent = parents[0] if len(parents) == 1 else None
+    if parent is None:
+        application = next((node for node in chain if _role_name(node) == "application"), None)
+        pid = pid_of(modal)
+        if application is not None and pid:
+            from a11y_computer_use.drivers import _linux_system
+            title = _linux_system.transient_parent_title(pid=pid, title=_node_name(modal))
+            if title:
+                matches = [node for node in _fresh_application_children(application)
+                           if _role_name(node) in {"frame", "window", "dialog"}
+                           and _node_name(node) == title and pid_of(node) == pid]
+                if len(matches) == 1:
+                    parent = matches[0]
+    _store_read_cache(modal, key, parent)
+    return parent
+
+
+def _modal_in_window(modal, root) -> bool:
+    """Exclude only a positively resolved, different native parent window."""
+    parent = _native_modal_parent(modal)
+    if parent is None:
+        return True
+    chain = list(_ancestor_chain(root))
+    keys = {_ancestor_key(node) for node in chain}
+    if _ancestor_key(modal) in keys or _ancestor_key(parent) in keys:
+        return True
+    return not any(_role_name(node) in {"frame", "window"} for node in chain)
+
+
 def snapshot_top_level_modals(root) -> list:
     """Inspect only the root and its application's immediate children.
 
@@ -22161,7 +22241,7 @@ def snapshot_top_level_modals(root) -> list:
                               if (child := _child_at(application, i)) is not None)
         else:
             candidates.extend(_fresh_application_children(application))
-    return [node for node in candidates if is_modal(node)]
+    return [node for node in candidates if is_modal(node) and _modal_in_window(node, root)]
 
 
 def active_modals(root, *, fallback: bool = True, point=None) -> list:
@@ -22282,7 +22362,7 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
     found = {}
     for node in candidates:
         key = _ancestor_key(node)
-        if key not in found and is_modal(node):
+        if key not in found and is_modal(node) and _modal_in_window(node, root):
             found[key] = node
     return list(found.values())
 
@@ -22383,7 +22463,7 @@ def _outside_modals(acc, modals, *, cache):
         context = cache.get(context_key) if cache is not None else None
         if context is None:
             modal_chain = _modal_chain(modal, cache)
-            context = (modal, _chromium_modal_parent(modal),
+            context = (modal, _native_modal_parent(modal),
                        next((node for node in modal_chain
                              if _role_name(node) in {"document web", "document frame"}), None),
                        next((node for node in modal_chain

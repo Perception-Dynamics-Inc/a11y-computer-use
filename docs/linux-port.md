@@ -1251,6 +1251,18 @@ Snapshots label the dialog `(modal)` and background controls
 `(outside_active_modal)` without click/edit actionability; `find` uses the
 same flags. Closing the dialog restores background actionability.
 
+Native window-modal dialogs are scoped to their reported parent window, using
+AT-SPI `SUBWINDOW_OF` or an exact same-process X11 `WM_TRANSIENT_FOR` match.
+A Mousepad Go To dialog on document B therefore leaves document A actionable,
+even while A is active. Controls behind the dialog in B remain refused. Native
+parent matching never infers ownership from overlapping rectangles or duplicate
+titles; an unresolved parent does not establish that a window is independent.
+The standalone `scripts/check_native_window_modal.py --head` probe exercises
+two Mousepad windows, checks six input paths on A, and requires three refused
+typing attempts with unchanged text on B. Run it through
+`scripts/latency/session.sh`; omit `--head` with a 0.4.76 interpreter for the
+same operation timings on the baseline. It does not run pytest live files.
+
 The Runtime checks native modal ancestry after permission and focus checks,
 including agent and `act` batch calls. Ref presses, value writes, and pointer
 clicks also check at the Linux driver boundary. An outside target returns
@@ -1363,7 +1375,10 @@ modal input policy.
 When hiding or clipping siblings renumbers surviving controls (#1110), a public
 snapshot rebinds the printed refs if each shifted control has a unique matching
 native node in the preceding snapshot and its issued semantics and ancestry
-remain unchanged. Previously refused controls and recycled row identities cannot
+remain unchanged. An unnamed noninteractive scroll wrapper may collapse when
+its scrollbar disappears (#1130); a surviving native control then binds to the
+snapshot that just issued its new ref. Named, actionable, modal, document and
+row boundaries remain significant. Previously refused controls and recycled row identities cannot
 supply this continuity. Internal effect reads do not rebind refs. Callers must use
 the refs from the latest public observation.
 
@@ -1581,3 +1596,12 @@ PYTHONPATH=. XDG_CACHE_HOME=$(mktemp -d) dbus-run-session -- xvfb-run -a \
 PYTHONPATH=. XDG_CACHE_HOME=$(mktemp -d) dbus-run-session -- xvfb-run -a \
   /workspace/a11y-venv-codex/bin/python scripts/box/benchmark_hung_chrome.py --cdp
 ```
+
+Firefox date/time input segments (for example Month or Hours) refuse
+`set_value` with `unsupported` / `unsafe_date_segment_replace` before focus,
+selection, Value writes or text replacement. Firefox advertises EditableText
+and Value on these spin buttons, but the generic replacement path can clear
+a segment and emit an empty `input`/`change` value. Use an explicit
+`type(ref, digits)` and verify the complete date/time afterward. This refusal
+also applies to empty replacement strings; ordinary text and number inputs
+retain their existing write paths.

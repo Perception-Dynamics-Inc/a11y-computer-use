@@ -3802,7 +3802,8 @@ class Runtime:
                     )
                     # Hidden/clipped siblings renumber surviving controls.
                     # Public issuance can rebind such a control only with
-                    # native continuity and unchanged semantics/ancestry.
+                    # native continuity and unchanged semantic ancestry. An unnamed
+                    # scroll wrapper can disappear when its scrollbar is pruned.
                     # Recycled row objects must still fail the identity check.
                     shifted_control = False
                     if old_identity != new_identity and element.node_identity and last is not None:
@@ -3824,9 +3825,14 @@ class Runtime:
                         candidates = shifted_nodes.get(element.node_identity, ())
                         shifted_control = (
                             len(candidates) == 1 and candidates[0].ref != element.ref
+                            and candidates[0].document_id == element.document_id
                             and self._issued_identity(
                                 identity_indexes[last.snapshot_id], candidates[0].ref,
-                            ) == new_identity
+                                omit_scroll_wrappers=True,
+                            ) == self._issued_identity(
+                                identity_indexes[snap.snapshot_id], element.ref,
+                                omit_scroll_wrappers=True,
+                            )
                         )
                     if old_identity != new_identity and not (
                         verified_rename or same_node_rename or newly_exposed_item or shifted_control
@@ -3847,7 +3853,8 @@ class Runtime:
             self._foreign_issued = None
 
     @staticmethod
-    def _issued_identity(elements: dict[str, Element], ref: str) -> tuple:
+    def _issued_identity(elements: dict[str, Element], ref: str,
+                         *, omit_scroll_wrappers: bool = False) -> tuple:
         """Target semantics and ancestry, excluding ancestor UI state.
 
         Firefox label ancestors can echo the value of their child input.
@@ -3861,6 +3868,15 @@ class Runtime:
         while ref in elements and ref not in seen:
             seen.add(ref)
             el = elements[ref]
+            # Only the native-continuity rebind may ignore a collapsible
+            # scroll ancestor. Never omit the target or semantic/modal/row
+            # boundaries, and leave ordinary changed-target checks exact.
+            if (omit_scroll_wrappers and chain and el.role == "AXScrollArea"
+                    and not (el.title or el.value is not None or el.clickable or el.editable
+                             or el.stable_id or el.row_identity or el.context_identity
+                             or el.modal or el.modal_scope_root)):
+                ref = el.parent
+                continue
             mutable_title = (
                 el.role == "AXWindow" or bool(el.context_identity)
                 or (bool(chain) and el.role == "AXStaticText")

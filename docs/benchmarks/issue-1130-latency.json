@@ -1,0 +1,438 @@
+{
+  "baseline": "v0.4.76 (5db4a7d8)",
+  "head_base": "f7763d23359b2e6358ad5fe1d5d547a927bedbe2",
+  "units": "seconds",
+  "measurement": "in-process Runtime calls, private Xvfb/xfwm4/D-Bus; A11Y_VISIBLE_ACTIONS=0",
+  "runs": {
+    "gtk3_baseline": [
+      {
+        "gtk": "3",
+        "repeat": 0,
+        "external": false,
+        "snapshot_before": 0.08666520699625835,
+        "clear": 0.39900255901739,
+        "snapshot_after": 0.0316547270049341,
+        "type": 0.42400610499316826,
+        "set_value": 0.40806009498192
+      },
+      {
+        "gtk": "3",
+        "repeat": 0,
+        "external": true,
+        "snapshot_before": 0.03592371998820454,
+        "snapshot_after": 0.062317330011865124,
+        "type": 0.415242944000056,
+        "set_value": 0.4084703810221981
+      },
+      {
+        "gtk": "3",
+        "repeat": 1,
+        "external": false,
+        "snapshot_before": 0.038032459997339174,
+        "clear": 0.42782919498858973,
+        "snapshot_after": 0.03547169399098493,
+        "type": 0.41463851800654083,
+        "set_value": 0.4168480689986609
+      },
+      {
+        "gtk": "3",
+        "repeat": 1,
+        "external": true,
+        "snapshot_before": 0.035794721014099196,
+        "snapshot_after": 0.042308512987801805,
+        "type": 0.44168373101274483,
+        "set_value": 0.40668573800940067
+      },
+      {
+        "gtk": "3",
+        "repeat": 2,
+        "external": false,
+        "snapshot_before": 0.038942818995565176,
+        "clear": 0.4038611529977061,
+        "snapshot_after": 0.029631005018018186,
+        "type": 0.4083493940124754,
+        "set_value": 0.4082775700080674
+      },
+      {
+        "gtk": "3",
+        "repeat": 2,
+        "external": true,
+        "snapshot_before": 0.03735413998947479,
+        "snapshot_after": 0.03949219701462425,
+        "type": 0.4228906130010728,
+        "set_value": 0.4070849090057891
+      }
+    ],
+    "gtk3_head": [
+      {
+        "gtk": "3",
+        "repeat": 0,
+        "external": false,
+        "snapshot_before": 0.06596059200819582,
+        "clear": 0.4183701649890281,
+        "snapshot_after": 0.0372091330063995,
+        "type": 0.4185788400063757,
+        "set_value": 0.4178908379981294
+      },
+      {
+        "gtk": "3",
+        "repeat": 0,
+        "external": true,
+        "snapshot_before": 0.036095946008572355,
+        "snapshot_after": 0.04388606298016384,
+        "type": 0.4221128359786235,
+        "set_value": 0.4196264380007051
+      },
+      {
+        "gtk": "3",
+        "repeat": 1,
+        "external": false,
+        "snapshot_before": 0.03903125200304203,
+        "clear": 0.421728877001442,
+        "snapshot_after": 0.034735096007352695,
+        "type": 0.43036502198083326,
+        "set_value": 0.4259151170263067
+      },
+      {
+        "gtk": "3",
+        "repeat": 1,
+        "external": true,
+        "snapshot_before": 0.039771599986124784,
+        "snapshot_after": 0.04334768099943176,
+        "type": 0.4778127850149758,
+        "set_value": 0.44493684798362665
+      },
+      {
+        "gtk": "3",
+        "repeat": 2,
+        "external": false,
+        "snapshot_before": 0.04098925500875339,
+        "clear": 0.42075018197647296,
+        "snapshot_after": 0.04118398399441503,
+        "type": 0.4282184530165978,
+        "set_value": 0.42174521897686645
+      },
+      {
+        "gtk": "3",
+        "repeat": 2,
+        "external": true,
+        "snapshot_before": 0.04089345599641092,
+        "snapshot_after": 0.04082216901588254,
+        "type": 0.4246041080041323,
+        "set_value": 0.4348946120007895
+      }
+    ],
+    "gtk4_baseline_initial": [
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": false,
+        "snapshot_before": 0.17939526899135672,
+        "clear": 0.5486995229730383,
+        "snapshot_after": 0.05678014797740616,
+        "type": 0.4960255220066756,
+        "set_value": 0.4563963219989091
+      },
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": true,
+        "snapshot_before": 0.0855481450271327,
+        "snapshot_after": 0.0504732690169476,
+        "type": 0.45544106999295764,
+        "set_value": 0.47562449099496007
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": false,
+        "snapshot_before": 0.07970497300266288,
+        "clear": 0.5140395649941638,
+        "snapshot_after": 0.06556712300516665,
+        "type": 0.4906934350146912,
+        "set_value": 0.4329838060075417
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": true,
+        "snapshot_before": 0.09621914097806439,
+        "snapshot_after": 0.04986380800255574,
+        "type": 0.4614743909914978,
+        "set_value": 0.4438834339962341
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": false,
+        "snapshot_before": 0.08454291202360764,
+        "clear": 0.48795531000359915,
+        "snapshot_after": 0.05008130599162541,
+        "type": 0.4602315020165406,
+        "set_value": 0.44656232598936185
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": true,
+        "snapshot_before": 0.08674162300303578,
+        "snapshot_after": 0.04349412998999469,
+        "type": 0.4721870830107946,
+        "set_value": 0.5248460559814703
+      }
+    ],
+    "gtk4_head_initial": [
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": false,
+        "snapshot_before": 0.12115922599332407,
+        "clear": 0.6433805599808693,
+        "snapshot_after": 0.07467867599916644,
+        "type": 0.527212849992793,
+        "set_value": 0.4839362060010899
+      },
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": true,
+        "snapshot_before": 0.09707008200348355,
+        "snapshot_after": 0.32172640299540944,
+        "type": 1.0273688059824053,
+        "set_value": 0.48575365799479187
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": false,
+        "snapshot_before": 0.10310628797742538,
+        "clear": 0.5751116169849411,
+        "snapshot_after": 0.059538514993619174,
+        "type": 0.5256762859935407,
+        "set_value": 0.5342464229906909
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": true,
+        "snapshot_before": 0.10758358199382201,
+        "snapshot_after": 0.05682343599619344,
+        "type": 0.5180905080051161,
+        "set_value": 0.4856417130213231
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": false,
+        "snapshot_before": 0.11347591801313683,
+        "clear": 0.6145643720228691,
+        "snapshot_after": 0.05126237199874595,
+        "type": 0.5336057899985462,
+        "set_value": 0.5386266540153883
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": true,
+        "snapshot_before": 0.11113760000444017,
+        "snapshot_after": 0.06569732999196276,
+        "type": 0.4867906940053217,
+        "set_value": 0.47751043501193635
+      }
+    ],
+    "gtk4_baseline_serial": [
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": false,
+        "snapshot_before": 0.19661562598776072,
+        "clear": 0.49822574298013933,
+        "snapshot_after": 0.04736736399354413,
+        "type": 0.47614007801166736,
+        "set_value": 0.45947643599356525
+      },
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": true,
+        "snapshot_before": 0.0816265250032302,
+        "snapshot_after": 0.05216626901528798,
+        "type": 0.46283904201118276,
+        "set_value": 0.45640593400457874
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": false,
+        "snapshot_before": 0.09301947700441815,
+        "clear": 0.5094276249874383,
+        "snapshot_after": 0.052139274979708716,
+        "type": 0.4594497859943658,
+        "set_value": 0.44315829800325446
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": true,
+        "snapshot_before": 0.08531627000775188,
+        "snapshot_after": 0.04963614899315871,
+        "type": 0.48143030900973827,
+        "set_value": 0.45025796999107115
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": false,
+        "snapshot_before": 0.09334888999001123,
+        "clear": 0.49831307501881383,
+        "snapshot_after": 0.043800519983051345,
+        "type": 0.44277109400718473,
+        "set_value": 0.4431220180122182
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": true,
+        "snapshot_before": 0.07629026999347843,
+        "snapshot_after": 0.07641000600415282,
+        "type": 0.46756393800023943,
+        "set_value": 0.5333701640192885
+      },
+      {
+        "gtk": "4",
+        "repeat": 3,
+        "external": false,
+        "snapshot_before": 0.12798763799946755,
+        "clear": 0.4762431679992005,
+        "snapshot_after": 0.06708892399910837,
+        "type": 0.4481984300073236,
+        "set_value": 0.45460035698488355
+      },
+      {
+        "gtk": "4",
+        "repeat": 3,
+        "external": true,
+        "snapshot_before": 0.08331720999558456,
+        "snapshot_after": 0.04950290700071491,
+        "type": 0.4461364140152,
+        "set_value": 0.444665884017013
+      },
+      {
+        "gtk": "4",
+        "repeat": 4,
+        "external": false,
+        "snapshot_before": 0.08191036098287441,
+        "clear": 0.4894913820025977,
+        "snapshot_after": 0.04073879000497982,
+        "type": 0.4501851240056567,
+        "set_value": 0.44443537198822014
+      },
+      {
+        "gtk": "4",
+        "repeat": 4,
+        "external": true,
+        "snapshot_before": 0.08531339399632998,
+        "snapshot_after": 0.04515792601159774,
+        "type": 0.446350774000166,
+        "set_value": 0.4628540860139765
+      }
+    ],
+    "gtk4_head_serial": [
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": false,
+        "snapshot_before": 0.11443628001143225,
+        "clear": 0.6483335649827495,
+        "snapshot_after": 0.06690633000107482,
+        "type": 0.5084330950048752,
+        "set_value": 0.5024643389915582
+      },
+      {
+        "gtk": "4",
+        "repeat": 0,
+        "external": true,
+        "snapshot_before": 0.09341331099858508,
+        "snapshot_after": 0.060109095997177064,
+        "type": 0.49113073499756865,
+        "set_value": 0.4771881789783947
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": false,
+        "snapshot_before": 0.10310973299783655,
+        "clear": 0.584170627000276,
+        "snapshot_after": 0.05471803297405131,
+        "type": 0.5037223730178084,
+        "set_value": 0.48005432402715087
+      },
+      {
+        "gtk": "4",
+        "repeat": 1,
+        "external": true,
+        "snapshot_before": 0.12094391600112431,
+        "snapshot_after": 0.06073930999264121,
+        "type": 0.5055249120050576,
+        "set_value": 0.4826309700147249
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": false,
+        "snapshot_before": 0.09847396000986919,
+        "clear": 0.5176024420070462,
+        "snapshot_after": 0.053060381003888324,
+        "type": 0.4829837809957098,
+        "set_value": 0.47891040399554186
+      },
+      {
+        "gtk": "4",
+        "repeat": 2,
+        "external": true,
+        "snapshot_before": 0.09751336899353191,
+        "snapshot_after": 0.056890449981437996,
+        "type": 0.48450293301721103,
+        "set_value": 0.4856319149839692
+      },
+      {
+        "gtk": "4",
+        "repeat": 3,
+        "external": false,
+        "snapshot_before": 0.10336829797597602,
+        "clear": 0.5471498359984253,
+        "snapshot_after": 0.07330919700325467,
+        "type": 0.49882510301540606,
+        "set_value": 0.5275624119967688
+      },
+      {
+        "gtk": "4",
+        "repeat": 3,
+        "external": true,
+        "snapshot_before": 0.08992169299745001,
+        "snapshot_after": 0.050727820984320715,
+        "type": 0.5378810139955021,
+        "set_value": 0.47248521097935736
+      },
+      {
+        "gtk": "4",
+        "repeat": 4,
+        "external": false,
+        "snapshot_before": 0.09887083800276741,
+        "clear": 0.5170184489979874,
+        "snapshot_after": 0.05085898598190397,
+        "type": 0.4834331779857166,
+        "set_value": 0.4799907479900867
+      },
+      {
+        "gtk": "4",
+        "repeat": 4,
+        "external": true,
+        "snapshot_before": 0.08974549398408271,
+        "snapshot_after": 0.06153683899901807,
+        "type": 0.5120603360119276,
+        "set_value": 0.5252315679972526
+      }
+    ]
+  }
+}

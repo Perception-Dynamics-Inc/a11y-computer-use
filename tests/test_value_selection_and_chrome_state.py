@@ -2433,3 +2433,65 @@ def test_native_chrome_select_never_confirms_missing_selection_effect(monkeypatc
     assert events == ([] if fault == "unreadable_before" else [("held", ()), "click"])
     assert "SELECTED" in banana.states  # no compensating Selection writes
     assert all(not row.action_log for row in box.children)
+
+
+@pytest.mark.parametrize("kind,parent_role,name,original,requested", [
+    ("date", "date editor", "Month", "01", "10"),
+    ("time", "panel", "Hours", "09", "11"),
+    ("datetime-local", "panel", "Minutes", "30", "45"),
+    ("date", "date editor", "Jour", "15", ""),
+])
+@pytest.mark.parametrize("entrypoint", ["driver", "text", "value"])
+def test_firefox_date_segment_refuses_before_mutation(
+    monkeypatch, kind, parent_role, name, original, requested, entrypoint,
+) -> None:
+    """Firefox's advertised text/value interfaces cannot safely replace segments."""
+    segment = _Entry(original, name)
+    segment.role = "spin button"
+    segment.toolkit = "Gecko"
+    segment.value, segment.minimum, segment.maximum = 1.0, 0.0, 59.0
+    parent = _Node(parent_role, children=[segment],
+                   attrs={"tag": "input", "text-input-type": kind})
+    driver = _driver(monkeypatch, segment)
+    effects = []
+
+    def forbidden(*args, **kwargs):
+        effects.append("mutation")
+        pytest.fail("segment refusal must precede focus, selection, text, value and keys")
+
+    monkeypatch.setattr(driver, "_raise_handle_window", forbidden)
+    monkeypatch.setattr(driver, "_check_modal_target", lambda _element: None)
+    monkeypatch.setattr(segment, "set_text_contents", forbidden)
+    monkeypatch.setattr(_Atspi.Value, "set_current_value", forbidden)
+    for helper in ("_capture_text_points", "_restore_text_points", "grab_focus",
+                   "_click_center", "_type_string", "_chord_into_target"):
+        monkeypatch.setattr(_atspi, helper, forbidden)
+    element = _element("e1", "AXTextField", name, editable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        if entrypoint == "driver":
+            driver.set_value(element, requested)
+        elif entrypoint == "text":
+            _atspi.set_text(segment, requested)
+        else:
+            _atspi.set_numeric_value(segment, requested)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "unsafe_date_segment_replace"
+    assert "type" in exc.value.message
+    assert segment.text == original
+    assert segment.parent is parent
+    assert segment.value_sets == []
+    assert effects == []
+
+
+@pytest.mark.parametrize("toolkit,role,attrs", [
+    ("Gecko", "spin button", {"tag": "input", "text-input-type": "number"}),
+    ("Gecko", "spin button", {"tag": "div", "xml-roles": "spinbutton"}),
+    ("Gecko", "entry", {"tag": "input", "text-input-type": "text"}),
+    ("GTK", "spin button", {}),
+    ("Chromium", "spin button", {}),
+])
+def test_firefox_segment_guard_preserves_other_controls(monkeypatch, toolkit, role, attrs):
+    node = _Node(role, "Month", attrs=attrs)
+    node.toolkit = toolkit
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    assert _atspi._refuse_gecko_date_segment_replace(node) is None
