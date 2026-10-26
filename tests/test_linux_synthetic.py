@@ -21409,3 +21409,133 @@ def test_qt_zero_width_glyph_requires_measured_horizontal_visibility(monkeypatch
         ),
     ))
     assert _atspi._qt_character_viewport_text(object(), (20, 30, 800, 400)) == expected
+@pytest.fixture
+def confirmation_modal_collection(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events, _browser_dialog
+
+    monkeypatch.setattr(fake_atspi, "Role", _NS(
+        DIALOG=1, ALERT=2, WINDOW=3, FRAME=4, FILE_CHOOSER=5), raising=False)
+    monkeypatch.setattr(fake_atspi, "CollectionMatchType", _NS(NONE=0, ANY=1), raising=False)
+    monkeypatch.setattr(fake_atspi, "CollectionSortOrder", _NS(CANONICAL=0), raising=False)
+    monkeypatch.setattr(fake_atspi, "MatchRule", _NS(new=lambda *args: args), raising=False)
+    monkeypatch.setattr(fake_atspi, "StateSet", _NS(new=lambda states: states), raising=False)
+    monkeypatch.setattr(_atspi, "_modal_discoveries", {})
+    monkeypatch.setattr(_atspi, "_modal_generation", None)
+    ready, epoch, queries = [True], [10], []
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: ready[0])
+    monkeypatch.setattr(_atspi_events, "modal_epoch", lambda: epoch[0])
+    frame = _Acc("frame", name="Page")
+    page_modal = _Acc("dialog", states=("SHOWING", "MODAL"))
+    chooser = _Acc("file chooser", states=("SHOWING", "MODAL"))
+    nonmodal = _Acc("dialog", states=("SHOWING",))
+    hidden = _Acc("dialog", states=("MODAL",))
+    _adopt(frame, page_modal, chooser, nonmodal, hidden)
+    hits = [page_modal, chooser, nonmodal, hidden]
+
+    def matches(rule, order, count, traverse):
+        assert rule[4] == [1, 2, 3, 4, 5]
+        assert count == 0 and traverse is True
+        queries.append(frame)
+        return list(hits)
+
+    frame.get_collection_iface = lambda: _NS(get_matches=matches)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_chromium_modal_parent", lambda node: None)
+    return _NS(frame=frame, hits=hits, ready=ready, epoch=epoch, queries=queries,
+               probe=lambda: _browser_dialog._dialog_roots(frame),
+               page_modal=page_modal, chooser=chooser)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("native_sibling", [False, True])
+def test_confirmation_collection_serves_modal_guard_without_second_walk(
+    confirmation_modal_collection, monkeypatch, empty, native_sibling,
+):
+    probe = confirmation_modal_collection
+    if empty:
+        probe.hits.clear()
+    sibling = _Acc("dialog", states=("SHOWING", "MODAL"))
+    application = _adopt(_Acc("application"), probe.frame, *([sibling] if native_sibling else []))
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda app: list(app.children))
+    assert probe.probe() == probe.hits
+    probe.frame.get_child_count = lambda: pytest.fail("complete query must avoid another tree walk")
+    expected = ([] if empty else [probe.page_modal, probe.chooser])
+    if native_sibling:
+        expected.append(sibling)
+    assert _atspi.input_modals(probe.frame, {}) == expected
+    assert _atspi._cached_modal_collection(probe.frame) == probe.hits
+    assert probe.queries == [probe.frame]
+    # An empty query for this window must not omit native application siblings.
+    assert sibling.parent is (application if native_sibling else None)
+    if expected:
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            _atspi.refuse_outside_modal(probe.frame, probe.frame)
+    else:
+        assert not _atspi.refuse_outside_modal(probe.frame, probe.frame)
+
+
+@pytest.mark.parametrize("invalidate", ["listener", "event", "during_query", "mutation", "window"])
+def test_confirmation_collection_cannot_authorize_stale_or_foreign_modal_reads(
+    confirmation_modal_collection, monkeypatch, invalidate,
+):
+    probe = confirmation_modal_collection
+    if invalidate == "listener":
+        probe.ready[0] = False
+    if invalidate == "during_query":
+        original = probe.frame.get_collection_iface
+        def collection():
+            def matches(*args):
+                result = original().get_matches(*args)
+                probe.epoch[0] += 1
+                return result
+            return _NS(get_matches=matches)
+        probe.frame.get_collection_iface = collection
+    assert probe.probe() == probe.hits
+    root = probe.frame
+    if invalidate == "event":
+        probe.epoch[0] += 1
+    elif invalidate == "mutation":
+        root.do_action = lambda index: False  # Failed acknowledgement may still mutate.
+        _atspi._call_first(root, ("do_action",), 0)
+    elif invalidate == "window":
+        root = _Acc("frame", name="Other window")
+    discoveries = []
+    monkeypatch.setattr(_atspi, "active_modals", lambda node: discoveries.append(node) or [probe.chooser])
+    assert _atspi.input_modals(root, {}) == [probe.chooser]
+    assert discoveries == [root]
+
+
+@pytest.mark.parametrize("failure", ["none", "exception"])
+def test_failed_confirmation_collection_does_not_seed_modal_absence(
+    confirmation_modal_collection, monkeypatch, failure,
+):
+    probe = confirmation_modal_collection
+    def matches(*args):
+        if failure == "exception":
+            raise RuntimeError("native query failed")
+        return None
+    probe.frame.get_collection_iface = lambda: _NS(get_matches=matches)
+    assert probe.probe() is None
+    assert _atspi._cached_modal_collection(probe.frame) is None
+
+
+def test_incomplete_confirmation_role_query_cannot_seed_modal_absence(
+    confirmation_modal_collection, monkeypatch,
+):
+    probe = confirmation_modal_collection
+    roles = _atspi._atspi().Role
+    monkeypatch.delattr(roles, "FILE_CHOOSER")
+    probe.frame.get_collection_iface = lambda: _NS(get_matches=lambda *args: [])
+    assert probe.probe() == []
+    assert _atspi._cached_modal_collection(probe.frame) is None
+
+
+def test_fresh_confirmation_collection_supersedes_derived_modal_discovery(
+    confirmation_modal_collection,
+):
+    probe = confirmation_modal_collection
+    assert probe.probe() == probe.hits
+    assert _atspi.input_modals(probe.frame, {}) == [probe.page_modal, probe.chooser]
+    probe.hits.clear()
+    assert probe.probe() == []
+    assert _atspi.input_modals(probe.frame, {}) == []
