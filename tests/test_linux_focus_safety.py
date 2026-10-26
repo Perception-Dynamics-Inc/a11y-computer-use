@@ -435,3 +435,56 @@ def test_chromium_field_press_defers_to_checked_pointer_path(focus_driver, monke
     assert driver.press_element(field) is False
     assert driver.verify_click_fallback(field, "chrome") is field
     assert driver._focused_editable is None
+
+
+@pytest.mark.parametrize("focused", [True, False])
+def test_chromium_type_has_one_focus_wait_and_no_regrab(focus_driver, monkeypatch, focused):
+    from a11y_computer_use.drivers import _page_health
+    driver, _, field, handle, _, _ = focus_driver
+    context = ("entry", "Name", object(), object(), object(), (None, None), (), ())
+    events = []
+    for name in ("_check_modal_target", "_refuse_hidden", "_raise_handle_window", "_visible_action"):
+        monkeypatch.setattr(driver, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda h: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda h: True)
+    monkeypatch.setattr(_atspi, "web_entry_context", lambda h: context)
+    monkeypatch.setattr(_atspi, "_node_name", lambda h: "Busy Lab")
+    monkeypatch.setattr(_atspi, "_doc_url", lambda h: "file:///busy.html")
+    monkeypatch.setattr(_page_health, "probe", lambda *args: None)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda h: {})
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda h: pytest.fail("second focus wait"))
+    monkeypatch.setattr(_atspi, "grab_focus", lambda h: pytest.fail("pointer must not regrab"))
+    monkeypatch.setattr(driver, "click", lambda target: events.append("pointer"))
+    def focus(element, h, **kwargs):
+        assert kwargs == {"context": context, "request_focus": False}
+        events.append("wait")
+        if not focused: raise _atspi._focus_lost_error("nothing typed")
+        return h
+    monkeypatch.setattr(driver, "_focus_web_entry", focus)
+    monkeypatch.setattr(driver, "_type_confirmed_handle", lambda h, text: events.append("type") or len(text))
+    if focused:
+        assert driver.type_into(field, "abc") == 3
+        assert events == ["pointer", "wait", "type"]
+    else:
+        with pytest.raises(ComputerUseError) as error:
+            driver.type_into(field, "abc")
+        assert error.value.detail["next"] == []
+        assert "input may be queued" in error.value.message
+        assert events == ["pointer", "wait"]
+
+
+def test_pointer_focus_wait_accepts_original_and_keeps_existing_budget(monkeypatch):
+    handle = object()
+    context = ("entry", "Name", object(), object(), None, (None, None), (), ())
+    sleeps = []
+    monkeypatch.setattr(_atspi, "grab_focus", lambda h: pytest.fail("no focus mutation"))
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda h: False)
+    monkeypatch.setattr(_atspi, "_focused_accessibles", lambda doc: [])
+    monkeypatch.setattr(_atspi.time, "sleep", sleeps.append)
+    with pytest.raises(ComputerUseError):
+        _atspi.focus_web_entry(handle, context=context, request_focus=False)
+    assert len(sleeps) == _atspi._FOCUS_CONFIRM_POLLS - 1
+    assert sum(sleeps) < 1.6
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda h: True)
+    monkeypatch.setattr(_atspi, "_state_has", lambda h, state: state == "EDITABLE")
+    assert _atspi.focus_web_entry(handle, context=context, request_focus=False) is handle
