@@ -531,7 +531,10 @@ def call_went_unanswered() -> bool:
 
 def _safe(fn, default=None, *, marshal=True):
     watch = _current_watch()
-    start = time.monotonic()
+    # perf_counter, not monotonic: Windows' monotonic clock ticks every
+    # ~15.6ms, so a 260ms miss could read as 0.234s and slip under the
+    # 250ms unanswered threshold.
+    start = time.perf_counter()
     failed = False
     try:
         # Direct native calls (e.g. Table.get_accessible_at) need the same
@@ -545,7 +548,7 @@ def _safe(fn, default=None, *, marshal=True):
     except Exception:
         failed = True
         result = default
-    elapsed = time.monotonic() - start
+    elapsed = time.perf_counter() - start
     _reply_local.last_failed = failed
     _reply_local.last_elapsed = elapsed
     if watch is not None:
@@ -20352,13 +20355,33 @@ def hidden_web_target(acc) -> bool:
     return False
 
 
+# Bus names whose native Collection role query has already timed out.
+_COLLECTION_TIMED_OUT: set[str] = set()
+
+
+def _await_collection_drain(root) -> None:
+    """Wait for an app to answer again after a Collection query timed out.
+
+    The 300ms wait ends our side of the call, not the app's work. Chrome
+    keeps filling a 10,000-child document for seconds, and every read in
+    that time also times out, so the walk returns a disabled, empty window
+    (#1169). Before #1043 the slow walk-based list discovery happened to
+    cover this gap. One fresh ping, allowed the longer hang-check budget,
+    lets the app finish first.
+    """
+    _drop_cached_properties(root)
+    _ping_answers(root)
+
+
 def _list_containers(root, limit: int = _MAX_LIST_CONTAINERS) -> list:
     """List, table, and tree nodes under ``root``, bounded."""
     # Discovery precedes the snapshot walk. Chromium can answer this role
     # query in one call instead of fetching every toolbar/document child
     # twice. Keep the walk for bridges without Collection (or failed reads).
+    bus = (_atspi_wrapper_key(root) or (None,))[0]
     try:
-        coll = _call_first(root, ("get_collection_iface", "get_collection"))
+        coll = (None if bus is not None and bus in _COLLECTION_TIMED_OUT
+                else _call_first(root, ("get_collection_iface", "get_collection")))
         if coll is not None:
             Atspi = _atspi()
             mt = Atspi.CollectionMatchType
@@ -20374,7 +20397,13 @@ def _list_containers(root, limit: int = _MAX_LIST_CONTAINERS) -> list:
                          and _extents(root)[0] is not None else [])
                 return (roots + [hit for hit in hits if _extents(hit)[0] is not None])[:limit]
     except Exception:
-        pass
+        # #1169: on a 10,000-button page Chrome is still answering the
+        # abandoned role query after the 300ms wait. Every read of the walk
+        # that follows timed out, and the window came back disabled and
+        # empty. Let Chrome finish before walking, and do not ask again.
+        if bus is not None:
+            _COLLECTION_TIMED_OUT.add(bus)
+        _await_collection_drain(root)
     found: list = []
     queue = [root]
     seen: set[int] = set()
@@ -22430,6 +22459,7 @@ def _modal_collection(root, *, split: bool = False):
             )
             return [*before, pivot, *after]
         except Exception:
+            _await_collection_drain(root)
             return None
     return None
 
