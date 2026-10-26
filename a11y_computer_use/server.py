@@ -3834,8 +3834,22 @@ class Runtime:
                                 omit_scroll_wrappers=True,
                             )
                         )
+                    # #1142: opening a modal dialog or popover splices a new
+                    # surface into the tree and renumbers later refs. Rebind
+                    # a ref only under a surface root that neither the old
+                    # anchor nor the previous issuance contained, so the old
+                    # target is necessarily outside it. Same app, process and
+                    # document are enforced above; changed targets without a
+                    # new surface (#1014 iframe replacement) stay refused.
+                    new_surface_item = (
+                        old_identity != new_identity and last is not None
+                        and self._under_new_surface(
+                            identity_indexes[snap.snapshot_id], element.ref, (old, last),
+                        )
+                    )
                     if old_identity != new_identity and not (
                         verified_rename or same_node_rename or newly_exposed_item or shifted_control
+                        or new_surface_item
                     ):
                         changed[element.ref] = snap
                         continue
@@ -3851,6 +3865,53 @@ class Runtime:
             self._foreign_issued = last
         else:
             self._foreign_issued = None
+
+    _SURFACE_ROLES = frozenset({"AXDialog", "AXSheet", "AXPopover"})
+
+    @classmethod
+    def _under_new_surface(cls, elements: dict[str, Element], ref: str,
+                           earlier: tuple[Snapshot, ...]) -> bool:
+        """Whether ``ref`` sits under a modal/popover root new since ``earlier``.
+
+        The target itself is not a root: a ref renumbered onto a dialog node
+        names the surface, not a control inside it. A root is matched by
+        native node identity, or by its issued semantic identity when the
+        backend reports none. A surface matched in an earlier snapshot was
+        already observable, so it alone does not authorize a rebind.
+        """
+        target = elements.get(ref)
+        if target is None or target.blocked_by_modal:
+            return False
+        roots = []
+        seen = {ref}
+        parent = target.parent
+        while parent in elements and parent not in seen:
+            seen.add(parent)
+            el = elements[parent]
+            if el.modal or el.role in cls._SURFACE_ROLES:
+                roots.append(el)
+            parent = el.parent
+        if not roots:
+            return False
+        for root in roots:
+            identity = cls._issued_identity(elements, root.ref)
+            present = False
+            for snap in earlier:
+                index = {el.ref: el for el in snap.elements}
+                for el in snap.elements:
+                    if root.node_identity:
+                        if el.node_identity == root.node_identity:
+                            present = True
+                            break
+                    elif ((el.modal or el.role in cls._SURFACE_ROLES)
+                          and cls._issued_identity(index, el.ref) == identity):
+                        present = True
+                        break
+                if present:
+                    break
+            if not present:
+                return True
+        return False
 
     @staticmethod
     def _issued_identity(elements: dict[str, Element], ref: str,
