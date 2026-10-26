@@ -3879,6 +3879,20 @@ class Runtime:
             self._foreign_issued = None
 
     _SURFACE_ROLES = frozenset({"AXDialog", "AXSheet", "AXPopover"})
+    # #1142: GTK4 exposes a DropDown or MenuButton popover as neither modal
+    # nor AXPopover. It is a list box or menu child of the expanded owner.
+    _POPUP_OWNER_ROLES = frozenset({"AXComboBox", "AXPopUpButton", "AXMenuButton", "AXButton"})
+    _POPUP_ROLES = frozenset({"AXList", "AXMenu"})
+
+    @classmethod
+    def _is_surface_root(cls, elements: dict[str, Element], el: Element) -> bool:
+        if el.modal or el.role in cls._SURFACE_ROLES:
+            return True
+        owner = elements.get(el.parent) if el.parent else None
+        return bool(
+            el.role in cls._POPUP_ROLES and owner is not None
+            and owner.expanded is True and owner.role in cls._POPUP_OWNER_ROLES
+        )
 
     @classmethod
     def _under_new_surface(cls, elements: dict[str, Element], ref: str,
@@ -3900,7 +3914,7 @@ class Runtime:
         while parent in elements and parent not in seen:
             seen.add(parent)
             el = elements[parent]
-            if el.modal or el.role in cls._SURFACE_ROLES:
+            if cls._is_surface_root(elements, el):
                 roots.append(el)
             parent = el.parent
         if not roots:
@@ -3915,7 +3929,7 @@ class Runtime:
                         if el.node_identity == root.node_identity:
                             present = True
                             break
-                    elif ((el.modal or el.role in cls._SURFACE_ROLES)
+                    elif (cls._is_surface_root(index, el)
                           and cls._issued_identity(index, el.ref) == identity):
                         present = True
                         break
