@@ -6720,3 +6720,107 @@ def test_textarea_ref_after_scroll_wrapper_pruning(
         runtime.type_text(text="x", ref="e2")
         assert focused == [after.element("e2")]
         assert mocked_driver["type"] == ["x"]
+
+
+def _surface_case(kind):
+    """Before/after trees for a modal or popover spliced in ahead of later refs."""
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Lab", None, None, "before",
+                     node_identity=(":1.2", "/window/1"))
+    controls = tuple(
+        Element(f"e{i}", "AXButton", title, None, Bounds(1, 10, i * 30, 150, 25), "before",
+                parent="e1", clickable=True, node_identity=(":1.2", f"/button/{i}"))
+        for i, title in enumerate(("Add Item", "Open", "Delete"), 2)
+    )
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, *controls))
+    if kind == "qt":
+        root = Element("e2", "AXWindow", "Add Item", None, Bounds(1, 50, 50, 300, 200), "after",
+                       modal=True, node_identity=(":1.2", "/dialog/1"))
+        inner = (Element("e3", "AXTextField", "Name", "", Bounds(1, 60, 80, 200, 25), "after",
+                         parent="e2", editable=True, node_identity=(":1.2", "/dialog/1/name")),
+                 Element("e4", "AXButton", "OK", None, Bounds(1, 60, 120, 80, 25), "after",
+                         parent="e2", clickable=True, node_identity=(":1.2", "/dialog/1/ok")))
+    elif kind == "electron":
+        root = Element("e2", "AXDialog", "Add Item", None, Bounds(1, 50, 50, 300, 200), "after",
+                       parent="e1", modal=True)
+        inner = (Element("e3", "AXTextField", "Name", "", Bounds(1, 60, 80, 200, 25), "after",
+                         parent="e2", editable=True),
+                 Element("e4", "AXButton", "OK", None, Bounds(1, 60, 120, 80, 25), "after",
+                         parent="e2", clickable=True))
+    else:  # GTK4 popover: not modal, the parent window stays live.
+        root = Element("e2", "AXPopover", "", None, Bounds(1, 50, 50, 200, 120), "after",
+                       parent="e1", node_identity=(":1.2", "/popover/1"))
+        inner = (Element("e3", "AXTextField", "Search", "", Bounds(1, 60, 60, 180, 25), "after",
+                         parent="e2", editable=True, node_identity=(":1.2", "/popover/1/search")),
+                 Element("e4", "AXMenuItem", "Rename", None, Bounds(1, 60, 90, 180, 25), "after",
+                         parent="e2", clickable=True, node_identity=(":1.2", "/popover/1/rename")))
+    blocked = kind != "gtk4"
+    moved = tuple(
+        dataclasses.replace(el, ref=f"e{i}", snapshot_id="after", blocked_by_modal=blocked)
+        for i, el in enumerate(controls, 5)
+    )
+    after_window = dataclasses.replace(window, snapshot_id="after", blocked_by_modal=blocked)
+    after = dataclasses.replace(before, snapshot_id="after",
+                                elements=(after_window, root, *inner, *moved))
+    return before, after, root, inner
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("kind", ["qt", "electron", "gtk4"])
+def test_fresh_refs_inside_newly_opened_surface_are_issued(
+    monkeypatch, mocked_driver, store, audit_dir, mode, kind,
+):
+    """#1142: refs under a newly opened modal or popover bind to the fresh snapshot."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, after, root, (field, button) = _surface_case(kind)
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = after
+        for _ in range(2):
+            runtime.desktop_snapshot(APP, mode=mode)
+            assert runtime._anchor("e3") == (after, field)
+            assert runtime._anchor("e4") == (after, button)
+        runtime.click(ref="e4", verify=True)
+        assert mocked_driver["click"][-1][0] == button
+        # The surface root itself took an old control's ref: never rebound.
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert caught.value.detail["anchor"]["title"] == "Add Item"
+        assert len(mocked_driver["click"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["qt", "electron", "gtk4"])
+@pytest.mark.parametrize("change", ["already_open"])
+def test_surface_rebind_requires_a_new_surface(
+    monkeypatch, mocked_driver, store, audit_dir, kind, change,
+):
+    """#1142's rebind never covers a surface that was already issued."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, after, root, (field, button) = _surface_case(kind)
+    if change == "already_open":
+        # The surface was observable before; its control was replaced in place.
+        opened = after
+        renamed = dataclasses.replace(button, title="Discard", snapshot_id="changed",
+                                      node_identity=(":1.2", "/replacement"))
+        after = dataclasses.replace(after, snapshot_id="changed", elements=tuple(
+            renamed if el.ref == "e4" else dataclasses.replace(el, snapshot_id="changed")
+            for el in after.elements))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        if change == "already_open":
+            current[0] = opened
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        runtime.desktop_snapshot(APP)
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e4", verify=True)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert mocked_driver["click"] == []
