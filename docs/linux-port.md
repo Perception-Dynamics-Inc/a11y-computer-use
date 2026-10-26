@@ -1375,7 +1375,10 @@ modal input policy.
 When hiding or clipping siblings renumbers surviving controls (#1110), a public
 snapshot rebinds the printed refs if each shifted control has a unique matching
 native node in the preceding snapshot and its issued semantics and ancestry
-remain unchanged. Previously refused controls and recycled row identities cannot
+remain unchanged. An unnamed noninteractive scroll wrapper may collapse when
+its scrollbar disappears (#1130); a surviving native control then binds to the
+snapshot that just issued its new ref. Named, actionable, modal, document and
+row boundaries remain significant. Previously refused controls and recycled row identities cannot
 supply this continuity. Internal effect reads do not rebind refs. Callers must use
 the refs from the latest public observation.
 
