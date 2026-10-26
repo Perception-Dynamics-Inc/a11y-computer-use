@@ -609,5 +609,8 @@
 
 - 2026-10-26 (PR #1107 CI repair): A bounded worker must recompute remaining time after Thread.start; scheduler delay during startup otherwise gets added to the original join budget. For modal snapshot marking, reported containment in every active modal proves membership without window/document classification; retain the full classification for outside targets and refresh ancestry on each traversal.
 
+- 2026-10-26 (PR #1114 repair): Sparse Chromium row-head paint polling and Electron focused-entry readback/modal containment fixes are independent. Retain both appended regression groups when merging; the historical R13-key latency failure predates main’s focused-entry and modal classification fixes. After merging, the unchanged seven-sample R13-key gate passed locally at 1.228x the fixed 0.4.76 baseline (`scripts/latency/run.py --rows R13-key`); this does not establish the full latency gate or new CI results.
+
+
 - 2026-10-26 (#1116): Browser confirmation already performs a complete native dialog-role query before key input. Share those candidates with modal discovery only for the same native window and subscribed boundary-event epoch, including FILE_CHOOSER coverage. Preserve live modal filtering and application-sibling discovery; failed queries, missing subscriptions, events and native mutations must force rediscovery. Copy retained candidate lists before adding siblings/root so later reads cannot accumulate stale windows.
 - 2026-10-26 (PR #1115 repair): Display-edge ref recovery and fresh public ref rebinding protect different cases. Preserve both regression groups when merging: unresolved old refs need measured overflow guidance, while newly issued surviving refs must remain usable after pruning renumbers them.
