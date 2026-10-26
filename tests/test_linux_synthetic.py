@@ -21571,3 +21571,55 @@ def test_fresh_confirmation_collection_supersedes_derived_modal_discovery(
     probe.hits.clear()
     assert probe.probe() == []
     assert _atspi.input_modals(probe.frame, {}) == []
+
+
+@pytest.mark.parametrize("ownership", ["relation", "transient"])
+def test_window_modal_blocks_only_its_parent(modal_boundary_tree, monkeypatch, ownership):
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import Click, TypeText, KeyChord
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    other = _Acc("frame", name="Other document", states=("SHOWING", "ACTIVE", "ENABLED"))
+    _adopt(frame, bg)
+    app = _adopt(_Acc("application"), frame, other, modal)
+    monkeypatch.setattr(_atspi, "pid_of", lambda node: 321)
+    relation = _NS(get_relation_type=lambda: "subwindow-of", get_n_targets=lambda: 1,
+                               get_target=lambda index: other)
+    modal.get_relation_set = lambda: [relation] if ownership == "relation" else []
+    monkeypatch.setattr(_linux_system, "transient_parent_title", lambda **kw: (
+        other.name if ownership == "transient" and kw == {"pid": 321, "title": modal.name} else None))
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: list(node.children))
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (bg, frame))
+    monkeypatch.setattr(_atspi, "_accessible_at_point", lambda *args: bg)
+
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    target = next(el for el in snap.elements if el.title == bg.name)
+    assert target.clickable and not target.blocked_by_modal
+    assert _atspi.active_modals(frame) == []
+    assert not _atspi.outside_modals(bg, [modal], cache={})
+    assert driver.press_element(target)
+    assert calls == [bg.name]
+    for action, addressed in ((Click(target), None), (Click(Point(0, 100, 110)), None),
+                              (TypeText("ok"), target), (TypeText("ok"), None),
+                              (KeyChord("ctrl+End"), None)):
+        driver.check_modal_input(action, "modal-test", input_target=addressed)
+
+    # Move the reported ownership to this document; no stale snapshot/cache may
+    # authorize background input. Preserve the #1013 refusal on every attempt.
+    relation.get_target = lambda index: frame
+    monkeypatch.setattr(_linux_system, "transient_parent_title", lambda **kw: frame.name)
+    for _ in range(3):
+        snap = driver.snapshot(Scope.WINDOW, "modal-test")
+        target = next(el for el in snap.elements if el.title == bg.name)
+        assert target.blocked_by_modal and not target.actionable
+        for invoke in (lambda: driver.press_element(target),
+                       lambda: driver.set_value(target, "blocked"),
+                       lambda: driver.type_into(target, "blocked"),
+                       lambda: driver.check_modal_input(Click(Point(0, 100, 110)), "modal-test"),
+                       lambda: driver.check_modal_input(TypeText("blocked"), "modal-test"),
+                       lambda: driver.check_modal_input(KeyChord("ctrl+End"), "modal-test")):
+            with pytest.raises(ComputerUseError, match="outside_active_modal"):
+                invoke()
+    assert calls == [bg.name]
+    assert not _atspi.outside_modals(inside, [modal])
+    assert modal.parent is app

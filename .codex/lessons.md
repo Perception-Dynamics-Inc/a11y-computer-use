@@ -616,3 +616,5 @@
 - 2026-10-26 (PR #1115 repair): Display-edge ref recovery and fresh public ref rebinding protect different cases. Preserve both regression groups when merging: unresolved old refs need measured overflow guidance, while newly issued surviving refs must remain usable after pruning renumbers them.
 
 - 2026-10-26 (#1118): Qt character extents can have zero width and positive height for combining marks, joiners and variation selectors. Preserve them only when their measured x and vertical span lie in the viewport; keep zero-height and clipped glyphs excluded. Leave other rectangle consumers' zero-size policy unchanged.
+
+- 2026-10-26 (#1139): GTK window-modal dialogs may be application siblings with no AT-SPI SUBWINDOW_OF relation (Mousepad Go To on this box). Resolve their exact same-process WM_TRANSIENT_FOR parent without requiring the dialog to be active; another document can legitimately hold focus. Apply the scope during snapshot marking and input discovery, retaining same-window refusal and browser document boundaries. Never infer parentage from overlap or duplicate titles.
