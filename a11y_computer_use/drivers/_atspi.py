@@ -19067,6 +19067,94 @@ def reveal_gtk_named_cell(root, needle: str):
     return None
 
 
+def terminal_scrollbar(acc):
+    """Return (terminal, bar, min, max, current) for one nearby terminal.
+
+    Only a terminal itself or its unambiguous descendant within two levels
+    qualifies. Missing or unreadable Value metadata leaves wheel fallback intact.
+    """
+    if acc is None:
+        return None
+    terminals = []
+    pending = [(acc, 0)]
+    visits = 0
+    while pending:
+        node, depth = pending.pop()
+        visits += 1
+        if visits > _MAX_SCROLL_NODES:
+            return None
+        if _role_name(node) == "terminal":
+            terminals.append(node)
+        elif depth < 2:
+            count = _child_count(node)
+            if count > _MAX_SCROLL_NODES:
+                return None
+            pending.extend((_child_at(node, i), depth + 1) for i in range(count))
+    if len(terminals) != 1:
+        return None
+    terminal = terminals[0]
+    for bar in _collect_scrollbars(terminal, nearest_vertical=True):
+        if _bar_axis(bar) != "vertical":
+            continue
+        minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), math.nan)
+        maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), math.nan)
+        current = _read_value(bar)
+        if (current is not None and all(math.isfinite(v) for v in (minimum, maximum, current))
+                and minimum <= current <= maximum):
+            return terminal, bar, minimum, maximum, current
+    return None
+
+
+def _terminal_viewport_step(terminal) -> int | None:
+    text = _safe(lambda: _atspi().Text.get_text(terminal, 0, -1))
+    if not isinstance(text, str) or not text:
+        return None
+    # Some VTE versions expose the buffer; use the measured visible slice.
+    visible = _terminal_on_screen(terminal, text)
+    return max(1, len(visible.splitlines()) - 2)
+
+
+def terminal_scroll_search_limit(acc) -> int | None:
+    """Viewport steps covering the reported scrollback range, plus its edge."""
+    state = terminal_scrollbar(acc)
+    if state is None:
+        return None
+    terminal, _bar, minimum, maximum, _current = state
+    step = _terminal_viewport_step(terminal)
+    return math.ceil((maximum - minimum) / step) + 1 if step else None
+
+
+def scroll_terminal_viewport(acc, direction: int) -> str | None:
+    """Page a terminal's Value bar with two rows of overlap and read back.
+
+    Return moved, at_end, or None when native paging is unavailable. A clamped
+    edge never writes. A failed post-write read refuses unverifiable movement.
+    """
+    if isinstance(direction, bool) or not isinstance(direction, int) or not direction:
+        return None
+    state = terminal_scrollbar(acc)
+    if state is None:
+        return None
+    terminal, bar, minimum, maximum, current = state
+    step = _terminal_viewport_step(terminal)
+    if step is None:
+        return None
+    target = min(max(current + (step if direction > 0 else -step), minimum), maximum)
+    if target == current:
+        return "at_end"
+    _write_value(bar, target)
+    updated = _read_value(bar)
+    if updated is None or not math.isfinite(updated):
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED, "terminal scroll position could not be verified",
+            detail={"surface": "terminal", "reason": "scroll_position_unavailable"},
+        )
+    if updated == current:
+        return "at_end"
+    _invalidate_tree_cache(terminal)
+    return "moved"
+
+
 def scroll_gtk_viewport_page(acc, direction: int) -> bool:
     """Move a large GTK table's vertical bar by one painted viewport.
 
@@ -21630,13 +21718,14 @@ def list_signature(acc) -> tuple[str, ...] | None:
     return best
 
 
-def _collect_scrollbars(start) -> list:
+def _collect_scrollbars(start, *, nearest_vertical: bool = False) -> list:
     """Scroll bars on ``start`` and its ancestors, nearest first.
 
     GTK puts the bars on the scroll pane, beside the viewport that holds the
     text, so the pane is an ancestor of the content and the bars are its
     children. A busy window is only peeked at (first children), which is
-    enough to see a scroll pane sitting next to a toolbar."""
+    enough to see a scroll pane sitting next to a toolbar. Terminal probes can
+    stop at the nearest vertical bar instead of scanning unrelated ancestors."""
     found: list = []
     seen: set[int] = set()
     visits = 0
@@ -21673,6 +21762,8 @@ def _collect_scrollbars(start) -> list:
                     if visits >= _MAX_SCROLL_NODES:
                         break
                     consider(_child_at(child, j))
+        if nearest_vertical and any(_bar_axis(bar) == "vertical" for bar in found):
+            break
         node = _parent_of(node)
     return found
 
