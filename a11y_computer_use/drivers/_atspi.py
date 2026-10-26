@@ -872,6 +872,9 @@ def _call_first_inline(obj, names, *args, default=None):
             continue
         if _is_mutator(name):
             modal_cache = getattr(_read_cache_local, "input_modals", None)
+            walk_parents = getattr(_read_cache_local, "walk_parents", None)
+            if walk_parents is not None:
+                walk_parents.clear()
             if name not in {"clear_cache", "clearCache"}:
                 _modal_discoveries.clear()
                 if modal_cache is not None:
@@ -1001,6 +1004,11 @@ def _share_parent_application(parent, kids) -> None:
         if _lookup_read_cache(kid, key) is not _CACHE_MISS:
             continue
         native_parent = _call_first(kid, ("get_parent",))
+        memo = getattr(_read_cache_local, "walk_parents", None)
+        kid_stable = _atspi_wrapper_key(kid) if memo is not None else None
+        if kid_stable is not None:
+            # This walk's modal ancestry asks the same parent again.
+            memo.setdefault(kid_stable, native_parent)
         if native_parent is not parent:
             # GI may return another wrapper for the same native parent.
             # Require exact bus/path identity, and never inherit ownership
@@ -19254,8 +19262,32 @@ def command_launcher_ancestor(acc, app: str) -> bool:
 
 
 def _parent_of(acc):
+    memo = getattr(_read_cache_local, "walk_parents", None)
+    key = _atspi_wrapper_key(acc) if memo is not None else None
+    if key is not None and key in memo:
+        return memo[key]
     _drop_cached_properties(acc)
-    return _call_first(acc, ("get_parent", "getParent"))
+    parent = _call_first(acc, ("get_parent", "getParent"))
+    if key is not None:
+        memo[key] = parent  # Values pin the parent wrapper for this walk.
+    return parent
+
+
+@contextmanager
+def walk_parent_memo():
+    """Reuse each reported parent for one read-only snapshot traversal.
+
+    Every walked node re-read its parent for the application lookup and
+    again for modal ancestry; the Options dialog paid ~3 get_parent calls
+    per cell. Only stable bus-name/object-path identities are memoized, and
+    any mutator drops the memo, so ancestry is never reused across input.
+    """
+    previous = getattr(_read_cache_local, "walk_parents", None)
+    _read_cache_local.walk_parents = {} if previous is None else previous
+    try:
+        yield
+    finally:
+        _read_cache_local.walk_parents = previous
 
 
 def _is_scroll_bar(acc) -> bool:
@@ -22240,6 +22272,7 @@ def _modal_chain(acc, cache):
     if cache is None:
         return list(_ancestor_chain(acc))
     chain = []
+    keys = []
     seen = set()
     node = acc
     while node is not None and len(chain) < 32:
@@ -22251,13 +22284,16 @@ def _modal_chain(acc, cache):
             chain.extend(cache[key][:32 - len(chain)])
             break
         chain.append(node)
+        keys.append(key)
         node = _parent_of(node)
     # Cache only complete acyclic paths; bounded/cyclic ancestry must be
     # re-read from each target, just like the uncached guard.
     if node is None or (_ancestor_key(node) in cache and len(chain) < 32):
-        # Values retain wrappers, including fallback id() identities.
-        for index, ancestor in enumerate(chain):
-            cache[_ancestor_key(ancestor)] = chain[index:]
+        # Values retain wrappers, including fallback id() identities. Only
+        # the newly read prefix needs entries: cached ancestors already have
+        # theirs, and re-keying the whole chain made each node O(depth).
+        for index, ancestor_key in enumerate(keys):
+            cache[ancestor_key] = chain[index:]
     return chain
 
 
@@ -22274,16 +22310,48 @@ def outside_modals(acc, modals: list, *, cache=None) -> bool:
     return result
 
 
+def _chain_facts(acc, chain, cache):
+    """Ancestor keys and nearest frame/window of one chain, memoized per walk.
+
+    Every Options-dialog cell repeated the full ancestor key set and frame
+    role scan (O(depth) remote role reads per node). Facts derive from the
+    parent's facts when the parent chain is already known, so a snapshot
+    traversal reads each ancestor's role once.
+    """
+    if cache is None or not chain:
+        return ({_ancestor_key(node) for node in chain},
+                next((node for node in chain if _role_name(node) in {"frame", "window"}), None))
+    key = _ancestor_key(acc)
+    facts_key = ("chain_facts", key)
+    hit = cache.get(facts_key)
+    if hit is not None and hit[0] is acc:
+        return hit[1], hit[2]
+    # Only reuse a parent's facts when this chain is exactly node + its chain.
+    parent_facts = None
+    if len(chain) > 1:
+        parent_hit = cache.get(("chain_facts", _ancestor_key(chain[1])))
+        if parent_hit is not None and parent_hit[3] == len(chain) - 1:
+            parent_facts = parent_hit
+    if parent_facts is not None:
+        parents = parent_facts[1] | {key}
+        frame = acc if _role_name(acc) in {"frame", "window"} else parent_facts[2]
+    else:
+        parents = frozenset(_ancestor_key(node) for node in chain)
+        frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
+    if len(chain) < 32:  # Bounded chains are re-read, like _modal_chain.
+        cache[facts_key] = (acc, parents, frame, len(chain))  # Pin acc for id() keys.
+    return parents, frame
+
+
 def _outside_modals(acc, modals, *, cache):
     chain = _modal_chain(acc, cache)
-    parents = {_ancestor_key(node) for node in chain}
+    parents, frame = _chain_facts(acc, chain, cache)
     # Reported containment already proves membership, including nested
     # modals. Window/document classification is needed only for an outside
     # target; doing it for every Options-dialog cell repeats remote reads.
     outside = [modal for modal in modals if _ancestor_key(modal) not in parents]
     if not outside:
         return False
-    frame = next((node for node in chain if _role_name(node) in {"frame", "window"}), None)
     for modal in outside:
         context_key = ("modal_context", id(modal))
         context = cache.get(context_key) if cache is not None else None
