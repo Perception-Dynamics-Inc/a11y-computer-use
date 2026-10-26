@@ -2884,6 +2884,7 @@ class Runtime:
         With no app, or no snapshot and no scope from the before-state, there
         is nothing to compare, so this does not observe.
         """
+        self._reread_reason = None
         current = getattr(self, "_current", None)
         if not app or (current is None and scope is None):
             return None
@@ -2891,7 +2892,13 @@ class Runtime:
         try:
             reader = getattr(self.driver, "effect_snapshot", None)
             snap = reader(chosen, app) if callable(reader) else self.driver.snapshot(chosen, app)
-        except Exception:
+        except Exception as exc:
+            # Keep a named reason (a LibreOffice with no bridge, #1183) so the
+            # verdict says why instead of a generic "could not be read".
+            detail = getattr(exc, "detail", None)
+            if isinstance(exc, ComputerUseError) and isinstance(detail, dict):
+                reason = detail.get("reason")
+                self._reread_reason = reason if isinstance(reason, str) else None
             return None
         epoch = getattr(current, "snapshot_id", None)
         if epoch:
@@ -3170,6 +3177,13 @@ class Runtime:
                 return "confirmed", evidence
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
+        if after is None and getattr(self, "_reread_reason", None) == "no_accessibility_bridge":
+            if died:
+                return "partial", "the target process exited after the action"
+            return "unverifiable", (
+                "no_accessibility_bridge: the app publishes no accessibility tree, "
+                "so the effect cannot be read; check it with a screenshot"
+            )
         readable = after is not None and before is not None
         changed: bool | None = None
         focus_note = None

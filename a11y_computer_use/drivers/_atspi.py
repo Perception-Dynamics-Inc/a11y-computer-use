@@ -12091,6 +12091,121 @@ def libreoffice_without_bridge(app: str) -> bool:
     return libreoffice_app(app) and libreoffice_process_running()
 
 
+# VCL plugins that can publish an AT-SPI tree. gen and x11 never do (#1183).
+_VCL_BRIDGE_PLUGINS = frozenset({"gtk3", "gtk4", "qt5", "qt6", "kf5", "kf6"})
+_VCL_PLUGIN_RE = re.compile(r"/libvclplug_([a-z0-9]+?)lo\.so\b")
+# process_instance_id -> plugin. A process never unloads its VCL plugin, so
+# the answer holds for that pid and start time; a relaunch gets a new key.
+_vcl_plugin_cache: dict[str, str] = {}
+
+
+def libreoffice_vcl_plugin(pid: int) -> str | None:
+    """The VCL plugin (``gen``, ``gtk3``, ...) mapped into ``pid``, else None.
+
+    Read from ``/proc/<pid>/maps`` with no D-Bus call. None while the plugin
+    is not loaded yet or the maps file cannot be read; that is not cached.
+    """
+    instance = process_instance_id(pid)
+    if instance is None:
+        return None
+    cached = _vcl_plugin_cache.get(instance)
+    if cached is not None:
+        return cached
+    try:
+        with open(os.path.join(_proc_root(), str(pid), "maps"),
+                  encoding="utf-8", errors="replace") as fh:
+            found = _VCL_PLUGIN_RE.search(fh.read())
+    except OSError:
+        return None
+    if found is None:
+        return None
+    plugin = found.group(1)
+    if len(_vcl_plugin_cache) > 256:
+        _vcl_plugin_cache.clear()
+    _vcl_plugin_cache[instance] = plugin
+    return plugin
+
+
+def _libreoffice_session_pids() -> list[int]:
+    """Live soffice.bin pids in the caller's session (the process that loads VCL)."""
+    root = _proc_root()
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return []
+    pids = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(root, entry, "comm"), encoding="utf-8", errors="replace") as fh:
+                if fh.read().strip() != "soffice.bin":
+                    continue
+            with open(os.path.join(root, entry, "stat"), encoding="utf-8", errors="replace") as fh:
+                stat = fh.read()
+        except OSError:
+            continue
+        end = stat.rfind(")")
+        if end >= 0 and stat[end + 2:end + 3] == "Z":
+            continue
+        environ = _read_proc_environ(entry, root)
+        if environ is not None and process_in_caller_session(environ):
+            pids.append(int(entry))
+    return pids
+
+
+def _registered_pids() -> set[int] | None:
+    """Pids of applications on the AT-SPI registry, or None when unreadable."""
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    count = max(0, int(_child_count(desktop) or 0))
+    pids = set()
+    for index in range(min(count, 200)):
+        app = _child_at(desktop, index)
+        pid = _call_first(app, ("get_process_id",)) if app is not None else None
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            pids.add(pid)
+    return pids
+
+
+def libreoffice_registration_wait() -> tuple[float, str | None]:
+    """``(seconds, plugin)``: how long a LibreOffice snapshot may wait to register.
+
+    The long wait is only for a young soffice.bin whose plugin can publish a
+    tree, or whose plugin is not mapped yet. A registered process gets the
+    short poll. gen/x11, or an old process that never registered, gets 0:
+    the bridge is not coming (#1183). ``plugin`` is the first plugin seen,
+    for the error detail. No soffice.bin yet (oosplash starting) keeps the
+    full wait.
+    """
+    pids = _libreoffice_session_pids()
+    if not pids:
+        return ATSPI_REGISTER_WAIT_S, None
+    registered = None
+    wait = 0.0
+    shown = None
+    for pid in pids:
+        plugin = libreoffice_vcl_plugin(pid)
+        shown = shown or plugin
+        if plugin is not None and plugin not in _VCL_BRIDGE_PLUGINS:
+            continue
+        if registered is None:
+            registered = _registered_pids()
+        if registered is not None and pid in registered:
+            wait = max(wait, ATSPI_REGISTER_POLL_S)
+            continue
+        age = process_age_s(pid)
+        if age is None:
+            continue
+        wait = max(wait, min(ATSPI_REGISTER_WAIT_S, ATSPI_STARTUP_GRACE_S - age))
+    return max(0.0, wait), shown
+
+
 # LibreOffice's X window shows up in app list and window list while AT-SPI is
 # still registering. That gap was 3–13 s. Snapshot polls until this deadline,
 # then reports the app missing (or the missing gtk3 bridge).

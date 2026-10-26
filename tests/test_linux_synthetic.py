@@ -22088,3 +22088,88 @@ def test_chromium_tree_with_one_own_row_skips_the_hit_probe(fake_atspi, monkeypa
     accessor.refresh_visible(_Acc("frame"))
     assert probed == [wrapped]
     assert accessor._visible_children[id(wrapped)] == own
+
+
+def _office_wait_clock(monkeypatch):
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: True)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _name: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda identifier: identifier)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux.time.sleep",
+        lambda seconds: clock.__setitem__("t", clock["t"] + float(seconds)),
+    )
+    monkeypatch.setattr(_atspi, "_libreoffice_session_pids", lambda: [4242])
+    return clock
+
+
+def test_libreoffice_vcl_plugin_reads_maps_and_caches_per_instance(tmp_path, monkeypatch) -> None:
+    """Synthetic /proc (#1183). The plugin comes from maps and is cached by pid+start."""
+    proc = tmp_path / "proc"
+    (proc / "4242").mkdir(parents=True)
+    maps = proc / "4242" / "maps"
+    maps.write_text(
+        "7f00-7f10 r-xp 0 08:01 1 /usr/lib/libreoffice/program/libmergedlo.so\n"
+        "7f10-7f20 r-xp 0 08:01 2 /usr/lib/libreoffice/program/libvclplug_genlo.so\n",
+        encoding="utf-8",
+    )
+    instance = {"id": "4242:100"}
+    monkeypatch.setattr(_atspi, "_proc_root", lambda: str(proc))
+    monkeypatch.setattr(_atspi, "process_instance_id", lambda pid: instance["id"])
+    monkeypatch.setattr(_atspi, "_vcl_plugin_cache", {})
+    assert _atspi.libreoffice_vcl_plugin(4242) == "gen"
+    maps.unlink()
+    assert _atspi.libreoffice_vcl_plugin(4242) == "gen"  # cached, no reread
+    instance["id"] = "4242:200"  # pid reused by a new process
+    assert _atspi.libreoffice_vcl_plugin(4242) is None
+    maps.write_text("7f10-7f20 r-xp 0 08:01 2 /opt/lo/program/libvclplug_gtk3lo.so\n", encoding="utf-8")
+    assert _atspi.libreoffice_vcl_plugin(4242) == "gtk3"
+
+
+def test_snapshot_with_gen_vcl_plugin_fails_fast(fake_atspi, monkeypatch) -> None:
+    """Synthetic clock (#1183). gen never publishes a tree: no 15 s wait."""
+    clock = _office_wait_clock(monkeypatch)
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin", lambda pid: "gen")
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 1.0)
+    monkeypatch.setattr(_atspi, "_registered_pids", lambda: set())
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "soffice.bin")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "no_accessibility_bridge"
+    assert exc.value.detail["vcl_plugin"] == "gen"
+    assert clock["t"] == 0.0
+
+
+@pytest.mark.parametrize("age,registered,expected", [
+    (3.0, set(), 12.0),      # young gtk3, not registered yet: wait out the grace
+    (60.0, set(), 0.0),      # old gtk3 that never registered: the bridge is not coming
+    (60.0, {4242}, 0.25),    # registered: one short poll only
+])
+def test_snapshot_gtk3_wait_depends_on_youth_and_registry(
+    fake_atspi, monkeypatch, age, registered, expected,
+) -> None:
+    """Synthetic clock (#1183). Only a young bridge-capable soffice gets the long wait."""
+    clock = _office_wait_clock(monkeypatch)
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin", lambda pid: "gtk3")
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: age)
+    monkeypatch.setattr(_atspi, "_registered_pids", lambda: set(registered))
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "soffice.bin")
+    assert exc.value.detail["reason"] == "no_accessibility_bridge"
+    assert clock["t"] == pytest.approx(expected)
+
+
+def test_snapshot_stops_waiting_when_the_plugin_maps_as_gen(fake_atspi, monkeypatch) -> None:
+    """Synthetic clock (#1183). Plugin unknown at first, then gen: the wait ends early."""
+    clock = _office_wait_clock(monkeypatch)
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin",
+                        lambda pid: "gen" if clock["t"] >= 1.0 else None)
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 0.5 + clock["t"])
+    monkeypatch.setattr(_atspi, "_registered_pids", lambda: set())
+    with pytest.raises(ComputerUseError):
+        LinuxDriver().snapshot(Scope.WINDOW, "soffice.bin")
+    assert clock["t"] == pytest.approx(1.0)
