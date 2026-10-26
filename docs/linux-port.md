@@ -1539,3 +1539,12 @@ also applies to an editable whose ref cannot be rematched after display-edge
 pruning; it sends no text. A click on a display-clipped ref whose effect remains
 unconfirmed returns `unverifiable` with no retry hints, since delivery may
 already have triggered the control. Confirmed effects retain their result.
+
+Firefox date/time input segments (for example Month or Hours) refuse
+`set_value` with `unsupported` / `unsafe_date_segment_replace` before focus,
+selection, Value writes or text replacement. Firefox advertises EditableText
+and Value on these spin buttons, but the generic replacement path can clear
+a segment and emit an empty `input`/`change` value. Use an explicit
+`type(ref, digits)` and verify the complete date/time afterward. This refusal
+also applies to empty replacement strings; ordinary text and number inputs
+retain their existing write paths.
