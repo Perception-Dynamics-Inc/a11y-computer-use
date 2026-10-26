@@ -13977,6 +13977,14 @@ def _combo_entry(acc):
             _state_has(child, state) for state in ("ENABLED", "SENSITIVE", "FOCUSABLE")
         ):
             continue
+        # A stale client child list can hand back a different field (Firefox
+        # once returned the focused Notes textarea for a <select>); writing
+        # it reported "set" on the wrong target. The entry must name this
+        # combo as its parent.
+        parent = _parent_of(child)
+        acc_key = _atspi_wrapper_key(acc)
+        if parent is not acc and (acc_key is None or _atspi_wrapper_key(parent) != acc_key):
+            continue
         if _editable_iface(child) is not None or role in {"entry", "text"}:
             return child
     return None
