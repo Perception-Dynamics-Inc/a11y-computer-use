@@ -484,6 +484,58 @@ def test_linux_wait_for_does_not_treat_a_checker_hit_as_actionable(monkeypatch) 
         )
 
 
+def test_linux_actionable_wait_re_resolves_a_ref_whose_snapshot_was_evicted(monkeypatch) -> None:
+    """#1175: a ref kept from an earlier find outlived its snapshot's handles.
+
+    observe keeps handles for the last _MAX_EPOCHS snapshots. After enough
+    other calls the stored handle was gone, every read probed nothing, and
+    the wait ran its whole budget to "did not become visible" on an enabled
+    button. The wait must re-resolve the ref through the checker and probe
+    the live accessible, and a ref that no longer resolves is stale_ref at
+    once, not a timeout.
+    """
+    import time
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
+    old = _element()
+    live = Element(
+        ref="e40", role="AXButton", title="Save", value=None,
+        bounds=Bounds(0, 10, 20, 80, 30), snapshot_id="snap-live",
+        enabled=True, clickable=True,
+    )
+    button = object()
+    handles = {("snap-live", "e40"): button}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: handles.get((sid, ref)))
+    monkeypatch.setattr(
+        _actionable, "probe_accessible",
+        lambda acc: _ready() if acc is button else Observation(False, False, None, False),
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    started = time.monotonic()
+    found = driver.wait_for(
+        old, condition=WaitCondition.ACTIONABLE, timeout_s=5,
+        checker=lambda element, condition: live,
+    )
+    assert found is live
+    assert time.monotonic() - started < 1.0
+
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as info:
+        driver.wait_for(
+            old, condition=WaitCondition.ACTIONABLE, timeout_s=5,
+            checker=lambda element, condition: None,
+        )
+    assert info.value.code is ErrorCode.STALE_REF
+    assert info.value.detail["ref"] == "e1"
+    assert time.monotonic() - started < 1.0
+
+
 def test_probe_fail_closed_on_visibility_enabled_and_the_hit(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi, _linux_system
 

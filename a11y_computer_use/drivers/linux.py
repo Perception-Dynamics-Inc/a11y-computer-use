@@ -6399,8 +6399,28 @@ class LinuxDriver:
             return False
 
         if condition is WaitCondition.ACTIONABLE:
+            from a11y_computer_use import observe
+
+            probed = [target]
+
             def read() -> _actionable.Observation:
-                return self._run(lambda: _actionable.read_target(target))
+                # A ref kept from an earlier find can outlive its snapshot's
+                # handles (observe keeps the last _MAX_EPOCHS). Re-resolve it
+                # through the checker, the identity path click uses, instead
+                # of probing nothing until the timeout (#1175). A ref that no
+                # longer resolves is stale now, not invisible later.
+                current = probed[0]
+                if observe.ax_handle_for(current.snapshot_id, current.ref) is None:
+                    live = checker(target, WaitCondition.EXISTS)
+                    if not isinstance(live, Element):
+                        raise ComputerUseError(
+                            ErrorCode.STALE_REF,
+                            f"{target.ref} no longer resolves to a live element; observe again",
+                            detail={"ref": target.ref, "condition": condition.value,
+                                    "reason": "not_found"},
+                        )
+                    probed[0] = current = live
+                return self._run(lambda: _actionable.read_target(current))
 
             def confirm() -> Element | None:
                 found = checker(target, condition)
