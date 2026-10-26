@@ -1657,7 +1657,9 @@ class LinuxDriver:
         )
         if waiting_for_registration:
             office = _atspi.libreoffice_app(app) or _atspi.libreoffice_app(resolved)
-            wait = (_atspi.ATSPI_REGISTER_WAIT_S if office
+            # A gen/x11 VCL plugin or an old unregistered soffice never
+            # publishes a tree; only a young bridge-capable one waits (#1183).
+            wait = (_atspi.libreoffice_registration_wait()[0] if office
                     else _atspi.ATSPI_REGISTER_POLL_S)
             # VLC may never register its Qt bridge on this launch. Process
             # youth is not evidence that a long blind wait will help (#680).
@@ -1680,19 +1682,27 @@ class LinuxDriver:
                     _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
                 ):
                     break
+                # The plugin may map mid-wait and turn out to be gen/x11.
+                if office and _atspi.libreoffice_registration_wait()[0] <= 0:
+                    break
         # A listed app without a root is running but currently inaccessible.
         # Keep genuinely absent apps distinct from a missing bridge.
         if root is None:
             if _atspi.libreoffice_without_bridge(resolved):
+                plugin = _atspi.libreoffice_registration_wait()[1]
+                detail = {
+                    "app": resolved,
+                    "reason": "no_accessibility_bridge",
+                    "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
+                }
+                if plugin:
+                    detail["vcl_plugin"] = plugin
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED,
-                    "LibreOffice is running without an accessibility bridge. "
+                    "LibreOffice is running without an accessibility bridge"
+                    + (f" (VCL plugin {plugin})" if plugin else "") + ". "
                     "Install libreoffice-gtk3 and start it with SAL_USE_VCLPLUGIN=gtk3.",
-                    detail={
-                        "app": resolved,
-                        "reason": "no_accessibility_bridge",
-                        "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
-                    },
+                    detail=detail,
                 )
             # A window can map between the registration check and this
             # final listing. It has not received even the short retry yet;

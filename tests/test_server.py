@@ -6926,3 +6926,24 @@ def test_gtk4_popup_rebind_requires_expanded_new_popup(
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
         assert mocked_driver["click"] == []
+
+
+def test_reread_passes_no_accessibility_bridge_to_the_verdict(tmp_path, monkeypatch):
+    """#1183. A type into LibreOffice with no bridge names why it is unverifiable."""
+    class NoBridge:
+        name = "fake"
+
+        def snapshot(self, scope, app):
+            raise ComputerUseError(ErrorCode.UNSUPPORTED, "no bridge",
+                                   detail={"app": app, "reason": "no_accessibility_bridge"})
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=NoBridge(),
+    )
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    assert runtime._reread("soffice.bin", Scope.WINDOW) is None
+    assert runtime._reread_reason == "no_accessibility_bridge"
+    verdict = runtime._judge_mutation("soffice.bin", {"scope": Scope.WINDOW}, None, "hello")
+    assert verdict[0] == "unverifiable"
+    assert verdict[1].startswith("no_accessibility_bridge")
