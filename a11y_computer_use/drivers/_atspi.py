@@ -22612,6 +22612,70 @@ def modal_dismiss_hit(acc, root, x: int, y: int, *, modal_cache=None) -> bool:
     return False
 
 
+def unexposed_native_modals(root) -> list[dict]:
+    """X11 modal windows owned by ``root``'s window but absent from AT-SPI.
+
+    Electron's native message box (#1146) blocks its parent for the user, yet
+    has no accessible: AT-SPI modal discovery cannot see it and semantic
+    actions reach the parent. Only a frame/window root is probed, against
+    its own title and pid, so another window of the same app (#1139/#1140)
+    stays usable. A modal transient that AT-SPI does expose is left to the
+    existing reported-state guards. Costs one X11 pass; AT-SPI children are
+    read only when such a window exists.
+    """
+    if root is None or _role_name(root) not in {"frame", "window"}:
+        return []
+    pid = pid_of(root)
+    title = _node_name(root)
+    if not pid or not title:
+        return []
+    from a11y_computer_use.drivers import _linux_system
+
+    windows = _linux_system.transient_modal_windows(pid=pid, parent_title=title)
+    if not windows:
+        return []
+    application = next((node for node in _ancestor_chain(root)
+                        if _role_name(node) == "application"), None)
+    exposed = set()
+    if application is not None:
+        exposed = {_node_name(node) for node in _fresh_application_children(application)
+                   if _ancestor_key(node) != _ancestor_key(root)
+                   and _state_has(node, "SHOWING")}
+    return [window for window in windows
+            if not window["title"] or window["title"] not in exposed]
+
+
+def unexposed_modal_message(windows) -> str:
+    names = ", ".join(repr(window["title"] or "untitled dialog") for window in windows)
+    return (f"native modal window {names} is open and outside the accessibility tree; "
+            "its controls are not listed. It has the app's keyboard input: answer it "
+            "with key (Return, Escape, Tab) or a coordinate click inside its bounds "
+            "(see window list), then re-observe")
+
+
+def refuse_unexposed_native_modal(acc) -> None:
+    """Refuse a ref action whose window is blocked by an X11-only modal (#1146).
+
+    Applies only to an explicit accessible target. Keyboard input and
+    coordinate clicks follow the toolkit's native modal routing and are not
+    refused here, so keys and clicks can still answer the dialog.
+    """
+    if acc is None:
+        return
+    root = next((node for node in _ancestor_chain(acc)
+                 if _role_name(node) in {"frame", "window"}), None)
+    windows = unexposed_native_modals(root)
+    if not windows:
+        return
+    names = ", ".join(repr(window["title"] or "untitled dialog") for window in windows)
+    raise ComputerUseError(ErrorCode.UNSUPPORTED,
+        f"outside_active_modal: target is outside {names}; no input was sent",
+        detail={"reason": "outside_active_modal", "outcome": "refused",
+                "hint": unexposed_modal_message(windows),
+                "modal_windows": [dict(window) for window in windows],
+                "next": ["window list", "key Return / Escape, or click(x, y) inside the dialog"]})
+
+
 def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, point=None) -> bool:
     """Refuse before input when the addressed accessible is outside a modal."""
     if root is None:

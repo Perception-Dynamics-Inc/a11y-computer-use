@@ -1833,6 +1833,10 @@ class LinuxDriver:
                                 accessor._active_modals, cache=accessor._modal_ancestry,
                             ) else el for el in snap.elements
                         ))
+                    native = _atspi.unexposed_native_modals(node)
+                    if native:
+                        snap = observe.attach_native_modal_windows(
+                            snap, native, note=_atspi.unexposed_modal_message(native))
                     _atspi.note_browser_bar(node, snap.elements)
                     return snap
 
@@ -3051,6 +3055,9 @@ class LinuxDriver:
             if handle is None:
                 owner = app or _linux_system.frontmost_app_id()
                 root = _atspi.find_root(owner, Scope.WINDOW)
+            if point is None and isinstance(target, Element):
+                # An X11-only modal (#1146) is invisible to AT-SPI discovery.
+                _atspi.refuse_unexposed_native_modal(handle)
             if point is not None:
                 return _atspi.refuse_outside_modal(handle, root, modal_cache=cache, point=point)
             if cache is None:

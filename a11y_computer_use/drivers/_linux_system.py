@@ -1019,6 +1019,54 @@ def active_transient_dialog(*, pid: int, title: str, parent_title: str) -> bool:
         return False
 
 
+def transient_modal_windows(*, pid: int, parent_title: str) -> list[dict]:
+    """Mapped same-process windows that declare themselves modal for one parent.
+
+    Electron's ``dialog.showMessageBox(win)`` is a GTK dialog created outside
+    Chromium's accessibility tree (#1146). X11 still reports its ownership:
+    ``WM_TRANSIENT_FOR`` names the exact parent window and ``_NET_WM_STATE``
+    carries ``_NET_WM_STATE_MODAL``. A transient relationship alone (a find
+    bar or tool window) is ownership, not modality, so MODAL is required.
+    The parent title must name exactly one managed window of ``pid``; an
+    ambiguous or unreadable relationship returns nothing. One X connection,
+    no geometry inference.
+    """
+    if not pid or not parent_title:
+        return []
+    try:
+        with _open_display() as d:
+            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            if len(owned) < 2:
+                return []
+            parents = [win for win in owned if _win_title(win, d) == parent_title]
+            if len(parents) != 1:
+                return []
+            parent = parents[0]
+            modal = _atom(d, "_NET_WM_STATE_MODAL")
+            found = []
+            for win in owned:
+                if win.id == parent.id:
+                    continue
+                transient = _prop(win, d, "WM_TRANSIENT_FOR")
+                if not transient or len(transient) != 1 or int(transient[0]) != int(parent.id):
+                    continue
+                states = _prop(win, d, "_NET_WM_STATE")
+                if not states or not any(_atom_is(state, modal) for state in states):
+                    continue
+                if win.get_attributes().map_state != 2 or _is_hidden(win, d):
+                    continue
+                geom = _geometry_on_root(win, d)
+                bounds = None
+                if geom is not None:
+                    gx, gy, gw, gh = geom
+                    bounds = {"display_id": 0, "x": gx, "y": gy, "width": gw, "height": gh}
+                found.append({"window_id": int(win.id), "title": _win_title(win, d),
+                              "bounds": bounds})
+            return found
+    except Exception:
+        return []
+
+
 def _window_overlapping(rows: list[dict], extents) -> int | None:
     """Window id whose client box overlaps ``extents`` the most, or None."""
     if not extents or len(extents) != 4:
