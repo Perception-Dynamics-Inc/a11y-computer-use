@@ -4698,7 +4698,25 @@ class LinuxDriver:
             before_head = self._run(lambda: _atspi.row_head(saved))
             if not mutate():
                 return False
-            mean, samples = _list_pixels_moved(before_grab, box)
+            after = None
+            last_head = None
+
+            def rows_settled(mean: float) -> bool:
+                nonlocal after, last_head
+                rows = self._run(lambda: _atspi._probe_visible_rows(container))
+                names = self._run(lambda: _atspi.row_names(rows))
+                head = names[0] if len(names) >= 2 else None
+                settled = head is not None and head != before_head and head == last_head
+                last_head = head
+                if settled and mean <= _atspi._UNIFORM_ROW_MEAN:
+                    settled = self._run(
+                        lambda: _atspi.shown_line_step(container, before_head, rows, int(dy))
+                    )
+                if settled:
+                    after = rows
+                return settled
+
+            mean, samples = _list_pixels_moved(before_grab, box, rows_settled=rows_settled)
             shown = self._run(lambda: _atspi.row_names(saved))
             still["mean"] = mean
             still["samples"] = samples
@@ -4722,14 +4740,16 @@ class LinuxDriver:
             # clicked the track. A page-sized jump is not the step, and
             # neither is a hit-test name that is not one of those rows.
             if mean <= _atspi._UNIFORM_ROW_MEAN:
-                after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
+                if after is None:
+                    after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
                 if after is not None and self._run(
                     lambda: _atspi.shown_line_step(container, before_head, after, int(dy))
                 ):
                     self._run(lambda: _atspi.commit_shown_rows(container, after))
                     return True
                 return False
-            after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
+            if after is None:
+                after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
             if after is not None:
                 # Uniform rows stay under the still-page threshold of 1 and
                 # the head has still left the old row. That is the step.
@@ -7009,7 +7029,9 @@ def _grab_wayland() -> bytes | None:
     return r.stdout if r.returncode == 0 and r.stdout else None
 
 
-def _list_pixels_moved(before, box: tuple[int, int, int, int]) -> tuple[float | None, int]:
+def _list_pixels_moved(
+    before, box: tuple[int, int, int, int], *, rows_settled: Callable[[float], bool] | None = None,
+) -> tuple[float | None, int]:
     """Mean absolute difference of the list box against the pre-wheel grab.
 
     The first grab after the wheel can still be the pre-paint frame. On the
@@ -7018,7 +7040,9 @@ def _list_pixels_moved(before, box: tuple[int, int, int, int]) -> tuple[float | 
     pre-wheel grab until one clears the still-page threshold or the tries
     end. The returned mean is that first clear sample, or the last sample
     when none clears it. None means a grab could not be compared. The count
-    is how many grabs were taken after the wheel.
+    is how many grabs were taken after the wheel. A caller with independent
+    stable row-head evidence can end the pixel wait early; it must still
+    validate the returned mean and the requested line step.
     """
     from a11y_computer_use.drivers import _atspi
 
@@ -7029,7 +7053,7 @@ def _list_pixels_moved(before, box: tuple[int, int, int, int]) -> tuple[float | 
         if mean is None:
             return None, attempt + 1
         last = mean
-        if mean > _atspi._PAGE_MOVE_MEAN:
+        if mean > _atspi._PAGE_MOVE_MEAN or (rows_settled is not None and rows_settled(mean)):
             return mean, attempt + 1
         if attempt + 1 < _atspi._PAINT_POLLS:
             _atspi.time.sleep(_atspi._PAINT_PAUSE_S)
