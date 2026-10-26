@@ -1,0 +1,184 @@
+{
+  "baseline": "0.4.76",
+  "commit": "9fdcd61e7ef727b936b158fff6a40e45551e4f0e",
+  "working_tree_dirty": true,
+  "atspi_sha256": "486c9cb9d1f465633c86128139e096a94cde207083a8dc621d6b4fb03d14af48",
+  "samples": 7,
+  "warmups": 2,
+  "rows": {
+    "R13-key": {
+      "baseline": {
+        "median": 0.47403222299180925,
+        "minimum": 0.45571564900455996,
+        "maximum": 0.5292175220092759,
+        "iqr": 0.008891553501598537,
+        "samples": [
+          0.45571564900455996,
+          0.48004860201035626,
+          0.46919611701741815,
+          0.4703664459811989,
+          0.5292175220092759,
+          0.47403222299180925,
+          0.4772970679914579
+        ]
+      },
+      "head": {
+        "median": 0.5149731900019106,
+        "minimum": 0.5015233489975799,
+        "maximum": 0.5164208659844007,
+        "iqr": 0.008852090511936694,
+        "samples": [
+          0.5164208659844007,
+          0.5149731900019106,
+          0.5015233489975799,
+          0.5156433660013136,
+          0.5035672039957717,
+          0.5159336930082645,
+          0.510305673989933
+        ]
+      },
+      "ratio": 1.0863674767755371,
+      "status": "pass",
+      "attempts": [
+        {
+          "baseline": [
+            {
+              "seconds": 0.45571564900455996,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.48004860201035626,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.46919611701741815,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.4703664459811989,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.5292175220092759,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.47403222299180925,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.4772970679914579,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            }
+          ],
+          "head": [
+            {
+              "seconds": 0.5164208659844007,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.5149731900019106,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.5015233489975799,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.5156433660013136,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.5035672039957717,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.5159336930082645,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            },
+            {
+              "seconds": 0.510305673989933,
+              "outcome": {
+                "outcome": "confirmed",
+                "next": [],
+                "evidence": "the Chromium page anchor or window changed"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "correctness": {
+    "R9": {
+      "correct": true
+    },
+    "R10": {
+      "correct": true,
+      "refusals": 3,
+      "shortcuts_not_refused": [
+        "ctrl+l"
+      ]
+    }
+  },
+  "versions": {
+    "python": "3.13.5 (main, Aug 10 2026, 12:06:59) [GCC 14.2.0]",
+    "platform": "Linux-6.12.94+-x86_64-with-glibc2.41",
+    "native": "at-spi2-core=2.56.2-1+deb13u2\ngir1.2-gtk-3.0=3.24.49-3\nlibreoffice-gtk3=4:25.2.3-2+deb13u8\nlibreoffice-writer=4:25.2.3-2+deb13u8\nmousepad=0.6.3-1\nxfwm4=4.20.0-1\n",
+    "chrome": "Google Chrome 155.0.8059.84 ",
+    "firefox": "Mozilla Firefox 158.0.1",
+    "mousepad": "Mousepad 0.6.3"
+  }
+}

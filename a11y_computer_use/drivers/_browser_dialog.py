@@ -26,9 +26,10 @@ def _dialog_roots(root):
 
     Collection runs in the application, so an empty result costs one bus
     round trip instead of reading every toolbar control. Include nested
-    dialogs, not only immediate frame children. Never cache across actions.
+    dialogs, not only immediate frame children. Complete results can serve
+    modal discovery while its subscribed boundary epoch remains unchanged.
     """
-    from a11y_computer_use.drivers import _atspi as api
+    from a11y_computer_use.drivers import _atspi as api, _atspi_events
 
     if root is None:
         return []
@@ -46,14 +47,24 @@ def _dialog_roots(root):
             return None
         Atspi = api._atspi()
         mt = Atspi.CollectionMatchType
+        roles = [Atspi.Role.DIALOG, Atspi.Role.ALERT, Atspi.Role.WINDOW, Atspi.Role.FRAME]
+        if hasattr(Atspi.Role, "FILE_CHOOSER"):
+            roles.append(Atspi.Role.FILE_CHOOSER)
         rule = Atspi.MatchRule.new(
             Atspi.StateSet.new([]), mt.NONE, {}, mt.NONE,
-            [Atspi.Role.DIALOG, Atspi.Role.ALERT, Atspi.Role.WINDOW, Atspi.Role.FRAME],
+            roles,
             mt.ANY, [], mt.NONE, False,
         )
         # Zero means all matches: do not silently truncate dialog discovery.
+        generation = (_atspi_events.modal_epoch()
+                      if _atspi_events.modal_cache_ready() else None)
         hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 0, True)
-        return list(hits) if hits is not None else None
+        if hits is None:
+            return None
+        result = list(hits)
+        if hasattr(Atspi.Role, "FILE_CHOOSER"):
+            api._remember_modal_collection(root, result, generation)
+        return result
     except Exception:
         return None
 
