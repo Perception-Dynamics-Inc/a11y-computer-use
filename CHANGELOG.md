@@ -30,7 +30,7 @@ Ninety commits since v0.4.76, through #1207.
 - Report display clipping without unsafe retry hints. Fixes #1111 (#1115) (f6f33fa, 2026-10-26).
 - Linux: fail fast for LibreOffice with no accessibility bridge. Fixes #1183 (#1186) (16b3d7f, 2026-10-27).
 - Re-resolve an evicted ref in actionable waits. Refs #1175 (#1176) (ad61a1b, 2026-10-27).
-- Never resolve an app name to a longer program sharing its prefix, so `python` is not `python3` and `firefox` is not `firefox-esr`. Refs #1191 (#1193) (d58ac5e, 2026-10-27).
+- Never resolve an app name to a longer program sharing its prefix, so `python` is not `python3` and `firefox` is not `firefox-esr`; a window or page title no longer selects the app and is only offered as an error hint. Refs #1191 (#1193) (d58ac5e, 2026-10-27).
 - Permission grants cover one program, not an alias family: a chrome grant no longer covers chromium. Refs #1191 (#1194) (b41a2a2, 2026-10-27).
 - A launched name and a Windows id name only their own program. Refs #1191 (#1196) (3eff0b8, 2026-10-27).
 - No retry hints after typed input reached a busy Chromium page. Refs #1190 (#1195) (05c0f63, 2026-10-27).
