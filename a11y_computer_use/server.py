@@ -3762,6 +3762,16 @@ class Runtime:
 
     # -- target resolution ----------------------------------------------------
 
+    @staticmethod
+    def _native_documents(elements) -> set[tuple]:
+        """Native document objects named by ``elements`` (role, bus, path)."""
+        documents = set()
+        for el in elements:
+            context = getattr(el, "context_identity", None)
+            if context and str(context[0]).startswith("document"):
+                documents.add(tuple(context))
+        return documents
+
     def _note_issued(self, snap: Snapshot, refs: set[str] | None = None,
                      *, preserve_identity: bool = False) -> None:
         """Remember which app issued the refs the agent was just given.
@@ -3806,10 +3816,31 @@ class Runtime:
             )
         previous_url = getattr(self, "_issued_document_url", None)
         document_changed = bool(previous_url and document_url and previous_url != document_url)
+        # A reload keeps the URL but replaces the native document object, so
+        # every ref issued before it is bound to a node that no longer exists
+        # (#1204). When every native document the previous observation named is
+        # gone and the fresh one names only new ones, the document was replaced
+        # rather than edited: start a new epoch. A node that changed inside a
+        # surviving document still shares that document and stays stale.
+        previous_documents = self._native_documents(last.elements if last is not None else ())
+        current_documents = self._native_documents(snap.elements)
+        native_replaced = bool(
+            previous_documents and current_documents
+            and previous_documents.isdisjoint(current_documents)
+            and not document_changed
+        )
+        if native_replaced:
+            document_changed = True
         self._issued_document_url = document_url or (
             previous_url if last is not None and last.app == app and not instance_changed else None
         )
         changed = getattr(self, "_changed_snapshot_refs", {}).copy()
+        # The identity of the page that was replaced, kept only to refuse a
+        # ref whose control became an irreversible one (#1204 follow-up).
+        replaced_anchors = (
+            anchors.copy() if native_replaced and last is not None
+            and last.app == app and not instance_changed else None
+        )
         if last is None or last.app != app or instance_changed or document_changed:
             anchors = {}
             changed = {}
@@ -3927,6 +3958,23 @@ class Runtime:
                         or new_surface_item
                     ):
                         changed[element.ref] = snap
+                        continue
+                # A reload starts a new epoch, so refs are not compared with
+                # the old page. A ref whose control became an irreversible one
+                # (Delete All) is still the old ref naming a different node:
+                # stale_ref, decided before the confirmation gate runs.
+                held = replaced_anchors.get(element.ref) if replaced_anchors else None
+                if held is not None and held is not snap:
+                    was = next((el for el in held.elements if el.ref == element.ref), None)
+                    if (
+                        was is not None and (was.role, was.title) != (element.role, element.title)
+                        and safety.confirmation_prompt(
+                            Click(target=element), app or "",
+                            menu_path=safety.menu_path(snap, element),
+                        ) is not None
+                    ):
+                        changed[element.ref] = snap
+                        anchors[element.ref] = held
                         continue
                 changed.pop(element.ref, None)
                 anchors[element.ref] = snap
