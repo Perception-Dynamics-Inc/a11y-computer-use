@@ -45,6 +45,7 @@ def focus_driver(monkeypatch):
     fake_input.scroll = lambda *args, **kwargs: None
     fake_input.press_chord = lambda chord: None
     fake_input.validate_chord = lambda chord: None
+    fake_input.physical_position_target = lambda is_chromium: nullcontext()
     fake_input.type_string = typed.append
     monkeypatch.setitem(sys.modules, "a11y_computer_use.drivers._linux_input", fake_input)
     monkeypatch.setattr(drivers, "_linux_input", fake_input, raising=False)
