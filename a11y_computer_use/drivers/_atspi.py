@@ -4810,6 +4810,12 @@ class ATSPIAccessor:
                         status_text = text
             except ImportError:
                 pass
+        if role_str == "link" and (position is None or size is None):
+            inline = _inline_link_box(node)
+            if inline is not None:
+                inline_text, position, size = inline
+                if not str(name).strip():
+                    name = inline_text
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
@@ -5597,6 +5603,67 @@ def window_document_id(_acc, role: str, title: str) -> str | None:
 
 _DOC_URL_KEYS = ("docurl", "uri", "url")
 _LINK_URL_KEYS = ("href", "link-target")
+
+
+_INLINE_LINK_CHARS = 512
+
+
+def _inline_link_box(node):
+    """``(text, position, size)`` of an inline link a toolkit gives no box.
+
+    A GTK3 label with ``<a href>`` markup exposes each link as a ``link`` child
+    with no Component, no name and no action; the label itself implements
+    Hypertext. The child's Hyperlink says which characters it spans, and the
+    parent's Text interface says where those characters are drawn. The box is
+    the first drawn line of the link, so a ref click lands on the link even
+    when the link wraps and its bounding box would be mostly other text.
+    None when the node is not such a link or the parent cannot place it (#1230).
+    """
+    if _role_name(node) != "link":
+        return None
+    parent = _parent_of(node)
+    if parent is None:
+        return None
+    link = _call_first(node, ("get_hyperlink",))
+    if link is None:
+        return None
+    start = _call_first(link, ("get_start_index",))
+    end = _call_first(link, ("get_end_index",))
+    ints = (int, float)
+    if (not isinstance(start, ints) or not isinstance(end, ints)
+            or isinstance(start, bool) or isinstance(end, bool) or end <= start):
+        return None
+    start, end = int(start), min(int(end), int(start) + _INLINE_LINK_CHARS)
+    try:
+        Atspi = _atspi()
+        text_iface = Atspi.Text
+    except Exception:
+        return None
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    label = _safe(lambda: text_iface.get_text(parent, start, end))
+    if not isinstance(label, str) or not label.strip():
+        return None
+    first = None
+    left = right = top = bottom = 0.0
+    for offset in range(start, end):
+        rect = _safe(lambda offset=offset: text_iface.get_character_extents(parent, offset, coord))
+        if rect is None:
+            continue
+        x, y = float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)
+        w, h = float(getattr(rect, "width", 0) or 0), float(getattr(rect, "height", 0) or 0)
+        if w <= 0 or h <= 0 or (x, y) == (-1.0, -1.0):
+            continue
+        if first is None:
+            first = True
+            left, right, top, bottom = x, x + w, y, y + h
+            continue
+        if y >= bottom - h / 2.0 or y + h <= top + h / 2.0:
+            break  # the next drawn line: the link wrapped
+        left, right = min(left, x), max(right, x + w)
+        top, bottom = min(top, y), max(bottom, y + h)
+    if first is None:
+        return None
+    return label.strip(), (left, top), (right - left, bottom - top)
 
 
 def _hyperlink_target(acc) -> str | None:
