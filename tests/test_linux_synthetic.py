@@ -2965,6 +2965,237 @@ def test_ctrl_letter_uses_real_key_in_second_layout_group(
     assert [(kind, detail) for kind, detail, _x, _y in events] == [(2, spare), (3, spare)]
 
 
+def _russian_only_display() -> "_GermanLayoutDisplay":
+    """A single ``ru`` group: the Cyrillic letters sit on the physical keys, and no
+    key anywhere produces a Latin letter or digit (#1211)."""
+    display = _GermanLayoutDisplay()
+    display.keymap.pop(24)
+    display.keymap.update({
+        24: [0x6CA, 0x6EA, 0, 0, 0, 0],  # q position: Cyrillic_shorti
+        38: [0x6C6, 0x6E6, 0, 0, 0, 0],  # a position: Cyrillic_ef
+        52: [0x6D1, 0x6F1, 0, 0, 0, 0],  # z position: Cyrillic_ya
+        54: [0x6D3, 0x6F3, 0, 0, 0, 0],  # c position: Cyrillic_es
+        55: [0x6CD, 0x6ED, 0, 0, 0, 0],  # v position: Cyrillic_em
+        10: [ord("1"), ord("!"), 0, 0, 0, 0],  # digits stay Latin on ru
+        64: [0xFFE9, 0, 0, 0, 0, 0],  # Alt_L
+        133: [0xFFEB, 0, 0, 0, 0, 0],  # Super_L
+    })
+    return display
+
+
+@pytest.mark.parametrize("chord,mods,keycode", [
+    ("ctrl+z", [37], 52),
+    ("ctrl+a", [37], 38),
+    ("ctrl+c", [37], 54),
+    ("ctrl+v", [37], 55),
+    ("ctrl+shift+z", [37, 50], 52),
+    ("alt+z", [64], 52),
+    ("super+q", [133], 24),
+])
+def test_shortcut_on_a_single_non_latin_layout_presses_the_us_position_key(
+    xtest_recorder, monkeypatch, chord, mods, keycode,
+) -> None:
+    """ru has no Latin z, so ctrl+z must press the physical Z key (keycode 52),
+    which Chromium matches by its US-QWERTY position. It must not bind a spare
+    keycode to the Latin keysym, which no toolkit treats as the shortcut."""
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+
+    with _linux_input.physical_position_target(lambda: True):  # a Chromium target
+        _linux_input.press_chord(chord)
+
+    assert [(kind, detail) for kind, detail, _x, _y in events] == [
+        *[(2, m) for m in mods], (2, keycode), (3, keycode), *[(3, m) for m in reversed(mods)],
+    ]
+    assert display.remapped == []
+    assert _linux_input.take_mismatch() is None
+
+
+@pytest.mark.parametrize("target", ["non-chromium", "unknown", "resolver-raises"])
+@pytest.mark.parametrize("chord", ["ctrl+z", "ctrl+shift+a", "alt+c"])
+def test_shortcut_for_gtk_or_an_unknown_target_keeps_the_spare_keycode_path(
+    xtest_recorder, monkeypatch, target, chord,
+) -> None:
+    """#1211 follow-up: GTK/Qt ignore the physical keycode on a lone ru layout and
+    honour a spare keycode carrying the Latin keysym. Only Chromium gets the US position."""
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+
+    def boom() -> bool:
+        raise RuntimeError("no accessibility bus")
+
+    resolver = {"non-chromium": lambda: False, "resolver-raises": boom}.get(target)
+    if resolver is None:
+        _linux_input.press_chord(chord)
+    else:
+        with _linux_input.physical_position_target(resolver):
+            _linux_input.press_chord(chord)
+
+    keysym = ord(chord[-1])
+    assert len(display.remapped) == 2 and display.remapped[0][1] == keysym
+    spare = display.remapped[0][0]
+    pressed = [detail for kind, detail, _x, _y in events if kind == 2]
+    assert spare in pressed
+    assert not {52, 38, 54} & set(pressed)
+
+
+def test_target_is_asked_once_and_only_when_the_layout_needs_it(
+    xtest_recorder, monkeypatch,
+) -> None:
+    events, _ = xtest_recorder
+    asked: list[str] = []
+
+    def resolver() -> bool:
+        asked.append("asked")
+        return True
+
+    ru = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", ru)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    with _linux_input.physical_position_target(resolver):
+        _linux_input.press_chord("ctrl+1")   # a Latin key exists: no question
+        _linux_input.press_chord("Return")
+        assert asked == []
+        _linux_input.press_chord("ctrl+z")
+    assert asked == ["asked"]
+
+
+@pytest.mark.parametrize("toolkit,expected", [("Chromium", True), ("gtk", False), ("Qt", False)])
+def test_driver_picks_the_physical_key_only_for_chromium(monkeypatch, toolkit, expected) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    class App:
+        def get_toolkit_name(self):
+            return toolkit
+
+        def get_name(self):
+            return {"Chromium": "chrome"}.get(toolkit, toolkit)
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("target", None))
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: App())
+    assert driver._frontmost_is_chromium() is expected
+    monkeypatch.setattr(driver, "frontmost_app", lambda: (None, None))
+    assert driver._frontmost_is_chromium() is False
+
+    def broken(app, scope):
+        raise OSError("bus gone")
+
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("target", None))
+    monkeypatch.setattr(_atspi, "find_root", broken)
+    assert driver._frontmost_is_chromium() is False
+
+
+def test_key_chord_gives_chromium_the_us_position_key_and_gtk_the_spare_keycode(
+    xtest_recorder, monkeypatch,
+) -> None:
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr(driver, "_confirm_file_chooser", lambda _chord: False)
+    from a11y_computer_use.drivers import _linux_system
+    import a11y_computer_use.drivers.linux as driver_module
+
+    monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda: None)
+    monkeypatch.setattr(driver_module, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_frontmost_is_chromium", lambda: True)
+    driver.key_chord("ctrl+z")
+    assert [d for k, d, _x, _y in events if k == 2] == [37, 52]
+    assert display.remapped == []
+    events.clear()
+    monkeypatch.setattr(driver, "_frontmost_is_chromium", lambda: False)
+    driver.key_chord("ctrl+z")
+    spare = display.remapped[0][0]
+    assert [d for k, d, _x, _y in events if k == 2] == [37, spare]
+
+
+def test_shortcut_on_a_non_latin_layout_stays_on_the_key_when_a_digit_is_latin(
+    xtest_recorder, monkeypatch,
+) -> None:
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+
+    _linux_input.press_chord("ctrl+1")  # found on the layout itself: no fallback
+
+    assert [(kind, detail) for kind, detail, _x, _y in events] == [(2, 37), (2, 10), (3, 10), (3, 37)]
+    assert display.remapped == []
+
+
+def test_shortcut_text_still_uses_a_spare_keycode_on_a_non_latin_layout(
+    xtest_recorder, monkeypatch,
+) -> None:
+    """Only chords change: typing a Latin letter on ru keeps the remapping."""
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+
+    _linux_input.type_string("z")
+
+    spare = display.remapped[0][0]
+    assert display.remapped == [(spare, ord("z")), (spare, 0)]
+    assert [(kind, detail) for kind, detail, _x, _y in events] == [(2, spare), (3, spare)]
+
+
+@pytest.mark.parametrize("rewrite", ["other-latin", "unbound"])
+def test_shortcut_is_refused_not_misdirected_when_the_us_position_key_cannot_be_used(
+    xtest_recorder, monkeypatch, rewrite,
+) -> None:
+    """A key that carries another Latin letter, or nothing, is not the Z key:
+    pressing it would send a different shortcut. Nothing is sent or remapped."""
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    if rewrite == "other-latin":
+        display.keymap[52] = [ord("y"), ord("Y"), 0, 0, 0, 0]  # a z/y swapped keymap
+        expect = "'y'"
+    else:
+        del display.keymap[52]
+        expect = "unbound"
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    # y is on the layout, so ctrl+z has no Latin key anywhere and must not fall to the y key
+    with pytest.raises(_linux_input.ShortcutUndeliverable, match=expect):
+        with _linux_input.physical_position_target(lambda: True):
+            _linux_input.press_chord("ctrl+z")
+
+    assert events == []
+    assert display.remapped == []
+
+
+def test_driver_reports_an_undeliverable_shortcut_as_an_error(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    del display.keymap[52]
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr(driver, "_confirm_file_chooser", lambda _chord: False)
+    monkeypatch.setattr(driver, "_frontmost_is_chromium", lambda: True)
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda: None)
+    import a11y_computer_use.drivers.linux as driver_module
+
+    monkeypatch.setattr(driver_module, "_on_wayland", lambda: False)
+
+    with pytest.raises(ComputerUseError) as error:
+        driver.key_chord("ctrl+z")
+
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert "ctrl+z" in str(error.value) and "cannot be delivered" in str(error.value)
+    assert events == []
+
+
 def test_text_binds_complete_keymap_before_first_keystroke(xtest_recorder, monkeypatch) -> None:
     """A mixed string must not change key translation while text is in flight."""
     import time
