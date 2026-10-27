@@ -6173,6 +6173,49 @@ def test_fresh_snapshot_after_an_in_place_page_switch_issues_a_working_ref(
         assert len(mocked_driver["click"]) == 1
 
 
+def test_find_after_an_in_place_page_switch_returns_the_reissued_ref(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1235 follow-up: find names the re-issued control by its re-issued ref.
+
+    After a fresh snapshot shows BetaBtn under a new ref, find must not
+    return the reused 'e2' for it (one control, two refs), and must not
+    rebind 'e2', which still names AlphaBtn for the agent that held it.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Untitled", None, None, "before")
+    alpha = Element("e2", "AXButton", "AlphaBtn", None, Bounds(1, 240, 140, 120, 56),
+                    "before", parent="e1", clickable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, alpha))
+
+    def page(sid):
+        return dataclasses.replace(base, snapshot_id=sid, elements=(
+            dataclasses.replace(window, snapshot_id=sid),
+            dataclasses.replace(alpha, title="BetaBtn", snapshot_id=sid),
+        ))
+
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = page("after")
+        text = runtime.desktop_snapshot(APP)
+        line = next(row for row in text.splitlines() if "BetaBtn" in row)
+        issued = re.search(r"\be(\d+)\b", line).group(0)
+        assert issued != "e2"
+        current[0] = page("found")
+        found = runtime.find(APP, text="BetaBtn")
+        refs = set(re.findall(r"\be\d+\b", next(row for row in found.splitlines() if "BetaBtn" in row)))
+        assert issued in refs and "e2" not in refs, found
+        runtime.click(ref=issued)
+        assert len(mocked_driver["click"]) == 1
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.detail["reason"] == "target_changed"
+        assert len(mocked_driver["click"]) == 1
+
+
 @pytest.mark.parametrize('readable', [True, False])
 def test_coordinate_drag_observes_overlay_not_unchanged_foreground(tmp_path, readable):
     """Xfwm keeps Mousepad active while screenshooter owns the region overlay."""
