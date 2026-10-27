@@ -23084,6 +23084,44 @@ def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monk
     assert entry.text == "x"
 
 
+@pytest.mark.parametrize("already_cleared", [False, True])
+def test_chromium_frame_recovery_bypasses_repopulated_native_children(
+    fake_atspi, monkeypatch, already_cleared,
+):
+    """A cache event during clear must not pin recovery to an empty frame."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    fake_atspi.Cache = _NS(NONE=0, CHILDREN=2, DEFAULT=127, UNDEFINED=128)
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_PIDS", {6262})
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_CLEARED", {6262} if already_cleared else set())
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_OPEN", set())
+    empty = _adopt(_Acc("frame", states=("ACTIVE",)), _Acc("panel"))
+    page = _adopt(_Acc("frame", name="rowtable - Google Chrome", states=("SHOWING",)),
+                  _Acc("document web", name="rowtable"))
+    app = _Acc("application", name="Google Chrome")
+    masks = [127]
+    clears = []
+    app.set_cache_mask = masks.append
+    for node in (app, empty, page):
+        node.get_application = lambda: app
+        node.get_toolkit_name = lambda: "Chrome"
+        node.get_process_id = lambda: 6262
+
+    def children():
+        # Simulate a native CHILDREN cache event repopulating the stale array
+        # during every clear. Only a mask bypass exposes the real page sibling.
+        return [empty] if masks[-1] & 2 else [empty, page]
+
+    app.get_child_count = lambda: len(children())
+    app.get_child_at_index = lambda index: children()[index]
+    app.clear_cache = lambda: clears.append("application")
+    with _atspi.read_cache():
+        assert _atspi.chromium_snapshot_root(empty) is page
+    assert clears == ["application"]
+    assert masks == [127, 125, 128]
+
+
 def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
     """#1232: GTK 4 marks an entry neither SINGLE_LINE nor MULTI_LINE."""
     driver, entry, element = _select_all_entry(monkeypatch)
