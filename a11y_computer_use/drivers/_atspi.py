@@ -7795,7 +7795,14 @@ def chromium_snapshot_root(root):
             and _application_bar_frame(app) is None
             and not _is_browser_bar_frame(root)
         ):
-            return _chrome_page_window(app, root)
+            page = _chrome_page_window(app, root)
+            # The one clear can run while Escape is still closing the bar.
+            # libatspi then caches the transient empty frame, and every later
+            # read is that untitled group with no rows. Only that empty
+            # result clears again: it has no document, so the clear does not
+            # re-walk a page and the short-page budget is kept.
+            if not _sparse_untitled_chrome_frame(page):
+                return page
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
