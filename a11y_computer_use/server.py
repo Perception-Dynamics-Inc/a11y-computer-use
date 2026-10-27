@@ -3346,6 +3346,19 @@ class Runtime:
             cover = outcome.occluded_click_effect(before["snap"], after, element)
             if cover:
                 return "suspected_noop", cover
+        # A tab click is confirmed only when that tab is the one selected. A
+        # click that activated the neighbour changed the tree and nothing else
+        # (#1208).
+        if (
+            judged == "confirmed"
+            and element is not None
+            and element.role in {"AXTab", "AXButton"}
+            and before is not None
+            and after is not None
+        ):
+            wrong = outcome.wrong_tab_effect(before["snap"], after, element)
+            if wrong:
+                return "partial", wrong
         return judged, evidence
 
     def _location_return_failure(self, before: Snapshot, after: Snapshot) -> str | None:
@@ -5646,6 +5659,33 @@ class Runtime:
             ocr_text=_crop_ocr_text(png, region),
         ), scaled
 
+    def _refuse_center_off_display(self, element: Element) -> None:
+        """A pointer click at a center beyond the display lands on the edge.
+
+        The input layer clamps an off-display point, so the click hits whatever
+        sits at the edge and any tree change then reads as the ref's effect.
+        Linux only, and only on a display the driver listed (#1208).
+        """
+        bounds = element.bounds
+        if (
+            getattr(self.driver, "name", None) != "linux"
+            or bounds is None or bounds.width < 1 or bounds.height < 1
+        ):
+            return
+        try:
+            display = self._display_for_bounds(bounds)
+        except ValueError:
+            return
+        cx = bounds.x + bounds.width // 2
+        cy = bounds.y + bounds.height // 2
+        if 0 <= cx < display.width and 0 <= cy < display.height:
+            return
+        raise _not_visible(
+            element.ref, "off_screen", bounds,
+            f"the ref's center ({cx}, {cy}) is outside display {display.display_id} "
+            f"({display.width}x{display.height}); move or resize the window, or scroll it into view",
+        )
+
     def _display_for_bounds(self, bounds: Bounds):
         found = self._known_displays()
         if found is None:
@@ -6027,6 +6067,8 @@ class Runtime:
             # point, so the hit-test runs right before them; an AXPress above
             # addressed the element itself and needs no such guard (#11).
             # A text ref uses the control's box, not the line-wide text box.
+            if isinstance(act, Element):
+                self._refuse_center_off_display(act)
             try:
                 self._recheck_target(app, act)
             except ComputerUseError as exc:

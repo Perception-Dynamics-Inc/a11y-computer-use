@@ -1635,7 +1635,12 @@ class LinuxDriver:
             (name, None, lambda name=name, root=root: self._snapshot_root(name, root, Scope.APP))
             for name, root in found.ready
         ]
-        snaps = _atspi.collect_app_snapshots(items)
+        from a11y_computer_use.drivers import _chromium_scale
+
+        snaps = [
+            _chromium_scale.scale_browser_ui(snap) if isinstance(snap, Snapshot) else snap
+            for snap in _atspi.collect_app_snapshots(items)
+        ]
         return observe.merge_snapshots(snaps)
 
     def _empty_display(self) -> Snapshot:
@@ -1675,7 +1680,11 @@ class LinuxDriver:
                     replace(el, content_note="; ".join(filter(None, (el.content_note, _page_health.STALE_TREE))))
                     if el.modal_scope_root else el for el in snap.elements
                 ))
-        return self._snapshot_selections(_cdp_forms.overlay_snapshot(snap))
+        from a11y_computer_use.drivers import _chromium_scale
+
+        return self._snapshot_selections(
+            _cdp_forms.overlay_snapshot(_chromium_scale.scale_browser_ui(snap))
+        )
 
     def observation_warning(self, snapshot: Snapshot) -> str:
         """Keep unknown renderer freshness visible even in filtered find results."""
