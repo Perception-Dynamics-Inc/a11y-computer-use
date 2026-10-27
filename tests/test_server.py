@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import re
 import sys
 from importlib.metadata import version as dist_version
 from pathlib import Path
@@ -6119,6 +6120,59 @@ def test_snapshot_identity_ignores_ancestor_text_value_echo(
         assert caught.value.detail["reason"] == "target_changed"
 
 
+def test_fresh_snapshot_after_an_in_place_page_switch_issues_a_working_ref(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1235: a stack page swapped in place reuses 'e2' for another button.
+
+    The ref the agent held for AlphaBtn stays refused (#1021). The fresh
+    snapshot names BetaBtn with a ref nothing issued before, so a click on
+    it is not refused against the pre-switch snapshot.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Untitled", None, None, "before")
+    alpha = Element("e2", "AXButton", "AlphaBtn", None, Bounds(1, 240, 140, 120, 56),
+                    "before", parent="e1", clickable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, alpha))
+    beta = dataclasses.replace(alpha, title="BetaBtn", snapshot_id="after")
+    field = Element("e3", "AXTextField", "", "", Bounds(1, 240, 200, 120, 30), "after",
+                    parent="e1", editable=True)
+    after = dataclasses.replace(base, snapshot_id="after", elements=(
+        dataclasses.replace(window, snapshot_id="after"), beta, field,
+    ))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        texts = []
+        for number in range(2):
+            current[0] = dataclasses.replace(
+                after, snapshot_id=f"after-{number}",
+                elements=tuple(dataclasses.replace(el, snapshot_id=f"after-{number}")
+                               for el in after.elements),
+            )
+            texts.append(runtime.desktop_snapshot(APP))
+        refs = []
+        for text in texts:
+            line = next(row for row in text.splitlines() if "BetaBtn" in row)
+            ref = re.search(r"\be(\d+)\b", line).group(0)
+            assert ref != "e2", line
+            refs.append(ref)
+        # The same page keeps the same ref across snapshots.
+        assert refs[0] == refs[1]
+        assert runtime._anchor(refs[0])[1].title == "BetaBtn"
+        runtime.click(ref=refs[0])
+        assert len(mocked_driver["click"]) == 1
+        # The ref held for AlphaBtn is still refused, and nothing was sent.
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert caught.value.detail["anchor"]["title"] == "AlphaBtn"
+        assert len(mocked_driver["click"]) == 1
+
+
 @pytest.mark.parametrize('readable', [True, False])
 def test_coordinate_drag_observes_overlay_not_unchanged_foreground(tmp_path, readable):
     """Xfwm keeps Mousepad active while screenshooter owns the region overlay."""
@@ -7328,3 +7382,17 @@ def test_window_replacement_still_refuses_a_ref_whose_control_changed(
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
         assert mocked_driver["click"] == []
+
+
+def test_result_label_quotes_the_ref_the_agent_used(tmp_path) -> None:
+    """#1235: a re-issued control is live under another number; the result names the issued one."""
+    store = safety.PermissionStore(tmp_path / "p.json")
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    assert rt._label("e11", live) == "e11 (AXButton 'BetaBtn')"
+    assert rt._label("e10", live) == "e10 (AXButton 'BetaBtn')"
+    assert rt._label(None, live) == "e10 (AXButton 'BetaBtn')"
