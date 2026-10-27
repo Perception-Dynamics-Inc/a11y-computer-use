@@ -6239,10 +6239,12 @@ class Runtime:
             captured = before.get("snap") if isinstance(before, dict) else None
             displays = captured.displays if isinstance(captured, Snapshot) else ()
             display = next((d for d in displays if d.display_id == box.display_id), None)
+            # A few pixels of overflow on a row whose click point is on screen
+            # (a Writer Navigator row clipped by its pane edge) do not make the
+            # effect unknown. Only a click point off the display does.
+            point = box.center
             if (display is not None
-                    and (box.x < 0 or box.y < 0
-                         or box.x + box.width > display.width
-                         or box.y + box.height > display.height)):
+                    and not (0 <= point.x < display.width and 0 <= point.y < display.height)):
                 result = outcome.ActionResult(
                     text, outcome="unverifiable", next=(),
                     evidence="effect unknown after click on a display-clipped target; "

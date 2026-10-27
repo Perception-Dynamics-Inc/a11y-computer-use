@@ -16935,6 +16935,21 @@ def _place_in_toolbar(toolbar) -> tuple[str, str] | None:
     return None
 
 
+def _libreoffice_node(acc) -> bool:
+    """True when ``acc`` belongs to LibreOffice, cached per application."""
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    cached = getattr(app, "_a11y_libreoffice", None)
+    if isinstance(cached, bool):
+        return cached
+    name = _call_first(app, ("get_name", "getName"), default="") or ""
+    found = libreoffice_app(str(name))
+    try:
+        setattr(app, "_a11y_libreoffice", found)
+    except Exception:
+        pass
+    return found
+
+
 def folder_place(acc) -> tuple[str, str] | None:
     """``(text, kind)`` for the location entry or the path bar.
 
@@ -16942,6 +16957,12 @@ def folder_place(acc) -> tuple[str, str] | None:
     buttons. Back, Home, and the view switches are not crumbs. None when
     the window has neither.
     """
+    # LibreOffice has no folder view. Its sidebar tab strip is a toolbar of
+    # checked toggle buttons ("Navigator (Alt+4)"), which read as a path-bar
+    # crumb: a Writer Navigator row then looked like a folder row, waited for
+    # a location change that never comes, and walked the toolbars per cell.
+    if _libreoffice_node(acc):
+        return None
     frame = _frame_ancestor(acc)
     if frame is None:
         return None

@@ -1668,6 +1668,42 @@ def test_path_bar_change_confirms_and_a_selected_row_does_not(monkeypatch) -> No
     del frame
 
 
+def _writer_navigator(app_name):
+    """A sidebar deck tab strip with a checked tab, beside a Navigator tree."""
+    tab = _Node("toggle button", "Navigator (Alt+4)", states={"CHECKED", "ENABLED"})
+    strip = _Node("tool bar", "", children=[tab])
+    row = _Node(
+        "table cell", "Section G heading",
+        actions=["click"], states={"ENABLED", "SELECTED"},
+    )
+    tree = _Node("tree", "", children=[row])
+    panel = _Node("panel", "", children=[strip, tree])
+    frame = _Node("frame", "Untitled 1 - LibreOffice Writer", children=[panel])
+    application = _Node("application", app_name, children=[frame])
+    frame.parent = application
+    for node in (tab, strip, row, tree, panel, frame):
+        node.get_application = lambda application=application: application
+    return row, frame
+
+
+def test_a_checked_sidebar_tab_is_not_a_path_bar_crumb_in_libreoffice(monkeypatch) -> None:
+    """A Writer Navigator row is not a folder row.
+
+    The checked ``Navigator (Alt+4)`` tab button used to read as a path-bar
+    crumb. The row then counted as folder navigation, waited for a location
+    change that never comes, and reported the row was selected but the
+    location did not change. The same window shape in a file manager keeps
+    its path bar.
+    """
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    row, _frame = _writer_navigator("soffice.bin")
+    assert _atspi.folder_place(row) is None
+    assert _atspi.folder_location(row) is None
+    assert _atspi.navigating_folder_row(row) is False
+    other, _frame = _writer_navigator("thunar")
+    assert _atspi.folder_place(other) == ("Navigator (Alt+4)", "path bar")
+
+
 def test_tree_row_click_errors_when_the_selection_stays_put(monkeypatch) -> None:
     table, rows = _table()
     table.select_fails = True
