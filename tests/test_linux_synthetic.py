@@ -23079,6 +23079,9 @@ def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monk
     entry.states.add("SINGLE_LINE")
     entry.text, entry.selection, entry.caret = "", None, 0
     assert _atspi.append_target_entry(entry)
+    assert not _atspi.whole_text_selected(entry)
+    assert driver.type_into(element, "x") == 1
+    assert entry.text == "x"
 
 
 def test_calc_cell_comment_comes_from_the_note_attribute(fake_atspi) -> None:
@@ -23098,9 +23101,6 @@ def test_calc_cell_comment_comes_from_the_note_attribute(fake_atspi) -> None:
     foreign = _Acc("table cell", name="B2")
     foreign.get_application = lambda: other
     assert _atspi._calc_cell_comment(foreign, "table cell", {"Note": "x"}) == ""
-    assert not _atspi.whole_text_selected(entry)
-    assert driver.type_into(element, "x") == 1
-    assert entry.text == "x"
 
 
 def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
