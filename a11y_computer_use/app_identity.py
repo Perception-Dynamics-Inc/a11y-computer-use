@@ -175,6 +175,64 @@ def shares_alias(left: str, right: str) -> bool:
     return False
 
 
+#: Names of one and the same program: launcher names, desktop ids and the
+#: process name of that binary. Unlike ``_GROUPS`` (grants and launch
+#: labels), these never join two different programs, so matching a running
+#: app by alias cannot move an action from Chrome to Chromium or from gedit
+#: to Mousepad (#1191).
+_PROGRAMS: tuple[frozenset[str], ...] = (
+    frozenset({"google-chrome", "google-chrome-stable", "chrome"}),
+    frozenset({"chromium", "chromium-browser"}),
+    frozenset({"nautilus", "org.gnome.nautilus"}),
+    frozenset({"gedit", "org.gnome.gedit"}),
+    frozenset({"gnome-text-editor", "org.gnome.texteditor"}),
+    frozenset({"mousepad", "org.xfce.mousepad"}),
+    frozenset({"gnome-terminal", "gnome-terminal-server", "org.gnome.terminal"}),
+    frozenset({
+        "libreoffice calc", "libreoffice-calc", "libreoffice writer", "libreoffice-writer",
+        "libreoffice impress", "libreoffice-impress", "libreoffice", "soffice", "soffice.bin",
+        "localc", "lowriter", "loimpress", "calc", "writer", "impress",
+    }),
+)
+
+#: Role labels a person says ("Files") that name whichever one of several
+#: programs is running. A label may match a member; a caller that finds more
+#: than one different member running refuses with ``ambiguous_app``.
+_ROLE_LABELS: dict[str, frozenset[str]] = {
+    "files": frozenset({"nautilus", "org.gnome.nautilus", "thunar", "nemo", "dolphin", "pcmanfm"}),
+    "text editor": frozenset({
+        "gedit", "org.gnome.gedit", "gnome-text-editor", "org.gnome.texteditor",
+        "mousepad", "org.xfce.mousepad",
+    }),
+}
+
+
+def same_program(left: str, right: str) -> bool:
+    """True when both names are the same program (``_PROGRAMS``), never two programs."""
+    left_keys = tokens(left)
+    right_keys = tokens(right)
+    if not left_keys or not right_keys:
+        return False
+    if left_keys & right_keys:
+        return True
+    return any((left_keys & group) and (right_keys & group) for group in _PROGRAMS)
+
+
+def role_label_member(label: str, name: str) -> bool:
+    """True when ``label`` is a role label and ``name`` is one of its programs."""
+    members = _ROLE_LABELS.get(normalize(label))
+    return bool(members and tokens(name) & members)
+
+
+def is_role_label(name: str) -> bool:
+    return normalize(name) in _ROLE_LABELS
+
+
+def program_alias(identifier: str, name: str) -> bool:
+    """Alias match for acting on a running app: same program, or a role label's member."""
+    return same_program(identifier, name) or role_label_member(identifier, name)
+
+
 def same_app(left: str, right: str) -> bool:
     """True when the two names are the same app, including by alias."""
     return bool(identity_keys(left) & identity_keys(right))
