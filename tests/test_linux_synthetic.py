@@ -22963,3 +22963,36 @@ def test_a_bound_name_is_not_rebound_to_a_different_program(fake_atspi, monkeypa
         driver._root_for_snapshot("files", Scope.WINDOW)
     assert exc.value.detail["reason"] == "app_not_running"
     assert exc.value.detail["bound"] == "nautilus"
+
+
+def test_live_window_contexts_lists_every_published_window_and_never_guesses(monkeypatch):
+    """#1215: an unfocused window is still live; unknown is None, not "destroyed"."""
+    class Window:
+        def __init__(self, role, key):
+            self.role, self.key = role, key
+
+    main = Window("frame", (":1.5", "/window/1"))
+    other = Window("frame", (":1.5", "/window/2"))
+    popup = Window("menu", (":1.5", "/menu/1"))
+    app = object()
+    children = [main, other, popup]
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: app if name == "wizard" else None)
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: list(children))
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: node.role)
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: node.key)
+    assert _atspi.live_window_contexts("wizard") == frozenset({
+        ("frame", ":1.5", "/window/1"), ("frame", ":1.5", "/window/2"),
+    })
+    children.remove(main)  # window destroyed
+    assert _atspi.live_window_contexts("wizard") == frozenset({("frame", ":1.5", "/window/2")})
+    assert _atspi.live_window_contexts("missing") is None
+    assert _atspi.live_window_contexts("") is None
+    other.key = None  # native identity unreadable
+    assert _atspi.live_window_contexts("wizard") is None
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert driver.live_window_contexts(None) is None
+    def boom(name, scope):
+        raise RuntimeError("busy")
+    monkeypatch.setattr(_atspi, "find_root", boom)
+    assert driver.live_window_contexts("wizard") is None
