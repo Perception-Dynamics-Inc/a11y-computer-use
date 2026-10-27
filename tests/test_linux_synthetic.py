@@ -22261,6 +22261,135 @@ def test_snapshot_stops_waiting_when_the_plugin_maps_as_gen(fake_atspi, monkeypa
     assert clock["t"] == pytest.approx(1.0)
 
 
+# --- #1198: the key map must follow a keyboard layout switch ---------------
+
+_LAYOUTS_1198 = {
+    # keycode: (base, shift) for the keys the tests touch
+    "us": {24: (0x71, 0x51), 25: (0x77, 0x57), 29: (0x79, 0x59), 38: (0x61, 0x41), 52: (0x7A, 0x5A)},
+    "de": {24: (0x71, 0x51), 25: (0x77, 0x57), 29: (0x7A, 0x5A), 38: (0x61, 0x41), 52: (0x79, 0x59)},
+    "fr": {24: (0x61, 0x41), 25: (0x7A, 0x5A), 29: (0x79, 0x59), 38: (0x71, 0x51), 52: (0x77, 0x57)},
+}
+
+
+class _SwitchableLayoutDisplay(_FakeXDisplay):
+    """python-xlib's staleness, faithfully: ``keysym_to_keycode(s)`` and
+    ``keycode_to_keysym`` read tables filled at connect and updated only by
+    ``_update_keymap``, while ``get_keyboard_mapping`` asks the live server."""
+
+    def __init__(self, layout: str) -> None:
+        super().__init__()
+        self.display = _NS(info=_NS(min_keycode=8, max_keycode=60))
+        self.live = layout
+        self._keymap_codes = None
+        self._update_keymap(8, 53)
+
+    def switch(self, layout: str) -> None:  # setxkbmap / a layout hotkey
+        self.live = layout
+
+    def _rows(self, layout: str, first: int, count: int):
+        table = {**_LAYOUTS_1198[layout], 37: (0xFFE3, 0), 50: (0xFFE1, 0)}
+        return [list(table.get(first + i, (0, 0))) + [0, 0] for i in range(count)]
+
+    def get_keyboard_mapping(self, first, count):
+        return self._rows(self.live, first, count)
+
+    def _update_keymap(self, first, count):
+        self._cached = {first + i: row for i, row in enumerate(self._rows(self.live, first, count))}
+        self._keymap_codes = True
+
+    def keycode_to_keysym(self, keycode, index):
+        row = self._cached.get(keycode, [])
+        return row[index] if index < len(row) else 0
+
+    def keysym_to_keycodes(self, keysym):
+        return [(kc, i) for kc, row in sorted(self._cached.items()) for i, s in enumerate(row) if s == keysym]
+
+    def keysym_to_keycode(self, keysym):
+        found = self.keysym_to_keycodes(keysym)
+        return found[0][0] if found else 0
+
+
+def _pressed_1198(events):
+    return [d for t, d, _x, _y in events if t == 2]
+
+
+@pytest.mark.parametrize("layout, typed_z, typed_y", [("de", 29, 52), ("fr", 25, 29)])
+def test_keymap_follows_a_layout_switch_while_the_server_runs(
+    xtest_recorder, monkeypatch, layout, typed_z, typed_y,
+) -> None:
+    """#1198. Under de, 'z' typed y; the table was never rebuilt after the switch."""
+    events, _ = xtest_recorder
+    display = _SwitchableLayoutDisplay("us")
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_keymap_seen", None, raising=False)
+
+    _linux_input.type_string("zy")
+    assert _pressed_1198(events) == [52, 29]  # us: z on 52, y on 29
+    assert _linux_input.take_mismatch() is None
+
+    events.clear()
+    display.switch(layout)
+    _linux_input.type_string("zy")
+    assert _pressed_1198(events) == [typed_z, typed_y]
+    assert _linux_input.take_mismatch() is None
+
+
+def test_ctrl_z_after_a_switch_to_azerty_is_not_sent_as_ctrl_w(xtest_recorder, monkeypatch) -> None:
+    """#1198. The stale us keycode for z is Ctrl+W (close the tab) under AZERTY."""
+    events, _ = xtest_recorder
+    display = _SwitchableLayoutDisplay("us")
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_keymap_seen", None, raising=False)
+    _linux_input.press_chord("ctrl+z")
+    assert _pressed_1198(events) == [37, 52]
+    events.clear()
+
+    display.switch("fr")
+    _linux_input.press_chord("ctrl+z")
+    pressed = _pressed_1198(events)
+    assert pressed == [37, 25], "AZERTY z is keycode 25; 52 is w there"
+    assert _linux_input.take_mismatch() is None
+
+
+def test_a_keysym_that_does_not_match_the_request_is_reported_not_confirmed(
+    xtest_recorder, monkeypatch, tmp_path,
+) -> None:
+    """#1198. If the key sent produces another keysym (layout changed between the
+    lookup and the send), the result is never confirmed and offers no retry."""
+    from a11y_computer_use import safety, server
+
+    events, _ = xtest_recorder
+    display = _SwitchableLayoutDisplay("us")
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_keymap_seen", None, raising=False)
+    # a lookup that is stale by construction: it keeps answering with the us keycode
+    monkeypatch.setattr(_linux_input, "_refresh_keymap", lambda: display, raising=False)
+    _linux_input.press_chord("ctrl+z")
+    events.clear()
+    display.switch("fr")
+    display._update_keymap(8, 53)  # the lookup sees fr...
+    monkeypatch.setattr(_linux_input, "_keycode_and_shift", lambda keysym: (52, False))  # ...but 52 is w
+    _linux_input.press_chord("ctrl+z")
+    mismatch = _linux_input.take_mismatch()
+    assert mismatch and "mismatch" in mismatch and "0x7a" in mismatch and "0x77" in mismatch
+
+    class LinuxDriver:
+        name = "linux"
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(_linux_input, "_last_mismatch", mismatch, raising=False)
+    result = runtime._conclude(
+        "pressed ctrl+z", tool="key", app="chrome", verdict=("confirmed", "the page changed"),
+        key_chord="ctrl+z",
+    )
+    assert result.outcome == "unverifiable"
+    assert "keyboard layout mismatch" in result.evidence
+    assert list(result.next) == []
+
+
 @pytest.mark.parametrize("entry", ["type_text", "type_into"])
 @pytest.mark.parametrize("busy", [True, False])
 def test_type_mismatch_on_a_busy_chromium_page_offers_no_retry(monkeypatch, entry, busy) -> None:

@@ -42,6 +42,95 @@ def _disp():
     return _display
 
 
+_keymap_seen: tuple | None = None
+_last_mismatch: str | None = None
+
+
+def _keymap_rows(d) -> tuple:
+    """The live core keyboard mapping as a hashable tuple (one round trip)."""
+    first = int(d.display.info.min_keycode)
+    count = int(d.display.info.max_keycode) - first + 1
+    return first, tuple(tuple(int(s) for s in row) for row in d.get_keyboard_mapping(first, count))
+
+
+def _refresh_keymap():
+    """Rebuild python-xlib's keysym tables when the server's keymap changed.
+
+    python-xlib fills them once per connection and updates them only from
+    MappingNotify events this cached connection never reads, so a layout
+    switch (setxkbmap de/fr, a layout hotkey) left every later key on the
+    old layout: z typed y, and AZERTY ctrl+z went out as Ctrl+W (#1198).
+    """
+    global _keymap_seen
+    d = _disp()
+    try:
+        rows = _keymap_rows(d)
+    except Exception:  # noqa: BLE001 - the hermetic fake has no mapping
+        return d
+    update = getattr(d, "_update_keymap", None)
+    stale = rows != _keymap_seen if _keymap_seen is not None else (
+        # First use on this connection: trust nothing it cached at open time.
+        getattr(d, "_keymap_codes", None) is not None
+    )
+    if stale and callable(update):
+        update(rows[0], len(rows[1]))
+    _keymap_seen = rows
+    return d
+
+
+def _active_group() -> int:
+    """The locked XKB group (0-3) from the core state bits 13-14, else 0."""
+    try:
+        mask = int(_disp().screen().root.query_pointer().mask)
+    except Exception:
+        return 0
+    return (mask >> 13) & 3
+
+
+def _layout_signature() -> tuple | None:
+    """(keymap, group) now, or None when the display cannot say."""
+    try:
+        return _keymap_rows(_disp()), _active_group()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def take_mismatch() -> str | None:
+    """The last keystroke's keysym mismatch, once; None when it matched."""
+    global _last_mismatch
+    value, _last_mismatch = _last_mismatch, None
+    return value
+
+
+def _sent_keysym(keycode: int, shift: bool, group: int) -> int:
+    """The keysym ``keycode`` produces in ``group`` (core columns 2g, 2g+1)."""
+    d = _disp()
+    column = 2 * group + (1 if shift else 0)
+    sym = int(d.keycode_to_keysym(keycode, column) or 0)
+    if not sym and group:
+        sym = int(d.keycode_to_keysym(keycode, 1 if shift else 0) or 0)
+    if not sym and shift:
+        sym = int(d.keycode_to_keysym(keycode, 2 * group) or 0)
+    return sym
+
+
+def _note_mismatch(requested: int, sent: int) -> None:
+    global _last_mismatch
+    if _last_mismatch is None:
+        _last_mismatch = (
+            f"keyboard layout mismatch: requested keysym {requested:#x} but the key sent "
+            f"produces {sent:#x} on the current layout"
+        )
+
+
+def _check_layout_unchanged(before: tuple | None) -> None:
+    """Flag input whose layout changed while it was being sent."""
+    global _last_mismatch
+    after = _layout_signature()
+    if before is not None and after is not None and before != after and _last_mismatch is None:
+        _last_mismatch = "keyboard layout changed while the keys were sent; the typed characters are unverified"
+
+
 def _fake(event_type, detail):
     """Queue one XTEST event; callers flush a keystroke, chord, or click.
 
@@ -208,6 +297,15 @@ def _keycode_and_shift(keysym: int) -> tuple[int | None, bool]:
     tap of such a keycode emits the base character ('q' for '@'), so those
     keysyms are reported as unmapped and callers route them through _TempKeymap."""
     d = _disp()
+    group = _active_group()
+    base = 2 * group
+    lookup = getattr(d, "keysym_to_keycodes", None)
+    entries = list(lookup(keysym)) if callable(lookup) else []
+    for keycode, index in sorted(entries, key=lambda kc: (kc[1], kc[0])):
+        if index in (base, base + 1) and _sent_keysym(keycode, index == base + 1, group) == keysym:
+            return keycode, index == base + 1
+    if group:
+        return None, False
     keycode = d.keysym_to_keycode(keysym)
     if not keycode:
         return None, False
@@ -334,10 +432,14 @@ def type_string(text: str, *, delay: float | None = None) -> None:
     longer one: Chrome's omnibox drops the tail of a URL typed at the
     default pace.
     """
+    global _last_mismatch
+    _last_mismatch = None
     if not text:
         return
     import time
 
+    _refresh_keymap()
+    layout = _layout_signature()
     keysyms = [_char_keysym(ch) for ch in text]
     keys = {sym: _keycode_and_shift(sym) for sym in dict.fromkeys(keysyms)}
     missing = [sym for sym, (kc, _shift) in keys.items() if kc is None]
@@ -368,6 +470,10 @@ def type_string(text: str, *, delay: float | None = None) -> None:
             for sym in run:
                 keycode, needs_shift = run_keys[sym]
                 assert keycode is not None
+                if pool is None or sym not in missing:
+                    sent = _sent_keysym(keycode, needs_shift, layout[1] if layout else 0)
+                    if sent and sent != sym and layout is not None:
+                        _note_mismatch(sym, sent)
                 # Preserve the user's lock state while sending the requested case.
                 if _keypad_numlock(sym) is None:
                     needs_shift = _shift_for_lock(keycode, needs_shift, caps)
@@ -379,6 +485,7 @@ def type_string(text: str, *, delay: float | None = None) -> None:
         finally:
             if pool is not None:
                 pool.restore()
+    _check_layout_unchanged(layout)
 
 
 # --- key chords ------------------------------------------------------------
@@ -425,9 +532,14 @@ def press_chord(chord: str) -> None:
     """
     from Xlib import X
 
+    global _last_mismatch
+    _last_mismatch = None
     msyms, ksym = _parse_chord(chord)
+    _refresh_keymap()
+    layout = _layout_signature()
     mod_kcs = [_disp().keysym_to_keycode(s) for s in msyms]
     key_kc, needs_shift = _keycode_and_shift(ksym)
+    physical = False
     if (key_kc is None and _KEYSYM_MODS["ctrl"] in msyms
             and (ord("a") <= ksym <= ord("z") or ord("A") <= ksym <= ord("Z"))):
         # Chromium resolves non-Latin Ctrl accelerators using the real key's
@@ -439,6 +551,7 @@ def press_chord(chord: str) -> None:
             for level, symbol in enumerate(symbols):
                 if symbol == ksym:
                     key_kc, needs_shift = candidate, bool(level % 2)
+                    physical = True  # another group's Latin key, on purpose
                     break
     pool = None
     if key_kc is None:  # e.g. "ctrl+ü" on a US layout: bind it for this chord
@@ -461,6 +574,13 @@ def press_chord(chord: str) -> None:
         mod_kcs = [kc for kc in mod_kcs if kc != shift_kc]
         if keypad != num:
             _tap_keysym_raw(0xFF7F)
+    if pool is None and not physical and layout is not None:
+        sent = _sent_keysym(key_kc, needs_shift, layout[1])
+        if sent and sent != ksym and not (
+            # A letter chord asks for the key, not the case: ctrl+z matches Z.
+            ksym < 0x100 and chr(sent if sent < 0x100 else 0).lower() == chr(ksym).lower()
+        ):
+            _note_mismatch(ksym, sent)
     try:
         for kc in mod_kcs:
             if kc:
@@ -477,6 +597,7 @@ def press_chord(chord: str) -> None:
             _flush()
         if pool is not None:
             pool.restore()
+    _check_layout_unchanged(layout)
 
 
 @contextmanager
