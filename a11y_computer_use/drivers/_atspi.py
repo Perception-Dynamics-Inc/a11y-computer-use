@@ -10086,14 +10086,62 @@ def _wait_until_gone(acc) -> bool:
     return False
 
 
+_SELECT_ALL_POLLS = 10
+_SELECT_ALL_PAUSE_S = 0.05
+
+
+def _selection_covers_value(acc) -> bool | None:
+    """True when the field's selection is its whole non-empty value.
+
+    None when the selection or the length cannot be read, which is not a
+    failure: the caller keeps its old behaviour for such a widget.
+    """
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    selections = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    if not isinstance(selections, int) or isinstance(selections, bool):
+        return None
+    if selections <= 0:
+        return False
+    _caret, start, end = _caret_and_selection(acc, count)
+    return start == 0 and end == count
+
+
+def _confirm_select_all(acc) -> None:
+    """Refuse before any delete when Ctrl+A did not select the whole value (#1225).
+
+    A Chromium field whose Ctrl+A is dropped keeps its caret, so the BackSpace
+    that follows removes one character and the write then fails with the old
+    text already damaged. Only Chromium is checked: its selection is published
+    through AT-SPI and its shortcuts are the ones that can be dropped.
+    """
+    if not _chromium_app(acc):
+        return
+    for poll in range(_SELECT_ALL_POLLS):
+        covered = _selection_covers_value(acc)
+        if covered is None or covered:
+            return
+        if poll + 1 < _SELECT_ALL_POLLS:
+            time.sleep(_SELECT_ALL_PAUSE_S)
+    raise _text_mismatch(
+        "selection_unconfirmed",
+        "select-all did not select the whole value, so nothing was deleted",
+    )
+
+
 def _x11_select_all_and_delete(acc) -> None:
     """Focus the field and replace its selection with nothing. X11 only.
 
     Each chord is sent only after focus is on ``acc``. A field that does not
-    take focus raises ``focus_lost`` and the chord is not sent.
+    take focus raises ``focus_lost`` and the chord is not sent. BackSpace is
+    sent only when a Chromium field's selection is confirmed to cover the whole
+    value; otherwise this refuses with the value untouched.
     """
     grab_focus(acc)
     _chord_into_target(acc, "ctrl+a")
+    _confirm_select_all(acc)
     _chord_into_target(acc, "backspace")
 
 
@@ -10361,7 +10409,11 @@ def _chord_into_target(acc, chord: str) -> None:
         raise _focus_lost_error("focus is not on the target; nothing was typed")
     from a11y_computer_use.drivers import _linux_input
 
-    _linux_input.press_chord(chord)
+    # Chromium matches Ctrl/Alt shortcuts by physical key, so on a lone
+    # non-Latin layout the chord has to use the US-position keycode (#1225).
+    # Other toolkits keep the spare keycode.
+    with _linux_input.physical_position_target(lambda: _chromium_app(acc)):
+        _linux_input.press_chord(chord)
 
 
 def _shown_matches(acc, text: str) -> bool:
@@ -10530,7 +10582,12 @@ def _restore_text(acc, original: str | None) -> None:
     if now == original or _texts_match(now, original):
         return
     if not _text_is_blank(now):
-        _x11_select_all_and_delete(acc)
+        try:
+            _x11_select_all_and_delete(acc)
+        except ComputerUseError as exc:
+            if exc.detail.get("reason") != "selection_unconfirmed":
+                raise
+            return  # cannot clear safely; the value is left as it is
         if not _wait_until_gone(acc):
             return
     else:

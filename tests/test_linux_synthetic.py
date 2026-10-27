@@ -3064,6 +3064,129 @@ def test_target_is_asked_once_and_only_when_the_layout_needs_it(
     assert asked == ["asked"]
 
 
+class _SelectionText:
+    """The slice of ``Atspi.Text`` that a select-all check reads."""
+
+    def __init__(self, count, selected):
+        self.count, self.selected = count, selected
+
+    def get_character_count(self, acc):
+        return self.count
+
+    def get_caret_offset(self, acc):
+        return self.count
+
+    def get_n_selections(self, acc):
+        return 0 if self.selected is None else 1
+
+    def get_selection(self, acc, index):
+        return self.selected
+
+
+def _ru_with_backspace():
+    display = _russian_only_display()
+    display.keymap[22] = [0xFF08, 0, 0, 0, 0, 0]  # BackSpace
+    return display
+
+
+def _select_all_world(monkeypatch, *, chromium, state):
+    """Internal chords on a lone ru layout, with a field whose selection is ``state``."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=state))
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda acc: chromium)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_SELECT_ALL_PAUSE_S", 0)
+
+
+@pytest.mark.parametrize("chromium,keycode", [(True, 38), (False, None)])
+def test_internal_select_all_uses_the_physical_key_only_for_chromium(
+    xtest_recorder, monkeypatch, chromium, keycode,
+) -> None:
+    """#1225: set_value's clear sends ctrl+a through _chord_into_target, not through
+    LinuxDriver.key_chord, so it needs the same Chromium-only physical key."""
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    _select_all_world(monkeypatch, chromium=chromium, state=_SelectionText(7, (0, 7)))
+    _atspi._chord_into_target(object(), "ctrl+a")
+    pressed = [detail for kind, detail, _x, _y in events if kind == 2]
+    if keycode is not None:
+        assert pressed == [37, keycode] and display.remapped == []
+    else:
+        assert 38 not in pressed and len(display.remapped) == 2  # the spare keycode, as before
+
+
+def test_a_dropped_select_all_never_sends_backspace(xtest_recorder, monkeypatch) -> None:
+    """#1225: Ctrl+A selected nothing and BackSpace then ate 'me' from 'keep me'."""
+    events, _ = xtest_recorder
+    monkeypatch.setattr(_linux_input, "_display", _ru_with_backspace())
+    _select_all_world(monkeypatch, chromium=True, state=_SelectionText(7, None))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._x11_select_all_and_delete(object())
+    assert exc.value.detail["reason"] == "selection_unconfirmed"
+    assert "nothing was deleted" in str(exc.value)
+    assert 22 not in [detail for kind, detail, _x, _y in events]  # no BackSpace
+
+
+def test_a_partial_selection_never_sends_backspace(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    monkeypatch.setattr(_linux_input, "_display", _ru_with_backspace())
+    _select_all_world(monkeypatch, chromium=True, state=_SelectionText(7, (5, 7)))
+    with pytest.raises(ComputerUseError):
+        _atspi._x11_select_all_and_delete(object())
+    assert 22 not in [detail for kind, detail, _x, _y in events]
+
+
+def test_a_confirmed_select_all_deletes(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    monkeypatch.setattr(_linux_input, "_display", _ru_with_backspace())
+    _select_all_world(monkeypatch, chromium=True, state=_SelectionText(7, (0, 7)))
+    _atspi._x11_select_all_and_delete(object())
+    assert [detail for kind, detail, _x, _y in events if kind == 2] == [37, 38, 22]
+
+
+@pytest.mark.parametrize("chromium,state", [
+    (False, _SelectionText(7, None)),    # another toolkit keeps the old behaviour
+    (True, _SelectionText(0, None)),     # an unreadable length is not a failure
+])
+def test_select_all_that_cannot_be_checked_still_deletes(xtest_recorder, monkeypatch, chromium, state) -> None:
+    events, _ = xtest_recorder
+    monkeypatch.setattr(_linux_input, "_display", _ru_with_backspace())
+    _select_all_world(monkeypatch, chromium=chromium, state=state)
+    _atspi._x11_select_all_and_delete(object())
+    assert 22 in [detail for kind, detail, _x, _y in events]
+
+
+def test_set_value_with_a_dropped_select_all_changes_nothing(xtest_recorder, monkeypatch) -> None:
+    """The whole #1225 path: refuse before anything changes, neither clear, type nor restore."""
+    events, _ = xtest_recorder
+    monkeypatch.setattr(_linux_input, "_display", _ru_with_backspace())
+    _select_all_world(monkeypatch, chromium=True, state=_SelectionText(7, None))
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "keep me")
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    for name in ("_type_into_target", "_restore_text"):
+        monkeypatch.setattr(_atspi, name, lambda *a, **k: pytest.fail("the field was typed into"))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "hello world 42")
+    assert exc.value.detail["reason"] == "selection_unconfirmed"
+    assert 22 not in [detail for kind, detail, _x, _y in events]
+
+
+def test_restore_leaves_the_value_alone_when_it_cannot_select_it(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    monkeypatch.setattr(_linux_input, "_display", _ru_with_backspace())
+    _select_all_world(monkeypatch, chromium=True, state=_SelectionText(5, None))
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "keep ")
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda *a, **k: pytest.fail("typed"))
+    _atspi._restore_text(object(), "keep me")
+    assert 22 not in [detail for kind, detail, _x, _y in events]
+
+
 @pytest.mark.parametrize("toolkit,expected", [("Chromium", True), ("gtk", False), ("Qt", False)])
 def test_driver_picks_the_physical_key_only_for_chromium(monkeypatch, toolkit, expected) -> None:
     from a11y_computer_use.drivers import _atspi
