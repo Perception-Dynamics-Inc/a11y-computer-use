@@ -5628,6 +5628,76 @@ def test_detailed_selection_double_click_reports_text_or_no_retry(
         assert 'could not be read' in result.evidence
 
 
+@pytest.mark.parametrize('before,after,expected', [
+    ((), ((15, 20, 'gamma'),), 'confirmed'),
+    (((0, 4, 'Para'),), ((15, 20, 'gamma'),), 'confirmed'),
+    (None, ((15, 20, 'gamma'),), 'unverifiable'),
+    ((), None, 'unverifiable'),
+    (None, None, 'unverifiable'),
+])
+def test_double_click_on_static_text_is_judged_by_its_selection(
+    tmp_path, monkeypatch, before, after, expected,
+):
+    """#1224: Chrome page text publishes the word it selected; that is the evidence."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = [before, after]
+    d.selection_details = lambda el: states.pop(0) if len(states) > 1 else states[0]
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == expected
+    assert len(d.clicked) == 1
+    if expected == 'confirmed':
+        assert 'gamma' in result.evidence and '15, 20' in result.evidence
+    else:
+        assert not result.next
+        assert 'could not be read' in result.evidence
+
+
+def test_double_click_keeps_a_paragraph_verdict_over_the_static_text_selection(tmp_path, monkeypatch):
+    """A Writer paragraph is judged by its caret; the #1224 selection check must not replace it."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    reads = []
+    d.selection_details = lambda el: reads.append(el) or ((41, 47, 'across'),)
+    rt = _hover_runtime(tmp_path, d)
+    caret = ('confirmed', 'the caret is in the target paragraph')
+    monkeypatch.setattr(rt, '_paragraph_click_verdict', lambda target: caret)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert 'caret is in the target paragraph' in result.evidence
+    assert 'text selection changed' not in result.evidence
+
+
+def test_double_click_on_static_text_without_a_selection_reader_is_unchanged(tmp_path, monkeypatch):
+    """A driver that cannot read selection ranges keeps the generic verdict."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    reads = []
+    d.text_selection = lambda el: reads.append(el) or ()
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    rt.click(ref=el.ref, count=2)
+    assert not reads
+
+
 def test_detailed_double_click_waits_for_selection_without_reclick(tmp_path, monkeypatch):
     from dataclasses import replace
     monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
