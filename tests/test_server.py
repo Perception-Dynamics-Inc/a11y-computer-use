@@ -7122,37 +7122,110 @@ def test_libreoffice_bridge_absent_needs_every_process_bridgeless(monkeypatch):
         assert _atspi.libreoffice_bridge_absent() == want
 
 
+def _window_tree(window_ref_title, window_path, controls, snapshot_id):
+    """A GTK-like window (native frame object) with button children."""
+    window = Element("e1", "AXWindow", window_ref_title, None, None, snapshot_id,
+                     context_identity=("frame", ":1.5", window_path))
+    buttons = [
+        Element(f"e{index}", "AXButton", title, None, Bounds(1, 10, 40 * index, 150, 25),
+                snapshot_id, parent="e1", clickable=True)
+        for index, title in controls
+    ]
+    return dataclasses.replace(build_synthetic_snapshot(), snapshot_id=snapshot_id,
+                               elements=(window, *buttons))
+
+
+def _window_runtime(monkeypatch, store, audit_dir, current, live):
+    """A Runtime whose driver reports ``live[0]`` as the app's live windows."""
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(audit_dir))
+    monkeypatch.setattr(runtime.driver, "live_window_contexts",
+                        lambda app: live[0], raising=False)
+    return runtime
+
+
+W1 = ("frame", ":1.5", "/window/1")
+W2 = ("frame", ":1.5", "/window/2")
+
+
 @pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
 @pytest.mark.parametrize("title", ["Wizard step 2", "Wizard step 1"])
 def test_window_replaced_by_an_identical_one_does_not_poison_fresh_refs(
     monkeypatch, mocked_driver, store, audit_dir, mode, title,
 ):
     """#1215: a wizard step or notification bubble is destroyed and an identical
-    window is shown. The native window object is new but nothing in it was
-    edited, so a ref from a fresh snapshot names the new window's control.
+    window is shown. The old window is gone from the app's live window list, so
+    a ref from a fresh snapshot names the new window's control.
     """
     store.set_tier(APP, safety.Tier.FULL)
-    window = Element("e1", "AXWindow", "Wizard step 1", None, None, "before",
-                     context_identity=("frame", ":1.5", "/window/1"))
-    label = Element("e2", "AXStaticText", "Step", None, None, "before", parent="e1")
-    target = Element("e3", "AXButton", "Next", None, Bounds(1, 10, 40, 150, 25), "before",
-                     parent="e1", clickable=True)
-    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
-                                 elements=(window, label, target))
-    updated = [dataclasses.replace(el, snapshot_id="after") for el in before.elements]
-    updated[0] = dataclasses.replace(updated[0], title=title,
-                                     context_identity=("frame", ":1.5", "/window/2"))
-    after = dataclasses.replace(before, snapshot_id="after", elements=tuple(updated))
-    current = [before]
-    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
-    pressed = []
-    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el) or False)
-    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+    controls = [(2, "Step"), (3, "Next")]
+    before = _window_tree("Wizard step 1", "/window/1", controls, "before")
+    after = _window_tree(title, "/window/2", controls, "after")
+    current, live = [before], [frozenset({W1})]
+    with _window_runtime(monkeypatch, store, audit_dir, current, live) as runtime:
         runtime.desktop_snapshot(APP, mode=mode)
-        current[0] = after
+        current[0], live[0] = after, frozenset({W2})  # window 1 destroyed
         for _ in range(2):
             runtime.desktop_snapshot(APP, mode=mode)
         runtime.click(ref="e3", verify=True)
+        assert len(mocked_driver["click"]) == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+def test_window_replaced_by_the_next_wizard_step_binds_its_fresh_refs(
+    monkeypatch, mocked_driver, store, audit_dir, mode,
+):
+    """#1215: the replacement may differ (Next becomes Finish). Its refs are new."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before = _window_tree("Step 1", "/window/1", [(2, "Next")], "before")
+    after = _window_tree("Step 2", "/window/2", [(2, "Finish")], "after")
+    current, live = [before], [frozenset({W1})]
+    with _window_runtime(monkeypatch, store, audit_dir, current, live) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0], live[0] = after, frozenset({W2})
+        runtime.desktop_snapshot(APP, mode=mode)
+        runtime.click(ref="e2", verify=True)
+        assert len(mocked_driver["click"]) == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("scope_switch", ["both_live", "live_list_unknown", "live_list_raises"])
+def test_switching_between_existing_windows_keeps_old_refs_stale(
+    monkeypatch, mocked_driver, store, audit_dir, mode, scope_switch,
+):
+    """#1215: window A still exists; the user focused window B.
+
+    A's refs must never rebind to B's same-numbered controls: they stay
+    stale_ref. B's own new refs work. The window-scoped snapshot of B names no
+    window of A, which is not evidence that A was destroyed.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    window_a = _window_tree("Window A", "/window/1", [(2, "Save"), (3, "Cancel")], "before")
+    window_b = _window_tree("Window B", "/window/2",
+                            [(2, "Open"), (3, "Close"), (4, "Extra")], "after")
+    current = [window_a]
+    live = [frozenset({W1})]
+    with _window_runtime(monkeypatch, store, audit_dir, current, live) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = window_b
+        if scope_switch == "both_live":
+            live[0] = frozenset({W1, W2})
+        elif scope_switch == "live_list_unknown":
+            live[0] = None
+        else:
+            def broken(app):
+                raise RuntimeError("at-spi busy")
+            monkeypatch.setattr(runtime.driver, "live_window_contexts", broken, raising=False)
+        for _ in range(2):
+            runtime.desktop_snapshot(APP, mode=mode)
+        for stale in ("e2", "e3"):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref=stale, verify=True)
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert caught.value.detail["reason"] == "target_changed"
+        assert mocked_driver["click"] == []
+        runtime.click(ref="e4", verify=True)
         assert len(mocked_driver["click"]) == 1
 
 
@@ -7168,57 +7241,20 @@ def test_window_replacement_still_refuses_a_ref_whose_control_changed(
     inside a window that was not replaced (#1021).
     """
     store.set_tier(APP, safety.Tier.FULL)
-    window = Element("e1", "AXWindow", "Wizard step 1", None, None, "before",
-                     context_identity=("frame", ":1.5", "/window/1"))
-    target = Element("e2", "AXButton", "Next", None, Bounds(1, 10, 40, 150, 25), "before",
-                     parent="e1", clickable=True)
-    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
-                                 elements=(window, target))
-    updated = [dataclasses.replace(el, snapshot_id="after") for el in before.elements]
-    if change != "window_survives":
-        updated[0] = dataclasses.replace(updated[0], context_identity=("frame", ":1.5", "/window/2"))
-    updated[1] = dataclasses.replace(
-        updated[1], title="Delete All" if change == "irreversible" else "Back")
-    after = dataclasses.replace(before, snapshot_id="after", elements=tuple(updated))
-    current = [before]
-    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
-    pressed = []
-    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el) or False)
-    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+    before = _window_tree("Wizard step 1", "/window/1", [(2, "Next")], "before")
+    renamed = "Delete All" if change == "irreversible" else "Back"
+    survives = change == "window_survives"
+    after = _window_tree("Wizard step 1", "/window/1" if survives else "/window/2",
+                         [(2, renamed)], "after")
+    current, live = [before], [frozenset({W1})]
+    with _window_runtime(monkeypatch, store, audit_dir, current, live) as runtime:
         runtime.desktop_snapshot(APP, mode=mode)
         current[0] = after
+        live[0] = frozenset({W1 if survives else W2})
         for _ in range(2):
             runtime.desktop_snapshot(APP, mode=mode)
         with pytest.raises(ComputerUseError) as caught:
             runtime.click(ref="e2", verify=True)
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
-        assert mocked_driver["click"] == pressed == []
-
-
-@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
-def test_window_replaced_by_the_next_wizard_step_binds_its_fresh_refs(
-    monkeypatch, mocked_driver, store, audit_dir, mode,
-):
-    """#1215: the replacement may differ (Next becomes Finish). Its refs are new."""
-    store.set_tier(APP, safety.Tier.FULL)
-    window = Element("e1", "AXWindow", "Step 1", None, None, "before",
-                     context_identity=("frame", ":1.5", "/window/1"))
-    target = Element("e2", "AXButton", "Next", None, Bounds(1, 10, 40, 150, 25), "before",
-                     parent="e1", clickable=True)
-    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
-                                 elements=(window, target))
-    after = dataclasses.replace(before, snapshot_id="after", elements=(
-        dataclasses.replace(window, snapshot_id="after", title="Step 2",
-                            context_identity=("frame", ":1.5", "/window/2")),
-        dataclasses.replace(target, snapshot_id="after", title="Finish"),
-    ))
-    current = [before]
-    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
-    monkeypatch.setattr(observe, "press_element", lambda el: False)
-    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
-        runtime.desktop_snapshot(APP, mode=mode)
-        current[0] = after
-        runtime.desktop_snapshot(APP, mode=mode)
-        runtime.click(ref="e2", verify=True)
-        assert len(mocked_driver["click"]) == 1
+        assert mocked_driver["click"] == []

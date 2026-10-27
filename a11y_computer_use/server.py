@@ -3853,19 +3853,32 @@ class Runtime:
             and not document_changed
         )
         # The same holds for a top-level window (#1215): a wizard step or a
-        # notification is destroyed and an identical one shown. Every native
-        # window the previous observation named is gone and the fresh one
-        # names only new ones, so the old window's refs are not a namespace
-        # to protect. A window that survives (a node edited inside it, a
-        # dialog opened over it) shares its object and stays stale.
-        if not native_replaced:
-            previous_windows = self._native_windows(last.elements if last is not None else ())
+        # notification is destroyed and an identical one shown. That needs
+        # proof the old window is gone. Another window of the app being
+        # focused, or the snapshot scoped to it, is not: the old window still
+        # exists and its refs must stay stale or they would rebind to
+        # same-numbered controls of the other window. So the previous
+        # observation's windows must be absent from the app's live window
+        # list, and the fresh observation's windows present in it. A driver
+        # that cannot list them (or errors) never starts a new epoch.
+        if (not native_replaced and last is not None and last.app == app
+                and not instance_changed and not document_changed
+                and last.snapshot_id != snap.snapshot_id):
+            previous_windows = self._native_windows(last.elements)
             current_windows = self._native_windows(snap.elements)
-            native_replaced = bool(
-                previous_windows and current_windows
-                and previous_windows.isdisjoint(current_windows)
-                and not document_changed
-            )
+            if (previous_windows and current_windows
+                    and previous_windows.isdisjoint(current_windows)):
+                live_windows = getattr(self.driver, "live_window_contexts", None)
+                live = None
+                if callable(live_windows):
+                    try:
+                        live = live_windows(app)
+                    except Exception:
+                        live = None
+                native_replaced = bool(
+                    live is not None and previous_windows.isdisjoint(live)
+                    and not current_windows.isdisjoint(live)
+                )
         if native_replaced:
             document_changed = True
         self._issued_document_url = document_url or (
