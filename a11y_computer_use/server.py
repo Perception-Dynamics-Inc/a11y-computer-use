@@ -3785,6 +3785,16 @@ class Runtime:
                 documents.add(tuple(context))
         return documents
 
+    @staticmethod
+    def _native_windows(elements) -> set[tuple]:
+        """Native top-level window objects named by ``elements`` (role, bus, path)."""
+        windows = set()
+        for el in elements:
+            context = getattr(el, "context_identity", None)
+            if context and str(context[0]) in {"frame", "window"}:
+                windows.add(tuple(context))
+        return windows
+
     def _note_issued(self, snap: Snapshot, refs: set[str] | None = None,
                      *, preserve_identity: bool = False) -> None:
         """Remember which app issued the refs the agent was just given.
@@ -3842,6 +3852,20 @@ class Runtime:
             and previous_documents.isdisjoint(current_documents)
             and not document_changed
         )
+        # The same holds for a top-level window (#1215): a wizard step or a
+        # notification is destroyed and an identical one shown. Every native
+        # window the previous observation named is gone and the fresh one
+        # names only new ones, so the old window's refs are not a namespace
+        # to protect. A window that survives (a node edited inside it, a
+        # dialog opened over it) shares its object and stays stale.
+        if not native_replaced:
+            previous_windows = self._native_windows(last.elements if last is not None else ())
+            current_windows = self._native_windows(snap.elements)
+            native_replaced = bool(
+                previous_windows and current_windows
+                and previous_windows.isdisjoint(current_windows)
+                and not document_changed
+            )
         if native_replaced:
             document_changed = True
         self._issued_document_url = document_url or (
