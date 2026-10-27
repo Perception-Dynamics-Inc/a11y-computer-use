@@ -23082,3 +23082,21 @@ def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monk
     assert not _atspi.whole_text_selected(entry)
     assert driver.type_into(element, "x") == 1
     assert entry.text == "x"
+
+
+def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
+    """#1232: GTK 4 marks an entry neither SINGLE_LINE nor MULTI_LINE."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    entry.states.discard("SINGLE_LINE")
+    assert _atspi.append_target_entry(entry)
+    assert driver.type_into(element, " more") == 5
+    assert entry.text == "keep me more"
+    assert entry.selection is None
+
+
+def test_ref_type_keeps_the_selection_of_a_stateless_text_with_line_breaks(fake_atspi, monkeypatch):
+    """A text role with line breaks and no single-line state is an editor, not an entry."""
+    _driver, entry, _element = _select_all_entry(monkeypatch)
+    entry.states.discard("SINGLE_LINE")
+    entry.text = "one\ntwo"
+    assert not _atspi.append_target_entry(entry)

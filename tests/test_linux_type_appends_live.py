@@ -46,6 +46,33 @@ _FIXTURE = textwrap.dedent(
 )
 
 
+_FIXTURE4 = textwrap.dedent(
+    """
+    import sys
+    import gi
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import GLib, Gtk
+
+    def activate(app):
+        win = Gtk.ApplicationWindow(application=app, title="Notes1232")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        win.set_child(box)
+        entry = Gtk.Entry()
+        entry.set_text("keep me")
+        box.append(entry)
+        box.append(Gtk.Button(label="Save"))
+        log = open(sys.argv[1], "a")
+        entry.connect("changed", lambda w: (log.write(w.get_text() + "\\n"), log.flush()))
+        win.present()
+        GLib.idle_add(lambda: (entry.grab_focus(), False)[1])
+
+    app = Gtk.Application(application_id="x.notes1232")
+    app.connect("activate", activate)
+    app.run()
+    """
+)
+
+
 def _gtk3_ready() -> None:
     if not os.environ.get("DISPLAY"):
         pytest.skip("needs an X display")
@@ -58,12 +85,24 @@ def _gtk3_ready() -> None:
         pytest.skip("no GTK 3 for /usr/bin/python3")
 
 
-def _run_case(tmp_path, focus: str, typed: str):
+def _gtk4_ready() -> None:
+    if not os.environ.get("DISPLAY"):
+        pytest.skip("needs an X display")
+    probe = subprocess.run(
+        ["/usr/bin/python3", "-c",
+         "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk"],
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("no GTK 4 for /usr/bin/python3")
+
+
+def _run_case(tmp_path, focus: str, typed: str, gtk: int = 3):
     from a11y_computer_use.drivers.linux import LinuxDriver
 
-    _gtk3_ready()
+    (_gtk3_ready if gtk == 3 else _gtk4_ready)()
     script = tmp_path / "entry1232.py"
-    script.write_text(_FIXTURE)
+    script.write_text(_FIXTURE if gtk == 3 else _FIXTURE4)
     log = tmp_path / "changes.log"
     log.write_text("")
     proc = subprocess.Popen(
@@ -106,3 +145,13 @@ def test_ref_type_appends_to_a_filled_entry(tmp_path, focus):
     assert changes and changes[-1] == "keep me more", changes
     # No intermediate state may have wiped the text.
     assert "" not in [c for c in changes], changes
+
+
+def test_ref_type_appends_to_a_gtk4_entry_that_already_has_focus(tmp_path):
+    """GTK 4 marks an entry neither single-line nor multi-line, and the
+    entry that holds focus already has its whole text selected."""
+    outcome, error, changes = _run_case(tmp_path, "entry", " more", gtk=4)
+    assert error is None, error
+    assert "typed 5 characters" in str(outcome), outcome
+    assert changes and changes[-1] == "keep me more", changes
+    assert "" not in changes, changes

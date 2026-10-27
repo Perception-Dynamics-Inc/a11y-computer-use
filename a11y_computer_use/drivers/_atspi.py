@@ -9745,12 +9745,17 @@ def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
 def append_target_entry(acc) -> bool:
     """A native single-line entry whose text a ref ``type`` must append to.
 
-    Browser fields keep their own focus path, and a multi-line view keeps
-    its caret and selection. A secure field is refused before this runs.
+    GTK3 marks an entry SINGLE_LINE; GTK4 marks neither SINGLE_LINE nor
+    MULTI_LINE on its entry (only a text view carries MULTI_LINE), so an
+    entry is a text or entry role that is not multi-line and holds no line
+    break. Browser fields keep their own focus path, and a multi-line view
+    keeps its caret and selection. A secure field is refused before this runs.
     """
     if _role_name(acc) not in {"text", "entry"}:
         return False
-    if not _state_has(acc, "SINGLE_LINE") or _state_has(acc, "MULTI_LINE"):
+    if _state_has(acc, "MULTI_LINE"):
+        return False
+    if not _state_has(acc, "SINGLE_LINE") and "\n" in (_full_text(acc) or ""):
         return False
     return not _chromium_app(acc)
 
