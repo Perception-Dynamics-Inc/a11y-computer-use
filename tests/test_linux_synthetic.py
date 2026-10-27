@@ -23069,6 +23069,46 @@ def test_ref_type_never_confirms_a_write_that_lost_the_prior_text(fake_atspi, mo
     assert exc.value.detail["actual"] == " more"
 
 
+def _gecko_stale_caret_entry(monkeypatch):
+    """#1241: a Firefox input whose AT-SPI caret still reads 0 after caret-to-end."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    entry.caret = 0
+
+    def grab():
+        entry.selection, entry.caret = None, 0
+        return True
+
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: grab())
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda _acc: False)
+    monkeypatch.setattr(_atspi, "gecko_entry_caret_to_end", lambda _acc: False)
+    monkeypatch.setattr(_atspi, "gecko_plain_entry", lambda _acc: True)
+    return driver, entry, element
+
+
+def test_ref_type_judges_a_gecko_append_at_the_end_despite_a_stale_caret(fake_atspi, monkeypatch):
+    """The keys land at the end; a caret read of 0 must not expect ' morekeep me'."""
+    driver, entry, element = _gecko_stale_caret_entry(monkeypatch)
+    monkeypatch.setattr(driver, "_type_confirmed_handle",
+                        lambda handle, text: setattr(handle, "text", handle.text + text) or len(text))
+    assert driver.type_into(element, " more") == 5
+    assert entry.text == "keep me more"
+
+
+@pytest.mark.parametrize("landed", [" more", " morekeep me", "keep more me"])
+def test_ref_type_still_refuses_a_gecko_write_that_lost_or_split_the_prior_text(
+    fake_atspi, monkeypatch, landed,
+):
+    """A Gecko write judged at the end still refuses a loss or a misplaced insert."""
+    driver, entry, element = _gecko_stale_caret_entry(monkeypatch)
+    monkeypatch.setattr(driver, "_type_confirmed_handle",
+                        lambda handle, text: setattr(handle, "text", landed) or len(text))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, " more")
+    assert exc.value.detail["reason"] == "prior_text_lost"
+    assert exc.value.detail["expected"] == "keep me more"
+    assert exc.value.detail["actual"] == landed
+
+
 def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monkeypatch):
     """Only a single-line entry with text is collapsed; a text view keeps its selection."""
     driver, entry, element = _select_all_entry(monkeypatch)

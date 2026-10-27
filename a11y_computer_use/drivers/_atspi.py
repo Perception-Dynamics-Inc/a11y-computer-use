@@ -9936,6 +9936,15 @@ def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
     return len(now) >= len(prior) and now.startswith(head) and now.endswith(tail)
 
 
+def gecko_plain_entry(acc) -> bool:
+    """A plain, non-secure Firefox input or textarea (not contenteditable)."""
+    if acc is None or not _gecko_app(acc) or _gecko_contenteditable(acc):
+        return False
+    if not (_state_has(acc, "SINGLE_LINE") or _state_has(acc, "MULTI_LINE")):
+        return False
+    return not is_secure(acc) and _editable_iface(acc) is not None
+
+
 def gecko_entry_caret_to_end(acc) -> bool:
     """Put the caret at the end of a Firefox input or textarea; ``True`` if moved.
 
@@ -9945,11 +9954,7 @@ def gecko_entry_caret_to_end(acc) -> bool:
     (contenteditable, password, anything without a text interface), is left as
     it is. The caller reads the caret back before it types.
     """
-    if acc is None or not _gecko_app(acc) or _gecko_contenteditable(acc):
-        return False
-    if not (_state_has(acc, "SINGLE_LINE") or _state_has(acc, "MULTI_LINE")):
-        return False
-    if is_secure(acc) or _editable_iface(acc) is None:
+    if not gecko_plain_entry(acc):
         return False
     Atspi = _atspi()
     count = _safe(lambda: Atspi.Text.get_character_count(acc))

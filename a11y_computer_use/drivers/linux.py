@@ -5278,6 +5278,7 @@ class LinuxDriver:
         # type(ref=...) shows the same overlay as click/scroll/set_value.
         self._visible_action(element, "Type")
         context = self._run(lambda: _atspi.web_entry_context(handle))
+        gecko_append = False
         if (element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
                 and self._run(lambda: _atspi._chromium_app(handle))):
             if context is not None:
@@ -5347,6 +5348,7 @@ class LinuxDriver:
                 # in front of the existing text. A field that already had
                 # focus keeps the caret the page or the user set.
                 self._run(lambda: _atspi.gecko_entry_caret_to_end(handle))
+                gecko_append = self._run(lambda: _atspi.gecko_plain_entry(handle))
         self._focused_editable = handle
         append_state = None
         if self._run(lambda: _atspi.append_target_entry(handle)):
@@ -5360,6 +5362,12 @@ class LinuxDriver:
                     "nothing was typed. Use set_value to replace the text",
                 )
             append_state = self._run(lambda: _atspi.entry_text_and_caret(handle))
+            if gecko_append and append_state is not None:
+                # Gecko's AT-SPI caret still reads 0 right after the grab,
+                # though the keys go where the caret was put: the end (#1241).
+                # Judge the read-back against an append. A write that loses
+                # or splits the prior text still fails this check.
+                append_state = (append_state[0], len(append_state[0]))
         peers: dict = {}
         try:
             peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
