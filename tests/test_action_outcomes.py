@@ -1699,6 +1699,67 @@ def test_linux_discovery_cover_work_scales_with_windows_and_refreshes(monkeypatc
     assert driver.same_app_window_cover(snap.element("button0"), "xarchiver") == "Extract files"
 
 
+@pytest.mark.parametrize("popup_pid,covered", [(4242, False), (9000, True), (None, True)],
+                         ids=["own-popup-on-top", "another-apps-popup", "no-popup"])
+def test_a_ref_in_the_topmost_override_redirect_popup_is_not_covered(monkeypatch, popup_pid, covered):
+    """The IBus candidate window is the target's own unmanaged window (#1227).
+
+    The managed window under the point is another toplevel (the app's other
+    window, or the window the popup floats over), so the id comparison alone
+    called the popup covered by it.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    candidate = _element("cand", "AXButton", "你好", clickable=True, bounds=Bounds(0, 100, 100, 60, 20))
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda el, handle: False)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snap, ref: ref)
+    monkeypatch.setattr(_atspi, "toplevel_raise_target",
+                        lambda handle: (False, "ibus-ui-gtk3", 4242, (50, 50, 327, 66)))
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 4242)
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 7)
+    monkeypatch.setattr(_linux_system, "window_at_point",
+                        lambda x, y: {"window_id": 1, "title": "KB Lab GTK3"})
+    monkeypatch.setattr(_linux_system, "popup_pid_at_point", lambda x, y: popup_pid)
+    assert driver.same_app_window_cover(candidate, "ibus-ui-gtk3") == (
+        "KB Lab GTK3" if covered else None
+    )
+    # The discovery path (snapshot, find) reads the same answer.
+    rows = [{"window_id": 1, "title": "KB Lab GTK3", "pid": 4242,
+             "bounds": {"x": 0, "y": 0, "width": 1000, "height": 500}}]
+    owner = _element("main", "AXWindow", "ibus-ui-gtk3")
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 7)
+    targets = {owner.ref: ((False, "ibus-ui-gtk3", 4242, (50, 50, 327, 66)), 7)}
+    got = driver.same_app_window_cover(candidate, "ibus-ui-gtk3", _discovery=(owner, rows, targets))
+    assert got == ("KB Lab GTK3" if covered else None)
+
+
+@pytest.mark.parametrize("popup_pid,raised", [(4242, False), (None, True), (9000, True)],
+                         ids=["own-popup-on-top", "no-popup", "another-apps-popup"])
+def test_raising_a_ref_never_buries_its_own_popup(monkeypatch, popup_pid, raised):
+    """An override-redirect popup is not raisable; the overlap guess is another window (#1227)."""
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    calls = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "raise_window", lambda wid: calls.append(wid))
+    monkeypatch.setattr(_atspi, "toplevel_raise_target",
+                        lambda handle: (False, "", 4242, (40.0, 0.0, 327.0, 66.0)))
+    monkeypatch.setattr(_linux_system, "popup_pid_at_point", lambda x, y: popup_pid)
+    monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 12)
+    monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda wid: None)
+    monkeypatch.setattr(_linux_system, "is_notification_window", lambda wid: False)
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {"window_id": 99})
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver._raise_handle_window(object())
+    assert calls == ([12] if raised else [])
+
+
 def test_linux_discovery_caches_failed_native_window_lookup(monkeypatch):
     from a11y_computer_use import observe
     from a11y_computer_use.drivers import _atspi

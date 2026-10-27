@@ -251,6 +251,10 @@ def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
         return ("ref", "cdp")
     if code == "element_disabled" or reason == "disabled":
         return ("ref", "keyboard")
+    if reason == "ime_active":
+        # Keyboard and ref writes go through the same input method. Only a
+        # DOM write on an opted-in browser bypasses it.
+        return ("cdp",)
     if reason == "text_mismatch":
         return ("keyboard", "cdp", "ref")
     return ("ref", "coordinates", "keyboard", "foreground")
