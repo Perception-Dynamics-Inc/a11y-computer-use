@@ -10414,6 +10414,26 @@ def web_entry_context(acc):
     return role, name, doc, window, parent, box, _ancestor_key(doc), _ancestor_key(window)
 
 
+def chromium_nested_web_entry(acc) -> bool:
+    """A Chromium web entry whose document sits inside another document.
+
+    An Electron ``<webview>`` guest is exposed as a document under an
+    internal frame of the host document, like an iframe. AT-SPI
+    ``grab_focus`` on a guest node returns True, but Chromium does not
+    move keyboard focus out of the host page into the guest (#1266). Only
+    real input crosses that boundary.
+    """
+    if not _chromium_app(acc):
+        return False
+    docs = 0
+    for node in _ancestor_chain(acc):
+        if _role_name(node) in {"document web", "document frame"}:
+            docs += 1
+            if docs > 1:
+                return True
+    return False
+
+
 def focus_web_entry(acc, *, context=None, request_focus: bool = True):
     """Focus a web entry, allowing only a detached, same-context remount.
 

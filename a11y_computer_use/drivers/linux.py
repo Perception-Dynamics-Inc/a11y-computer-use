@@ -4171,7 +4171,19 @@ class LinuxDriver:
             restore()
             raise _not_editable(element)
         context = self._run(lambda: _atspi.web_entry_context(handle))
-        handle = self._focus_web_entry(element, handle, context=context)
+        if context is not None and self._run(lambda: (
+            _atspi.chromium_nested_web_entry(handle)
+            and _atspi._focus_on_target(handle) is not True
+        )):
+            # AT-SPI focus does not cross from the host page into an
+            # Electron <webview> guest (#1266). Use the geometry-checked
+            # pointer press type(ref) uses, then wait without re-grabbing.
+            self.click(element)
+            handle = self._focus_web_entry(
+                element, handle, context=context, request_focus=False,
+            )
+        else:
+            handle = self._focus_web_entry(element, handle, context=context)
         # EditableText replace, or X11 clear-and-type when that interface is
         # missing. Success is the snapshot text read (Text.get_text 0, -1),
         # not a bounded read that can echo the request. A write that does not
