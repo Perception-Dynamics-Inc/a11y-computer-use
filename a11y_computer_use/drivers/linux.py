@@ -5314,6 +5314,17 @@ class LinuxDriver:
             if not math_focused:
                 handle = self._focus_web_entry(element, handle, context=context)
                 self._run(lambda: _atspi.grab_focus(handle))
+            if (not math_focused and context is None
+                    and not self._run(lambda: _atspi._focus_on_target(handle))
+                    and self._run(lambda: _atspi.gtk4_entry_needs_pointer_focus(handle))):
+                # GTK 4 cannot take focus over AT-SPI (#1237). Use the
+                # geometry-checked pointer press, then put the caret at the
+                # end so the press point does not split the existing text.
+                self.click(element)
+                if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                    raise self._focus_lost_on(element)
+                if not self._run(lambda: _atspi.place_caret_at_end(handle)):
+                    raise self._focus_lost_on(element)
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
                 if context is None:
                     raise self._focus_lost_on(element)
