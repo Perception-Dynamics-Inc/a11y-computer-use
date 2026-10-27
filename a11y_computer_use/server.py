@@ -6052,8 +6052,15 @@ class Runtime:
         detailed_selection = callable(selection_reader)
         if not detailed_selection:
             selection_reader = getattr(self.driver, "text_selection", None)
+        # A double-click on a word of page text (Chrome static text, #1224) selects
+        # it and publishes the range, but changes nothing else the generic
+        # comparison reads, so it was reported as a no-op. Only a driver that reads
+        # the selection on the clicked node and its descendants checks static text.
+        selectable_roles = {"AXTextArea", "AXTextField", "AXSearchField"}
+        if detailed_selection:
+            selectable_roles = selectable_roles | {"AXStaticText"}
         verify_selection = (count == 2 and isinstance(target, Element)
-                            and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
+                            and target.role in selectable_roles
                             and callable(selection_reader))
         selection_before = None
         selection_target = target
