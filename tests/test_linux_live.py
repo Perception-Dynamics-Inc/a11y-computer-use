@@ -8988,6 +8988,43 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
         return {"cached": cached, "fresh_children": fresh}
 
     capture("native", lambda: driver._run(native))
+
+    def frames():
+        # Every top-level frame of the Chrome application as libatspi has it
+        # cached, and the frame chromium_snapshot_root picks (#1242).
+        root = _atspi.find_root("chrome", Scope.WINDOW)
+        app = _atspi._call_first(root, ("get_application", "getApplication")) or root
+
+        def describe(node):
+            if node is None:
+                return None
+            count = _atspi._child_count(node)
+            kids = []
+            for index in range(min(max(count, 0), 4)):
+                child = _atspi._child_at(node, index)
+                kids.append(None if child is None else (
+                    _atspi._role_name(child), _atspi._node_name(child), _atspi._child_count(child)))
+            return {"role": _atspi._role_name(node), "name": _atspi._node_name(node),
+                    "child_count": count, "states": sorted(_atspi._state_names(node)),
+                    "children": kids,
+                    "sparse_untitled": _atspi._sparse_untitled_chrome_frame(node),
+                    "bar": _atspi._is_browser_bar_frame(node)}
+
+        count = _atspi._child_count(app)
+        try:
+            pid = _atspi.pid_of(root)
+        except Exception:
+            pid = None
+        return {
+            "root": describe(root),
+            "app_frames": [describe(_atspi._child_at(app, index))
+                           for index in range(min(max(count, 0), 8))],
+            "latched": _atspi._browser_bar_latched(root),
+            "cleared": pid in _atspi._BROWSER_BAR_CLEARED,
+            "picked": describe(_atspi.chromium_snapshot_root(root)),
+        }
+
+    capture("frames", lambda: driver._run(frames))
     return json.dumps(evidence, default=str, ensure_ascii=True)
 
 
@@ -9086,6 +9123,11 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
                 budget_s=90,
             )
+            if "ROW-0300" not in found or "not found" in found or "found after 0" in found:
+                # Which pass failed and what frame the read saw (#1242).
+                found += "\n" + _chrome_table_failure(
+                    driver, proc, runtime._current, phase=f"scroll pass {_pass}", samples=[],
+                )
             assert "ROW-0300" in found, found
             assert "not found" not in found, found
             assert "found after 0" not in found, found
