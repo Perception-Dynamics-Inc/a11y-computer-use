@@ -4169,6 +4169,22 @@ def _has_default_state(acc) -> bool:
     }
 
 
+def _libreoffice_parent_label(acc) -> str:
+    """The label of a sole-child button: its parent's description, else name.
+
+    LibreOffice's sidebar tab buttons are unnamed. The parent panel carries
+    the label as its description ("Properties (Alt+1)") (#1184).
+    """
+    parent = _parent_of(acc)
+    if parent is None or _child_count(parent) != 1:
+        return ""
+    for getter in ("get_description", "get_name"):
+        label = _plain_accessible_name(str(_call_first(parent, (getter,), default="") or ""))
+        if label.strip():
+            return label
+    return ""
+
+
 def _state_flags(acc):
     """(enabled, focused, checked, selected, expanded, focusable, editable).
 
@@ -4654,6 +4670,11 @@ class ATSPIAccessor:
                 if recovered is not None:
                     position, size = recovered
         enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
+        # The role says it can be checked. LibreOffice's gtk3 toggle never
+        # publishes CHECKABLE, so an unpressed one read as None, not False,
+        # and a click had no before value to compare (#1184).
+        if checked is None and role_str == "toggle button":
+            checked = False
         if role_str == "viewport" and _gtk_major(node) == 3:
             # GTK 3 applies the scroll offset to the viewport's own
             # visibility check. Its children can still be SHOWING with
@@ -4747,6 +4768,9 @@ class ATSPIAccessor:
                 if label:
                     name = _plain_accessible_name(label)
                     break
+        if (self.libreoffice and role_str in {"toggle button", "push button"}
+                and not str(name).strip() and not description.strip()):
+            name = _libreoffice_parent_label(node)
         button_name = str(name)
         if role_str == "push button":
             name = _gtk_button_row_name(node, button_name)
@@ -20298,6 +20322,17 @@ def gtk_dialog_toggle_state(acc) -> tuple[bool, bool] | None:
         return None
     bits = ("SELECTED", "CHECKED") if role == "page tab" else ("CHECKED", "PRESSED")
     return _click_state_bits(acc, bits, require_showing=True)
+
+
+def libreoffice_toggle_state(acc) -> tuple[bool, bool] | None:
+    """Fresh CHECKED/PRESSED bits of a LibreOffice toggle button (#1184).
+
+    LibreOffice's gtk3 toggle publishes CHECKED without CHECKABLE, so the
+    sidebar tab buttons are read by role. Other roles and apps are None.
+    """
+    if acc is None or _role_name(acc) != "toggle button" or not _libreoffice_node(acc):
+        return None
+    return _click_state_bits(acc, ("CHECKED", "PRESSED"))
 
 
 def _click_state_bits(acc, bits: tuple[str, str], *, require_showing: bool = False):
