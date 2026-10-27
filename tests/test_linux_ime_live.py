@@ -1,0 +1,182 @@
+"""#1219 live: Chrome with an IBus engine that transforms ASCII.
+
+Skipped unless Chrome, ``ibus`` and a running IBus daemon that can load
+``m17n:ru:translit`` are present. The user's engine is put back afterwards.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+import pytest
+
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
+
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
+from tests.test_linux_live import _chrome_binary, _runtime_for, _stop_group  # noqa: E402
+
+_PAGE = (
+    "<!doctype html><meta charset=utf-8><title>cuaime</title>"
+    "<input id=f aria-label='Name field'>"
+)
+_ENGINE = "m17n:ru:translit"
+_TEXT = "hello world 42"
+
+
+def _ibus(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["ibus", *args], capture_output=True, text=True, timeout=5, check=False)
+
+
+@pytest.fixture
+def transforming_engine(monkeypatch):
+    # tests/conftest.py disables the bypass so no test touches a real engine.
+    # This one exists to exercise it.
+    monkeypatch.setenv("A11Y_IME_BYPASS", "1")
+    if shutil.which("ibus") is None:
+        pytest.skip("ibus is not installed")
+    before = _ibus("engine")
+    if before.returncode != 0 or not before.stdout.strip() or " " in before.stdout.strip():
+        pytest.skip("no running IBus daemon with an engine set")
+    original = before.stdout.strip()
+    _ibus("engine", _ENGINE)
+    if _ibus("engine").stdout.strip() != _ENGINE:
+        _ibus("engine", original)
+        pytest.skip(f"IBus cannot load {_ENGINE}")
+    yield original
+    _ibus("engine", original)
+    for _ in range(3):
+        if _ibus("engine").stdout.strip() == original:
+            break
+        _ibus("engine", original)
+
+
+@pytest.fixture
+def chrome_field(tmp_path, transforming_engine):
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome")
+    page = tmp_path / "ime.html"
+    page.write_text(_PAGE)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    env = dict(os.environ, XMODIFIERS="@im=ibus", GTK_IM_MODULE="ibus", QT_IM_MODULE="ibus")
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,500", f"file://{page}",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, env=env,
+    )
+    driver = LinuxDriver()
+    try:
+        field = None
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and field is None:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                field = next((e for e in shot.elements if e.title == "Name field"), None)
+            time.sleep(0.5)
+        assert field is not None, "Chrome never exposed the field"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = shot
+        yield driver, runtime, field, transforming_engine
+    finally:
+        _stop_group(proc)
+
+
+def _value(driver) -> str | None:
+    shot = driver.snapshot(Scope.WINDOW, "chrome")
+    return next(e.value for e in shot.elements if e.title == "Name field")
+
+
+def test_type_ref_lands_ascii_exactly_and_restores_the_engine(chrome_field) -> None:
+    driver, runtime, field, original = chrome_field
+    runtime.type_text(_TEXT, ref=field.ref)
+    assert _value(driver) == _TEXT
+    assert _ibus("engine").stdout.strip() == _ENGINE
+
+
+def test_set_value_lands_ascii_exactly_and_keeps_focus(chrome_field) -> None:
+    driver, runtime, field, original = chrome_field
+    runtime.set_value(field.ref, _TEXT)
+    shot = driver.snapshot(Scope.WINDOW, "chrome")
+    now = next(e for e in shot.elements if e.title == "Name field")
+    assert now.value == _TEXT
+    assert now.focused is True
+    assert _ibus("engine").stdout.strip() == _ENGINE
+
+
+def test_a_refused_type_leaves_no_ime_text_in_the_field(chrome_field, monkeypatch) -> None:
+    """If the engine cannot be switched, nothing is typed: no 'хелло' is left behind."""
+    from a11y_computer_use.drivers import _linux_ime
+
+    driver, runtime, field, original = chrome_field
+    before = _value(driver)
+    monkeypatch.setattr(_linux_ime, "_set_engine", lambda name: False)
+    for call in (
+        lambda: runtime.type_text(_TEXT, ref=field.ref),
+        lambda: runtime.set_value(field.ref, _TEXT),
+    ):
+        with pytest.raises(ComputerUseError) as exc:
+            call()
+        assert exc.value.detail.get("reason") == "ime_active"
+        assert _value(driver) == before
+    assert _ibus("engine").stdout.strip() == _ENGINE
+
+
+def _wait_for(check, seconds: float = 5.0):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        found = check()
+        if found:
+            return found
+        time.sleep(0.1)
+    return check()
+
+
+def test_an_open_composition_is_refused_and_left_intact(chrome_field) -> None:
+    """The preedit is never switched away or dropped; clearing it lets typing work again."""
+    from a11y_computer_use.drivers import _atspi
+
+    driver, runtime, field, _original = chrome_field
+    if shutil.which("xdotool") is None:
+        pytest.skip("needs xdotool to type on a real keyboard")
+    _ibus("engine", "libpinyin")
+    if _ibus("engine").stdout.strip() != "libpinyin":
+        pytest.skip("IBus cannot load libpinyin")
+    runtime.click(field.ref)
+    subprocess.run(["xdotool", "type", "--delay", "80", "nihao"], check=True, timeout=10)
+    try:
+        if not _wait_for(lambda: _atspi.ime_composition_open() is True):
+            pytest.skip("the IBus panel shows no composition (is ibus-ui-gtk3 the panel?)")
+        before = _value(driver)
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.type_text(" abc", app="chrome")
+        assert exc.value.detail.get("reason") == "ime_composition_open"
+        assert _ibus("engine").stdout.strip() == "libpinyin"  # not switched
+        assert _atspi.ime_composition_open() is True  # the preedit is still open
+        assert _value(driver) == before
+        assert "你好" in before
+        # Addressed by ref the field is focused first, which commits the preedit in
+        # Chrome. Either that or the refusal is fine; the 你好 is never dropped.
+        try:
+            runtime.type_text(" abc", ref=field.ref)
+        except ComputerUseError as err:
+            assert err.detail.get("reason") == "ime_composition_open"
+        assert "你好" in (_value(driver) or "")
+    finally:
+        subprocess.run(["xdotool", "key", "Escape"], check=False, timeout=5)
+    assert _wait_for(lambda: _atspi.ime_composition_open() is False)
+    runtime.type_text("abc", app="chrome")
+    assert "abc" in (_value(driver) or "")

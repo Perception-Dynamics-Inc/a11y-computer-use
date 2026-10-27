@@ -3990,6 +3990,9 @@ class LinuxDriver:
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None:
+            # Before the window is raised, the field focused or a DOM write made:
+            # any of them can commit or cancel an open composition (#1219).
+            self._run(lambda: _atspi.refuse_open_composition(handle))
             self._run(lambda: _atspi._refuse_gecko_date_segment_replace(handle))
             self._raise_handle_window(handle)
         peers: dict = {}
@@ -4115,6 +4118,16 @@ class LinuxDriver:
             if points:
                 self._run(lambda: _atspi._restore_text_points(points))
 
+        def restore_and_refocus() -> None:
+            # A refused write must not leave the keyboard on the page: restoring
+            # the caret can select the document (#1219). No keys are sent.
+            restore()
+            if handle is not None:
+                try:
+                    self._run(lambda: _atspi.grab_focus(handle))
+                except Exception:
+                    pass
+
         if not _accepts_text(element):
             restore()
             raise _not_editable(element)
@@ -4149,14 +4162,15 @@ class LinuxDriver:
                 )
                 success = self._run(lambda: _atspi.set_text(handle, value))
         except Exception:
-            restore()
+            restore_and_refocus()
             raise
         if not success:
-            restore()
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
+            restore_and_refocus()
+            raise _atspi._text_mismatch(
+                "text_mismatch",
                 f"the value read back does not match {value!r}",
-                detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
+                ref=element.ref,
+                role=element.role,
             )
         self._focused_editable = handle
         return success

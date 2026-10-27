@@ -422,6 +422,15 @@ class _TempKeymap:
 
 
 def type_string(text: str, *, delay: float | None = None) -> None:
+    """Type ``text`` into the focused element, keeping an active IBus engine
+    from transforming it (#1219). See ``_type_string_keys`` for the keystrokes."""
+    from a11y_computer_use.drivers import _linux_ime
+
+    with _linux_ime.ascii_passthrough(text):
+        _type_string_keys(text, delay=delay)
+
+
+def _type_string_keys(text: str, *, delay: float | None = None) -> None:
     """Type with a stable keymap and paced keystrokes into the focused element.
 
     Bind each capacity-limited run before input, then settle and restore its map

@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 
 os.environ["A11Y_VISIBLE_ACTIONS"] = "0"
+# Hermetic tests must never switch a real IBus engine on the developer machine.
+os.environ.setdefault("A11Y_IME_BYPASS", "0")
 
 import pytest
 
