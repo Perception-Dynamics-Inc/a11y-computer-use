@@ -152,7 +152,9 @@ def test_pids_matching_matches_the_owner_comm_but_never_a_window_title(monkeypat
     assert _linux_system.pids_matching("gedit") == {1}
     assert _linux_system.pids_matching("chrome") == {2}
     assert _linux_system.pids_matching("") == set()
-    assert _linux_system.resolve_app("Google Search") == "chrome"  # titles resolve here, by design
+    # A title is never the id (#1191): it is only a hint for the error.
+    assert _linux_system.resolve_app("Google Search") == "Google Search"
+    assert _linux_system.title_suggestion("Google Search") == "chrome"
 
 
 def test_resolve_app_prefers_the_owning_comm_over_a_window_that_names_it(monkeypatch) -> None:
@@ -183,7 +185,9 @@ def test_resolve_app_prefers_the_owning_comm_over_a_window_that_names_it(monkeyp
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {1: "krita", 2: "chrome"}.get(pid))
     assert _linux_system.resolve_app("krita") == "krita"
-    assert _linux_system.resolve_app("Donations") == "chrome"  # a pure title still resolves
+    # A pure title is not resolved to another program (#1191); it is a hint.
+    assert _linux_system.resolve_app("Donations") == "Donations"
+    assert _linux_system.title_suggestion("Donations") == "chrome"
     assert _linux_system.resolve_app("nothing-here") == "nothing-here"
 
 
@@ -218,7 +222,8 @@ def test_google_chrome_resolves_to_the_running_chrome_process(monkeypatch) -> No
     )
     assert _linux_system.resolve_app("chrome") == "chrome"
     assert _linux_system.resolve_app("google-chrome") == "chrome"
-    assert _linux_system.resolve_app("Google Chrome") == "chrome"
+    assert _linux_system.resolve_app("Google Chrome") == "Google Chrome"  # titles are hints only (#1191)
+    assert _linux_system.title_suggestion("Google Chrome") == "chrome"
     assert _linux_system.resolve_app("gnome-terminal-server") == "gnome-terminal-"
     assert _linux_system.resolve_app("nothing-here") == "nothing-here"
     assert _linux_system.pids_matching("google-chrome") == {7}
@@ -1945,3 +1950,50 @@ def test_exited_or_frozen_app_does_not_match_prefix_neighbour(other) -> None:
     assert _linux_system._comm_matches_identifier("python", "python")
     # LibreOffice keeps resolving through its alias group, not the prefix.
     assert _linux_system._comm_matches_identifier("soffice", "soffice.bin")
+
+
+@pytest.mark.parametrize("identifier,running", [
+    ("chrome", "chromium"), ("google-chrome", "chromium"), ("chromium", "chrome"),
+    ("gedit", "mousepad"), ("mousepad", "gedit"), ("nautilus", "thunar"), ("thunar", "dolphin"),
+    ("code", "code-insiders"), ("firefox", "firefox-esr"), ("python", "python3"),
+])
+def test_a_different_program_is_never_an_alias(identifier, running) -> None:
+    """#1191: alias groups join names of one program, never two programs."""
+    assert not _linux_system._comm_matches_identifier(identifier, running)
+    assert not _linux_system._identifier_matches_process(identifier, running)
+
+
+@pytest.mark.parametrize("identifier,running", [
+    ("google-chrome", "chrome"), ("chrome", "chrome"), ("chromium-browser", "chromium"),
+    ("LibreOffice", "soffice.bin"), ("calc", "soffice.bin"), ("org.gnome.Nautilus", "nautilus"),
+    ("files", "nautilus"), ("text editor", "mousepad"),
+])
+def test_names_of_the_same_program_still_match(identifier, running) -> None:
+    assert _linux_system._identifier_matches_process(identifier, running)
+
+
+def test_resolve_app_does_not_turn_a_title_into_another_program(monkeypatch) -> None:
+    """#1191: Krita is closed; an Okular window titled "krita-notes.pdf" is not Krita."""
+
+    class _TitledWin(_FakeXWin):
+        def __init__(self, wid: int, pid: int, title: str):
+            super().__init__(wid, 0, 0, 800, 600, pid)
+            self.title = title
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_NAME":
+                return _NS(value=self.title.encode())
+            return super().get_full_property(atom, kind)
+
+    okular = _TitledWin(0xA0, pid=3, title="krita-notes.pdf - Okular")
+    root = _FakeXRoot([okular])
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: okular,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {3: "okular"}.get(pid))
+    assert _linux_system.resolve_app("krita") == "krita"
+    assert _linux_system.pids_matching("krita") == set()
+    assert _linux_system.title_suggestion("krita") == "okular"
