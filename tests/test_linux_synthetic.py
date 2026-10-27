@@ -22998,6 +22998,148 @@ def test_live_window_contexts_lists_every_published_window_and_never_guesses(mon
     assert driver.live_window_contexts("wizard") is None
 
 
+def _select_all_entry(monkeypatch, *, drop_selection: bool = True):
+    """A focused GTK-style entry 'keep me' whose focus grab selects all (#1232)."""
+    app = _Acc("application", name="notes")
+    entry = _Acc("text", name="Title", states={"SINGLE_LINE", "EDITABLE", "FOCUSED", "ENABLED"})
+    entry.get_application = lambda: app
+    entry.text = "keep me"
+    entry.caret = 7
+    entry.selection = None
+    entry.get_editable_text_iface = lambda: entry
+
+    def delete_text(start, end):
+        entry.text = entry.text[:start] + entry.text[end:]
+        entry.caret = start
+        entry.selection = None
+        return True
+
+    def insert_text(pos, text, length):
+        entry.text = entry.text[:pos] + text[:length] + entry.text[pos:]
+        entry.caret = pos + length
+        return True
+
+    entry.delete_text = delete_text
+    entry.insert_text = insert_text
+
+    def grab():
+        entry.selection = (0, len(entry.text))
+        entry.caret = len(entry.text)
+        return True
+
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: grab())
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda _acc: {})
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: entry)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    element = Element("e1", "AXTextField", "Title", "keep me", Bounds(0, 0, 0, 100, 20),
+                      "snap-1", editable=True)
+    return driver, entry, element
+
+
+def test_ref_type_into_a_filled_entry_appends_after_focus_selects_all(fake_atspi, monkeypatch):
+    """#1232: 'keep me' + ' more' stays 'keep me more' when focus selects all."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    assert driver.type_into(element, " more") == 5
+    assert entry.text == "keep me more"
+    assert entry.selection is None
+
+
+def test_ref_type_refuses_when_the_select_all_cannot_be_dropped(fake_atspi, monkeypatch):
+    """A whole-text selection that stays is refused before any write."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    monkeypatch.setattr(_atspi, "collapse_whole_selection_to_end", lambda _acc: False)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, " more")
+    assert exc.value.detail["reason"] == "would_replace_text"
+    assert entry.text == "keep me"
+
+
+def test_ref_type_never_confirms_a_write_that_lost_the_prior_text(fake_atspi, monkeypatch):
+    """The read-back compares prior plus typed text, not the typed text alone."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    monkeypatch.setattr(driver, "_type_confirmed_handle",
+                        lambda handle, text: setattr(handle, "text", text) or len(text))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, " more")
+    assert exc.value.detail["reason"] == "prior_text_lost"
+    assert exc.value.detail["expected"] == "keep me more"
+    assert exc.value.detail["actual"] == " more"
+
+
+def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monkeypatch):
+    """Only a single-line entry with text is collapsed; a text view keeps its selection."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    entry.states.discard("SINGLE_LINE")
+    entry.states.add("MULTI_LINE")
+    assert not _atspi.append_target_entry(entry)
+    entry.states.discard("MULTI_LINE")
+    entry.states.add("SINGLE_LINE")
+    entry.text, entry.selection, entry.caret = "", None, 0
+    assert _atspi.append_target_entry(entry)
+
+
+@pytest.mark.parametrize("already_cleared", [False, True])
+def test_chromium_frame_recovery_bypasses_repopulated_native_children(
+    fake_atspi, monkeypatch, already_cleared,
+):
+    """A cache event during clear must not pin recovery to an empty frame."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    fake_atspi.Cache = _NS(NONE=0, CHILDREN=2, DEFAULT=127, UNDEFINED=128)
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_PIDS", {6262})
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_CLEARED", {6262} if already_cleared else set())
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_OPEN", set())
+    empty = _adopt(_Acc("frame", states=("ACTIVE",)), _Acc("panel"))
+    page = _adopt(_Acc("frame", name="rowtable - Google Chrome", states=("SHOWING",)),
+                  _Acc("document web", name="rowtable"))
+    app = _Acc("application", name="Google Chrome")
+    masks = [127]
+    clears = []
+    app.set_cache_mask = masks.append
+    for node in (app, empty, page):
+        node.get_application = lambda: app
+        node.get_toolkit_name = lambda: "Chrome"
+        node.get_process_id = lambda: 6262
+
+    def children():
+        # Simulate a native CHILDREN cache event repopulating the stale array
+        # during every clear. Only a mask bypass exposes the real page sibling.
+        return [empty] if masks[-1] & 2 else [empty, page]
+
+    app.get_child_count = lambda: len(children())
+    app.get_child_at_index = lambda index: children()[index]
+    app.clear_cache = lambda: clears.append("application")
+    with _atspi.read_cache():
+        assert _atspi.chromium_snapshot_root(empty) is page
+    assert clears == ["application"]
+    assert masks == [127, 125, 128]
+    assert not _atspi.whole_text_selected(entry)
+    assert driver.type_into(element, "x") == 1
+    assert entry.text == "x"
+
+
+def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
+    """#1232: GTK 4 marks an entry neither SINGLE_LINE nor MULTI_LINE."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    entry.states.discard("SINGLE_LINE")
+    assert _atspi.append_target_entry(entry)
+    assert driver.type_into(element, " more") == 5
+    assert entry.text == "keep me more"
+    assert entry.selection is None
+
+
+def test_ref_type_keeps_the_selection_of_a_stateless_text_with_line_breaks(fake_atspi, monkeypatch):
+    """A text role with line breaks and no single-line state is an editor, not an entry."""
+    _driver, entry, _element = _select_all_entry(monkeypatch)
+    entry.states.discard("SINGLE_LINE")
+    entry.text = "one\ntwo"
+    assert not _atspi.append_target_entry(entry)
+
+
 def test_chromium_snapshot_root_clears_again_when_the_cleared_read_is_empty() -> None:
     """Synthetic AT-SPI nodes, not a live Chrome.
 
@@ -23081,39 +23223,68 @@ def test_chromium_snapshot_root_clears_again_when_the_cleared_read_is_empty() ->
         _atspi._BROWSER_BAR_OPEN.clear()
 
 
-@pytest.mark.parametrize("already_cleared", [False, True])
-def test_chromium_frame_recovery_bypasses_repopulated_native_children(
-    fake_atspi, monkeypatch, already_cleared,
-):
-    """A cache event during clear must not pin recovery to an empty frame."""
-    from a11y_computer_use.drivers import _atspi_events
+def _lo_validity_popup(window_role: str = "window"):
+    """Synthetic LibreOffice validity list. Not a live Calc window.
 
-    fake_atspi.Cache = _NS(NONE=0, CHILDREN=2, DEFAULT=127, UNDEFINED=128)
-    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
-    monkeypatch.setattr(_atspi, "_BROWSER_BAR_PIDS", {6262})
-    monkeypatch.setattr(_atspi, "_BROWSER_BAR_CLEARED", {6262} if already_cleared else set())
-    monkeypatch.setattr(_atspi, "_BROWSER_BAR_OPEN", set())
-    empty = _adopt(_Acc("frame", states=("ACTIVE",)), _Acc("panel"))
-    page = _adopt(_Acc("frame", name="rowtable - Google Chrome", states=("SHOWING",)),
-                  _Acc("document web", name="rowtable"))
-    app = _Acc("application", name="Google Chrome")
-    masks = [127]
-    clears = []
-    app.set_cache_mask = masks.append
-    for node in (app, empty, page):
-        node.get_application = lambda: app
-        node.get_toolkit_name = lambda: "Chrome"
-        node.get_process_id = lambda: 6262
+    A GTK tree table of entries inside an undecorated popup ``window``.
+    select_child marks the row SELECTED, as GTK does, without committing.
+    """
+    red = _outline_cell("Red", ["expand or contract", "edit", "activate"])
+    green = _outline_cell("Green", ["expand or contract", "edit", "activate"])
+    window = _outline_window(red, green)
+    window.role = window_role
+    app = green.get_application()
+    app.name = "soffice"
+    return window, red, green
 
-    def children():
-        # Simulate a native CHILDREN cache event repopulating the stale array
-        # during every clear. Only a mask bypass exposes the real page sibling.
-        return [empty] if masks[-1] & 2 else [empty, page]
 
-    app.get_child_count = lambda: len(children())
-    app.get_child_at_index = lambda index: children()[index]
-    app.clear_cache = lambda: clears.append("application")
-    with _atspi.read_cache():
-        assert _atspi.chromium_snapshot_root(empty) is page
-    assert clears == ["application"]
-    assert masks == [127, 125, 128]
+def test_libreoffice_validity_row_is_a_popup_row_without_double_click_note(fake_atspi) -> None:
+    """Refs #1247. Synthetic tree. Not a live Calc window."""
+    _window, red, green = _lo_validity_popup()
+    assert _atspi.libreoffice_popup_list_row(green) is True
+    assert _atspi.libreoffice_popup_list_row(red) is True
+    assert _atspi.outline_double_click_note(green) == ""
+    framed, _red, framed_green = _lo_validity_popup(window_role="frame")
+    assert _atspi.libreoffice_popup_list_row(framed_green) is False
+    assert _atspi.outline_double_click_note(framed_green) == "activates on double-click"
+    _plain, _r, other = _lo_validity_popup()
+    other.get_application().name = "treeprobe"
+    assert _atspi.libreoffice_popup_list_row(other) is False
+
+
+def test_libreoffice_validity_row_click_is_a_pointer_click_not_select_child(fake_atspi, monkeypatch) -> None:
+    """Refs #1247. Synthetic tree. Not a live Calc window.
+
+    select_child only highlights the row and Return then commits the old
+    entry. The ref click sends one pointer click and succeeds only when the
+    popup closes. A popup that stays open is an error, not success.
+    """
+    _window, _red, green = _lo_validity_popup()
+    tree = green.get_parent()
+    selected: list[int] = []
+    tree.select_child = lambda index: selected.append(index) or True
+    clicks: list[object] = []
+
+    def click(self, target, **_kwargs):
+        clicks.append(target)
+        green.states.discard("SHOWING")
+
+    monkeypatch.setattr(LinuxDriver, "click", click)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: green)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    element = Element("e4", "AXCell", "Green", None, Bounds(0, 48, 121, 180, 21), "snap-1", clickable=True)
+    assert LinuxDriver().press_element(element) is True
+    assert clicks == [element]
+    assert selected == []
+
+    _window, _red, stuck = _lo_validity_popup()
+    clicks.clear()
+    monkeypatch.setattr(LinuxDriver, "click", lambda self, target, **_kw: clicks.append(target))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: stuck)
+    ticks = iter(range(0, 1000))
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: float(next(ticks)))
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().press_element(element)
+    assert exc.value.detail["reason"] == "popup_not_closed"
+    assert clicks == [element]
