@@ -353,6 +353,17 @@ jobs:
         # reaped as orphans by the runner. `timeout` (as the block's last command)
         # sets the exit code.
         run: |
+          # Runner diagnostics only (no effect on the test run). The Linux job
+          # alternates between about 25 and about 43 minutes on identical code
+          # and image; this records the host so a slow run can be matched to
+          # its hardware and load. Every command is allowed to fail.
+          echo "::group::runner diagnostics"
+          nproc || true
+          lscpu | grep -E "^(Model name|CPU\(s\)|Thread|Core|Socket|CPU MHz|Hypervisor|BogoMIPS|L3 cache)" || true
+          uptime || true
+          cat /proc/loadavg || true
+          free -m || true
+          echo "::endgroup::"
           # Quoted heredoc at this block's indent. YAML strips that indent, so
           # the delimiter is column 0 for the shell. It stays outside the
           # single-quoted bash -c below; single-quoted echoes there are a
