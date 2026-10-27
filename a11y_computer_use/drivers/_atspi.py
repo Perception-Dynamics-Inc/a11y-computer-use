@@ -19955,6 +19955,16 @@ def _chromium_app(acc) -> bool:
     return "chrom" in name
 
 
+def app_is_chromium(app: str) -> bool:
+    """True when the accessible application ``app`` is Chromium or Electron."""
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return "chrom" in app.lower()
+    return _chromium_app(root)
+
+
 def _reports_multiline(node, attrs: dict) -> bool:
     """True when ``node`` publishes multi-line text.
 

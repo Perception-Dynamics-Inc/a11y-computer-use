@@ -6225,7 +6225,8 @@ class LinuxDriver:
             self._refuse_xtest_password_focus()
         self._focused_editable = None
         try:
-            _linux_input.press_chord(chord)
+            with _linux_input.physical_position_target(self._frontmost_is_chromium):
+                _linux_input.press_chord(chord)
         except _linux_input.ShortcutUndeliverable as exc:
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED, f"{chord}: {exc}",
@@ -6233,6 +6234,23 @@ class LinuxDriver:
                         "active keyboard layout"},
             ) from exc
         return None
+
+    def _frontmost_is_chromium(self) -> bool:
+        """True when the active window belongs to Chromium or an Electron app.
+
+        Only they match Ctrl/Alt shortcuts by physical key, so only they get
+        the US-position keycode on a lone non-Latin layout (#1211). An
+        unknown target keeps the spare-keycode path that GTK and Qt honour.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            app_id, _pid = self.frontmost_app()
+            if not app_id:
+                return False
+            return bool(self._run(lambda: _atspi.app_is_chromium(app_id)))
+        except Exception:
+            return False
 
     def _confirm_file_chooser(self, chord: str) -> bool:
         """Activate the chooser's Open or Save button. True when this chord was that confirm.

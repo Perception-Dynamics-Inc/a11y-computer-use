@@ -3003,13 +3003,118 @@ def test_shortcut_on_a_single_non_latin_layout_presses_the_us_position_key(
     monkeypatch.setattr(_linux_input, "_display", display)
     monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
 
-    _linux_input.press_chord(chord)
+    with _linux_input.physical_position_target(lambda: True):  # a Chromium target
+        _linux_input.press_chord(chord)
 
     assert [(kind, detail) for kind, detail, _x, _y in events] == [
         *[(2, m) for m in mods], (2, keycode), (3, keycode), *[(3, m) for m in reversed(mods)],
     ]
     assert display.remapped == []
     assert _linux_input.take_mismatch() is None
+
+
+@pytest.mark.parametrize("target", ["non-chromium", "unknown", "resolver-raises"])
+@pytest.mark.parametrize("chord", ["ctrl+z", "ctrl+shift+a", "alt+c"])
+def test_shortcut_for_gtk_or_an_unknown_target_keeps_the_spare_keycode_path(
+    xtest_recorder, monkeypatch, target, chord,
+) -> None:
+    """#1211 follow-up: GTK/Qt ignore the physical keycode on a lone ru layout and
+    honour a spare keycode carrying the Latin keysym. Only Chromium gets the US position."""
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+
+    def boom() -> bool:
+        raise RuntimeError("no accessibility bus")
+
+    resolver = {"non-chromium": lambda: False, "resolver-raises": boom}.get(target)
+    if resolver is None:
+        _linux_input.press_chord(chord)
+    else:
+        with _linux_input.physical_position_target(resolver):
+            _linux_input.press_chord(chord)
+
+    keysym = ord(chord[-1])
+    assert len(display.remapped) == 2 and display.remapped[0][1] == keysym
+    spare = display.remapped[0][0]
+    pressed = [detail for kind, detail, _x, _y in events if kind == 2]
+    assert spare in pressed
+    assert not {52, 38, 54} & set(pressed)
+
+
+def test_target_is_asked_once_and_only_when_the_layout_needs_it(
+    xtest_recorder, monkeypatch,
+) -> None:
+    events, _ = xtest_recorder
+    asked: list[str] = []
+
+    def resolver() -> bool:
+        asked.append("asked")
+        return True
+
+    ru = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", ru)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    with _linux_input.physical_position_target(resolver):
+        _linux_input.press_chord("ctrl+1")   # a Latin key exists: no question
+        _linux_input.press_chord("Return")
+        assert asked == []
+        _linux_input.press_chord("ctrl+z")
+    assert asked == ["asked"]
+
+
+@pytest.mark.parametrize("toolkit,expected", [("Chromium", True), ("gtk", False), ("Qt", False)])
+def test_driver_picks_the_physical_key_only_for_chromium(monkeypatch, toolkit, expected) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    class App:
+        def get_toolkit_name(self):
+            return toolkit
+
+        def get_name(self):
+            return {"Chromium": "chrome"}.get(toolkit, toolkit)
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("target", None))
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: App())
+    assert driver._frontmost_is_chromium() is expected
+    monkeypatch.setattr(driver, "frontmost_app", lambda: (None, None))
+    assert driver._frontmost_is_chromium() is False
+
+    def broken(app, scope):
+        raise OSError("bus gone")
+
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("target", None))
+    monkeypatch.setattr(_atspi, "find_root", broken)
+    assert driver._frontmost_is_chromium() is False
+
+
+def test_key_chord_gives_chromium_the_us_position_key_and_gtk_the_spare_keycode(
+    xtest_recorder, monkeypatch,
+) -> None:
+    events, _ = xtest_recorder
+    display = _russian_only_display()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr(driver, "_confirm_file_chooser", lambda _chord: False)
+    from a11y_computer_use.drivers import _linux_system
+    import a11y_computer_use.drivers.linux as driver_module
+
+    monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda: None)
+    monkeypatch.setattr(driver_module, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_frontmost_is_chromium", lambda: True)
+    driver.key_chord("ctrl+z")
+    assert [d for k, d, _x, _y in events if k == 2] == [37, 52]
+    assert display.remapped == []
+    events.clear()
+    monkeypatch.setattr(driver, "_frontmost_is_chromium", lambda: False)
+    driver.key_chord("ctrl+z")
+    spare = display.remapped[0][0]
+    assert [d for k, d, _x, _y in events if k == 2] == [37, spare]
 
 
 def test_shortcut_on_a_non_latin_layout_stays_on_the_key_when_a_digit_is_latin(
@@ -3059,7 +3164,8 @@ def test_shortcut_is_refused_not_misdirected_when_the_us_position_key_cannot_be_
     monkeypatch.setattr(_linux_input, "_lock_mask", lambda: (False, False))
     # y is on the layout, so ctrl+z has no Latin key anywhere and must not fall to the y key
     with pytest.raises(_linux_input.ShortcutUndeliverable, match=expect):
-        _linux_input.press_chord("ctrl+z")
+        with _linux_input.physical_position_target(lambda: True):
+            _linux_input.press_chord("ctrl+z")
 
     assert events == []
     assert display.remapped == []
@@ -3074,6 +3180,7 @@ def test_driver_reports_an_undeliverable_shortcut_as_an_error(xtest_recorder, mo
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn, *a, **k: fn(*a, **k))
     monkeypatch.setattr(driver, "_confirm_file_chooser", lambda _chord: False)
+    monkeypatch.setattr(driver, "_frontmost_is_chromium", lambda: True)
     from a11y_computer_use.drivers import _linux_system
 
     monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda: None)

@@ -22,6 +22,7 @@ from time import sleep as _wheel_sleep
 from collections.abc import Sequence
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 _display = None
 
@@ -512,6 +513,33 @@ def _parse_chord(chord: str) -> tuple[list[int], int]:
     raise ValueError(f"unknown key {key!r} in {chord!r}")
 
 
+_physical_resolver: ContextVar = ContextVar("a11y_physical_position_resolver", default=None)
+
+
+@contextmanager
+def physical_position_target(is_chromium):
+    """Say how to decide whether the chord target matches shortcuts by physical key.
+
+    ``is_chromium`` is a zero-argument callable, called at most once and only
+    for a Ctrl/Alt/Super chord on a layout with no Latin key for it.
+    """
+    token = _physical_resolver.set(is_chromium)
+    try:
+        yield
+    finally:
+        _physical_resolver.reset(token)
+
+
+def _physical_position_target() -> bool:
+    resolver = _physical_resolver.get()
+    if resolver is None:
+        return False
+    try:
+        return bool(resolver())
+    except Exception:
+        return False
+
+
 class ShortcutUndeliverable(ValueError):
     """A Ctrl/Alt/Super shortcut has no physical key to press on this layout."""
 
@@ -579,6 +607,13 @@ def press_chord(chord: str) -> None:
     Ctrl+Latin-letter shortcuts retain a real keycode when the letter is
     mapped in another layout group, preserving Chromium's physical-key
     accelerator identity without changing the selected layout.
+
+    On a layout with no Latin letter at all (a lone ru/gr/he/ar), a Chromium
+    target gets Ctrl/Alt/Super + letter or digit at its US-QWERTY position
+    (#1211). GTK and Qt ignore that keycode there and honour a spare keycode
+    carrying the Latin keysym, so every other target, and an unknown one,
+    keeps the spare-keycode path. ``physical_position_target`` supplies the
+    answer, and it is asked only in that situation.
     """
     from Xlib import X
 
@@ -604,9 +639,10 @@ def press_chord(chord: str) -> None:
                     key_kc, needs_shift = candidate, bool(level % 2)
                     physical = True  # another group's Latin key, on purpose
                     break
-        if key_kc is None:
-            # No group has the Latin key (a single ru/gr/he/ar layout): press
-            # the key at its US-QWERTY position. Never a spare keycode.
+        if key_kc is None and _physical_position_target():
+            # No group has the Latin key (a single ru/gr/he/ar layout) and the
+            # target matches by physical key (Chromium): press the key at its
+            # US-QWERTY position. Never a spare keycode.
             key_kc = _us_position_keycode(ksym)
             needs_shift = ord("A") <= ksym <= ord("Z")
             physical = True
