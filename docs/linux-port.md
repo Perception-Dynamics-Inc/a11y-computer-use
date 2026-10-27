@@ -403,6 +403,53 @@ opaque, including the wxGTK layout with the toolbar description on a sibling
 grip: its displayed reading is not an accessible value. When Audacity publishes
 real children or names, the driver preserves them.
 
+## Input methods (IBus)
+
+Typing and `set_value` into Chromium send XTEST keycodes. With
+`XMODIFIERS=@im=ibus`, Chromium routes them to the active IBus engine, so
+`libpinyin` or `m17n:ru:translit` turns `hello world 42` into
+`合理咯我人类的42` or `хелло ворлд 42` (#1219). GTK3 entries and `xkb:` engines
+are not affected.
+
+While keys are sent, `_linux_ime.ascii_passthrough` switches the global engine to
+`xkb:us::eng` (about 5 ms; the XKB layout does not change) and puts the user's
+engine back after, checking by reading it back. One switch covers a whole string.
+If the engine cannot be switched and the text has ASCII in it (a space counts),
+the call is refused as `ime_active` with `detail.ime` naming the engine and
+`detail.typed: false`, before any key is sent or any field is cleared. Nothing the
+engine would transform reaches the field, and the target keeps keyboard focus.
+Text with no ASCII uses spare keycodes an engine passes through, so it is still typed.
+`A11Y_IME_BYPASS=0` turns the switch off. fcitx5 and other
+frameworks are not switched or detected.
+
+Switching the engine discards an open composition (the uncommitted preedit, such
+as `你好` after typing `nihao`). Before it switches, `ascii_passthrough` reads the
+IBus panel (`ibus-ui-gtk3`) over AT-SPI: a showing label with text in it (the
+preedit or a candidate) means a composition is open. The call is then refused as
+`ime_composition_open` before the switch and before any key, with `detail.typed:
+false`, and the preedit is left as it was. Commit it (Enter or a candidate) or
+cancel it (Escape) and retry. The panel's candidate window stays mapped when idle,
+so the check reads its labels, not its map state.
+
+The panel learns of a preedit tens of milliseconds after the keys that made it, so
+one read that finds it idle proves nothing. The check reads until the panel has shown
+no composition for 0.25 s (a composition found at any read refuses at once), which
+costs about 0.25 s per call while a non-US engine is active. A panel that cannot be
+read (no `ibus-ui-gtk3`, for example `ibus-daemon --panel disable`, or an AT-SPI
+timeout that outlasts 1.5 s of retries) leaves the composition unknown, and an unknown
+composition is refused as `ime_composition_unknown`, because the switch could discard
+it. `A11Y_IME_COMPOSITION_UNKNOWN=proceed` types anyway. AT-SPI exposes no preedit
+marker on the field itself in Chrome or Firefox (the preedit is just part of its text),
+so the panel is the only signal; an engine that shows its preedit only inline, with no
+panel text, cannot be seen.
+
+For a browser field the engine switch and this check run before the write touches
+the field, including `set_value`'s clear: a Firefox entry is cleared with ctrl+a,
+BackSpace, and a refusal after that would leave it empty. `set_value` also checks
+before it raises the window, focuses the field or writes the DOM. The key clear
+refuses on its own when a composition is open. A `type` addressed by `ref` focuses
+the field first, which commits the preedit in Chrome.
+
 ## Meld file comparisons
 
 Meld 3.22.3 (GTK 3) exposes the file-diff chunk-action gutter between text
