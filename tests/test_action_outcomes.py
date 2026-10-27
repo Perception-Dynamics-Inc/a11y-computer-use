@@ -2095,6 +2095,10 @@ class _CoveredLinuxDriver(TreeDriver):
                  raise_churn: bool = False, activate_fails: bool = False,
                  click_lands: bool = True) -> None:
         super().__init__()
+        # Outcome verification checks process liveness. A fixed synthetic PID
+        # can name an unrelated process that exits mid-click on any CI host.
+        self.pid = os.getpid()
+        self.apps[0]["pid"] = self.pid
         self.covered = True
         self.raise_clears = raise_clears
         self.moves = moves
@@ -2177,6 +2181,27 @@ def test_linux_covered_click_uses_the_box_resolved_after_the_raise(
     runtime.click("e2")
 
     assert _clicks(driver) == [("click", "e2", (300, 200))]
+
+
+def test_linux_covered_click_is_independent_of_unrelated_process_exit(tmp_path, monkeypatch):
+    """An unrelated host process exiting must not change the click verdict."""
+    driver = _CoveredLinuxDriver()
+    alive = outcome.pid_alive
+    monkeypatch.setattr(outcome, "pid_alive", lambda pid: True)
+    runtime = _covered_runtime(tmp_path, monkeypatch, driver)
+    click = driver.click
+
+    def click_and_exit(target, **kwargs):
+        click(target, **kwargs)
+        # Model the old fixture's PID disappearing after the baseline read.
+        monkeypatch.setattr(outcome, "pid_alive", lambda pid: pid == os.getpid() and alive(pid))
+
+    driver.click = click_and_exit
+
+    result = runtime.click("e2")
+
+    assert result.outcome == "confirmed"
+    assert _clicks(driver) == [("click", "e2", (10, 20))]
 
 
 def test_linux_click_still_covered_after_the_raise_is_refused_as_covered(
