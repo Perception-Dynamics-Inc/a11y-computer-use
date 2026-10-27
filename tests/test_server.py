@@ -7396,3 +7396,39 @@ def test_result_label_quotes_the_ref_the_agent_used(tmp_path) -> None:
     assert rt._label("e11", live) == "e11 (AXButton 'BetaBtn')"
     assert rt._label("e10", live) == "e10 (AXButton 'BetaBtn')"
     assert rt._label(None, live) == "e10 (AXButton 'BetaBtn')"
+
+
+def test_driver_refusal_names_the_ref_the_agent_used() -> None:
+    """#1262: a not_editable refusal for a re-issued control quotes the issued ref."""
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    exc = ComputerUseError(
+        ErrorCode.UNSUPPORTED, "e10 (AXButton 'BetaBtn') is not editable",
+        detail={"ref": "e10", "role": "AXButton", "reason": "not_editable"},
+    )
+    out = server._with_issued_ref(exc, "e11", live)
+    assert out is exc
+    assert out.message == "e11 (AXButton 'BetaBtn') is not editable"
+    assert str(out) == out.message
+    assert out.detail == {"ref": "e11", "role": "AXButton", "reason": "not_editable"}
+
+    # e100 is not e10; only whole refs are replaced.
+    other = ComputerUseError(ErrorCode.UNSUPPORTED, "e10 near e100", detail={"ref": "e10"})
+    assert server._with_issued_ref(other, "e11", live).message == "e11 near e100"
+
+
+def test_driver_refusal_keeps_its_ref_when_it_is_not_the_live_number() -> None:
+    """#1262: the same ref, no ref, or a detail naming another element is untouched."""
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    for ref, detail in (("e10", {"ref": "e10"}), (None, {"ref": "e10"}), ("e11", {"ref": "e7"}), ("e11", {})):
+        exc = ComputerUseError(ErrorCode.UNSUPPORTED, "e10 is not editable", detail=dict(detail))
+        out = server._with_issued_ref(exc, ref, live)
+        assert out.message == "e10 is not editable"
+        assert out.detail == detail
