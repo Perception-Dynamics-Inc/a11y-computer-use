@@ -569,6 +569,77 @@ def _cover_rows(snap: object, cover: object) -> tuple:
     return tuple(sorted((_page_row(el) for el in _subtree(snap, cover)), key=_sort_key))
 
 
+def _tab_groups(snap: object) -> list[list]:
+    """The AXTab siblings of each tab strip, in tree order."""
+    groups: dict = {}
+    for el in _snap_elements(snap):
+        if getattr(el, "role", "") == "AXTab":
+            groups.setdefault(getattr(el, "parent", None), []).append(el)
+    return list(groups.values())
+
+
+def _tab_group_for(snap: object, tab: object) -> list | None:
+    for group in _tab_groups(snap):
+        if any(getattr(el, "ref", None) == getattr(tab, "ref", object()) for el in group):
+            return group
+    return None
+
+
+def wrong_tab_effect(before: object, after: object, target: object) -> str | None:
+    """Evidence that a tab or tab-close click activated a different tab (#1208).
+
+    A click on a tab must leave that tab selected, and a click on the Close
+    button inside a tab must not leave that tab newly selected: that is a
+    click that landed on the tab body, or on the neighbour, and any tree
+    change is the wrong tab's. None when the target cannot be placed in one
+    tab strip before and after, so a layout this cannot read is not accused.
+    """
+    role = getattr(target, "role", "")
+    owner = target
+    closing = False
+    if role == "AXButton" and getattr(target, "title", "").casefold() == "close":
+        by_ref = _by_ref(before)
+        parent = by_ref.get(getattr(target, "parent", None))
+        if parent is None or getattr(parent, "role", "") != "AXTab":
+            return None
+        owner, closing = parent, True
+    elif role != "AXTab":
+        return None
+    before_group = _tab_group_for(before, owner)
+    if not before_group:
+        return None
+    index = next(i for i, el in enumerate(before_group) if el.ref == owner.ref)
+    candidates = [g for g in _tab_groups(after) if len(g) == len(before_group)]
+    if len(candidates) != 1:
+        return None
+    after_group = candidates[0]
+    was = [bool(getattr(el, "selected", False)) for el in before_group]
+    now = [bool(getattr(el, "selected", False)) for el in after_group]
+    newly = [i for i, (a, b) in enumerate(zip(was, now)) if b and not a]
+    if closing:
+        if index in newly:
+            return (
+                f"the click activated tab {getattr(owner, 'title', '')!r} instead of "
+                "closing it; the Close button was not hit"
+            )
+        return None
+    if now[index] or was[index]:
+        return None
+    others = [i for i in newly if i != index]
+    if not others:
+        current = [i for i, on in enumerate(now) if on]
+        shown = getattr(after_group[current[0]], "title", "") if current else ""
+        return (
+            f"clicked tab {getattr(owner, 'title', '')!r} is not selected after the click"
+            + (f"; tab {shown!r} is" if shown else "")
+        )
+    other = getattr(after_group[others[0]], "title", "")
+    return (
+        f"clicked tab {getattr(owner, 'title', '')!r} is not selected; "
+        f"tab {other!r} was activated instead"
+    )
+
+
 def occluded_click_effect(before: object, after: object, target: object) -> str | None:
     """Evidence when a click changed a cover and left the target alone.
 
