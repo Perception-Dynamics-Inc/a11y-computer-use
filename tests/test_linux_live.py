@@ -14728,7 +14728,10 @@ def test_linux_firefox_datalist_input_takes_set_value_and_ref_type(tmp_path) -> 
                 break
         line = next(ln for ln in shot.splitlines() if 'combobox "City"' in ln)
         assert "edit" in line and "Plain" not in line, line
-        bar = next(ln for ln in shot.splitlines() if 'combobox "Search or enter address"' in ln)
+        # The address bar's name depends on the build and search engine
+        # ("Search or enter address", "Search with Google or enter address").
+        bar = next(ln for ln in shot.splitlines()
+                   if re.search(r'combobox "[^"]*enter address"', ln))
         assert "edit" not in bar, bar
         ref = re.search(r'(e\d+) combobox "City"', line).group(1)
         found = runtime.find("firefox", text="City", editable=True)
