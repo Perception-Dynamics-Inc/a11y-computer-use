@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">
+<office:body><office:spreadsheet>
+<table:content-validations>
+ <table:content-validation table:name="val1" table:condition="of:cell-content-is-in-list(&quot;Red&quot;;&quot;Green&quot;;&quot;Blue&quot;)" table:allow-empty-cell="true" table:display-list="unsorted" table:base-cell-address="Data.D2"/>
+</table:content-validations>
+<table:table table:name="Data">
+ <table:table-row><table:table-cell office:value-type="string"><text:p>Fruit</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>Qty</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>Region</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>Color</text:p></table:table-cell></table:table-row>
+ <table:table-row><table:table-cell office:value-type="string"><text:p>Apple</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="5"><text:p>5</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>North</text:p></table:table-cell><table:table-cell table:content-validation-name="val1"/></table:table-row>
+ <table:table-row><table:table-cell office:value-type="string"><text:p>Banana</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="7"><text:p>7</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>South</text:p></table:table-cell><table:table-cell table:content-validation-name="val1"/></table:table-row>
+ <table:table-row><table:table-cell office:value-type="string"><text:p>Cherry</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="3"><text:p>3</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>North</text:p></table:table-cell><table:table-cell table:content-validation-name="val1"/></table:table-row>
+ <table:table-row><table:table-cell office:value-type="string"><text:p>Date</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="9"><text:p>9</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>South</text:p></table:table-cell><table:table-cell table:content-validation-name="val1"/></table:table-row>
+</table:table>
+<table:table table:name="Notes"><table:table-row><table:table-cell office:value-type="string"><text:p>notes sheet</text:p></table:table-cell></table:table-row></table:table>
+<table:database-ranges><table:database-range table:name="__Anonymous_Sheet_DB__0" table:target-range-address="Data.A1:Data.D5" table:display-filter-buttons="true"/></table:database-ranges>
+</office:spreadsheet></office:body></office:document>

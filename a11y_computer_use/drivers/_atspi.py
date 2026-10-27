@@ -8027,6 +8027,43 @@ def _focused_office_paragraph(app: str, *, max_nodes: int):
     return None if queue else candidate
 
 
+def _calc_drawing_paragraph(table):
+    """The focused paragraph of a Calc drawing text object, or None.
+
+    While a cell comment (a callout) or another shape's text is edited,
+    FOCUSED stays on the sheet ``table`` and also sits on the paragraph
+    inside a ``panel`` sibling of that table under ``document spreadsheet``.
+    The table has no Text, so the paragraph is the read-back. Only the
+    document's direct panel children are walked, never the table's cells.
+    Two focused paragraphs are ambiguous and give None.
+    """
+    if _role_name(table) != "table":
+        return None
+    doc = _call_first(table, ("get_parent", "getParent"))
+    if doc is None or _role_name(doc) != "document spreadsheet":
+        return None
+    found = None
+    count = int(_call_first(doc, ("get_child_count",), default=0) or 0)
+    for index in range(min(count, 64)):
+        panel = _call_first(doc, ("get_child_at_index",), index)
+        if panel is None or _role_name(panel) != "panel":
+            continue
+        inner = int(_call_first(panel, ("get_child_count",), default=0) or 0)
+        for sub in range(min(inner, 16)):
+            node = _call_first(panel, ("get_child_at_index",), sub)
+            if (
+                node is not None
+                and _role_name(node) == "paragraph"
+                and _state_has(node, "FOCUSED")
+                and _state_has(node, "SHOWING")
+                and not is_secure(node)
+            ):
+                if found is not None:
+                    return None
+                found = node
+    return found
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -8045,6 +8082,10 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         acc = _focused_office_paragraph(app, max_nodes=max_nodes)
         if acc is None:
             return None
+    if _role_name(acc) == "table" and _libreoffice_accessible(acc):
+        paragraph = _calc_drawing_paragraph(acc)
+        if paragraph is not None:
+            acc = paragraph
     if _chromium_app(acc):
         entry = focused_chromium_entry(app, max_nodes=max_nodes)
         if entry is not None:
