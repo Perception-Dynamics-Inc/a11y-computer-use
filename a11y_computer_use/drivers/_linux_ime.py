@@ -10,8 +10,9 @@ the ASCII path is affected.
 While text is typed, the global engine is switched to a pass-through ``xkb:``
 engine and the user's engine is restored afterwards. ``xkb:*`` engines are
 what IBus uses for a plain layout, so nothing is transformed. If the switch
-cannot be made the failure is remembered, and the caller's ``text_mismatch``
-is reported as ``ime_active`` naming the engine.
+cannot be made and the text has ASCII in it, nothing is typed: the call is
+refused as ``ime_active`` naming the engine, before any key is sent, so no
+transformed text is left in the field.
 
 Scope: IBus only. fcitx5 and others are not switched or detected.
 ``A11Y_IME_BYPASS=0`` turns the switch off.
@@ -24,7 +25,6 @@ import os
 import shutil
 import subprocess
 import threading
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -32,9 +32,6 @@ _log = logging.getLogger(__name__)
 
 PASSTHROUGH_ENGINE = "xkb:us::eng"
 _TIMEOUT_S = 2.0
-# A refusal names the IME only while the typing call that could not bypass it
-# is still being judged.
-_FAILURE_WINDOW_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -47,7 +44,6 @@ class ActiveIme:
 
 
 _state = threading.local()
-_failure: tuple[ActiveIme, float] | None = None
 
 
 def _enabled() -> bool:
@@ -95,12 +91,30 @@ def active_ime() -> ActiveIme | None:
     return ActiveIme("ibus", name)
 
 
-def recent_bypass_failure() -> ActiveIme | None:
-    """The IME that a recent typing call could not bypass, or None."""
-    found = _failure
-    if found is None or time.monotonic() - found[1] > _FAILURE_WINDOW_S:
-        return None
-    return found[0]
+def needs_passthrough(text: str | None) -> bool:
+    """True when typing ``text`` goes through the engine as ASCII keystrokes.
+
+    Characters outside ASCII use a spare keycode and pass an engine unchanged.
+    ``None`` means the text is not known, so assume it does.
+    """
+    return text is None or any(0x20 <= ord(ch) < 0x7F for ch in text)
+
+
+def _refuse(ime: ActiveIme):
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"the active input method ({ime}) changes typed text and could not be switched "
+        "to a pass-through engine; nothing was typed and the field was not changed. Switch the input method to a plain "
+        "keyboard layout (for example 'ibus engine xkb:us::eng') and retry",
+        detail={
+            "platform": "linux",
+            "reason": "ime_active",
+            "ime": {"framework": ime.framework, "engine": ime.engine},
+            "typed": False,
+        },
+    )
 
 
 def _set_engine(name: str) -> bool:
@@ -112,13 +126,15 @@ def _set_engine(name: str) -> bool:
 
 
 @contextmanager
-def ascii_passthrough():
+def ascii_passthrough(text: str | None = None):
     """Keep an IBus engine from transforming the keystrokes sent inside.
 
-    Re-entrant: only the outermost use switches and restores. Without an
-    active transforming engine this is one cheap query and nothing else.
+    ``text`` is what will be typed inside. When the engine cannot be switched
+    and that text has ASCII in it, this raises the ``ime_active`` refusal
+    before the body runs, so no key is sent. Re-entrant: only the outermost use
+    switches and restores. Without an active transforming engine this is one
+    cheap query and nothing else.
     """
-    global _failure
     depth = getattr(_state, "depth", 0)
     if depth:
         _state.depth = depth + 1
@@ -129,12 +145,12 @@ def ascii_passthrough():
         return
     ime = active_ime()
     switched = False
-    _failure = None
     if ime is not None:
         switched = _set_engine(PASSTHROUGH_ENGINE)
         if not switched:
-            _failure = (ime, time.monotonic())
-            _log.warning("could not switch %s to %s; typed text may be transformed", ime, PASSTHROUGH_ENGINE)
+            _log.warning("could not switch %s to %s", ime, PASSTHROUGH_ENGINE)
+            if needs_passthrough(text):
+                raise _refuse(ime)
     _state.depth = 1
     try:
         yield

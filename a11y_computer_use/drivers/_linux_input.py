@@ -425,7 +425,7 @@ def type_string(text: str, *, delay: float | None = None) -> None:
     from transforming it (#1219). See ``_type_string_keys`` for the keystrokes."""
     from a11y_computer_use.drivers import _linux_ime
 
-    with _linux_ime.ascii_passthrough():
+    with _linux_ime.ascii_passthrough(text):
         _type_string_keys(text, delay=delay)
 
 

@@ -45,7 +45,6 @@ def ibus(monkeypatch):
     monkeypatch.setattr(_linux_ime.subprocess, "run", run)
     monkeypatch.setenv("A11Y_IME_BYPASS", "1")
     monkeypatch.delenv("FAKE_IBUS_REFUSE", raising=False)
-    monkeypatch.setattr(_linux_ime, "_failure", None)
 
     class Fake:
         def set(self, name: str) -> None:
@@ -87,7 +86,6 @@ def test_engine_is_pass_through_while_typing_and_restored_after(ibus, engine) ->
     with _linux_ime.ascii_passthrough():
         assert ibus.engine == _linux_ime.PASSTHROUGH_ENGINE
     assert ibus.engine == engine
-    assert _linux_ime.recent_bypass_failure() is None
 
 
 def test_restored_when_the_typing_raises(ibus) -> None:
@@ -141,54 +139,64 @@ def test_type_into_target_switches_once_for_the_whole_string(ibus, monkeypatch) 
     assert ibus.engine == "libpinyin"
 
 
-def test_unswitchable_engine_is_named_in_the_refusal(ibus, monkeypatch) -> None:
+def test_unswitchable_engine_refuses_before_any_key_and_names_the_ime(ibus, monkeypatch) -> None:
     ibus.set("m17n:ru:translit")
     monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
-    with _linux_ime.ascii_passthrough():
-        pass
-    assert ibus.engine == "m17n:ru:translit"
-    err = _atspi._text_mismatch(
-        "text_mismatch", "the text read back does not contain 'hello world 42'",
-        expected="hello world 42", actual="хелло ворлд 42",
-    )
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "_type_string_keys", lambda text, delay=None: sent.append(text))
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_input.type_string("hello world 42")
+    assert sent == []
+    err = exc.value
     assert err.code is ErrorCode.UNSUPPORTED
     assert err.detail["reason"] == "ime_active"
     assert err.detail["ime"] == {"framework": "ibus", "engine": "m17n:ru:translit"}
-    assert err.detail["actual"] == "хелло ворлд 42"
+    assert err.detail["typed"] is False
     assert "m17n:ru:translit" in str(err) and "xkb:us::eng" in str(err)
     assert outcome.next_for_error(err.code.value, err.detail) == ("cdp",)
+    assert ibus.engine == "m17n:ru:translit"  # the user's engine is untouched
 
 
-def test_other_mismatches_stay_generic(ibus, monkeypatch) -> None:
-    ibus.set("libpinyin")
-    with _linux_ime.ascii_passthrough():
-        pass
-    err = _atspi._text_mismatch("text_mismatch", "does not match")
-    assert err.detail["reason"] == "text_mismatch"
-    assert "ime" not in err.detail
-    # A refusal that is not a text mismatch keeps its own reason even after a failure.
-    monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
-    ibus.set("libpinyin")
-    with _linux_ime.ascii_passthrough():
-        pass
-    assert _atspi._text_mismatch("focus_lost", "x").detail["reason"] == "focus_lost"
-
-
-def test_a_failure_is_forgotten(ibus, monkeypatch) -> None:
+def test_text_outside_ascii_is_not_refused_when_the_switch_fails(ibus, monkeypatch) -> None:
+    """Spare-keycode characters pass an engine unchanged, so they can still be typed."""
     ibus.set("libpinyin")
     monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
-    with _linux_ime.ascii_passthrough():
-        pass
-    assert _linux_ime.recent_bypass_failure() is not None
-    # Stale after the window.
-    monkeypatch.setattr(_linux_ime, "_failure", (_linux_ime.recent_bypass_failure(), time.monotonic() - 60))
-    assert _linux_ime.recent_bypass_failure() is None
-    # Cleared by the next typing call that can switch.
-    monkeypatch.setattr(_linux_ime, "_failure", (_linux_ime.ActiveIme("ibus", "libpinyin"), time.monotonic()))
-    monkeypatch.delenv("FAKE_IBUS_REFUSE")
-    with _linux_ime.ascii_passthrough():
-        pass
-    assert _linux_ime.recent_bypass_failure() is None
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "_type_string_keys", lambda text, delay=None: sent.append(text))
+    _linux_input.type_string("привет合理")
+    assert sent == ["привет合理"]
+    assert _linux_ime.needs_passthrough("a") and not _linux_ime.needs_passthrough("привет")
+    assert _linux_ime.needs_passthrough(None)
+
+
+def test_type_into_target_refuses_before_the_first_character(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
+    sent: list[str] = []
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_type_string", sent.append)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._type_into_target(object(), "hello")
+    assert exc.value.detail["reason"] == "ime_active"
+    assert sent == []
+
+
+def test_a_refused_type_leaves_no_text_in_the_field(ibus, monkeypatch) -> None:
+    """The regression: an unswitchable engine used to type anyway and leave IME text behind."""
+    ibus.set("m17n:ru:translit")
+    monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
+    field = {"text": ""}
+
+    def keys(text, delay=None):
+        field["text"] += "хелло ворлд" if _linux_ime.active_ime() else text
+
+    monkeypatch.setattr(_linux_input, "_type_string_keys", keys)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: None)
+    with pytest.raises(ComputerUseError):
+        _atspi._type_into_target(object(), "hello world")
+    assert field["text"] == ""
 
 
 def test_a_set_value_that_cannot_bypass_leaves_a_filled_field_alone(ibus, monkeypatch) -> None:
@@ -207,7 +215,42 @@ def test_a_set_value_that_cannot_bypass_leaves_a_filled_field_alone(ibus, monkey
         _atspi._replace_with_keys(object(), "hello world 42")
     assert exc.value.detail["reason"] == "ime_active"
     assert exc.value.detail["ime"]["engine"] == "libpinyin"
-    assert "nothing was cleared" in str(exc.value)
+    assert "nothing was typed and the field was not changed" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "original,text",
+    [("", "hello world 42"), ("   ", "hello"), ("keep me", "привет")],
+    ids=["empty-field", "blank-field", "ascii-original-needs-a-restore"],
+)
+def test_replace_with_keys_refuses_before_any_key_when_the_engine_cannot_be_switched(
+    ibus, monkeypatch, original, text,
+) -> None:
+    ibus.set("libpinyin")
+    monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: original)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a key was sent or focus was moved")
+
+    for name in ("_x11_select_all_and_delete", "_type_into_target", "_restore_text", "grab_focus"):
+        monkeypatch.setattr(_atspi, name, unexpected)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), text)
+    assert exc.value.detail["reason"] == "ime_active"
+
+
+def test_replace_with_keys_still_types_non_ascii_into_an_empty_field(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
+    field = {"text": ""}
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: field["text"])
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: field["text"] == text)
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda acc, text: field.update(text=text))
+    assert _atspi._replace_with_keys(object(), "привет") is True
 
 
 def test_replace_with_keys_lands_ascii_with_the_engine_switched(ibus, monkeypatch) -> None:

@@ -9714,34 +9714,9 @@ def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
     return int(caret), start, end
 
 
-def _ime_active_error(ime, message: str, **detail):
-    """The refusal for text an input method changed or would change (#1219)."""
-    from a11y_computer_use.schema import ComputerUseError, ErrorCode
-
-    payload = {
-        "platform": "linux",
-        "reason": "ime_active",
-        "ime": {"framework": ime.framework, "engine": ime.engine},
-    }
-    payload.update(detail)
-    return ComputerUseError(
-        ErrorCode.UNSUPPORTED,
-        f"the active input method ({ime}) changes typed text and could not be switched "
-        f"to a pass-through engine; {message}. Switch the input method to a plain "
-        "keyboard layout (for example 'ibus engine xkb:us::eng') and retry",
-        detail=payload,
-    )
-
-
 def _text_mismatch(reason: str, message: str, **detail):
-    from a11y_computer_use.drivers import _linux_ime
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
-    ime = _linux_ime.recent_bypass_failure() if reason == "text_mismatch" else None
-    if ime is not None:
-        # The keystroke path went through an input method that could not be
-        # switched to pass-through, so the read-back is its output (#1219).
-        return _ime_active_error(ime, message, **detail)
     payload = {"platform": "linux", "reason": reason}
     payload.update(detail)
     return ComputerUseError(ErrorCode.UNSUPPORTED, message, detail=payload)
@@ -10342,7 +10317,7 @@ def _type_into_target(acc, text: str) -> None:
 
     sent = False
     # One engine switch for the whole string, not one per character (#1219).
-    with _linux_ime.ascii_passthrough():
+    with _linux_ime.ascii_passthrough(text):
         for ch in text:
             if _focus_on_target(acc) is False:
                 if sent:
@@ -10506,15 +10481,10 @@ def _replace_with_keys(acc, text: str) -> bool:
     original = current
     from a11y_computer_use.drivers import _linux_ime
 
-    # One engine switch covers the clear, the write and a restore (#1219).
-    with _linux_ime.ascii_passthrough():
-        ime = _linux_ime.recent_bypass_failure()
-        if ime is not None and not _text_is_blank(current):
-            # The original could not be typed back through this engine, so
-            # nothing is cleared.
-            raise _ime_active_error(
-                ime, "the field was left as it was; nothing was cleared or typed",
-            )
+    # One engine switch covers the clear, the write and a restore (#1219). The
+    # original is typed back if the write fails, so it must be typeable too:
+    # when the engine cannot be switched, this refuses before any key is sent.
+    with _linux_ime.ascii_passthrough(text + current):
         if not _text_is_blank(current):
             _x11_select_all_and_delete(acc)
             if not _wait_until_gone(acc):

@@ -115,3 +115,21 @@ def test_set_value_lands_ascii_exactly_and_keeps_focus(chrome_field) -> None:
     assert now.value == _TEXT
     assert now.focused is True
     assert _ibus("engine").stdout.strip() == _ENGINE
+
+
+def test_a_refused_type_leaves_no_ime_text_in_the_field(chrome_field, monkeypatch) -> None:
+    """If the engine cannot be switched, nothing is typed: no 'хелло' is left behind."""
+    from a11y_computer_use.drivers import _linux_ime
+
+    driver, runtime, field, original = chrome_field
+    before = _value(driver)
+    monkeypatch.setattr(_linux_ime, "_set_engine", lambda name: False)
+    for call in (
+        lambda: runtime.type_text(_TEXT, ref=field.ref),
+        lambda: runtime.set_value(field.ref, _TEXT),
+    ):
+        with pytest.raises(ComputerUseError) as exc:
+            call()
+        assert exc.value.detail.get("reason") == "ime_active"
+        assert _value(driver) == before
+    assert _ibus("engine").stdout.strip() == _ENGINE
