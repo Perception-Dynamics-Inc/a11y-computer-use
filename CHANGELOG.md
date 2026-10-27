@@ -7,6 +7,23 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.79] - 2026-10-27
+
+Two commits since v0.4.78, through #1226. A patch release: two Linux fixes for a single non-Latin keyboard layout (for example a lone `ru` layout). The second one stops `set_value` from deleting part of a Chrome field.
+
+### Safety
+
+- Never delete an unconfirmed selection in `set_value`: its clear step (select-all, then BackSpace) now uses the Chromium physical key on a lone non-Latin layout, and in Chromium it deletes only after it has confirmed that the selection covers the whole value. Otherwise it refuses with `text_mismatch` (`reason="selection_unconfirmed"`) and changes nothing. Before, on a lone `ru` layout in Chrome, setting "keep me" left "keep " and returned `text_mismatch`. Refs #1225 (#1226) (f8a51ee, 2026-10-27).
+
+### Linux drivers
+
+- Fix Ctrl/Alt shortcuts on a single non-Latin keyboard layout: in Chrome and Electron the chord now uses the key at the US-QWERTY position, so Ctrl+Z, C, V and the like are no longer lost and reported `unverifiable`. GTK, Qt and every other target keep the spare-keycode path. Refs #1211 (#1218) (773a0de, 2026-10-27).
+
+### Known issues
+
+- Linux input methods (#1219): with an IBus engine active (for example libpinyin or `ru:translit`), typing ASCII into Chrome writes the engine's output and returns `text_mismatch`, and `set_value` is refused and leaves the field empty. The fix is not in 0.4.79; it needs another Tester pass.
+- Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Not in 0.4.79.
+
 ## [0.4.78] - 2026-10-27
 
 Three commits since v0.4.77, through #1217. A patch release: the only code change is the #1215 regression fix.
