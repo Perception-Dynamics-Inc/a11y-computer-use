@@ -19,19 +19,22 @@ def test_alias_and_case_share_a_grant(tmp_path) -> None:
     store.set_tier("soffice", Tier.CLICK)
     store.set_tier("mousepad", Tier.FULL)
     store.set_tier("google-chrome", Tier.CLICK)
-    assert store.get_tier("Files") is Tier.FULL
-    assert store.get_tier("FILES") is Tier.FULL
-    assert store.get_tier("nautilus") is Tier.FULL
+    # Grants are per program (#1191): a thunar grant is not Files or nautilus.
+    assert store.get_tier("Thunar") is Tier.FULL
+    assert store.get_tier("Files") is None
+    assert store.get_tier("FILES") is None
+    assert store.get_tier("nautilus") is None
     assert store.get_tier("xfce4-terminal") is Tier.CLICK
     assert store.get_tier("Terminal") is None
     assert store.get_tier("gnome-terminal") is None
     assert store.get_tier("xterm") is None
-    assert store.get_tier("Text Editor") is Tier.FULL
-    assert store.get_tier("gedit") is Tier.FULL
-    assert store.get_tier("gnome-text-editor") is Tier.FULL
+    assert store.get_tier("org.xfce.mousepad") is Tier.FULL
+    assert store.get_tier("Text Editor") is None
+    assert store.get_tier("gedit") is None
+    assert store.get_tier("gnome-text-editor") is None
     assert store.get_tier("chrome") is Tier.CLICK
-    assert store.get_tier("chromium") is Tier.CLICK
-    assert store.get_tier("chromium-browser") is Tier.CLICK
+    assert store.get_tier("chromium") is None
+    assert store.get_tier("chromium-browser") is None
     assert store.get_tier("google-chrome-stable") is Tier.CLICK
     store.set_tier("gnome-terminal", Tier.FULL)
     assert store.get_tier("gnome-terminal-server") is Tier.FULL

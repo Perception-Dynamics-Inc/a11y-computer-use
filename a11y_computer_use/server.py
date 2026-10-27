@@ -978,7 +978,13 @@ def _launched_as(app_id: str, command: str) -> bool:
     on macOS are exact and never take this path."""
     if sys.platform == "darwin" or len(command) < 4:
         return False
-    return app_id.startswith(command) or command.endswith("-" + app_id) or command[:15] == app_id
+    if command[:15] == app_id or command.endswith("-" + app_id):
+        return True
+    # Only a comm cut at exactly 15 bytes may extend the launched name
+    # ("gnome-terminal-" for gnome-terminal-server). A shorter id that merely
+    # starts with it is a different program: code-insiders is not code,
+    # python3 is not python, firefox-esr is not firefox (#1191).
+    return len(app_id) == 15 and app_id.startswith(command)
 
 
 def _running_app(identifier: str) -> tuple[object, str]:
@@ -3666,6 +3672,25 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
+        no_bridge = False
+        if tool in {"type", "key"} and judged == "unverifiable" and not died:
+            plugin = self._libreoffice_without_bridge(app)
+            if plugin:
+                # Name the cause: a gen/x11 LibreOffice never publishes a
+                # tree, so no retry or re-observe can verify this (#1183).
+                no_bridge = True
+                evidence = (
+                    f"no_accessibility_bridge: LibreOffice runs the {plugin} VCL plugin, "
+                    "which publishes no accessibility tree, so the effect cannot be read; "
+                    "check it with a screenshot. Install libreoffice-gtk3 and start it "
+                    "with SAL_USE_VCLPLUGIN=gtk3 for verified input"
+                )
+        layout_mismatch = self._take_keysym_mismatch()
+        if layout_mismatch and not died:
+            # The key that went out is not the one requested (a layout
+            # switch, #1198). Never confirm it, and never offer a retry: the
+            # wrong key already landed.
+            judged, evidence = "unverifiable", layout_mismatch + "; re-observe before acting again"
         hung = False
         if tool == "click" and judged == "suspected_noop" and reads is not None and reads[0] == app:
             # A hung page overrides an unchanged readable signal: the click may
@@ -3678,7 +3703,7 @@ class Runtime:
             if isinstance(why, str) and why:
                 hung = True
                 judged, evidence = "unverifiable", evidence + "; " + why
-        no_retry = hung or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        no_retry = hung or no_bridge or bool(layout_mismatch) or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
@@ -3695,6 +3720,30 @@ class Runtime:
             ),
             evidence=evidence,
         )
+
+    def _libreoffice_without_bridge(self, app: str | None) -> str | None:
+        """The VCL plugin when ``app`` is a LibreOffice that cannot publish a tree."""
+        if getattr(self.driver, "name", None) != "linux" or not app:
+            return None
+        try:
+            from a11y_computer_use.drivers import _atspi
+
+            if not _atspi.libreoffice_app(app):
+                return None
+            return _atspi.libreoffice_bridge_absent()
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail the action
+            return None
+
+    def _take_keysym_mismatch(self) -> str | None:
+        """The X keystroke mismatch the last XTEST input recorded, once (#1198)."""
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        try:
+            from a11y_computer_use.drivers import _linux_input
+
+            return _linux_input.take_mismatch()
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail the action
+            return None
 
     def _effect_after(self, pre: "Snapshot | None") -> str:
         """Effect Receipt: re-snapshot ``pre``'s app after a mutating action and
@@ -6207,10 +6256,12 @@ class Runtime:
             captured = before.get("snap") if isinstance(before, dict) else None
             displays = captured.displays if isinstance(captured, Snapshot) else ()
             display = next((d for d in displays if d.display_id == box.display_id), None)
+            # A few pixels of overflow on a row whose click point is on screen
+            # (a Writer Navigator row clipped by its pane edge) do not make the
+            # effect unknown. Only a click point off the display does.
+            point = box.center
             if (display is not None
-                    and (box.x < 0 or box.y < 0
-                         or box.x + box.width > display.width
-                         or box.y + box.height > display.height)):
+                    and not (0 <= point.x < display.width and 0 <= point.y < display.height)):
                 result = outcome.ActionResult(
                     text, outcome="unverifiable", next=(),
                     evidence="effect unknown after click on a display-clipped target; "

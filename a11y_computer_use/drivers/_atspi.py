@@ -4169,6 +4169,22 @@ def _has_default_state(acc) -> bool:
     }
 
 
+def _libreoffice_parent_label(acc) -> str:
+    """The label of a sole-child button: its parent's description, else name.
+
+    LibreOffice's sidebar tab buttons are unnamed. The parent panel carries
+    the label as its description ("Properties (Alt+1)") (#1184).
+    """
+    parent = _parent_of(acc)
+    if parent is None or _child_count(parent) != 1:
+        return ""
+    for getter in ("get_description", "get_name"):
+        label = _plain_accessible_name(str(_call_first(parent, (getter,), default="") or ""))
+        if label.strip():
+            return label
+    return ""
+
+
 def _state_flags(acc):
     """(enabled, focused, checked, selected, expanded, focusable, editable).
 
@@ -4654,6 +4670,11 @@ class ATSPIAccessor:
                 if recovered is not None:
                     position, size = recovered
         enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
+        # The role says it can be checked. LibreOffice's gtk3 toggle never
+        # publishes CHECKABLE, so an unpressed one read as None, not False,
+        # and a click had no before value to compare (#1184).
+        if checked is None and role_str == "toggle button":
+            checked = False
         if role_str == "viewport" and _gtk_major(node) == 3:
             # GTK 3 applies the scroll offset to the viewport's own
             # visibility check. Its children can still be SHOWING with
@@ -4747,6 +4768,9 @@ class ATSPIAccessor:
                 if label:
                     name = _plain_accessible_name(label)
                     break
+        if (self.libreoffice and role_str in {"toggle button", "push button"}
+                and not str(name).strip() and not description.strip()):
+            name = _libreoffice_parent_label(node)
         button_name = str(name)
         if role_str == "push button":
             name = _gtk_button_row_name(node, button_name)
@@ -6713,15 +6737,66 @@ def _preferred_window(frames, is_active):
     return frames[0]
 
 
+def _program_of(candidate, name: str) -> str:
+    """The program id of an AT-SPI registrant: its process identity, else its name."""
+    from a11y_computer_use.drivers import _linux_system
+
+    pid = pid_of(candidate)
+    if pid:
+        try:
+            identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+        except Exception:  # noqa: BLE001 - an exited pid has no identity
+            identity = ""
+        if identity:
+            return identity.lower()
+    return name
+
+
+def _pick_one_program(app: str, needle: str, matched):
+    """The best registrant of the one program ``app`` names, or ``ambiguous_app``.
+
+    Rank (active frame, then frames, then any) only orders registrants of the
+    same program: a windowless python3 registrant never shadows the real
+    app. Two different programs with windows (a role label like ``Files``
+    with Nautilus and Thunar open) are not settled by which one is active;
+    an exact name picks one, otherwise the lookup refuses (#1191).
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    if not matched:
+        return None
+    windowed = [m for m in matched if m[1] >= 1]
+    programs = sorted({m[2] for m in windowed if m[2]})
+    if len(programs) > 1:
+        exact = [p for p in programs
+                 if p == needle or any(m[2] == p and m[3] == needle for m in windowed)]
+        if len(exact) != 1:
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"{app!r} matches more than one running program: {', '.join(programs)}; "
+                "name one of them",
+                detail={"app": app, "reason": "ambiguous_app", "candidates": programs},
+            )
+        matched = [m for m in windowed if m[2] == exact[0]]
+    best = None
+    best_rank = -1
+    for candidate, rank, _program, _name in matched:
+        if rank > best_rank:
+            best, best_rank = candidate, rank
+    return best
+
+
 def find_root(app: str, scope) -> object | None:
     """The AT-SPI root for ``app`` at ``scope``.
 
-    ``app`` matches an application accessible by name substring (case-insensitive)
+    ``app`` matches an application accessible by name (case-insensitive, see
+    ``_linux_system._names_program``)
     — the Linux analog of a bundle id / process exe. For `Scope.APP` the app
     accessible is returned; for `Scope.WINDOW` its active (else first) top-level
     frame. A GTK combo popup that is the only ACTIVE window does not replace
     the frame that contains the combo. None when nothing matches (the engine
-    yields an empty snapshot)."""
+    yields an empty snapshot). Matches from two different programs raise
+    ``app_not_found`` with reason ``ambiguous_app`` (see ``_pick_one_program``)."""
     from a11y_computer_use.schema import Scope
 
     Atspi = _atspi()
@@ -6790,8 +6865,7 @@ def find_root(app: str, scope) -> object | None:
             if len(frames) == 1 and _is_active(frames[0]):
                 return frames[0]
         return None
-    best = None
-    best_rank = -1
+    matched: list[tuple[object, int, str, str]] = []
     hinted = next(iter(pids)) if len(pids) == 1 else None
     for candidate in applications:
         if candidate is None:
@@ -6807,7 +6881,7 @@ def find_root(app: str, scope) -> object | None:
         if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        if needle not in name and not (pids and pid_of(candidate) in pids):
+        if not _linux_system._names_program(needle, name) and not (pids and pid_of(candidate) in pids):
             continue
         with app_reply_watch(app, hinted, candidate) as watch:
             pid = pid_of(candidate)
@@ -6815,10 +6889,8 @@ def find_root(app: str, scope) -> object | None:
                 watch.pid = pid
             frames = _frames(candidate)
             rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
-        if rank > best_rank:
-            best, best_rank = candidate, rank
-            if rank == 2:
-                break
+        matched.append((candidate, rank, _program_of(candidate, name), name))
+    best = _pick_one_program(app, needle, matched)
     app_acc = best
     if app_acc is None or scope is Scope.APP:
         return app_acc
@@ -12206,6 +12278,27 @@ def libreoffice_registration_wait() -> tuple[float, str | None]:
     return max(0.0, wait), shown
 
 
+def libreoffice_bridge_absent() -> str | None:
+    """The VCL plugin name when no soffice.bin in this session can publish a tree.
+
+    Every session soffice.bin must have a plugin mapped and none may be
+    bridge-capable (gen/x11). None when there is no soffice.bin, a plugin is
+    not mapped yet, or any process could still publish a tree. Reads only
+    /proc (cached per process instance), so an action verdict can name the
+    cause without waiting (#1183).
+    """
+    pids = _libreoffice_session_pids()
+    if not pids:
+        return None
+    shown = None
+    for pid in pids:
+        plugin = libreoffice_vcl_plugin(pid)
+        if plugin is None or plugin in _VCL_BRIDGE_PLUGINS:
+            return None
+        shown = shown or plugin
+    return shown
+
+
 # LibreOffice's X window shows up in app list and window list while AT-SPI is
 # still registering. That gap was 3–13 s. Snapshot polls until this deadline,
 # then reports the app missing (or the missing gtk3 bridge).
@@ -16842,6 +16935,21 @@ def _place_in_toolbar(toolbar) -> tuple[str, str] | None:
     return None
 
 
+def _libreoffice_node(acc) -> bool:
+    """True when ``acc`` belongs to LibreOffice, cached per application."""
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    cached = getattr(app, "_a11y_libreoffice", None)
+    if isinstance(cached, bool):
+        return cached
+    name = _call_first(app, ("get_name", "getName"), default="") or ""
+    found = libreoffice_app(str(name))
+    try:
+        setattr(app, "_a11y_libreoffice", found)
+    except Exception:
+        pass
+    return found
+
+
 def folder_place(acc) -> tuple[str, str] | None:
     """``(text, kind)`` for the location entry or the path bar.
 
@@ -16849,6 +16957,12 @@ def folder_place(acc) -> tuple[str, str] | None:
     buttons. Back, Home, and the view switches are not crumbs. None when
     the window has neither.
     """
+    # LibreOffice has no folder view. Its sidebar tab strip is a toolbar of
+    # checked toggle buttons ("Navigator (Alt+4)"), which read as a path-bar
+    # crumb: a Writer Navigator row then looked like a folder row, waited for
+    # a location change that never comes, and walked the toolbars per cell.
+    if _libreoffice_node(acc):
+        return None
     frame = _frame_ancestor(acc)
     if frame is None:
         return None
@@ -20250,6 +20364,17 @@ def gtk_dialog_toggle_state(acc) -> tuple[bool, bool] | None:
         return None
     bits = ("SELECTED", "CHECKED") if role == "page tab" else ("CHECKED", "PRESSED")
     return _click_state_bits(acc, bits, require_showing=True)
+
+
+def libreoffice_toggle_state(acc) -> tuple[bool, bool] | None:
+    """Fresh CHECKED/PRESSED bits of a LibreOffice toggle button (#1184).
+
+    LibreOffice's gtk3 toggle publishes CHECKED without CHECKABLE, so the
+    sidebar tab buttons are read by role. Other roles and apps are None.
+    """
+    if acc is None or _role_name(acc) != "toggle button" or not _libreoffice_node(acc):
+        return None
+    return _click_state_bits(acc, ("CHECKED", "PRESSED"))
 
 
 def _click_state_bits(acc, bits: tuple[str, str], *, require_showing: bool = False):

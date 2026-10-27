@@ -6587,6 +6587,42 @@ def test_display_clipped_ref_click_never_advises_retry(tmp_path, monkeypatch, ve
         assert "display-clipped" in result.evidence
 
 
+@pytest.mark.parametrize("x, width, clip_flagged", [
+    (988, 293, False),   # #1202: Navigator row, right edge 1281 on a 1280-px screen
+    (1110, 180, False),  # centre 1200, 10 px over
+    (1200, 120, False),  # centre 1260 is still on screen
+    (1240, 120, True),   # centre 1300 is off screen
+    (-300, 200, True),   # centre -200 is off screen
+])
+def test_display_clip_check_follows_the_click_point_not_a_pixel_of_overflow(
+    tmp_path, monkeypatch, x, width, clip_flagged,
+):
+    """A row clipped by a pixel keeps its real verdict; an off-screen click stays unknown."""
+    from dataclasses import replace
+    from a11y_computer_use import outcome
+    from a11y_computer_use.schema import Display
+
+    driver = _HoverDriver()
+    snap = build_synthetic_snapshot(app="editor")
+    target = Element("e2", "AXCell", "Section G heading", None,
+                     Bounds(0, x, 373, width, 23), snap.snapshot_id, clickable=True)
+    snap = replace(snap, elements=(target,), displays=(Display(0, 1280, 800, 1., True),))
+    driver.snapshot = lambda *args, **kwargs: snap
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = snap
+    monkeypatch.setattr(rt, "_run_gated", lambda action, app, execute, **kw: driver.click(action.target) or "clicked e2")
+    monkeypatch.setattr(rt, "_conclude", lambda text, **kw: outcome.ActionResult(
+        text, outcome="partial", next=("coordinates",), evidence="scoped read"))
+    result = rt.click(ref="e2", count=2)
+    if clip_flagged:
+        assert result.outcome == "unverifiable"
+        assert result.next == ()
+        assert "display-clipped" in result.evidence
+    else:
+        assert result.outcome == "partial"
+        assert result.evidence == "scoped read"
+
+
 @pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
 @pytest.mark.parametrize("change", ["hidden", "clipped", "recycled", "missing_identity", "previously_refused"])
 def test_snapshot_rebinds_renumbered_surviving_controls(
@@ -6947,3 +6983,44 @@ def test_reread_passes_no_accessibility_bridge_to_the_verdict(tmp_path, monkeypa
     verdict = runtime._judge_mutation("soffice.bin", {"scope": Scope.WINDOW}, None, "hello")
     assert verdict[0] == "unverifiable"
     assert verdict[1].startswith("no_accessibility_bridge")
+
+
+@pytest.mark.parametrize("tool, verdict, chord", [
+    ("type", ("unverifiable", "unverified"), None),
+    ("key", ("unverifiable", "the accessibility state could not be read"), "ctrl+a"),
+])
+@pytest.mark.parametrize("plugin", ["gen", "gtk3"])
+def test_type_and_key_into_a_libreoffice_without_bridge_name_the_cause(
+    tmp_path, monkeypatch, tool, verdict, chord, plugin,
+):
+    """#1183 problem 2. type/key evidence names no_accessibility_bridge and the
+    plugin, with no retry hints; a bridge-capable plugin keeps the old verdict."""
+    from a11y_computer_use.drivers import _atspi
+
+    class LinuxDriver:
+        name = "linux"
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(_atspi, "_libreoffice_session_pids", lambda: [4242])
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin", lambda pid: plugin)
+    result = runtime._conclude("did it", tool=tool, app="soffice.bin", verdict=verdict, key_chord=chord)
+    assert result.outcome == "unverifiable"
+    if plugin == "gen":
+        assert result.evidence.startswith("no_accessibility_bridge")
+        assert "gen VCL plugin" in result.evidence and "libreoffice-gtk3" in result.evidence
+        assert list(result.next) == []
+    else:
+        assert "no_accessibility_bridge" not in result.evidence
+
+
+def test_libreoffice_bridge_absent_needs_every_process_bridgeless(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    plugins = {1: "gen", 2: "x11", 3: "gtk3", 4: None}
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin", plugins.get)
+    for pids, want in [([], None), ([1], "gen"), ([1, 2], "gen"), ([1, 3], None), ([4], None)]:
+        monkeypatch.setattr(_atspi, "_libreoffice_session_pids", lambda pids=pids: pids)
+        assert _atspi.libreoffice_bridge_absent() == want

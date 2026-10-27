@@ -92,6 +92,17 @@ def _hint_pid(app: str) -> int | None:
     return None
 
 
+def _same_program_name(app: str, other: str) -> bool:
+    """True when ``other`` is another name of the program ``app`` names."""
+    from a11y_computer_use.app_identity import program_alias
+    from a11y_computer_use.drivers import _linux_system
+
+    if app.strip().casefold() == other.strip().casefold():
+        return True
+    return program_alias(app, other) or _linux_system._identifier_matches_process(app, other) \
+        or _linux_system.class_names_program(app, other)
+
+
 def _resolved_app(identifier: str) -> str:
     """The app id app list would show for ``identifier``.
 
@@ -1412,12 +1423,49 @@ class LinuxDriver:
 
         root = self._run(lambda name=app: lookup(name))
         if root is not None:
-            return app, root
+            return app, self._pinned(app, root)
+        # The second lookup is only for another name of the same program
+        # (LibreOffice -> soffice.bin, a WM_CLASS). resolve_app no longer
+        # falls back to a window title, and a different program is refused
+        # here as well, so an exited `python` never becomes `python3`
+        # (#1191).
         resolved = _resolved_app(app)
-        if resolved != app:
+        if resolved != app and _same_program_name(app, resolved):
             root = self._run(lambda name=resolved: lookup(name))
-            return resolved, root
-        return app, None
+            return resolved, (self._pinned(app, root) if root is not None else None)
+        # A different program's name is kept only to word the error (VLC's
+        # bridge hint); nothing is bound to it.
+        return resolved, None
+
+    def _pinned(self, app: str, root):
+        """``root`` when it is the program ``app`` was first bound to.
+
+        The first snapshot of a name records the program it bound. A later
+        bind of the same name to a different program (Nautilus closed and
+        Thunar open for ``Files``) is ``app_not_running``, never a silent
+        rebind. A restart of the same program binds again.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        app_acc = _atspi._application_of(root) or root
+        program = _atspi._program_of(app_acc, "")
+        if not program:
+            return root
+        bound = getattr(self, "_bound_programs", None)
+        if bound is None:
+            bound = self._bound_programs = {}
+        key = app.strip().casefold()
+        previous = bound.get(key)
+        if previous and previous != program and not _same_program_name(previous, program):
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"{app!r} was {previous!r}, which is no longer running; "
+                f"{program!r} is a different program",
+                detail={"app": app, "reason": "app_not_running",
+                        "bound": previous, "found": program},
+            )
+        bound[key] = program
+        return root
 
     # -- observe (AT-SPI2) --------------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
@@ -1711,10 +1759,18 @@ class LinuxDriver:
                 _atspi.app_listed(app) or _atspi.app_listed(resolved)
             ):
                 raise _no_accessibility_tree(resolved)
+            from a11y_computer_use.drivers import _linux_system
+
+            detail = {"app": resolved, "reason": "app_not_running"}
+            # A window title that mentions the name is a hint, never the
+            # target: the caller decides whether that is the app (#1191).
+            suggestion = _linux_system.title_suggestion(app)
+            if suggestion and suggestion != resolved:
+                detail["title_match"] = suggestion
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {resolved!r}",
-                detail={"app": resolved},
+                detail=detail,
             )
 
         # WINDOW lists every showing sibling (a preferences dialog next to
@@ -2489,6 +2545,78 @@ class LinuxDriver:
             return _page_health.BUSY
         return None
 
+    #: Reason for a refused type whose keys may still land (#1190).
+    TYPE_BUSY_REASON = "page busy, input may land later; re-observe before retrying"
+
+    def type_into(self, element: Element, text: str) -> int:
+        """Type into ``element``; see ``_type_into_unguarded`` and ``_busy_page_guard``."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def pid():
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            return self._run(lambda: _atspi.pid_of(handle)) if handle is not None else None
+
+        return self._busy_page_guard(pid, lambda: self._type_into_unguarded(element, text))
+
+    def type_text(self, text: str, *, pre_check: Callable | None = None,
+                  dry_run: bool = False) -> object:
+        """Type into the focused editable; see ``_type_text_unguarded`` and ``_busy_page_guard``."""
+        if dry_run or not text:
+            return self._type_text_unguarded(text, pre_check=pre_check, dry_run=dry_run)
+
+        def pid():
+            from a11y_computer_use.drivers import _atspi
+
+            handle = self._focused_editable
+            if handle is not None:
+                return self._run(lambda: _atspi.pid_of(handle))
+            return self.frontmost_app()[1]
+
+        return self._busy_page_guard(
+            pid, lambda: self._type_text_unguarded(text, pre_check=pre_check, dry_run=dry_run))
+
+    def _busy_page_guard(self, target_pid, write):
+        """Run ``write``; a text_mismatch on a busy Chromium page is unverifiable.
+
+        A readback taken while the renderer busy-loops reads the browser's
+        stale accessibility cache, and the keys already sent can still land
+        later. Retry hints there type the text twice (#1190). When the /proc
+        renderer sample (#1160) shows one renderer on CPU across the write,
+        the refusal becomes ``unverifiable`` with no ``next``. Apps without
+        Chromium renderers (sample None) and errors before delivery
+        (anything but text_mismatch) are unchanged.
+        """
+        from a11y_computer_use.drivers import _page_health
+
+        try:
+            pid = target_pid()
+        except Exception:  # noqa: BLE001 - no pid means no busy evidence
+            pid = None
+        ticks = _page_health.renderer_ticks(pid) if pid else None
+        started = time.monotonic()
+        try:
+            return write()
+        except ComputerUseError as exc:
+            detail = dict(exc.detail or {})
+            if ticks is None or detail.get("reason") != "text_mismatch":
+                raise
+            busy = _page_health.renderer_busy(
+                (started, ticks), (time.monotonic(), _page_health.renderer_ticks(pid)))
+            if not busy:
+                raise
+            detail.update(
+                outcome="unverifiable",
+                next=[],
+                evidence=f"{exc.message}; {self.TYPE_BUSY_REASON}",
+                renderer=_page_health.BUSY,
+                input_delivered=True,
+            )
+            raise ComputerUseError(exc.code, f"{exc.message}; {self.TYPE_BUSY_REASON}",
+                                   detail=detail) from exc
+
+    _LO_TOGGLE_POLLS = 12
+
     def toggle_click_probe(self, target: Target):
         """Capture a page toggle or GTK dialog selection before the click."""
         from a11y_computer_use import observe
@@ -2510,6 +2638,9 @@ class LinuxDriver:
             if state is None:
                 reader = _atspi.gtk_dialog_toggle_state
                 state = reader(handle)
+            if state is None:
+                reader = _atspi.libreoffice_toggle_state
+                state = reader(handle)
             return (handle, state, reader) if state is not None else None
 
         try:
@@ -2524,21 +2655,42 @@ class LinuxDriver:
         if probe is None:
             return None
         handle, previous, reader = probe
+        office = reader is _atspi.libreoffice_toggle_state
         # XSync acknowledges delivery, not the application's event handler. Keep
         # these short waits outside the AT-SPI thread so state events run.
-        for attempt in range(3):
-            try:
-                current = self._run(lambda: reader(handle))
-            except Exception:
-                return None
-            if current is None:
-                return None
-            if current != previous:
-                if reader is _atspi.gtk_dialog_toggle_state:
-                    return "the clicked GTK dialog control's selected/checked state changed"
-                return "the clicked toggle's checked/pressed state changed"
-            if attempt < 2:
-                time.sleep(0.01)
+        # LibreOffice runs the sidebar deck switch from its own event loop,
+        # so it gets a longer poll before the retry below.
+        attempts, pause = (self._LO_TOGGLE_POLLS, 0.05) if office else (3, 0.01)
+
+        def flipped() -> bool | None:
+            for attempt in range(attempts):
+                try:
+                    current = self._run(lambda: reader(handle))
+                except Exception:
+                    return None
+                if current is None:
+                    return None
+                if current != previous:
+                    return True
+                if attempt < attempts - 1:
+                    time.sleep(pause)
+            return False
+
+        changed = flipped()
+        if changed:
+            if reader is _atspi.gtk_dialog_toggle_state:
+                return "the clicked GTK dialog control's selected/checked state changed"
+            return "the clicked toggle's checked/pressed state changed"
+        if not office or changed is None:
+            return None
+        # A LibreOffice sidebar tab can ignore the pointer click while its own
+        # click action works (#1184). Retry once through that action.
+        try:
+            acted = self._run(lambda: _atspi.do_named_action(handle, "click"))
+        except Exception:
+            return None
+        if acted and flipped():
+            return "the toggle's checked state changed after its own click action"
         return None
 
     def button_click_evidence(self, element: Element) -> str | None:
@@ -5020,7 +5172,7 @@ class LinuxDriver:
             },
         )
 
-    def type_into(self, element: Element, text: str) -> int:
+    def _type_into_unguarded(self, element: Element, text: str) -> int:
         """Type ``text`` into ``element`` only after focus is confirmed on it.
 
         Chromium text fields receive a checked pointer click first; other
@@ -5277,8 +5429,8 @@ class LinuxDriver:
             )
         return app_id
 
-    def type_text(self, text: str, *, pre_check: Callable | None = None,
-                  dry_run: bool = False) -> object:
+    def _type_text_unguarded(self, text: str, *, pre_check: Callable | None = None,
+                             dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.
 
         Primary path: AT-SPI EditableText. A ref click remembers the element.

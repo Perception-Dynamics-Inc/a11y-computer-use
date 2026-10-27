@@ -22090,6 +22090,92 @@ def test_chromium_tree_with_one_own_row_skips_the_hit_probe(fake_atspi, monkeypa
     assert accessor._visible_children[id(wrapped)] == own
 
 
+def _lo_sidebar_tab(*, pressed=False, siblings=0):
+    """LibreOffice gtk3 sidebar: toolbar > panel(description) > unnamed toggle (#1184)."""
+    toggle = _Acc("toggle button", states={"ENABLED", "SENSITIVE", "SHOWING", "VISIBLE", "FOCUSABLE"}
+                  | ({"CHECKED"} if pressed else set()))
+    panel = _Acc("panel")
+    panel.get_description = lambda: "Properties (Alt+1)"
+    _adopt(panel, toggle, *[_Acc("push button", name=f"x{i}") for i in range(siblings)])
+    _adopt(_Acc("tool bar", name="Properties"), panel)
+    return panel, toggle
+
+
+@pytest.mark.parametrize("pressed", [False, True])
+def test_libreoffice_sidebar_toggle_is_named_and_checkable(fake_atspi, monkeypatch, pressed) -> None:
+    """Synthetic (#1184). The unnamed tab takes its panel's description and reads checked."""
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((1240.0, 180.0), (22.0, 22.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("click",))
+    _panel, toggle = _lo_sidebar_tab(pressed=pressed)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    raw = accessor.read(toggle)
+    assert raw.title == "Properties (Alt+1)"
+    assert raw.checked is pressed
+
+
+def test_libreoffice_label_needs_a_sole_child_and_other_toggles_keep_none(fake_atspi, monkeypatch) -> None:
+    """Synthetic (#1184). A shared parent names nothing; a push button's checked stays None."""
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((1240.0, 180.0), (22.0, 22.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("click",))
+    _panel, toggle = _lo_sidebar_tab(siblings=1)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    assert accessor.read(toggle).title == ""
+    _panel, button = _lo_sidebar_tab()
+    button.role = "push button"
+    assert accessor.read(button).checked is None
+
+
+def _lo_toggle_driver(monkeypatch, toggle, *, clicks_work):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Bounds, Element
+
+    element = Element("e29", "AXButton", "Properties (Alt+1)", None, Bounds(0, 1240, 180, 22, 22),
+                      "lo-toggle", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: toggle})
+    driver = LinuxDriver(visible_actions=False)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_LO_TOGGLE_POLLS", 2)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda s: None)
+    monkeypatch.setattr(_atspi, "_libreoffice_node", lambda acc: acc is toggle)
+    actions = []
+
+    def do_named_action(acc, name):
+        actions.append((acc, name))
+        if clicks_work:
+            toggle.states.symmetric_difference_update({"CHECKED"})
+        return True
+
+    monkeypatch.setattr(_atspi, "do_named_action", do_named_action)
+    return driver, element, actions
+
+
+def test_libreoffice_toggle_click_is_verified_by_checked_flip(fake_atspi, monkeypatch) -> None:
+    """Synthetic (#1184). A pointer click that flips CHECKED is confirmed with no retry."""
+    _panel, toggle = _lo_sidebar_tab()
+    driver, element, actions = _lo_toggle_driver(monkeypatch, toggle, clicks_work=True)
+    probe = driver.toggle_click_probe(element)
+    assert probe is not None
+    toggle.states.add("CHECKED")
+    assert driver.toggle_click_evidence(probe) == "the clicked toggle's checked/pressed state changed"
+    assert actions == []
+
+
+@pytest.mark.parametrize("clicks_work", [True, False])
+def test_libreoffice_toggle_retries_once_with_its_click_action(fake_atspi, monkeypatch, clicks_work) -> None:
+    """Synthetic (#1184). An ignored pointer click retries the node's click action once."""
+    _panel, toggle = _lo_sidebar_tab()
+    driver, element, actions = _lo_toggle_driver(monkeypatch, toggle, clicks_work=clicks_work)
+    probe = driver.toggle_click_probe(element)
+    evidence = driver.toggle_click_evidence(probe)
+    assert actions == [(toggle, "click")]
+    if clicks_work:
+        assert evidence == "the toggle's checked state changed after its own click action"
+    else:
+        assert evidence is None
+
+
 def _office_wait_clock(monkeypatch):
     from a11y_computer_use.drivers import _linux_system
 
@@ -22173,3 +22259,319 @@ def test_snapshot_stops_waiting_when_the_plugin_maps_as_gen(fake_atspi, monkeypa
     with pytest.raises(ComputerUseError):
         LinuxDriver().snapshot(Scope.WINDOW, "soffice.bin")
     assert clock["t"] == pytest.approx(1.0)
+
+
+# --- #1198: the key map must follow a keyboard layout switch ---------------
+
+_LAYOUTS_1198 = {
+    # keycode: (base, shift) for the keys the tests touch
+    "us": {24: (0x71, 0x51), 25: (0x77, 0x57), 29: (0x79, 0x59), 38: (0x61, 0x41), 52: (0x7A, 0x5A)},
+    "de": {24: (0x71, 0x51), 25: (0x77, 0x57), 29: (0x7A, 0x5A), 38: (0x61, 0x41), 52: (0x79, 0x59)},
+    "fr": {24: (0x61, 0x41), 25: (0x7A, 0x5A), 29: (0x79, 0x59), 38: (0x71, 0x51), 52: (0x77, 0x57)},
+}
+
+
+class _SwitchableLayoutDisplay(_FakeXDisplay):
+    """python-xlib's staleness, faithfully: ``keysym_to_keycode(s)`` and
+    ``keycode_to_keysym`` read tables filled at connect and updated only by
+    ``_update_keymap``, while ``get_keyboard_mapping`` asks the live server."""
+
+    def __init__(self, layout: str) -> None:
+        super().__init__()
+        self.display = _NS(info=_NS(min_keycode=8, max_keycode=60))
+        self.live = layout
+        self._keymap_codes = None
+        self._update_keymap(8, 53)
+
+    def switch(self, layout: str) -> None:  # setxkbmap / a layout hotkey
+        self.live = layout
+
+    def _rows(self, layout: str, first: int, count: int):
+        table = {**_LAYOUTS_1198[layout], 37: (0xFFE3, 0), 50: (0xFFE1, 0)}
+        return [list(table.get(first + i, (0, 0))) + [0, 0] for i in range(count)]
+
+    def get_keyboard_mapping(self, first, count):
+        return self._rows(self.live, first, count)
+
+    def _update_keymap(self, first, count):
+        self._cached = {first + i: row for i, row in enumerate(self._rows(self.live, first, count))}
+        self._keymap_codes = True
+
+    def keycode_to_keysym(self, keycode, index):
+        row = self._cached.get(keycode, [])
+        return row[index] if index < len(row) else 0
+
+    def keysym_to_keycodes(self, keysym):
+        return [(kc, i) for kc, row in sorted(self._cached.items()) for i, s in enumerate(row) if s == keysym]
+
+    def keysym_to_keycode(self, keysym):
+        found = self.keysym_to_keycodes(keysym)
+        return found[0][0] if found else 0
+
+
+def _pressed_1198(events):
+    return [d for t, d, _x, _y in events if t == 2]
+
+
+@pytest.mark.parametrize("layout, typed_z, typed_y", [("de", 29, 52), ("fr", 25, 29)])
+def test_keymap_follows_a_layout_switch_while_the_server_runs(
+    xtest_recorder, monkeypatch, layout, typed_z, typed_y,
+) -> None:
+    """#1198. Under de, 'z' typed y; the table was never rebuilt after the switch."""
+    events, _ = xtest_recorder
+    display = _SwitchableLayoutDisplay("us")
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_keymap_seen", None, raising=False)
+
+    _linux_input.type_string("zy")
+    assert _pressed_1198(events) == [52, 29]  # us: z on 52, y on 29
+    assert _linux_input.take_mismatch() is None
+
+    events.clear()
+    display.switch(layout)
+    _linux_input.type_string("zy")
+    assert _pressed_1198(events) == [typed_z, typed_y]
+    assert _linux_input.take_mismatch() is None
+
+
+def test_ctrl_z_after_a_switch_to_azerty_is_not_sent_as_ctrl_w(xtest_recorder, monkeypatch) -> None:
+    """#1198. The stale us keycode for z is Ctrl+W (close the tab) under AZERTY."""
+    events, _ = xtest_recorder
+    display = _SwitchableLayoutDisplay("us")
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_keymap_seen", None, raising=False)
+    _linux_input.press_chord("ctrl+z")
+    assert _pressed_1198(events) == [37, 52]
+    events.clear()
+
+    display.switch("fr")
+    _linux_input.press_chord("ctrl+z")
+    pressed = _pressed_1198(events)
+    assert pressed == [37, 25], "AZERTY z is keycode 25; 52 is w there"
+    assert _linux_input.take_mismatch() is None
+
+
+def test_a_keysym_that_does_not_match_the_request_is_reported_not_confirmed(
+    xtest_recorder, monkeypatch, tmp_path,
+) -> None:
+    """#1198. If the key sent produces another keysym (layout changed between the
+    lookup and the send), the result is never confirmed and offers no retry."""
+    from a11y_computer_use import safety, server
+
+    events, _ = xtest_recorder
+    display = _SwitchableLayoutDisplay("us")
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_keymap_seen", None, raising=False)
+    # a lookup that is stale by construction: it keeps answering with the us keycode
+    monkeypatch.setattr(_linux_input, "_refresh_keymap", lambda: display, raising=False)
+    _linux_input.press_chord("ctrl+z")
+    events.clear()
+    display.switch("fr")
+    display._update_keymap(8, 53)  # the lookup sees fr...
+    monkeypatch.setattr(_linux_input, "_keycode_and_shift", lambda keysym: (52, False))  # ...but 52 is w
+    _linux_input.press_chord("ctrl+z")
+    mismatch = _linux_input.take_mismatch()
+    assert mismatch and "mismatch" in mismatch and "0x7a" in mismatch and "0x77" in mismatch
+
+    class LinuxDriver:
+        name = "linux"
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(_linux_input, "_last_mismatch", mismatch, raising=False)
+    result = runtime._conclude(
+        "pressed ctrl+z", tool="key", app="chrome", verdict=("confirmed", "the page changed"),
+        key_chord="ctrl+z",
+    )
+    assert result.outcome == "unverifiable"
+    assert "keyboard layout mismatch" in result.evidence
+    assert list(result.next) == []
+
+
+@pytest.mark.parametrize("entry", ["type_text", "type_into"])
+@pytest.mark.parametrize("busy", [True, False])
+def test_type_mismatch_on_a_busy_chromium_page_offers_no_retry(monkeypatch, entry, busy) -> None:
+    """#1190: keys sent to a busy-looping renderer can land after the readback.
+
+    A text_mismatch read from Chromium's stale cache must then be unverifiable
+    with no next, or following the retry hint types the text twice. An idle
+    renderer keeps the plain refusal and its hints.
+    """
+    from a11y_computer_use import observe, outcome
+    from a11y_computer_use.drivers import _page_health
+
+    clock = {"t": 100.0}
+    reads = {"n": 0}
+
+    def ticks(pid):
+        assert pid == 77
+        reads["n"] += 1
+        # 100 ticks over 1.0 s is one renderer fully on CPU (CLK_TCK 100).
+        return {501: 1000 + (100 if busy and reads["n"] > 1 else 0)}
+
+    def write(*_args, **_kwargs):
+        clock["t"] += 1.0
+        raise _atspi._text_mismatch("text_mismatch", "field reads 'ab' after typing 'abc'")
+
+    monkeypatch.setattr(_page_health, "renderer_ticks", ticks)
+    monkeypatch.setattr("os.sysconf", lambda name: 100, raising=False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr(LinuxDriver, "_type_text_unguarded", write, raising=False)
+    monkeypatch.setattr(LinuxDriver, "_type_into_unguarded", write, raising=False)
+    monkeypatch.setattr(LinuxDriver, "frontmost_app", lambda self: ("chrome", 77))
+    monkeypatch.setattr(LinuxDriver, "_run", lambda self, fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: object())
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 77)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    element = Element(ref="e1", role="entry", title="", value="", bounds=None, snapshot_id="s1")
+    with pytest.raises(ComputerUseError) as exc:
+        if entry == "type_text":
+            driver.type_text("abc")
+        else:
+            driver.type_into(element, "abc")
+    result = outcome.refused_result(text="type", code=exc.value.code.value,
+                                    message=exc.value.message, detail=exc.value.detail)
+    if busy:
+        assert result.outcome == "unverifiable"
+        assert list(result.next) == []
+        assert "page busy, input may land later; re-observe before retrying" in result.evidence
+    else:
+        assert result.outcome == "refused"
+        assert "keyboard" in result.next
+
+
+@pytest.mark.parametrize("scope", [Scope.APP, Scope.WINDOW])
+def test_find_root_refuses_prefix_neighbour_when_named_app_is_gone(fake_atspi, monkeypatch, scope) -> None:
+    """#1191: ``python`` must not bind to the ``python3`` application's tree."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    gtk = _WindowNode("frame", "Hang Fixture GTK")
+    neighbour = _WindowNode("application", "python3", children=[gtk])
+    fake_atspi.desktop = _WindowNode("desktop", children=[neighbour])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    assert _atspi.find_root("python", scope) is None
+    assert _atspi.find_root("python3", scope) is (neighbour if scope is Scope.APP else gtk)
+
+
+def test_find_root_keeps_whole_word_application_names(fake_atspi, monkeypatch) -> None:
+    """A whole word in the AT-SPI name still matches: ``chrome`` names "Google Chrome"."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    frame = _WindowNode("frame", "New Tab - Google Chrome")
+    chrome = _WindowNode("application", "Google Chrome", children=[frame])
+    fake_atspi.desktop = _WindowNode("desktop", children=[chrome])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    assert _atspi.find_root("chrome", Scope.APP) is chrome
+
+
+class _PidNode(_WindowNode):
+    """An AT-SPI application stand-in that answers its process id."""
+
+    def __init__(self, role, name="", pid=0, children=()):
+        super().__init__(role, name, children=children)
+        self.pid = pid
+
+    def get_process_id(self):
+        return self.pid
+
+
+def _programs_by_pid(monkeypatch, table):
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: table.get(pid))
+    monkeypatch.setattr(_linux_system, "_identity_for_pid", lambda pid, comm: table.get(pid))
+
+
+def test_find_root_refuses_a_role_label_that_names_two_running_programs(fake_atspi, monkeypatch) -> None:
+    """#1191: ``Files`` with Nautilus and Thunar open is ambiguous_app, not the active one."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    nautilus = _PidNode("application", "Nautilus", pid=11,
+                        children=[_WindowNode("frame", "Home", states={"active"})])
+    thunar = _PidNode("application", "Thunar", pid=12, children=[_WindowNode("frame", "Downloads")])
+    fake_atspi.desktop = _WindowNode("desktop", children=[nautilus, thunar])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: {11, 12})
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    _programs_by_pid(monkeypatch, {11: "nautilus", 12: "thunar"})
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.find_root("files", Scope.APP)
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert exc.value.detail["reason"] == "ambiguous_app"
+    assert exc.value.detail["candidates"] == ["nautilus", "thunar"]
+    # An exact program name still picks that program.
+    assert _atspi.find_root("thunar", Scope.APP) is thunar
+
+
+@pytest.mark.parametrize("app,other", [("chrome", "chromium"), ("python", "python3"),
+                                       ("gedit", "mousepad"), ("nautilus", "thunar")])
+def test_snapshot_does_not_retry_under_a_different_program(fake_atspi, monkeypatch, app, other) -> None:
+    """#1191: an exited/frozen ``app`` must not be snapshotted as ``other`` via resolve_app."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    probes = []
+    window = _WindowNode("frame", "Other")
+
+    def find_root(name, scope):
+        probes.append(name)
+        return window if name == other else None
+
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda name: None)
+    monkeypatch.setattr(_atspi, "should_wait_for_atspi", lambda name: False)
+    monkeypatch.setattr(_atspi, "libreoffice_without_bridge", lambda name: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: other)
+    monkeypatch.setattr(_linux_system, "class_names_program", lambda name, identity: False)
+    monkeypatch.setattr(_linux_system, "title_suggestion", lambda name: None)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, app)
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert exc.value.detail["reason"] == "app_not_running"
+    assert probes == [app]
+
+
+def test_snapshot_still_retries_under_the_same_program(fake_atspi, monkeypatch) -> None:
+    """LibreOffice -> soffice.bin is one program, so the second lookup stays."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    window = _WindowNode("frame", "Untitled 1 - LibreOffice Calc")
+    office = _PidNode("application", "soffice", pid=21, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window if name == "soffice.bin" else None)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: "soffice.bin")
+    _programs_by_pid(monkeypatch, {21: "soffice.bin"})
+    assert LinuxDriver()._root_for_snapshot("LibreOffice", Scope.WINDOW) == ("soffice.bin", window)
+    assert office.children == [window]
+
+
+def test_a_bound_name_is_not_rebound_to_a_different_program(fake_atspi, monkeypatch) -> None:
+    """#1191 pin: ``Files`` bound to Nautilus; Nautilus closes, Thunar is app_not_running."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    nautilus_win = _WindowNode("frame", "Home")
+    _PidNode("application", "Nautilus", pid=11, children=[nautilus_win])
+    restarted_win = _WindowNode("frame", "Home")
+    _PidNode("application", "Nautilus", pid=13, children=[restarted_win])
+    thunar_win = _WindowNode("frame", "Downloads")
+    _PidNode("application", "Thunar", pid=12, children=[thunar_win])
+    current = {"root": nautilus_win}
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: current["root"])
+    _programs_by_pid(monkeypatch, {11: "nautilus", 12: "thunar", 13: "nautilus"})
+    driver = LinuxDriver()
+    assert driver._root_for_snapshot("files", Scope.WINDOW) == ("files", nautilus_win)
+    current["root"] = restarted_win  # the same program restarted binds again
+    assert driver._root_for_snapshot("files", Scope.WINDOW) == ("files", restarted_win)
+    current["root"] = thunar_win
+    with pytest.raises(ComputerUseError) as exc:
+        driver._root_for_snapshot("files", Scope.WINDOW)
+    assert exc.value.detail["reason"] == "app_not_running"
+    assert exc.value.detail["bound"] == "nautilus"
