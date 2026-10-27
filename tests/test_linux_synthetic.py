@@ -22996,3 +22996,89 @@ def test_live_window_contexts_lists_every_published_window_and_never_guesses(mon
         raise RuntimeError("busy")
     monkeypatch.setattr(_atspi, "find_root", boom)
     assert driver.live_window_contexts("wizard") is None
+
+
+def _select_all_entry(monkeypatch, *, drop_selection: bool = True):
+    """A focused GTK-style entry 'keep me' whose focus grab selects all (#1232)."""
+    app = _Acc("application", name="notes")
+    entry = _Acc("text", name="Title", states={"SINGLE_LINE", "EDITABLE", "FOCUSED", "ENABLED"})
+    entry.get_application = lambda: app
+    entry.text = "keep me"
+    entry.caret = 7
+    entry.selection = None
+    entry.get_editable_text_iface = lambda: entry
+
+    def delete_text(start, end):
+        entry.text = entry.text[:start] + entry.text[end:]
+        entry.caret = start
+        entry.selection = None
+        return True
+
+    def insert_text(pos, text, length):
+        entry.text = entry.text[:pos] + text[:length] + entry.text[pos:]
+        entry.caret = pos + length
+        return True
+
+    entry.delete_text = delete_text
+    entry.insert_text = insert_text
+
+    def grab():
+        entry.selection = (0, len(entry.text))
+        entry.caret = len(entry.text)
+        return True
+
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: grab())
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda _acc: {})
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: entry)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    element = Element("e1", "AXTextField", "Title", "keep me", Bounds(0, 0, 0, 100, 20),
+                      "snap-1", editable=True)
+    return driver, entry, element
+
+
+def test_ref_type_into_a_filled_entry_appends_after_focus_selects_all(fake_atspi, monkeypatch):
+    """#1232: 'keep me' + ' more' stays 'keep me more' when focus selects all."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    assert driver.type_into(element, " more") == 5
+    assert entry.text == "keep me more"
+    assert entry.selection is None
+
+
+def test_ref_type_refuses_when_the_select_all_cannot_be_dropped(fake_atspi, monkeypatch):
+    """A whole-text selection that stays is refused before any write."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    monkeypatch.setattr(_atspi, "collapse_whole_selection_to_end", lambda _acc: False)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, " more")
+    assert exc.value.detail["reason"] == "would_replace_text"
+    assert entry.text == "keep me"
+
+
+def test_ref_type_never_confirms_a_write_that_lost_the_prior_text(fake_atspi, monkeypatch):
+    """The read-back compares prior plus typed text, not the typed text alone."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    monkeypatch.setattr(driver, "_type_confirmed_handle",
+                        lambda handle, text: setattr(handle, "text", text) or len(text))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, " more")
+    assert exc.value.detail["reason"] == "prior_text_lost"
+    assert exc.value.detail["expected"] == "keep me more"
+    assert exc.value.detail["actual"] == " more"
+
+
+def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monkeypatch):
+    """Only a single-line entry with text is collapsed; a text view keeps its selection."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    entry.states.discard("SINGLE_LINE")
+    entry.states.add("MULTI_LINE")
+    assert not _atspi.append_target_entry(entry)
+    entry.states.discard("MULTI_LINE")
+    entry.states.add("SINGLE_LINE")
+    entry.text, entry.selection, entry.caret = "", None, 0
+    assert _atspi.append_target_entry(entry)
+    assert not _atspi.whole_text_selected(entry)
+    assert driver.type_into(element, "x") == 1
+    assert entry.text == "x"

@@ -9742,6 +9742,80 @@ def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
     return int(caret), start, end
 
 
+def append_target_entry(acc) -> bool:
+    """A native single-line entry whose text a ref ``type`` must append to.
+
+    Browser fields keep their own focus path, and a multi-line view keeps
+    its caret and selection. A secure field is refused before this runs.
+    """
+    if _role_name(acc) not in {"text", "entry"}:
+        return False
+    if not _state_has(acc, "SINGLE_LINE") or _state_has(acc, "MULTI_LINE"):
+        return False
+    return not _chromium_app(acc)
+
+
+def whole_text_selected(acc) -> bool:
+    """True when the field has text and every character of it is selected."""
+    text = _full_text(acc)
+    if not text:
+        return False
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if not isinstance(nchars, int) or isinstance(nchars, bool) or nchars <= 0:
+        return False
+    _caret, start, end = _caret_and_selection(acc, nchars)
+    return start == 0 and end == nchars
+
+
+def collapse_whole_selection_to_end(acc) -> bool:
+    """Collapse a select-all selection of an entry so typing appends.
+
+    GTK selects the whole text when it gives an entry focus, and an
+    EditableText insert replaces that selection. A ref ``type`` has no
+    replace request, so the selection is dropped and the caret goes to the
+    end of the text. True when no whole-text selection remains.
+    """
+    Atspi = _atspi()
+    if not whole_text_selected(acc):
+        return True
+    nchars = _safe(lambda: Atspi.Text.get_character_count(acc))
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if isinstance(count, int) and not isinstance(count, bool):
+        for index in range(count - 1, -1, -1):
+            _safe(lambda: Atspi.Text.remove_selection(acc, index))
+    _move_caret(Atspi, acc, nchars)
+    return not whole_text_selected(acc)
+
+
+def entry_text_and_caret(acc) -> tuple[str, int] | None:
+    """(text, caret offset in characters) of a collapsed entry, else None."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    caret, start, end = _caret_and_selection(acc, nchars)
+    if start != end or nchars != len(text):
+        return None
+    return text, caret
+
+
+def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
+    """Whether the field still holds its prior text around the typed text.
+
+    The prior text before the caret and after it must both survive, with
+    something inserted between them. The write's own read-back compares
+    the exact string; this backstop catches a write that replaced the old
+    text, without failing a field that reshapes the typed characters (a
+    mask, a length limit or a case rule).
+    """
+    prior, caret = before
+    now = _full_text(acc)
+    if now is None:
+        return True
+    head, tail = prior[:caret], prior[caret:]
+    return len(now) >= len(prior) and now.startswith(head) and now.endswith(tail)
+
+
 def _text_mismatch(reason: str, message: str, **detail):
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 

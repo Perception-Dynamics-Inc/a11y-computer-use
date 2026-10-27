@@ -11194,7 +11194,10 @@ def build_server(
         says edit is a type target: focus is that paragraph or its shape,
         then EditableText inserts at the caret. A browser paragraph is not
         a type target. Without ref: the focused element. An undeclared
-        argument is invalid_arguments and no text is sent. With app=<bundle
+        argument is invalid_arguments and no text is sent. A ref type into
+        a single-line entry appends at the end of its text: focus selects
+        the whole text in GTK, and that selection is dropped, never typed
+        over (use set_value to replace). With app=<bundle
         id or name> on macOS the keystrokes are addressed to that app's
         process: it need not be frontmost, nothing is activated, and the
         user's screen stays where it is. On Linux, app= resolves that app's

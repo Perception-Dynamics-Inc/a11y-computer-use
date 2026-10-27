@@ -5307,6 +5307,18 @@ class LinuxDriver:
                     element, handle, context=context, request_focus=False,
                 )
         self._focused_editable = handle
+        append_state = None
+        if self._run(lambda: _atspi.append_target_entry(handle)):
+            # Focus selects a GTK entry's whole text, and the insert would
+            # replace it. A ref type appends: drop that selection first, and
+            # refuse rather than type when it cannot be dropped (#1232).
+            if not self._run(lambda: _atspi.collapse_whole_selection_to_end(handle)):
+                raise _atspi._text_mismatch(
+                    "would_replace_text",
+                    "the field's whole text is selected and typing would replace it; "
+                    "nothing was typed. Use set_value to replace the text",
+                )
+            append_state = self._run(lambda: _atspi.entry_text_and_caret(handle))
         peers: dict = {}
         try:
             peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
@@ -5332,6 +5344,18 @@ class LinuxDriver:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
         self._raise_if_peers_changed(handle, peers, element)
+        if (
+            append_state is not None and append_state[0]
+            and not self._run(
+                lambda: _atspi.entry_kept_prior_text(handle, append_state, text)
+            )
+        ):
+            raise _atspi._text_mismatch(
+                "prior_text_lost",
+                "the field no longer holds its previous text plus the typed text",
+                expected=append_state[0][:append_state[1]] + text + append_state[0][append_state[1]:],
+                actual=self._run(lambda: _atspi._full_text(handle)),
+            )
         return count
 
     def _focus_web_entry(self, element: Element, handle, *, context=None,
