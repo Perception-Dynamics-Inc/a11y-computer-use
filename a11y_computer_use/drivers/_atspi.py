@@ -6716,7 +6716,8 @@ def _preferred_window(frames, is_active):
 def find_root(app: str, scope) -> object | None:
     """The AT-SPI root for ``app`` at ``scope``.
 
-    ``app`` matches an application accessible by name substring (case-insensitive)
+    ``app`` matches an application accessible by name (case-insensitive, see
+    ``_linux_system._names_program``)
     — the Linux analog of a bundle id / process exe. For `Scope.APP` the app
     accessible is returned; for `Scope.WINDOW` its active (else first) top-level
     frame. A GTK combo popup that is the only ACTIVE window does not replace
@@ -6807,7 +6808,7 @@ def find_root(app: str, scope) -> object | None:
         if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        if needle not in name and not (pids and pid_of(candidate) in pids):
+        if not _linux_system._names_program(needle, name) and not (pids and pid_of(candidate) in pids):
             continue
         with app_reply_watch(app, hinted, candidate) as watch:
             pid = pid_of(candidate)

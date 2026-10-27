@@ -1914,3 +1914,34 @@ def test_transient_modal_windows_fail_open_without_display(monkeypatch):
     monkeypatch.setattr(_linux_system, "_display", broken)
     assert _linux_system.transient_modal_windows(pid=200, parent_title="Parent") == []
     assert _linux_system.transient_modal_windows(pid=0, parent_title="Parent") == []
+
+
+@pytest.mark.parametrize("needle,name,expected", [
+    ("python", "python", True),
+    ("python", "python3", False),
+    ("firefox", "firefox-esr", False),
+    ("code", "code-insiders", False),
+    ("gimp", "gimp-2.10", False),
+    ("soffice", "soffice.bin", False),
+    ("chrome", "google chrome", True),
+    ("terminal", "xfce4-terminal", True),
+    ("python3", "python", False),
+])
+def test_names_program_refuses_longer_program_with_same_prefix(needle, name, expected) -> None:
+    """#1191: ``python`` must never name the different program ``python3``."""
+    from a11y_computer_use.drivers import _linux_system
+
+    assert _linux_system._names_program(needle, name) is expected
+
+
+@pytest.mark.parametrize("other", ["python3", "python3.12"])
+def test_exited_or_frozen_app_does_not_match_prefix_neighbour(other) -> None:
+    """#1191: with ``python`` gone, its id must not resolve to ``python3``'s process."""
+    from a11y_computer_use.drivers import _linux_system
+
+    assert not _linux_system._identifier_matches_process("python", other)
+    assert not _linux_system._comm_matches_identifier("python", other)
+    assert _linux_system._identifier_matches_process("python", "python")
+    assert _linux_system._comm_matches_identifier("python", "python")
+    # LibreOffice keeps resolving through its alias group, not the prefix.
+    assert _linux_system._comm_matches_identifier("soffice", "soffice.bin")

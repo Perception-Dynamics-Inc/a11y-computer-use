@@ -703,10 +703,29 @@ def _identity_needles(identifier: str) -> list[str]:
     return names
 
 
+def _names_program(needle: str, name: str) -> bool:
+    """Whether ``name`` holds ``needle`` as a program name, not a prefix of a longer one.
+
+    ``needle`` matches the whole name or a trailing part of it (``terminal``
+    in ``xfce4-terminal``, ``chrome`` in ``google chrome``). A name that
+    extends ``needle`` with more name characters is a different program:
+    ``python`` is not ``python3``, ``firefox`` is not ``firefox-esr``,
+    ``code`` is not ``code-insiders`` and ``gimp`` is not ``gimp-2.10``. An
+    app that stopped answering or exited must not resolve to such a
+    neighbour (#1191).
+    """
+    if not needle or not name:
+        return False
+    if needle == name:
+        return True
+    return re.search(re.escape(needle) + r"(?![\w.-])", name) is not None
+
+
 def _comm_matches_identifier(identifier: str, comm: str) -> bool:
     """True when ``comm`` is the process ``identifier`` names.
 
-    A comm substring matches, and so does a launcher alias. A path matches
+    A comm that holds the name (see ``_names_program``) matches, and so
+    does a launcher alias. A path matches
     by its basename as well as the full string.
     """
     folded = (comm or "").lower()
@@ -717,7 +736,7 @@ def _comm_matches_identifier(identifier: str, comm: str) -> bool:
     if shares_alias(identifier, folded):
         return True
     for needle in _identity_needles(identifier):
-        if needle in folded or _launcher_comm(needle, folded):
+        if _names_program(needle, folded) or _launcher_comm(needle, folded):
             return True
     return False
 
@@ -730,7 +749,8 @@ def _identifier_matches_process(identifier: str, identity: str) -> bool:
     or the 15-byte comm of that same name. It does not match a different
     program that shares the prefix, and a shorter token inside the name
     (``text`` inside ``gnome-text-editor``) is not a match. A short comm
-    keeps the substring and launcher rules ``resolve_app`` already used.
+    keeps the launcher rule and the ``_names_program`` rule, so ``python``
+    never matches ``python3``.
     """
     folded = (identity or "").lower()
     if not folded:
@@ -749,7 +769,7 @@ def _identifier_matches_process(identifier: str, identity: str) -> bool:
             if needle.endswith("-" + folded):
                 return True
             continue
-        if needle in folded or _launcher_comm(needle, folded):
+        if _names_program(needle, folded) or _launcher_comm(needle, folded):
             return True
     return False
 

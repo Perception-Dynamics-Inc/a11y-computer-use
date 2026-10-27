@@ -22173,3 +22173,31 @@ def test_snapshot_stops_waiting_when_the_plugin_maps_as_gen(fake_atspi, monkeypa
     with pytest.raises(ComputerUseError):
         LinuxDriver().snapshot(Scope.WINDOW, "soffice.bin")
     assert clock["t"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("scope", [Scope.APP, Scope.WINDOW])
+def test_find_root_refuses_prefix_neighbour_when_named_app_is_gone(fake_atspi, monkeypatch, scope) -> None:
+    """#1191: ``python`` must not bind to the ``python3`` application's tree."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    gtk = _WindowNode("frame", "Hang Fixture GTK")
+    neighbour = _WindowNode("application", "python3", children=[gtk])
+    fake_atspi.desktop = _WindowNode("desktop", children=[neighbour])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    assert _atspi.find_root("python", scope) is None
+    assert _atspi.find_root("python3", scope) is (neighbour if scope is Scope.APP else gtk)
+
+
+def test_find_root_keeps_whole_word_application_names(fake_atspi, monkeypatch) -> None:
+    """A whole word in the AT-SPI name still matches: ``chrome`` names "Google Chrome"."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    frame = _WindowNode("frame", "New Tab - Google Chrome")
+    chrome = _WindowNode("application", "Google Chrome", children=[frame])
+    fake_atspi.desktop = _WindowNode("desktop", children=[chrome])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    assert _atspi.find_root("chrome", Scope.APP) is chrome
