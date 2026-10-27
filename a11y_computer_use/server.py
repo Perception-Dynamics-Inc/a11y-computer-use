@@ -4091,6 +4091,50 @@ class Runtime:
         self._reissued_refs = earlier
         return renamed
 
+    def _use_reissued_refs(self, snap: Snapshot, matches) -> tuple[Snapshot, list]:
+        """Name a ``find`` match by the ref a snapshot re-issued for it (#1235).
+
+        A fresh snapshot shows a control behind a refused, reused number
+        under a new ref. ``find`` reads the native tree again, which numbers
+        that control with the reused number. Returning that number would
+        give one control two refs, and issuing it would rebind the refused
+        number the agent may still hold for the old control. A match whose
+        identity is the re-issued control's, in the same app, is named by
+        the re-issued ref instead. Anything else is unchanged.
+        """
+        reissued = getattr(self, "_reissued_refs", None)
+        last = getattr(self, "_last_issued", None)
+        if not reissued or not matches or last is None or last.app != getattr(snap, "app", None):
+            return snap, list(matches)
+        anchors = getattr(self, "_issued_anchors", {})
+        by_identity = {
+            identity: ref for ref, identity in reissued.items() if ref in anchors
+        }
+        if not by_identity:
+            return snap, list(matches)
+        index = {el.ref: el for el in snap.elements}
+        mapping: dict[str, str] = {}
+        for el in matches:
+            if el.ref not in index:
+                continue
+            ref = by_identity.get(self._issued_identity(index, el.ref))
+            if ref is None or ref == el.ref or ref in index or ref in mapping.values():
+                continue
+            mapping[el.ref] = ref
+        if not mapping:
+            return snap, list(matches)
+        renamed = observe.rename_refs(snap, mapping)
+        self._current = renamed
+        moved = [
+            replace(
+                el, ref=mapping.get(el.ref, el.ref),
+                parent=mapping.get(el.parent, el.parent) if el.parent else el.parent,
+                snapshot_id=renamed.snapshot_id,
+            )
+            for el in matches
+        ]
+        return renamed, moved
+
     _SURFACE_ROLES = frozenset({"AXDialog", "AXSheet", "AXPopover"})
     # #1142: GTK4 exposes a DropDown or MenuButton popover as neither modal
     # nor AXPopover. It is a list box or menu child of the expanded owner.
@@ -5523,6 +5567,7 @@ class Runtime:
                     if el.ref in replacements else el for el in snap.elements
                 ))
                 self._current = snap
+            snap, matches = self._use_reissued_refs(snap, matches)
             self._note_issued(snap, {el.ref for el in matches})
             rendered = observe.render_matches(snap, matches, text=text)
             warning_reader = getattr(self.driver, "observation_warning", None)
