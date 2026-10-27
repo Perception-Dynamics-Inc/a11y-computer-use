@@ -427,16 +427,19 @@ class PermissionStore:
         """
         with self._lock:
             self._refresh()
+            # Deny stays broad (any alias group) so it fails closed; a grant
+            # or an allow entry covers only the same program (#1191).
             keys = self._identity_keys(bundle_id)
+            grant_keys = self._identity_keys(bundle_id, same_program=True)
             if any(key in self._deny for key in keys):
                 block: str | None = "deny"
-            elif self._allow and not any(key in self._allow for key in keys):
+            elif self._allow and not any(key in self._allow for key in grant_keys):
                 block = "allow"
             else:
                 block = None
             denied = self._load_error is not None or block is not None
             granted = None
-            for key in keys:
+            for key in grant_keys:
                 if launching:
                     from a11y_computer_use.app_identity import normalize
                     editor_families = (
@@ -452,7 +455,7 @@ class PermissionStore:
                     break
             return granted, denied, self._load_error, block
 
-    def _identity_keys(self, bundle_id: str) -> list[str]:
+    def _identity_keys(self, bundle_id: str, *, same_program: bool = False) -> list[str]:
         """Stored keys that name ``bundle_id``, exact string first.
 
         Case, a desktop id, and alias groups share a grant. Files covers the
@@ -460,8 +463,18 @@ class PermissionStore:
         gnome-text-editor, and the Chrome names cover each other. A terminal
         binary covers only its own aliases, not a different terminal. The
         caller's own string is always included so an unknown app stays a miss.
+
+        With ``same_program`` (grants and the allow list) a key covers only
+        the same program: a Chrome grant does not cover Chromium, nor a
+        gedit grant Mousepad. A role-label key (``Files``) still covers each
+        of its programs, since that grant names the role (#1191).
         """
-        from a11y_computer_use.app_identity import identity_keys
+        from a11y_computer_use.app_identity import identity_keys, program_alias, same_program as same
+
+        def covers(key: str) -> bool:
+            if same_program:
+                return same(key, bundle_id) or program_alias(key, bundle_id)
+            return bool(identity_keys(key) & wanted)
 
         ordered: list[str] = []
         if bundle_id in self._tiers or bundle_id in self._deny or bundle_id in self._allow:
@@ -471,7 +484,7 @@ class PermissionStore:
             for key in list(self._tiers) + list(self._deny) + list(self._allow):
                 if key in ordered:
                     continue
-                if identity_keys(key) & wanted:
+                if covers(key):
                     ordered.append(key)
         if bundle_id not in ordered:
             ordered.append(bundle_id)

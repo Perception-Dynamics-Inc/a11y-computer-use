@@ -1046,3 +1046,42 @@ def test_act_batch_reports_each_code_once(tmp_path) -> None:
     rt.store.revoke(APP)
     out = json.loads(rt.act_batch([{"do": "click", **INSIDE_SAVE}]))
     assert out[0]["error"].count("needs_permission") == 1
+
+
+@pytest.mark.parametrize("granted,asked", [
+    ("chrome", "chromium"), ("google-chrome", "chromium"), ("chromium", "chrome"),
+    ("gedit", "mousepad"), ("nautilus", "thunar"),
+])
+def test_a_grant_covers_only_the_same_program(tmp_path, granted, asked) -> None:
+    """#1191: a Chrome grant is not a Chromium grant; deny still fails closed."""
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    store.set_tier(granted, safety.Tier.FULL)
+    assert store.get_tier(asked) is None
+    (tmp_path / "perm.json").write_text(json.dumps({"apps": {}, "allow": [granted]}))
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    assert store.policy(asked)[3] == "allow"
+    (tmp_path / "perm.json").write_text(json.dumps({"apps": {asked: {"tier": "full"}}, "deny": [granted]}))
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    assert store.policy(asked)[3] == "deny"
+
+
+@pytest.mark.parametrize("granted,asked", [
+    ("google-chrome", "chrome"), ("LibreOffice", "soffice.bin"), ("calc", "soffice"),
+    ("files", "nautilus"), ("text editor", "mousepad"), ("Org.Gnome.Nautilus", "nautilus"),
+])
+def test_a_grant_still_covers_names_of_the_same_program(tmp_path, granted, asked) -> None:
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    store.set_tier(granted, safety.Tier.FULL)
+    assert store.get_tier(asked) is safety.Tier.FULL
+
+
+@pytest.mark.parametrize("program", ["mousepad", "gedit", "gnome-text-editor"])
+def test_editor_program_grant_does_not_grant_the_role(tmp_path, program) -> None:
+    """A role grants its members, but a member does not grant the whole role."""
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    store.set_tier(program, safety.Tier.FULL)
+    assert store.get_tier("Text Editor") is None
+    store.set_tier("Text Editor", safety.Tier.READ)
+    assert store.get_tier(program) is safety.Tier.FULL
+    for other in {"mousepad", "gedit", "gnome-text-editor"} - {program}:
+        assert store.get_tier(other) is safety.Tier.READ

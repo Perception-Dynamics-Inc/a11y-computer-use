@@ -2001,7 +2001,7 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
 
 @requires_display
 def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path, isolated_home) -> None:
-    """Live. Text Editor and the Chrome names share a grant. Terminals do not.
+    """Live. Grants cover one program; explicit role grants cover their members.
 
     mousepad, gedit, or gnome-text-editor is launched as Text Editor. A grant
     for xterm does not launch gnome-terminal when exec is enabled. With exec
@@ -2023,11 +2023,21 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
     assert editor, "no text editor binary; the linux job installs mousepad"
     store = safety.PermissionStore()
     store.set_tier(editor, Tier.FULL)
-    assert store.get_tier("Text Editor") is Tier.FULL
-    assert store.get_tier("gedit") is Tier.FULL
+    assert store.get_tier("Text Editor") is None
+    for name in ("mousepad", "gedit", "gnome-text-editor"):
+        assert store.get_tier(name) is (Tier.FULL if name == editor else None)
+    # A role grant is explicit: it authorizes whichever installed editor the
+    # desktop label resolves to, without broadening the individual grant.
+    store.set_tier("Text Editor", Tier.FULL)
+    for name in ("mousepad", "gedit", "gnome-text-editor"):
+        assert store.get_tier(name) is Tier.FULL
     store.set_tier("chromium", Tier.CLICK)
-    assert store.get_tier("google-chrome") is Tier.CLICK
-    assert store.get_tier("chrome") is Tier.CLICK
+    assert store.get_tier("google-chrome") is None
+    assert store.get_tier("chrome") is None
+    assert store.get_tier("chromium-browser") is Tier.CLICK
+    store.set_tier("google-chrome", Tier.READ)
+    assert store.get_tier("chrome") is Tier.READ
+    assert store.get_tier("chromium") is Tier.CLICK
     assert store.get_tier("chromium-browser") is Tier.CLICK
     store.set_tier("xterm", Tier.FULL)
     assert store.get_tier("gnome-terminal") is None
