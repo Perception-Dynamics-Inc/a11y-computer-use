@@ -403,6 +403,23 @@ opaque, including the wxGTK layout with the toolbar description on a sibling
 grip: its displayed reading is not an accessible value. When Audacity publishes
 real children or names, the driver preserves them.
 
+## Input methods (IBus)
+
+Typing and `set_value` into Chromium send XTEST keycodes. With
+`XMODIFIERS=@im=ibus`, Chromium routes them to the active IBus engine, so
+`libpinyin` or `m17n:ru:translit` turns `hello world 42` into
+`合理咯我人类的42` or `хелло ворлд 42` (#1219). GTK3 entries and `xkb:` engines
+are not affected.
+
+While keys are sent, `_linux_ime.ascii_passthrough` switches the global engine to
+`xkb:us::eng` (about 5 ms; the XKB layout does not change) and puts the user's
+engine back after, checking by reading it back. One switch covers a whole string.
+If the engine cannot be switched and the read-back is wrong, the error is
+`ime_active` with `detail.ime` naming the engine, not `text_mismatch`.
+`set_value` leaves a non-empty field untouched in that case, and the target keeps
+keyboard focus. `A11Y_IME_BYPASS=0` turns the switch off. fcitx5 and other
+frameworks are not switched or detected.
+
 ## Meld file comparisons
 
 Meld 3.22.3 (GTK 3) exposes the file-diff chunk-action gutter between text

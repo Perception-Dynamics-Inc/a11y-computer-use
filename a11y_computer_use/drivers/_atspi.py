@@ -9714,9 +9714,34 @@ def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
     return int(caret), start, end
 
 
-def _text_mismatch(reason: str, message: str, **detail):
+def _ime_active_error(ime, message: str, **detail):
+    """The refusal for text an input method changed or would change (#1219)."""
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
+    payload = {
+        "platform": "linux",
+        "reason": "ime_active",
+        "ime": {"framework": ime.framework, "engine": ime.engine},
+    }
+    payload.update(detail)
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"the active input method ({ime}) changes typed text and could not be switched "
+        f"to a pass-through engine; {message}. Switch the input method to a plain "
+        "keyboard layout (for example 'ibus engine xkb:us::eng') and retry",
+        detail=payload,
+    )
+
+
+def _text_mismatch(reason: str, message: str, **detail):
+    from a11y_computer_use.drivers import _linux_ime
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    ime = _linux_ime.recent_bypass_failure() if reason == "text_mismatch" else None
+    if ime is not None:
+        # The keystroke path went through an input method that could not be
+        # switched to pass-through, so the read-back is its output (#1219).
+        return _ime_active_error(ime, message, **detail)
     payload = {"platform": "linux", "reason": reason}
     payload.update(detail)
     return ComputerUseError(ErrorCode.UNSUPPORTED, message, detail=payload)
@@ -10313,16 +10338,20 @@ def _type_into_target(acc, text: str) -> None:
     if _focus_on_target(acc) is None:
         _type_string(text)
         return
+    from a11y_computer_use.drivers import _linux_ime
+
     sent = False
-    for ch in text:
-        if _focus_on_target(acc) is False:
-            if sent:
-                raise _focus_lost_error(
-                    "focus left the target; stopped before the next keystroke"
-                )
-            raise _focus_lost_error("focus is not on the target; nothing was typed")
-        _type_string(ch)
-        sent = True
+    # One engine switch for the whole string, not one per character (#1219).
+    with _linux_ime.ascii_passthrough():
+        for ch in text:
+            if _focus_on_target(acc) is False:
+                if sent:
+                    raise _focus_lost_error(
+                        "focus left the target; stopped before the next keystroke"
+                    )
+                raise _focus_lost_error("focus is not on the target; nothing was typed")
+            _type_string(ch)
+            sent = True
 
 
 def _chord_into_target(acc, chord: str) -> None:
@@ -10475,17 +10504,28 @@ def _replace_with_keys(acc, text: str) -> bool:
     if current is None or not _x11_keys_available():
         return False
     original = current
-    if not _text_is_blank(current):
-        _x11_select_all_and_delete(acc)
-        if not _wait_until_gone(acc):
-            _restore_text(acc, original)
-            return False
-    else:
-        grab_focus(acc)
-    _type_into_target(acc, text)
-    if _confirm_text(acc, text):
-        return True
-    _restore_text(acc, original)
+    from a11y_computer_use.drivers import _linux_ime
+
+    # One engine switch covers the clear, the write and a restore (#1219).
+    with _linux_ime.ascii_passthrough():
+        ime = _linux_ime.recent_bypass_failure()
+        if ime is not None and not _text_is_blank(current):
+            # The original could not be typed back through this engine, so
+            # nothing is cleared.
+            raise _ime_active_error(
+                ime, "the field was left as it was; nothing was cleared or typed",
+            )
+        if not _text_is_blank(current):
+            _x11_select_all_and_delete(acc)
+            if not _wait_until_gone(acc):
+                _restore_text(acc, original)
+                return False
+        else:
+            grab_focus(acc)
+        _type_into_target(acc, text)
+        if _confirm_text(acc, text):
+            return True
+        _restore_text(acc, original)
     return False
 
 
