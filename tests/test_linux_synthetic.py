@@ -21290,6 +21290,40 @@ def test_sparse_list_line_scroll_stops_pixel_wait_on_stable_rows(
     assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == f"ITEM-{1 + dy:03d}"
 
 
+@pytest.mark.parametrize("document_replaced", [True, False])
+def test_linux_replaced_document_ref_is_stale_even_when_the_window_overflows(
+    monkeypatch, document_replaced,
+):
+    """#1204: a page the browser replaced is stale_ref, not window_beyond_display."""
+    from dataclasses import replace
+
+    window = Element("e1", "AXWindow", "Page", None, Bounds(0, 0, 0, 900, 900), "old",
+                     context_identity=("frame", ":1.42", "/window"))
+    page = Element("e2", "AXGroup", "Page", None, Bounds(0, 0, 40, 900, 860), "old",
+                   parent="e1", path=(0,),
+                   context_identity=("document web", ":1.42", "/document/1"))
+    target = Element("e3", "AXButton", "B24", None, Bounds(0, 400, 200, 100, 30),
+                     "old", parent="e2", path=(0, 0))
+    old = Snapshot("old", Scope.WINDOW, "chrome", 42, 0., (), (window, page, target))
+    note = "window extends beyond the displays; off-screen controls may be omitted"
+    live_page = replace(
+        page, snapshot_id="live",
+        context_identity=("document web", ":1.42", "/document/9" if document_replaced else "/document/1"),
+    )
+    live = replace(old, snapshot_id="live",
+                   elements=(replace(window, snapshot_id="live", content_note=note), live_page))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *args: None)
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(old, "e3", live=live)
+    if document_replaced:
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "document_changed"
+    else:
+        assert caught.value.code is ErrorCode.NOT_VISIBLE
+        assert caught.value.detail["reason"] == "window_beyond_display"
+
+
 @pytest.mark.parametrize("role,title,occupant", [
     ("AXButton", "Beta", "Alpha"),
     ("AXTextField", "", None),
