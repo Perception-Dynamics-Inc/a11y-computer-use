@@ -23079,6 +23079,9 @@ def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monk
     entry.states.add("SINGLE_LINE")
     entry.text, entry.selection, entry.caret = "", None, 0
     assert _atspi.append_target_entry(entry)
+    assert not _atspi.whole_text_selected(entry)
+    assert driver.type_into(element, "x") == 1
+    assert entry.text == "x"
 
 
 def _calc_comment_tree():
@@ -23151,9 +23154,6 @@ def test_calc_comment_paragraph_is_the_type_read_back(fake_atspi, monkeypatch) -
     with pytest.raises(ComputerUseError) as exc:
         driver.type_text("Added by test")
     assert exc.value.detail["reason"] == "text_mismatch"
-    assert not _atspi.whole_text_selected(entry)
-    assert driver.type_into(element, "x") == 1
-    assert entry.text == "x"
 
 
 def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
