@@ -47,6 +47,10 @@ def ibus(monkeypatch):
     monkeypatch.delenv("FAKE_IBUS_REFUSE", raising=False)
     # No test reads a real panel; the composition tests set this themselves.
     monkeypatch.setattr(_linux_ime, "_composition_open", lambda: False)
+    # The settle is real time on a real panel; none of it is needed against a stub.
+    monkeypatch.setattr(_linux_ime, "_SETTLE_S", 0.0)
+    monkeypatch.setattr(_linux_ime, "_BUDGET_S", 0.2)
+    monkeypatch.setattr(_linux_ime, "_POLL_S", 0.0)
 
     class Fake:
         def set(self, name: str) -> None:
@@ -361,9 +365,6 @@ def test_no_composition_means_the_engine_is_switched_as_before(ibus, monkeypatch
     monkeypatch.setattr(_linux_input, "_type_string_keys", lambda t, delay=None: None)
     _linux_input.type_string("abc")
     assert ibus.switches == ["set xkb:us::eng", "set libpinyin"]
-    # Unknown (no panel, unreadable) is not a refusal either.
-    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: None)
-    _linux_input.type_string("abc")
 
 
 def test_a_plain_layout_does_not_look_for_a_composition(ibus, monkeypatch) -> None:
@@ -380,7 +381,11 @@ def test_a_nested_use_checks_the_composition_once(ibus, monkeypatch) -> None:
     with _linux_ime.ascii_passthrough("a"):
         with _linux_ime.ascii_passthrough("b"):
             pass
-    assert calls == [1]
+    nested = len(calls)
+    calls.clear()
+    with _linux_ime.ascii_passthrough("a"):
+        pass
+    assert nested == len(calls)
 
 
 class _Node:
@@ -454,3 +459,153 @@ def test_without_a_panel_or_when_it_cannot_be_read_the_composition_is_unknown(mo
     monkeypatch.setattr(_linux_ime, "_composition_open", _linux_ime._composition_open)
     monkeypatch.setattr(_atspi, "ime_composition_open", boom)
     assert _linux_ime._composition_open() is None
+
+
+# --- the check is settled, never skipped, and runs before any clear (#1219) ----
+
+
+def test_a_composition_the_panel_publishes_late_is_still_found(ibus, monkeypatch) -> None:
+    """The panel lags the keys that made the preedit; one idle read is not an answer."""
+    ibus.set("libpinyin")
+    monkeypatch.setattr(_linux_ime, "_SETTLE_S", 0.15)
+    started = time.monotonic()
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: time.monotonic() - started > 0.06)
+    assert _linux_ime.composition_state() is True
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as exc:
+        with _linux_ime.ascii_passthrough("abc"):
+            pytest.fail("typed over an open composition")
+    assert exc.value.detail["reason"] == "ime_composition_open"
+    assert ibus.switches == []
+
+
+def test_idle_is_only_reported_after_the_settle_period(ibus, monkeypatch) -> None:
+    monkeypatch.setattr(_linux_ime, "_SETTLE_S", 0.1)
+    monkeypatch.setattr(_linux_ime, "_POLL_S", 0.01)
+    began = time.monotonic()
+    assert _linux_ime.composition_state() is False
+    assert time.monotonic() - began >= 0.1
+
+
+def test_a_transient_unreadable_panel_is_retried_not_refused(ibus, monkeypatch) -> None:
+    reads = iter([None, None, False, False, False, False, False, False])
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: next(reads, False))
+    assert _linux_ime.composition_state() is False
+
+
+def test_an_unreadable_panel_is_unknown_and_refuses_before_any_switch(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: None)
+    with pytest.raises(ComputerUseError) as exc:
+        with _linux_ime.ascii_passthrough("abc"):
+            pytest.fail("typed although a composition could not be ruled out")
+    assert exc.value.detail["reason"] == "ime_composition_unknown"
+    assert exc.value.detail["typed"] is False
+    assert ibus.switches == []
+    monkeypatch.setenv("A11Y_IME_COMPOSITION_UNKNOWN", "proceed")
+    with _linux_ime.ascii_passthrough("abc"):
+        assert ibus.engine == "xkb:us::eng"
+
+
+def test_a_late_composition_after_unknown_reads_is_found(ibus, monkeypatch) -> None:
+    reads = iter([None, None, True])
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: next(reads, None))
+    assert _linux_ime.composition_state() is True
+
+
+def _firefox_field(monkeypatch, text="keep me"):
+    """A Firefox entry whose clear and typing are recorded instead of sent."""
+    sent: list[str] = []
+    field = {"text": text}
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: field["text"])
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_chord_into_target", lambda acc, chord: (sent.append(chord), field.update(text="") if chord == "backspace" else None))
+    monkeypatch.setattr(_atspi, "_wait_until_gone", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", lambda acc, t: sent.append(f"type {t}"))
+    monkeypatch.setattr(_atspi, "_confirm_text_landed", lambda acc, t: True)
+    monkeypatch.setattr(_atspi, "_shown_matches", lambda acc, t: False)
+    return field, sent
+
+
+def test_firefox_set_value_with_an_unswitchable_engine_never_clears_the_field(ibus, monkeypatch) -> None:
+    """The clear (ctrl+a, BackSpace) used to run before the IME check: 0/3 kept."""
+    ibus.set("libpinyin")
+    monkeypatch.setenv("FAKE_IBUS_REFUSE", "1")
+    field, sent = _firefox_field(monkeypatch)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_refuse_model_editor_replace", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_capture_text_points", lambda acc: [])
+    monkeypatch.setattr(_atspi, "_restore_text_points", lambda saved: None)
+    # The unguarded body: the clear would run and empty the field.
+    monkeypatch.setattr(_atspi, "_set_text_body", lambda acc, t, force=False: _atspi._focus_and_replace(acc, t))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(object(), "hello world 42")
+    assert exc.value.detail["reason"] == "ime_active"
+    assert exc.value.detail["typed"] is False
+    assert sent == []
+    assert field["text"] == "keep me"
+    assert ibus.switches == ["set xkb:us::eng"]
+
+
+def test_firefox_set_value_with_an_open_composition_never_clears_the_field(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    _open_composition(monkeypatch)
+    field, sent = _firefox_field(monkeypatch, text="ni hao")
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_refuse_model_editor_replace", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_capture_text_points", lambda acc: [])
+    monkeypatch.setattr(_atspi, "_restore_text_points", lambda saved: None)
+    monkeypatch.setattr(_atspi, "_set_text_body", lambda acc, t, force=False: _atspi._focus_and_replace(acc, t))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(object(), "hello world 42")
+    assert exc.value.detail["reason"] == "ime_composition_open"
+    assert sent == [] and field["text"] == "ni hao"
+    assert ibus.switches == []
+
+
+def test_the_key_clear_refuses_on_its_own_when_a_composition_is_open(ibus, monkeypatch) -> None:
+    """Backstop for a caller that reaches the clear without the guard."""
+    ibus.set("libpinyin")
+    _open_composition(monkeypatch)
+    sent: list[str] = []
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: sent.append("focus"))
+    monkeypatch.setattr(_atspi, "_chord_into_target", lambda acc, chord: sent.append(chord))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._x11_select_all_and_delete(object())
+    assert exc.value.detail["reason"] == "ime_composition_open"
+    assert sent == []
+    # Inside the guard (already checked) it sends the keys, and without an IME too.
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: False)
+    _atspi._x11_select_all_and_delete(object())
+    assert sent == ["focus", "ctrl+a", "backspace"]
+    ibus.set("xkb:us::eng")
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: pytest.fail("looked"))
+    _atspi._x11_select_all_and_delete(object())
+
+
+def test_the_driver_refuses_set_value_before_focus_dom_write_or_window_raise(ibus, monkeypatch) -> None:
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _cdp_forms
+
+    ibus.set("libpinyin")
+    _open_composition(monkeypatch)
+    handle = object()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snapshot, ref: handle)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: False)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("the field was touched")
+
+    monkeypatch.setattr(_cdp_forms, "write_element", unexpected)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "_check_modal_target", lambda element: None)
+    for name in ("_raise_handle_window", "_focus_web_entry", "_apply_set_value"):
+        monkeypatch.setattr(driver, name, unexpected)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(_element(), "hello world 42")
+    assert exc.value.detail["reason"] == "ime_composition_open"

@@ -429,10 +429,26 @@ preedit or a candidate) means a composition is open. The call is then refused as
 `ime_composition_open` before the switch and before any key, with `detail.typed:
 false`, and the preedit is left as it was. Commit it (Enter or a candidate) or
 cancel it (Escape) and retry. The panel's candidate window stays mapped when idle,
-so the check reads its labels, not its map state. With no panel (for example
-`ibus-daemon --panel disable`) or an unreadable one the composition is unknown and
-typing goes ahead. A `type` addressed by `ref` focuses the field first, which
-commits the preedit in Chrome.
+so the check reads its labels, not its map state.
+
+The panel learns of a preedit tens of milliseconds after the keys that made it, so
+one read that finds it idle proves nothing. The check reads until the panel has shown
+no composition for 0.25 s (a composition found at any read refuses at once), which
+costs about 0.25 s per call while a non-US engine is active. A panel that cannot be
+read (no `ibus-ui-gtk3`, for example `ibus-daemon --panel disable`, or an AT-SPI
+timeout that outlasts 1.5 s of retries) leaves the composition unknown, and an unknown
+composition is refused as `ime_composition_unknown`, because the switch could discard
+it. `A11Y_IME_COMPOSITION_UNKNOWN=proceed` types anyway. AT-SPI exposes no preedit
+marker on the field itself in Chrome or Firefox (the preedit is just part of its text),
+so the panel is the only signal; an engine that shows its preedit only inline, with no
+panel text, cannot be seen.
+
+For a browser field the engine switch and this check run before the write touches
+the field, including `set_value`'s clear: a Firefox entry is cleared with ctrl+a,
+BackSpace, and a refusal after that would leave it empty. `set_value` also checks
+before it raises the window, focuses the field or writes the DOM. The key clear
+refuses on its own when a composition is open. A `type` addressed by `ref` focuses
+the field first, which commits the preedit in Chrome.
 
 ## Meld file comparisons
 

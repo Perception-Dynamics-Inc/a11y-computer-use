@@ -3983,6 +3983,9 @@ class LinuxDriver:
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None:
+            # Before the window is raised, the field focused or a DOM write made:
+            # any of them can commit or cancel an open composition (#1219).
+            self._run(lambda: _atspi.refuse_open_composition(handle))
             self._run(lambda: _atspi._refuse_gecko_date_segment_replace(handle))
             self._raise_handle_window(handle)
         peers: dict = {}
