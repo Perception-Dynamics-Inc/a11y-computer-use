@@ -1,6 +1,6 @@
 """#1219: typing into Chrome with an IBus engine that transforms ASCII.
 
-Hermetic. A fake ``ibus`` executable on PATH stands in for the real one, so no
+Hermetic. A Python stand-in for the ``ibus`` CLI replaces the real one, so no
 test can change a developer's engine. ``tests/conftest.py`` turns the bypass off
 for every other test; these tests turn it back on with ``A11Y_IME_BYPASS=1``.
 """
@@ -8,7 +8,7 @@ for every other test; these tests turn it back on with ``A11Y_IME_BYPASS=1``.
 from __future__ import annotations
 
 import os
-import stat
+import subprocess
 import time
 
 import pytest
@@ -18,46 +18,46 @@ from a11y_computer_use.drivers import _atspi, _linux_ime, _linux_input
 from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode
 
-_SCRIPT = """#!/bin/sh
-state="$FAKE_IBUS_STATE"
-log="$FAKE_IBUS_STATE.log"
-if [ "$1" != engine ]; then exit 2; fi
-if [ -n "$2" ]; then
-  echo "set $2" >> "$log"
-  if [ -n "$FAKE_IBUS_REFUSE" ]; then echo "Set global engine failed."; exit 1; fi
-  printf '%s' "$2" > "$state"
-  exit 0
-fi
-if [ ! -s "$state" ]; then echo "No engine is set."; exit 1; fi
-cat "$state"; echo
-"""
-
-
 @pytest.fixture
-def ibus(tmp_path, monkeypatch):
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    exe = bindir / "ibus"
-    exe.write_text(_SCRIPT)
-    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    state = tmp_path / "engine"
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("FAKE_IBUS_STATE", str(state))
+def ibus(monkeypatch):
+    """Model the ibus CLI in Python, so no test can change a developer's engine.
+
+    No shell script or executable bit: the same fixture has to work on Windows
+    and macOS, where the suite also runs these tests.
+    """
+    state = {"engine": ""}
+    switches: list[str] = []
+
+    def run(args, *, capture_output, text, timeout, check):
+        assert args[:2] == ["fake-ibus", "engine"]
+        if len(args) == 3:
+            switches.append(f"set {args[2]}")
+            if os.environ.get("FAKE_IBUS_REFUSE"):
+                return subprocess.CompletedProcess(args, 1, "Set global engine failed.\n", "")
+            state["engine"] = args[2]
+            return subprocess.CompletedProcess(args, 0, "", "")
+        engine = state["engine"]
+        if not engine:
+            return subprocess.CompletedProcess(args, 1, "No engine is set.\n", "")
+        return subprocess.CompletedProcess(args, 0, engine + "\n", "")
+
+    monkeypatch.setattr(_linux_ime, "_ibus_binary", lambda: "fake-ibus")
+    monkeypatch.setattr(_linux_ime.subprocess, "run", run)
     monkeypatch.setenv("A11Y_IME_BYPASS", "1")
+    monkeypatch.delenv("FAKE_IBUS_REFUSE", raising=False)
     monkeypatch.setattr(_linux_ime, "_failure", None)
 
     class Fake:
         def set(self, name: str) -> None:
-            state.write_text(name)
+            state["engine"] = name
 
         @property
         def engine(self) -> str:
-            return state.read_text() if state.exists() else ""
+            return state["engine"]
 
         @property
         def switches(self) -> list[str]:
-            path = tmp_path / "engine.log"
-            return path.read_text().split("\n")[:-1] if path.exists() else []
+            return switches
 
     return Fake()
 
@@ -223,6 +223,7 @@ def test_replace_with_keys_lands_ascii_with_the_engine_switched(ibus, monkeypatc
         field["text"] += text if ibus.engine.startswith("xkb:") else "合理咯"
 
     monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    monkeypatch.setattr(_atspi, "_x11_select_all_and_delete", lambda acc: field.update(text=""))
     assert _atspi._replace_with_keys(object(), "hello world 42") is True
     assert field["text"] == "hello world 42"
     assert ibus.engine == "libpinyin"
