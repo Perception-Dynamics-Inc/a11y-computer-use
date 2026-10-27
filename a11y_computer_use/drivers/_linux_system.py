@@ -651,6 +651,25 @@ def _top_window_pid(x: float, y: float) -> int | None:
     return None
 
 
+def popup_pid_at_point(x: float, y: float) -> int | None:
+    """Pid of the override-redirect popup that is topmost at a point, else None.
+
+    None when the topmost window there is a managed one, when no popup is above
+    it, or when the stack cannot be read. A popup is not a managed toplevel, so
+    ``window_at_point`` never names it; a ref whose own window is that popup
+    asks this to tell "covered by a sibling window" from "on top" (#1227).
+    """
+    try:
+        with _open_display() as d:
+            top = _window_at_point(d, x, y, popups=True)
+            if top is None or top.id == getattr(_window_at_point(d, x, y), "id", None):
+                return None
+            pid = _pid_of(top, d)
+            return int(pid) if pid else None
+    except Exception:
+        return None
+
+
 def drag_overlay_at_point(x: float, y: float) -> tuple[int, str] | None:
     """Identity of a full-screen unmanaged window at a drag's start.
 

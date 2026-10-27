@@ -2071,6 +2071,17 @@ def test_a_popup_above_the_managed_stack_owns_the_point(monkeypatch) -> None:
     assert _linux_system.window_at_point(100, 150) == {"window_id": 0x20, "title": ""}
 
 
+def test_popup_pid_at_point_names_only_a_popup_that_is_on_top(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "ibus-ui-gtk3"})
+    assert _linux_system.popup_pid_at_point(100, 150) == 300
+    assert _linux_system.popup_pid_at_point(600, 300) is None  # a managed window is on top
+    below, below_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    _popup_display(monkeypatch, [below], [popup, below_frame], {200: "chrome", 300: "ibus-ui-gtk3"})
+    assert _linux_system.popup_pid_at_point(100, 150) is None  # the popup is under it
+
+
 def test_a_popup_below_a_managed_window_does_not_cover_it(monkeypatch) -> None:
     chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
     popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
