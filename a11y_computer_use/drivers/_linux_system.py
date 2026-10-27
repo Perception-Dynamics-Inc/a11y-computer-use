@@ -703,21 +703,40 @@ def _identity_needles(identifier: str) -> list[str]:
     return names
 
 
+def _names_program(needle: str, name: str) -> bool:
+    """Whether ``name`` holds ``needle`` as a program name, not a prefix of a longer one.
+
+    ``needle`` matches the whole name or a trailing part of it (``terminal``
+    in ``xfce4-terminal``, ``chrome`` in ``google chrome``). A name that
+    extends ``needle`` with more name characters is a different program:
+    ``python`` is not ``python3``, ``firefox`` is not ``firefox-esr``,
+    ``code`` is not ``code-insiders`` and ``gimp`` is not ``gimp-2.10``. An
+    app that stopped answering or exited must not resolve to such a
+    neighbour (#1191).
+    """
+    if not needle or not name:
+        return False
+    if needle == name:
+        return True
+    return re.search(re.escape(needle) + r"(?![\w.-])", name) is not None
+
+
 def _comm_matches_identifier(identifier: str, comm: str) -> bool:
     """True when ``comm`` is the process ``identifier`` names.
 
-    A comm substring matches, and so does a launcher alias. A path matches
+    A comm that holds the name (see ``_names_program``) matches, and so
+    does a launcher alias. A path matches
     by its basename as well as the full string.
     """
     folded = (comm or "").lower()
     if not folded:
         return False
-    from a11y_computer_use.app_identity import shares_alias
+    from a11y_computer_use.app_identity import program_alias
 
-    if shares_alias(identifier, folded):
+    if program_alias(identifier, folded):
         return True
     for needle in _identity_needles(identifier):
-        if needle in folded or _launcher_comm(needle, folded):
+        if _names_program(needle, folded) or _launcher_comm(needle, folded):
             return True
     return False
 
@@ -730,14 +749,15 @@ def _identifier_matches_process(identifier: str, identity: str) -> bool:
     or the 15-byte comm of that same name. It does not match a different
     program that shares the prefix, and a shorter token inside the name
     (``text`` inside ``gnome-text-editor``) is not a match. A short comm
-    keeps the substring and launcher rules ``resolve_app`` already used.
+    keeps the launcher rule and the ``_names_program`` rule, so ``python``
+    never matches ``python3``.
     """
     folded = (identity or "").lower()
     if not folded:
         return False
-    from a11y_computer_use.app_identity import shares_alias
+    from a11y_computer_use.app_identity import program_alias
 
-    if shares_alias(identifier, folded):
+    if program_alias(identifier, folded):
         return True
     long_name = len(folded.encode("utf-8", "replace")) > _COMM_MAX
     for needle in _identity_needles(identifier):
@@ -749,7 +769,7 @@ def _identifier_matches_process(identifier: str, identity: str) -> bool:
             if needle.endswith("-" + folded):
                 return True
             continue
-        if needle in folded or _launcher_comm(needle, folded):
+        if _names_program(needle, folded) or _launcher_comm(needle, folded):
             return True
     return False
 
@@ -780,9 +800,9 @@ def _class_matches_identifier(identifier: str, instance: str, klass: str) -> boo
     """True when WM_CLASS instance or class is one of ``identifier``'s names."""
     inst = (instance or "").lower()
     cls = (klass or "").lower()
-    from a11y_computer_use.app_identity import shares_alias
+    from a11y_computer_use.app_identity import program_alias
 
-    if shares_alias(identifier, inst) or shares_alias(identifier, cls):
+    if program_alias(identifier, inst) or program_alias(identifier, cls):
         return True
     for needle in _identity_needles(identifier):
         if not needle:
@@ -798,8 +818,8 @@ def resolve_app(identifier: str) -> str:
     The id is the full program name when the kernel comm is that name's
     15-byte cut, and the comm otherwise. ``gnome-text-editor`` stays
     ``gnome-text-editor``; ``google-chrome`` still resolves to ``chrome``.
-    A comm match wins over a window title: ``krita`` stays Krita even when a
-    Chrome tab is titled "Donations | Krita". Two different programs that
+    A window title is never matched: ``krita`` stays ``krita`` when only a
+    Chrome tab is titled "Donations | Krita" (see ``title_suggestion``). Two different programs that
     share a truncated comm are not collapsed, so a grant for one is not a
     grant for the other. An unmatched name is returned unchanged so a grant
     or a launch can name an app that has no window yet.
@@ -809,7 +829,6 @@ def resolve_app(identifier: str) -> str:
         return identifier
     hits: list[str] = []
     by_class: str | None = None
-    by_title: str | None = None
     try:
         with _open_display() as d:
             for win in _managed_windows(d):
@@ -820,15 +839,6 @@ def resolve_app(identifier: str) -> str:
                 instance, klass = _wm_class_strings(win, d)
                 if by_class is None and _class_matches_identifier(identifier, instance, klass):
                     by_class = identity or instance.lower()
-                # A title match is a fallback, never a winner over a program
-                # match: a Chromium tab "Donations | Krita" stacked above
-                # Krita's window must not turn `krita` into `chrome`. A path
-                # matches its basename in the title the same way the bare
-                # name does.
-                if by_title is None and identity:
-                    title = _win_title(win, d).lower()
-                    if any(name and name in title for name in _identity_needles(identifier)):
-                        by_title = identity
     except ComputerUseError:
         raise
     except Exception:
@@ -836,7 +846,45 @@ def resolve_app(identifier: str) -> str:
     chosen = _unique_identity(identifier, hits)
     if chosen:
         return chosen
-    return by_class or by_title or identifier
+    # A title that mentions the name is never the id: "krita" in an Okular
+    # title while Krita is closed must not become okular, and the action
+    # would land in another program (#1191). `title_suggestion` offers it in
+    # an error detail instead.
+    return by_class or identifier
+
+
+def class_names_program(identifier: str, identity: str) -> bool:
+    """True when a window of ``identity`` has a WM_CLASS ``identifier`` names."""
+    want = (identity or "").lower()
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                if (_app_id(win, d) or "").lower() != want:
+                    continue
+                instance, klass = _wm_class_strings(win, d)
+                if _class_matches_identifier(identifier, instance, klass):
+                    return True
+    except Exception:  # noqa: BLE001 - no X11 means no class evidence
+        return False
+    return False
+
+
+def title_suggestion(identifier: str) -> str | None:
+    """The id of a window whose title mentions ``identifier``, for an error hint only."""
+    if not (identifier or "").strip():
+        return None
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                identity = (_app_id(win, d) or "").lower()
+                if not identity:
+                    continue
+                title = _win_title(win, d).lower()
+                if any(name and name in title for name in _identity_needles(identifier)):
+                    return identity
+    except Exception:
+        return None
+    return None
 
 
 def pids_matching(identifier: str) -> set[int]:

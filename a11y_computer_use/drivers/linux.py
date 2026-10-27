@@ -92,6 +92,17 @@ def _hint_pid(app: str) -> int | None:
     return None
 
 
+def _same_program_name(app: str, other: str) -> bool:
+    """True when ``other`` is another name of the program ``app`` names."""
+    from a11y_computer_use.app_identity import program_alias
+    from a11y_computer_use.drivers import _linux_system
+
+    if app.strip().casefold() == other.strip().casefold():
+        return True
+    return program_alias(app, other) or _linux_system._identifier_matches_process(app, other) \
+        or _linux_system.class_names_program(app, other)
+
+
 def _resolved_app(identifier: str) -> str:
     """The app id app list would show for ``identifier``.
 
@@ -1412,12 +1423,49 @@ class LinuxDriver:
 
         root = self._run(lambda name=app: lookup(name))
         if root is not None:
-            return app, root
+            return app, self._pinned(app, root)
+        # The second lookup is only for another name of the same program
+        # (LibreOffice -> soffice.bin, a WM_CLASS). resolve_app no longer
+        # falls back to a window title, and a different program is refused
+        # here as well, so an exited `python` never becomes `python3`
+        # (#1191).
         resolved = _resolved_app(app)
-        if resolved != app:
+        if resolved != app and _same_program_name(app, resolved):
             root = self._run(lambda name=resolved: lookup(name))
-            return resolved, root
-        return app, None
+            return resolved, (self._pinned(app, root) if root is not None else None)
+        # A different program's name is kept only to word the error (VLC's
+        # bridge hint); nothing is bound to it.
+        return resolved, None
+
+    def _pinned(self, app: str, root):
+        """``root`` when it is the program ``app`` was first bound to.
+
+        The first snapshot of a name records the program it bound. A later
+        bind of the same name to a different program (Nautilus closed and
+        Thunar open for ``Files``) is ``app_not_running``, never a silent
+        rebind. A restart of the same program binds again.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        app_acc = _atspi._application_of(root) or root
+        program = _atspi._program_of(app_acc, "")
+        if not program:
+            return root
+        bound = getattr(self, "_bound_programs", None)
+        if bound is None:
+            bound = self._bound_programs = {}
+        key = app.strip().casefold()
+        previous = bound.get(key)
+        if previous and previous != program and not _same_program_name(previous, program):
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"{app!r} was {previous!r}, which is no longer running; "
+                f"{program!r} is a different program",
+                detail={"app": app, "reason": "app_not_running",
+                        "bound": previous, "found": program},
+            )
+        bound[key] = program
+        return root
 
     # -- observe (AT-SPI2) --------------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
@@ -1711,10 +1759,18 @@ class LinuxDriver:
                 _atspi.app_listed(app) or _atspi.app_listed(resolved)
             ):
                 raise _no_accessibility_tree(resolved)
+            from a11y_computer_use.drivers import _linux_system
+
+            detail = {"app": resolved, "reason": "app_not_running"}
+            # A window title that mentions the name is a hint, never the
+            # target: the caller decides whether that is the app (#1191).
+            suggestion = _linux_system.title_suggestion(app)
+            if suggestion and suggestion != resolved:
+                detail["title_match"] = suggestion
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {resolved!r}",
-                detail={"app": resolved},
+                detail=detail,
             )
 
         # WINDOW lists every showing sibling (a preferences dialog next to
