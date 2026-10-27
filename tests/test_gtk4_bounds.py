@@ -723,3 +723,47 @@ def test_gtk4_editable_ref_click_bypasses_noop_focus(monkeypatch, role, case):
         )
     assert clicks == ([] if case == "untrusted" else [(881, 435)])
     assert field.pressed == []
+
+
+# --- #1237: GTK 4 entries need pointer focus -------------------------------
+
+from types import SimpleNamespace as _NS  # noqa: E402
+
+
+def _focus_env(monkeypatch, *, gtk4=True, role="text", states=("EDITABLE", "SHOWING")):
+    from a11y_computer_use.drivers import _atspi
+    monkeypatch.setattr(_atspi, "_gtk4_app", lambda acc: gtk4)
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: role)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in states)
+    return _atspi
+
+
+@pytest.mark.parametrize("role", ["text", "entry", "password text"])
+def test_gtk4_editable_entry_needs_pointer_focus(monkeypatch, role) -> None:
+    assert _focus_env(monkeypatch, role=role).gtk4_entry_needs_pointer_focus(object())
+
+
+@pytest.mark.parametrize("kw", [
+    {"gtk4": False},                       # GTK 3 can grab focus over AT-SPI
+    {"role": "push button"},
+    {"states": ("SHOWING",)},              # not editable
+    {"states": ("EDITABLE",)},             # not showing
+])
+def test_other_nodes_do_not_take_pointer_focus(monkeypatch, kw) -> None:
+    assert not _focus_env(monkeypatch, **kw).gtk4_entry_needs_pointer_focus(object())
+    assert not _focus_env(monkeypatch).gtk4_entry_needs_pointer_focus(None)
+
+
+def test_place_caret_at_end_is_true_only_when_read_back(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+    caret = {"at": 3}
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "keep me")
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS())
+    monkeypatch.setattr(_atspi, "_move_caret", lambda mod, acc, off: caret.update(at=off))
+    monkeypatch.setattr(_atspi, "_caret_offset", lambda acc: caret["at"])
+    assert _atspi.place_caret_at_end(object()) and caret["at"] == 7
+    monkeypatch.setattr(_atspi, "_move_caret", lambda mod, acc, off: None)  # ignored
+    caret["at"] = 3
+    assert not _atspi.place_caret_at_end(object())
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: None)
+    assert not _atspi.place_caret_at_end(object())

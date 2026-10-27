@@ -2833,6 +2833,33 @@ def _gtk4_app(acc) -> bool:
     return major is not None and major >= 4
 
 
+def gtk4_entry_needs_pointer_focus(acc) -> bool:
+    """A GTK 4 editable text node that AT-SPI cannot focus (#1237).
+
+    GTK 4's Component.GrabFocus is not implemented (the call errors), so a
+    ref ``type`` into an unfocused GTK 4 entry never got focus. Its only
+    action is ``activate``, which submits; a pointer press is the one way in.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    if _role_name(acc) not in {"text", "entry", "password text"}:
+        return False
+    return _state_has(acc, "EDITABLE") and _state_has(acc, "SHOWING")
+
+
+def place_caret_at_end(acc) -> bool:
+    """Move the caret to the end of ``acc``'s text; True only when read back."""
+    text = _full_text(acc)
+    if text is None:
+        return False
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return False
+    _move_caret(Atspi, acc, len(text))
+    return _caret_offset(acc) == len(text)
+
+
 def _gtk4_frame_size(acc) -> tuple[int, int]:
     """Client size of ``acc``'s frame, from WINDOW extents, else SCREEN."""
     frame = _frame_ancestor(acc) or acc
