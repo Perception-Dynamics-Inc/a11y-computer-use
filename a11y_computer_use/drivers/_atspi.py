@@ -4829,6 +4829,12 @@ class ATSPIAccessor:
                         status_text = text
             except ImportError:
                 pass
+        if role_str == "link" and (position is None or size is None):
+            inline = _inline_link_box(node)
+            if inline is not None:
+                inline_text, position, size = inline
+                if not str(name).strip():
+                    name = inline_text
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
@@ -5619,6 +5625,67 @@ def window_document_id(_acc, role: str, title: str) -> str | None:
 
 _DOC_URL_KEYS = ("docurl", "uri", "url")
 _LINK_URL_KEYS = ("href", "link-target")
+
+
+_INLINE_LINK_CHARS = 512
+
+
+def _inline_link_box(node):
+    """``(text, position, size)`` of an inline link a toolkit gives no box.
+
+    A GTK3 label with ``<a href>`` markup exposes each link as a ``link`` child
+    with no Component, no name and no action; the label itself implements
+    Hypertext. The child's Hyperlink says which characters it spans, and the
+    parent's Text interface says where those characters are drawn. The box is
+    the first drawn line of the link, so a ref click lands on the link even
+    when the link wraps and its bounding box would be mostly other text.
+    None when the node is not such a link or the parent cannot place it (#1230).
+    """
+    if _role_name(node) != "link":
+        return None
+    parent = _parent_of(node)
+    if parent is None:
+        return None
+    link = _call_first(node, ("get_hyperlink",))
+    if link is None:
+        return None
+    start = _call_first(link, ("get_start_index",))
+    end = _call_first(link, ("get_end_index",))
+    ints = (int, float)
+    if (not isinstance(start, ints) or not isinstance(end, ints)
+            or isinstance(start, bool) or isinstance(end, bool) or end <= start):
+        return None
+    start, end = int(start), min(int(end), int(start) + _INLINE_LINK_CHARS)
+    try:
+        Atspi = _atspi()
+        text_iface = Atspi.Text
+    except Exception:
+        return None
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    label = _safe(lambda: text_iface.get_text(parent, start, end))
+    if not isinstance(label, str) or not label.strip():
+        return None
+    first = None
+    left = right = top = bottom = 0.0
+    for offset in range(start, end):
+        rect = _safe(lambda offset=offset: text_iface.get_character_extents(parent, offset, coord))
+        if rect is None:
+            continue
+        x, y = float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)
+        w, h = float(getattr(rect, "width", 0) or 0), float(getattr(rect, "height", 0) or 0)
+        if w <= 0 or h <= 0 or (x, y) == (-1.0, -1.0):
+            continue
+        if first is None:
+            first = True
+            left, right, top, bottom = x, x + w, y, y + h
+            continue
+        if y >= bottom - h / 2.0 or y + h <= top + h / 2.0:
+            break  # the next drawn line: the link wrapped
+        left, right = min(left, x), max(right, x + w)
+        top, bottom = min(top, y), max(bottom, y + h)
+    if first is None:
+        return None
+    return label.strip(), (left, top), (right - left, bottom - top)
 
 
 def _hyperlink_target(acc) -> str | None:
@@ -9810,6 +9877,85 @@ def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
             if end < start:
                 start, end = end, start
     return int(caret), start, end
+
+
+def append_target_entry(acc) -> bool:
+    """A native single-line entry whose text a ref ``type`` must append to.
+
+    GTK3 marks an entry SINGLE_LINE; GTK4 marks neither SINGLE_LINE nor
+    MULTI_LINE on its entry (only a text view carries MULTI_LINE), so an
+    entry is a text or entry role that is not multi-line and holds no line
+    break. Browser fields keep their own focus path, and a multi-line view
+    keeps its caret and selection. A secure field is refused before this runs.
+    """
+    if _role_name(acc) not in {"text", "entry"}:
+        return False
+    if _state_has(acc, "MULTI_LINE"):
+        return False
+    if not _state_has(acc, "SINGLE_LINE") and "\n" in (_full_text(acc) or ""):
+        return False
+    return not _chromium_app(acc)
+
+
+def whole_text_selected(acc) -> bool:
+    """True when the field has text and every character of it is selected."""
+    text = _full_text(acc)
+    if not text:
+        return False
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if not isinstance(nchars, int) or isinstance(nchars, bool) or nchars <= 0:
+        return False
+    _caret, start, end = _caret_and_selection(acc, nchars)
+    return start == 0 and end == nchars
+
+
+def collapse_whole_selection_to_end(acc) -> bool:
+    """Collapse a select-all selection of an entry so typing appends.
+
+    GTK selects the whole text when it gives an entry focus, and an
+    EditableText insert replaces that selection. A ref ``type`` has no
+    replace request, so the selection is dropped and the caret goes to the
+    end of the text. True when no whole-text selection remains.
+    """
+    Atspi = _atspi()
+    if not whole_text_selected(acc):
+        return True
+    nchars = _safe(lambda: Atspi.Text.get_character_count(acc))
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if isinstance(count, int) and not isinstance(count, bool):
+        for index in range(count - 1, -1, -1):
+            _safe(lambda: Atspi.Text.remove_selection(acc, index))
+    _move_caret(Atspi, acc, nchars)
+    return not whole_text_selected(acc)
+
+
+def entry_text_and_caret(acc) -> tuple[str, int] | None:
+    """(text, caret offset in characters) of a collapsed entry, else None."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    caret, start, end = _caret_and_selection(acc, nchars)
+    if start != end or nchars != len(text):
+        return None
+    return text, caret
+
+
+def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
+    """Whether the field still holds its prior text around the typed text.
+
+    The prior text before the caret and after it must both survive, with
+    something inserted between them. The write's own read-back compares
+    the exact string; this backstop catches a write that replaced the old
+    text, without failing a field that reshapes the typed characters (a
+    mask, a length limit or a case rule).
+    """
+    prior, caret = before
+    now = _full_text(acc)
+    if now is None:
+        return True
+    head, tail = prior[:caret], prior[caret:]
+    return len(now) >= len(prior) and now.startswith(head) and now.endswith(tail)
 
 
 def _text_mismatch(reason: str, message: str, **detail):
@@ -17448,6 +17594,9 @@ def outline_double_click_note(acc) -> str:
     try:
         if navigating_folder_row(acc):
             return ""
+        # A LibreOffice popup list row commits on the single click.
+        if libreoffice_popup_list_row(acc):
+            return ""
     except Exception:
         return ""
     names = _raw_action_names(acc)
@@ -17504,6 +17653,52 @@ def folder_navigation_verdict(acc, before: str) -> tuple[str, str]:
             return "confirmed", f"the {kind} changed"
         if time.monotonic() >= deadline:
             return "partial", "the row was selected but the location did not change"
+        time.sleep(0.05)
+
+
+_LO_POPUP_ROW_ROLES = frozenset({"table cell", "list item"})
+_LO_POPUP_LIST_ROLES = frozenset({"tree table", "table", "list", "list box", "tree"})
+
+
+def libreoffice_popup_list_row(acc) -> bool:
+    """A row of a LibreOffice popup list, such as a cell's validity list.
+
+    The list is a GTK tree view inside an undecorated popup ``window``.
+    Selection.select_child highlights the row but leaves VCL's cursor on
+    the old entry, so Return then commits the old value and nothing closes
+    the popup. Only a pointer click on the row commits it. A tree or list
+    inside a frame or dialog is not a popup list and is not matched.
+    """
+    if _role_name(acc) not in _LO_POPUP_ROW_ROLES:
+        return False
+    if not libreoffice_app(_application_name(acc)):
+        return False
+    parent = _call_first(acc, ("get_parent", "getParent"))
+    if parent is None or _role_name(parent) not in _LO_POPUP_LIST_ROLES:
+        return False
+    node = _call_first(parent, ("get_parent", "getParent"))
+    for _ in range(6):
+        if node is None:
+            return False
+        role = _role_name(node)
+        if role == "window":
+            return True
+        if role in {"frame", "dialog", "application", "desktop frame"}:
+            return False
+        node = _call_first(node, ("get_parent", "getParent"))
+    return False
+
+
+def libreoffice_popup_list_closed(acc, timeout: float = 1.0) -> bool:
+    """Whether the popup that owned ``acc`` closed after the click."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _call_first(acc, ("get_parent", "getParent")) is None:
+            return True
+        if _state_has(acc, "DEFUNCT") or not _state_has(acc, "SHOWING"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
 
 

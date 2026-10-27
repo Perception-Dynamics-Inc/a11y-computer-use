@@ -722,9 +722,11 @@ def test_linux_type_ref_lands_only_in_the_named_gtk_entry(tmp_path) -> None:
         final = _wait_two_entry(driver)
         assert final is not None
         assert _shown(_value_of(final, "FieldA")) == "in-a"
-        # Focusing FieldB selects its current text, so the second type
-        # replaces "from-none". The new characters are only in FieldB.
-        assert _shown(_value_of(final, "FieldB")) == "from-a"
+        # Focusing FieldB selects its current text, but a ref type appends:
+        # it moves the caret to the end first, so "from-none" is kept and the
+        # verifier expects the prior text plus what was typed (#1232). The new
+        # characters are only in FieldB.
+        assert _shown(_value_of(final, "FieldB")) == "from-nonefrom-a"
         assert "from-a" not in _shown(_value_of(final, "FieldA"))
     finally:
         proc.terminate()
@@ -1653,6 +1655,7 @@ def test_linux_find_skips_a_label_that_mentions_a_10k_tree_row(tmp_path) -> None
 
 def _chrome_binary() -> str | None:
     import shutil
+    from pathlib import Path
 
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         found = shutil.which(name)
@@ -1804,6 +1807,7 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
     missing accessibility bus skips the same way the GTK tests do.
     """
     import shutil
+    from pathlib import Path
 
     from a11y_computer_use import observe, safety, server
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -2934,6 +2938,7 @@ _PARA_CONTROLS = (
 
 def _firefox_binary() -> str | None:
     import shutil
+    from pathlib import Path
 
     for name in ("firefox", "firefox-esr"):
         found = shutil.which(name)
@@ -4280,6 +4285,7 @@ def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path)
 def test_linux_caps_lock_does_not_invert_keystroke_typing(tmp_path) -> None:
     """XTEST typing into a widget with no EditableText keeps the requested case."""
     import shutil
+    from pathlib import Path
 
     from a11y_computer_use.drivers import _linux_input
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -14387,6 +14393,7 @@ def test_linux_chrome_click_during_renderer_freeze_is_unverifiable_without_cdp(t
     lands after recovery.
     """
     import shutil
+    from pathlib import Path
 
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -14474,6 +14481,7 @@ def test_linux_chrome_click_during_renderer_freeze_is_unverifiable_without_cdp(t
 def test_xfce4_terminal_scroll_to_find_turns_up_from_bottom(tmp_path) -> None:
     """Real VTE scrollback: default direction reaches early output via Value."""
     import shutil
+    from pathlib import Path
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     binary = shutil.which("xfce4-terminal")
@@ -14596,6 +14604,72 @@ def test_linux_chrome_refs_from_a_fresh_snapshot_click_after_a_reload(tmp_path) 
             "the click result in the window title",
             limit_s=15.0,
         )
+    finally:
+        _stop_group(proc)
+
+
+def test_linux_calc_validity_list_ref_click_commits_the_entry(tmp_path) -> None:
+    """Live Calc. Refs #1247. A ref click on a validity list entry commits it.
+
+    D2 has a list validity (Red, Green, Blue) and holds Red. alt+Down opens
+    the list. A ref click on Green must leave D2 holding Green with no
+    Return. Selection.select_child only highlighted the row, and Return
+    then committed Red. Only this test's own soffice group is stopped.
+    """
+    import re
+    import shutil
+    from pathlib import Path
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    doc = tmp_path / "validity.fods"
+    shutil.copy(Path(__file__).parent / "fixtures" / "calc_validity_list.fods", doc)
+    profile = tmp_path / "lo-validity"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env.update(SAL_USE_VCLPLUGIN="gtk3", GTK_MODULES="gail:atk-bridge", NO_AT_BRIDGE="0")
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(doc),
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        runtime = None
+        ref = None
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and ref is None:
+            time.sleep(0.5)
+            try:
+                runtime = runtime or _runtime_for(tmp_path, driver, "soffice")
+                match = re.search(r'(e\d+) cell "D2"', runtime.find("soffice", text="D2"))
+            except ComputerUseError:
+                continue
+            ref = match.group(1) if match else None
+        assert runtime is not None and ref is not None, "Calc did not expose D2"
+        runtime.click(ref=ref)
+        runtime.key("alt+Down", "soffice")
+        green = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and green is None:
+            match = re.search(r'(e\d+) \S+ "Green"', runtime.find("soffice", text="Green"))
+            green = match.group(1) if match else None
+            if green is None:
+                time.sleep(0.3)
+        assert green is not None, "the validity list did not open"
+        clicked = runtime.click(ref=green)
+        assert "double-click" not in str(clicked), clicked
+        shot = _wait_cell_value(driver, "D2", "Green")
+        d2 = _cell(shot, "D2")
+        assert d2 is not None and d2.value == "Green", None if d2 is None else d2.value
     finally:
         _stop_group(proc)
 

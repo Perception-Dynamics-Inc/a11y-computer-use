@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import re
 import sys
 from importlib.metadata import version as dist_version
 from pathlib import Path
@@ -5628,6 +5629,76 @@ def test_detailed_selection_double_click_reports_text_or_no_retry(
         assert 'could not be read' in result.evidence
 
 
+@pytest.mark.parametrize('before,after,expected', [
+    ((), ((15, 20, 'gamma'),), 'confirmed'),
+    (((0, 4, 'Para'),), ((15, 20, 'gamma'),), 'confirmed'),
+    (None, ((15, 20, 'gamma'),), 'unverifiable'),
+    ((), None, 'unverifiable'),
+    (None, None, 'unverifiable'),
+])
+def test_double_click_on_static_text_is_judged_by_its_selection(
+    tmp_path, monkeypatch, before, after, expected,
+):
+    """#1224: Chrome page text publishes the word it selected; that is the evidence."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    states = [before, after]
+    d.selection_details = lambda el: states.pop(0) if len(states) > 1 else states[0]
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == expected
+    assert len(d.clicked) == 1
+    if expected == 'confirmed':
+        assert 'gamma' in result.evidence and '15, 20' in result.evidence
+    else:
+        assert not result.next
+        assert 'could not be read' in result.evidence
+
+
+def test_double_click_keeps_a_paragraph_verdict_over_the_static_text_selection(tmp_path, monkeypatch):
+    """A Writer paragraph is judged by its caret; the #1224 selection check must not replace it."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    reads = []
+    d.selection_details = lambda el: reads.append(el) or ((41, 47, 'across'),)
+    rt = _hover_runtime(tmp_path, d)
+    caret = ('confirmed', 'the caret is in the target paragraph')
+    monkeypatch.setattr(rt, '_paragraph_click_verdict', lambda target: caret)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert 'caret is in the target paragraph' in result.evidence
+    assert 'text selection changed' not in result.evidence
+
+
+def test_double_click_on_static_text_without_a_selection_reader_is_unchanged(tmp_path, monkeypatch):
+    """A driver that cannot read selection ranges keeps the generic verdict."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    reads = []
+    d.text_selection = lambda el: reads.append(el) or ()
+    rt = _hover_runtime(tmp_path, d)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    rt.click(ref=el.ref, count=2)
+    assert not reads
+
+
 def test_detailed_double_click_waits_for_selection_without_reclick(tmp_path, monkeypatch):
     from dataclasses import replace
     monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
@@ -6047,6 +6118,59 @@ def test_snapshot_identity_ignores_ancestor_text_value_echo(
         with pytest.raises(ComputerUseError) as caught:
             runtime._anchor("e1")
         assert caught.value.detail["reason"] == "target_changed"
+
+
+def test_fresh_snapshot_after_an_in_place_page_switch_issues_a_working_ref(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1235: a stack page swapped in place reuses 'e2' for another button.
+
+    The ref the agent held for AlphaBtn stays refused (#1021). The fresh
+    snapshot names BetaBtn with a ref nothing issued before, so a click on
+    it is not refused against the pre-switch snapshot.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Untitled", None, None, "before")
+    alpha = Element("e2", "AXButton", "AlphaBtn", None, Bounds(1, 240, 140, 120, 56),
+                    "before", parent="e1", clickable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, alpha))
+    beta = dataclasses.replace(alpha, title="BetaBtn", snapshot_id="after")
+    field = Element("e3", "AXTextField", "", "", Bounds(1, 240, 200, 120, 30), "after",
+                    parent="e1", editable=True)
+    after = dataclasses.replace(base, snapshot_id="after", elements=(
+        dataclasses.replace(window, snapshot_id="after"), beta, field,
+    ))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        texts = []
+        for number in range(2):
+            current[0] = dataclasses.replace(
+                after, snapshot_id=f"after-{number}",
+                elements=tuple(dataclasses.replace(el, snapshot_id=f"after-{number}")
+                               for el in after.elements),
+            )
+            texts.append(runtime.desktop_snapshot(APP))
+        refs = []
+        for text in texts:
+            line = next(row for row in text.splitlines() if "BetaBtn" in row)
+            ref = re.search(r"\be(\d+)\b", line).group(0)
+            assert ref != "e2", line
+            refs.append(ref)
+        # The same page keeps the same ref across snapshots.
+        assert refs[0] == refs[1]
+        assert runtime._anchor(refs[0])[1].title == "BetaBtn"
+        runtime.click(ref=refs[0])
+        assert len(mocked_driver["click"]) == 1
+        # The ref held for AlphaBtn is still refused, and nothing was sent.
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert caught.value.detail["anchor"]["title"] == "AlphaBtn"
+        assert len(mocked_driver["click"]) == 1
 
 
 @pytest.mark.parametrize('readable', [True, False])
@@ -7258,3 +7382,17 @@ def test_window_replacement_still_refuses_a_ref_whose_control_changed(
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
         assert mocked_driver["click"] == []
+
+
+def test_result_label_quotes_the_ref_the_agent_used(tmp_path) -> None:
+    """#1235: a re-issued control is live under another number; the result names the issued one."""
+    store = safety.PermissionStore(tmp_path / "p.json")
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    assert rt._label("e11", live) == "e11 (AXButton 'BetaBtn')"
+    assert rt._label("e10", live) == "e10 (AXButton 'BetaBtn')"
+    assert rt._label(None, live) == "e10 (AXButton 'BetaBtn')"
