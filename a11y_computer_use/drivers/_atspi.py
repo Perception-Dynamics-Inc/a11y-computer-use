@@ -7146,6 +7146,47 @@ def desktop_application_roots() -> DesktopApplications:
     return DesktopApplications(ready, silent)
 
 
+_IME_PANEL_APPS = ("ibus-ui-gtk3", "ibus-ui-gtk", "ibus-ui-emojier")
+_IME_PANEL_NODE_LIMIT = 200
+
+
+def ime_composition_open() -> bool | None:
+    """True when an input-method panel is showing uncommitted text (#1219).
+
+    IBus's panel (``ibus-ui-gtk3``) keeps its candidate window mapped when no
+    composition is open, so a mapped window says nothing. What it does show
+    while the engine holds a preedit is a showing label with text in it: the
+    preedit (``ni hao |``) or a candidate. The numbered row labels (``1.``)
+    are shown empty. True when such a label is showing, False when the panel
+    is there and shows none, None when there is no panel or it cannot be read.
+    """
+    try:
+        roots = desktop_application_roots().ready
+    except Exception:
+        return None
+    panels = [acc for name, acc in roots if name.strip().lower() in _IME_PANEL_APPS]
+    if not panels:
+        return None
+    seen = 0
+    read = False
+    stack = list(panels)
+    while stack and seen < _IME_PANEL_NODE_LIMIT:
+        node = stack.pop()
+        seen += 1
+        if not _state_has(node, "SHOWING") and _role_name(node) != "application":
+            continue
+        read = True
+        if _role_name(node) == "label":
+            text = str(_call_first(node, ("get_name",), default="") or "").strip()
+            if text and not re.fullmatch(r"\d+\.?", text):
+                return True
+        for index in range(_child_count(node)):
+            child = _child_at(node, index)
+            if child is not None:
+                stack.append(child)
+    return False if read else None
+
+
 def _text_security(acc):
     """Read security metadata once; visibility is meaningful only for entries."""
     role = _role_name(acc)
@@ -10218,6 +10259,11 @@ def _x11_select_all_and_delete(acc) -> None:
     sent only when a Chromium field's selection is confirmed to cover the whole
     value; otherwise this refuses with the value untouched.
     """
+    from a11y_computer_use.drivers import _linux_ime
+
+    # Select-all and BackSpace erase an open composition (or part of it), so
+    # nothing is sent unless it is known that none is open (#1219).
+    _linux_ime.require_no_composition()
     grab_focus(acc)
     _chord_into_target(acc, "ctrl+a")
     _confirm_select_all(acc)
@@ -10468,16 +10514,20 @@ def _type_into_target(acc, text: str) -> None:
     if _focus_on_target(acc) is None:
         _type_string(text)
         return
+    from a11y_computer_use.drivers import _linux_ime
+
     sent = False
-    for ch in text:
-        if _focus_on_target(acc) is False:
-            if sent:
-                raise _focus_lost_error(
-                    "focus left the target; stopped before the next keystroke"
-                )
-            raise _focus_lost_error("focus is not on the target; nothing was typed")
-        _type_string(ch)
-        sent = True
+    # One engine switch for the whole string, not one per character (#1219).
+    with _linux_ime.ascii_passthrough(text):
+        for ch in text:
+            if _focus_on_target(acc) is False:
+                if sent:
+                    raise _focus_lost_error(
+                        "focus left the target; stopped before the next keystroke"
+                    )
+                raise _focus_lost_error("focus is not on the target; nothing was typed")
+            _type_string(ch)
+            sent = True
 
 
 def _chord_into_target(acc, chord: str) -> None:
@@ -10607,11 +10657,16 @@ def _focus_and_replace(acc, text: str) -> bool:
         return True
     if current is None:
         return False
-    if not _text_is_blank(current):
-        _x11_select_all_and_delete(acc)
-        if not _wait_until_gone(acc):
-            return False
-    _type_into_target(acc, text)
+    from a11y_computer_use.drivers import _linux_ime
+
+    # The IME checks come before the clear: a refusal after ctrl+a, BackSpace
+    # would leave the field empty (#1219).
+    with _linux_ime.ascii_passthrough(text + current):
+        if not _text_is_blank(current):
+            _x11_select_all_and_delete(acc)
+            if not _wait_until_gone(acc):
+                return False
+        _type_into_target(acc, text)
     return _confirm_text_landed(acc, text)
 
 
@@ -10634,17 +10689,23 @@ def _replace_with_keys(acc, text: str) -> bool:
     if current is None or not _x11_keys_available():
         return False
     original = current
-    if not _text_is_blank(current):
-        _x11_select_all_and_delete(acc)
-        if not _wait_until_gone(acc):
-            _restore_text(acc, original)
-            return False
-    else:
-        grab_focus(acc)
-    _type_into_target(acc, text)
-    if _confirm_text(acc, text):
-        return True
-    _restore_text(acc, original)
+    from a11y_computer_use.drivers import _linux_ime
+
+    # One engine switch covers the clear, the write and a restore (#1219). The
+    # original is typed back if the write fails, so it must be typeable too:
+    # when the engine cannot be switched, this refuses before any key is sent.
+    with _linux_ime.ascii_passthrough(text + current):
+        if not _text_is_blank(current):
+            _x11_select_all_and_delete(acc)
+            if not _wait_until_gone(acc):
+                _restore_text(acc, original)
+                return False
+        else:
+            grab_focus(acc)
+        _type_into_target(acc, text)
+        if _confirm_text(acc, text):
+            return True
+        _restore_text(acc, original)
     return False
 
 
@@ -17902,15 +17963,49 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
     _refuse_model_editor_replace(acc)
-    saved = _capture_text_points(acc)
-    try:
-        ok = _set_text_body(acc, text, force=force)
-    except Exception:
-        _restore_text_points(saved)
-        raise
-    if not ok:
-        _restore_text_points(saved)
+    with _ime_text_guard(acc, text, force):
+        saved = _capture_text_points(acc)
+        try:
+            ok = _set_text_body(acc, text, force=force)
+        except Exception:
+            _restore_text_points(saved)
+            raise
+        if not ok:
+            _restore_text_points(saved)
     return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
+
+
+def refuse_open_composition(acc) -> None:
+    """Refuse before a write when a browser field has an input-method composition open.
+
+    Reads the IBus panel (settled), so a preedit the panel has not published yet
+    is not missed, and refuses when it cannot be ruled out. Nothing is sent or
+    changed. Fields of other toolkits are not checked here.
+    """
+    if not (_chromium_app(acc) or _gecko_app(acc)):
+        return
+    from a11y_computer_use.drivers import _linux_ime
+
+    _linux_ime.require_no_composition()
+
+
+def _ime_text_guard(acc, text: str, force: bool):
+    """Every IME check for a browser field, made before the write touches it.
+
+    A web field is written with key events (and its EditableText writes and
+    clears reach the same DOM an open composition lives in), and a Firefox
+    entry is cleared with ctrl+a, BackSpace before the text is typed. The engine
+    switch and the open-composition check therefore run here, before the first
+    EditableText call or key, so a refusal never changes the field (#1219).
+    Other toolkits write through EditableText without keys and are not guarded.
+    """
+    import contextlib
+
+    if force or not (_chromium_app(acc) or _gecko_app(acc)):
+        return contextlib.nullcontext()
+    from a11y_computer_use.drivers import _linux_ime
+
+    return _linux_ime.ascii_passthrough(text + (_full_text(acc) or ""))
 
 
 def _thunar_location_entry(acc) -> bool:
@@ -18056,10 +18151,13 @@ def _set_text_body(acc, text: str, *, force: bool = False) -> bool:
         # caller. Even equal buffer text must be retyped to repair that model.
         if not _x11_keys_available() or _full_text(acc) is None:
             return False
-        _x11_select_all_and_delete(acc)
-        if not _wait_until_gone(acc):
-            return False
-        _type_into_target(acc, text)
+        from a11y_computer_use.drivers import _linux_ime
+
+        with _linux_ime.ascii_passthrough(text + (_full_text(acc) or "")):
+            _x11_select_all_and_delete(acc)
+            if not _wait_until_gone(acc):
+                return False
+            _type_into_target(acc, text)
         return _confirm_text(acc, text)
     if is_writer_document(acc):
         return _set_writer_document_text(acc, text)
