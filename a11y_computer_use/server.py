@@ -3796,7 +3796,7 @@ class Runtime:
         return windows
 
     def _note_issued(self, snap: Snapshot, refs: set[str] | None = None,
-                     *, preserve_identity: bool = False) -> None:
+                     *, preserve_identity: bool = False) -> Snapshot:
         """Remember which app issued the refs the agent was just given.
 
         Refs restart at ``e1`` in every snapshot, so after a snapshot of app
@@ -3899,7 +3899,10 @@ class Runtime:
         identity_indexes = {}
         shifted_nodes = None
         prior_anchors = anchors.copy()
-        refused_refs = set(changed)
+        # A ref re-issued for a refused control (#1235) is still that control:
+        # it is no more evidence of continuity than the refused ref was.
+        refused_refs = set(changed) | set(getattr(self, "_reissued_refs", ()))
+        reissue: dict[str, tuple] = {}
         for element in snap.elements:
             if refs is None or element.ref in refs:
                 old = anchors.get(element.ref)
@@ -4008,6 +4011,12 @@ class Runtime:
                         or new_surface_item
                     ):
                         changed[element.ref] = snap
+                        # Only a control the agent can act on needs a working
+                        # number. Containers and surface roots keep the
+                        # refused one: their children's parent links and the
+                        # popover-cover check follow those refs.
+                        if (element.clickable or element.editable) and element.role not in self._SURFACE_ROLES:
+                            reissue[element.ref] = new_identity
                         continue
                 # A reload starts a new epoch, so refs are not compared with
                 # the old page. A ref whose control became an irreversible one
@@ -4029,6 +4038,8 @@ class Runtime:
                 changed.pop(element.ref, None)
                 anchors[element.ref] = snap
                 renames.pop(element.ref, None)
+        if reissue:
+            snap = self._reissue_changed_refs(snap, reissue, anchors, changed)
         self._changed_snapshot_refs = changed
         self._issued_anchors = anchors
         self._last_issued = snap
@@ -4038,6 +4049,47 @@ class Runtime:
             self._foreign_issued = last
         else:
             self._foreign_issued = None
+        return snap
+
+    def _reissue_changed_refs(self, snap: Snapshot, reissue: dict[str, tuple],
+                              anchors: dict[str, Snapshot],
+                              changed: dict[str, Snapshot]) -> Snapshot:
+        """Give controls behind a refused, reused ref a ref that is not refused.
+
+        A page switched in place hands the old page's numbers to the new
+        page's controls. Refusing those numbers is right for the ref the
+        agent already holds (#1021), but the fresh snapshot just described
+        the new control, so it must not be shown under the refused number.
+        Each such control takes a number no issuance has used, or the one it
+        took before while its identity is unchanged, so repeated snapshots
+        of the same page hand out stable refs. The old ref stays refused.
+        """
+        present = {el.ref for el in snap.elements}
+        taken = present | set(anchors) | set(changed)
+        top = max((int(r[1:]) for r in taken if r[:1] == "e" and r[1:].isdigit()), default=0)
+        earlier = {
+            ref: identity
+            for ref, identity in getattr(self, "_reissued_refs", {}).items()
+            if ref in anchors and ref not in present and ref not in changed
+        }
+        mapping: dict[str, str] = {}
+        for ref, identity in reissue.items():
+            name = next(
+                (r for r, ident in earlier.items()
+                 if ident == identity and r not in mapping.values()),
+                None,
+            )
+            if name is None:
+                top += 1
+                name = f"e{top}"
+            mapping[ref] = name
+        renamed = observe.rename_refs(snap, mapping)
+        for ref, name in mapping.items():
+            anchors[name] = renamed
+            changed.pop(name, None)
+            earlier[name] = reissue[ref]
+        self._reissued_refs = earlier
+        return renamed
 
     _SURFACE_ROLES = frozenset({"AXDialog", "AXSheet", "AXPopover"})
     # #1142: GTK4 exposes a DropDown or MenuButton popover as neither modal
@@ -4737,6 +4789,11 @@ class Runtime:
                 return f"{ref} (text {self._screen_text.line(ref).text!r})"
             except KeyError:
                 pass
+        if isinstance(target, Element) and ref and target.ref != ref:
+            # The live element carries the number the backend gave it; the
+            # agent used the ref it was issued, which a re-issued control
+            # (#1235) does not share. Quote the one the agent used.
+            target = replace(target, ref=ref)
         return _describe(target)
 
     @_serialized
@@ -5288,7 +5345,7 @@ class Runtime:
             prev = self._current if mode == "diff" else None
             snap = self.driver.snapshot(Scope(scope), bundle)
             self._current = snap
-            self._note_issued(snap, preserve_identity=True)
+            snap = self._current = self._note_issued(snap, preserve_identity=True)
             if mode != "diff":
                 self._view = mode  # diffs and Effect Receipts follow the view last asked for
             # diff only against a prior snapshot of the SAME app (else the agent
@@ -6052,8 +6109,15 @@ class Runtime:
         detailed_selection = callable(selection_reader)
         if not detailed_selection:
             selection_reader = getattr(self.driver, "text_selection", None)
+        # A double-click on a word of page text (Chrome static text, #1224) selects
+        # it and publishes the range, but changes nothing else the generic
+        # comparison reads, so it was reported as a no-op. Only a driver that reads
+        # the selection on the clicked node and its descendants checks static text.
+        selectable_roles = {"AXTextArea", "AXTextField", "AXSearchField"}
+        if detailed_selection:
+            selectable_roles = selectable_roles | {"AXStaticText"}
         verify_selection = (count == 2 and isinstance(target, Element)
-                            and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
+                            and target.role in selectable_roles
                             and callable(selection_reader))
         selection_before = None
         selection_target = target
@@ -6325,7 +6389,12 @@ class Runtime:
                 verdict = self._folder_navigation_verdict(target, nav_before)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
-        if verify_selection and not activated:
+        # A Writer paragraph is judged by its caret (paragraph_verdict). The static
+        # text selection check added for #1224 is for page text that has no such
+        # native evidence; it must not replace the paragraph's own evidence.
+        if verify_selection and not activated and not (
+            detailed_selection and paragraph_verdict is not None
+        ):
             selection_after = selection_reader(selection_target)
             if detailed_selection:
                 deadline = time.monotonic() + 0.3
