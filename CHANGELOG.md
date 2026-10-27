@@ -9,20 +9,23 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.79] - 2026-10-27
 
-Two commits since v0.4.78, through #1226. A patch release: two Linux fixes for a single non-Latin keyboard layout (for example a lone `ru` layout). The second one stops `set_value` from deleting part of a Chrome field.
+Four commits since v0.4.78, through #1220. A patch release: Linux fixes for a single non-Latin keyboard layout (for example a lone `ru` layout), for an active IBus input method, and for override-redirect popups.
 
 ### Safety
 
 - Never delete an unconfirmed selection in `set_value`: its clear step (select-all, then BackSpace) now uses the Chromium physical key on a lone non-Latin layout, and in Chromium it deletes only after it has confirmed that the selection covers the whole value. Otherwise it refuses with `text_mismatch` (`reason="selection_unconfirmed"`) and changes nothing. Before, on a lone `ru` layout in Chrome, setting "keep me" left "keep " and returned `text_mismatch`. Refs #1225 (#1226) (f8a51ee, 2026-10-27).
+- Keep an active IBus engine from transforming typed ASCII: while keys are sent, the IBus global engine is switched to `xkb:us::eng` and put back afterwards (IBus only; `A11Y_IME_BYPASS=0` turns it off). If the engine cannot be switched and the text needs ASCII, `type`, `type_ref` and `set_value` refuse before any key or clear with `ime_active`, and an open IME composition (an uncommitted preedit such as `你好`) is refused with `ime_composition_open` instead of being dropped; an IBus panel that cannot be read is refused as `ime_composition_unknown` (`A11Y_IME_COMPOSITION_UNKNOWN=proceed` opts out). While a non-US IBus engine is active, guarded calls take about 0.25 s longer. Not covered: fcitx5 and engines that show the preedit only inside the field. Refs #1219 (#1220) (52081b2, 2026-10-27).
 
 ### Linux drivers
 
 - Fix Ctrl/Alt shortcuts on a single non-Latin keyboard layout: in Chrome and Electron the chord now uses the key at the US-QWERTY position, so Ctrl+Z, C, V and the like are no longer lost and reported `unverifiable`. GTK, Qt and every other target keep the spare-keycode path. Refs #1211 (#1218) (773a0de, 2026-10-27).
+- See override-redirect popups in the on-top check and app list: a ref in the IBus candidate popup is no longer refused as covered by the window underneath, the popup's process is listed by `running_apps`, and raising a ref never buries its own popup. Refs #1227 (#1229) (18894d0, 2026-10-27).
 
 ### Known issues
 
-- Linux input methods (#1219): with an IBus engine active (for example libpinyin or `ru:translit`), typing ASCII into Chrome writes the engine's output and returns `text_mismatch`, and `set_value` is refused and leaves the field empty. The fix is not in 0.4.79; it needs another Tester pass.
 - Linux GTK 3 entries (#1232): typing by ref into a filled GTK 3 entry replaces the existing text, for example "keep me" + " more" becomes " more", but the result is reported as `confirmed`. Not new in 0.4.79: it is already in 0.4.78. The fix is planned for 0.4.80.
+- Linux GTK 4 entries (#1232): with focus already in a filled GTK 4 `Gtk.Entry`, typing by ref replaces the existing text and reports `confirmed`, the same symptom as GTK 3. It reproduces on 0.4.78 (Tester, 3/3), so it is not new in 0.4.79. An unfocused GTK 4 entry is refused as `focus_lost` (#1237). Not in 0.4.79.
+- Linux Firefox (#1236): typing by ref into a filled Firefox input or textarea inserts at the start ("keep me" + " more" becomes " morekeep me") and reports `unverifiable`. It reproduces on 0.4.78 (Tester, 6/6), so it is not new in 0.4.79. Not in 0.4.79.
 - Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Not in 0.4.79.
 
 ## [0.4.78] - 2026-10-27
