@@ -20841,6 +20841,69 @@ def gtk_inline_link_state(acc) -> tuple[bool, bool] | None:
     return _click_state_bits(acc, ("VISITED", "SHOWING"), require_showing=True)
 
 
+_GTK_SELECTABLE_ITEMS = frozenset({"list item", "table cell"})
+_GTK_SELECTION_CONTAINERS = frozenset({"list", "list box", "table", "tree table"})
+
+
+def _gtk_selectable_item(acc):
+    """The GTK row/tile at or just above ``acc`` and its container, or None."""
+    node = acc
+    for _ in range(3):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role in {"frame", "window", "dialog", "application"}:
+            return None
+        if role in _GTK_SELECTABLE_ITEMS:
+            parent = _parent_of(node)
+            if parent is not None and _role_name(parent) in _GTK_SELECTION_CONTAINERS:
+                return node, parent
+            return None
+        node = _parent_of(node)
+    return None
+
+
+def _index_of(acc) -> int | None:
+    try:
+        index = acc.get_index_in_parent()
+    except Exception:
+        return None
+    return index if isinstance(index, int) and index >= 0 else None
+
+
+def gtk_selection_click_state(acc) -> tuple[bool, bool] | None:
+    """Fresh selection of a GTK ListBox row or FlowBox tile (#1238, #1240).
+
+    A GtkListBox row sets SELECTED on itself, but the generic state diff can
+    miss it. A GtkFlowBox tile never sets SELECTED; the parent table's
+    ``Selection`` interface names it instead. Returns (item SELECTED, item in
+    the container's selection). None for other widgets, toolkits, an
+    unreadable state, or an item that is already selected (the click cannot
+    show a change).
+    """
+    if acc is None or _toolkit_name(acc) != "gtk":
+        return None
+    found = _gtk_selectable_item(acc)
+    if found is None:
+        return None
+    item, container = found
+    bits = _click_state_bits(item, ("SELECTED", "SHOWING"), require_showing=True)
+    if bits is None:
+        return None
+    in_selection = False
+    iface = _selection_iface(container)
+    index = _index_of(item)
+    if iface is not None and index is not None:
+        count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+        if isinstance(count, int) and not isinstance(count, bool):
+            for position in range(min(max(count, 0), 64)):
+                child = _call_first(iface, ("get_selected_child", "getSelectedChild"), position)
+                if child is not None and _index_of(child) == index:
+                    in_selection = True
+                    break
+    return (bool(bits[0]), in_selection)
+
+
 def libreoffice_toggle_state(acc) -> tuple[bool, bool] | None:
     """Fresh CHECKED/PRESSED bits of a LibreOffice toggle button (#1184).
 
