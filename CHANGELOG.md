@@ -7,6 +7,127 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.77] - 2026-10-27
+
+Ninety commits since v0.4.76, through #1207.
+
+### Safety
+
+- Enforce modal input boundaries. Fixes #1013 (#1020) (5c95094, 2026-10-24).
+- Refuse changed refs after desktop snapshots. Refs #1014 (#1021) (5219598, 2026-10-24).
+- Verify drag effects before suggesting retries. Refs #974 Refs #999 Refs #1000 (#1006) (54b63af, 2026-10-24).
+- Reject recycled Chromium row refs. Refs #977 (#1005) (3028629, 2026-10-24).
+- Refuse refs after SPA route changes. Fixes #1102 (#1106) (9bdc7e9, 2026-10-25).
+- Require complete no-op evidence before retry hints. Refs #1027 Refs #1028 Refs #1033 Refs #1037 Refs #1038 Refs #1041 Refs #1054 Refs #1059 (#1082) (e09b18e, 2026-10-25).
+- Guard Electron transient modal parents. Refs #1097 (#1099) (bc2f809, 2026-10-25).
+- Scope page modals to their web document. Fixes #1084 (#1086) (2fbc07a, 2026-10-25).
+- Refuse unsafe rich-text document replacement. Refs #1078 (#1081) (f5eeaf4, 2026-10-25).
+- Expose and guard Electron native message boxes absent from AT-SPI. Refs #1146 (#1152) (56e8781, 2026-10-26).
+- No Escape for a collapsed Firefox select inside a dialog. Fixes #1150 (#1155) (6b89bec, 2026-10-26).
+- Prevent unsafe retries on hung Chromium pages. Refs #1092 (#1138) (d50e2bf, 2026-10-26).
+- Scope native modals to their parent window. Fixes #1139 (#1140) (eaf6add, 2026-10-26).
+- Refuse destructive Firefox date segment replacement. Refs #1135 (#1136) (7facd6b, 2026-10-26).
+- Report display clipping without unsafe retry hints. Fixes #1111 (#1115) (f6f33fa, 2026-10-26).
+- Linux: fail fast for LibreOffice with no accessibility bridge. Fixes #1183 (#1186) (16b3d7f, 2026-10-27).
+- Re-resolve an evicted ref in actionable waits. Refs #1175 (#1176) (ad61a1b, 2026-10-27).
+- Never resolve an app name to a longer program sharing its prefix, so `python` is not `python3` and `firefox` is not `firefox-esr`; a window or page title no longer selects the app and is only offered as an error hint. Refs #1191 (#1193) (d58ac5e, 2026-10-27).
+- Permission grants cover one program, not an alias family: a chrome grant no longer covers chromium. Refs #1191 (#1194) (b41a2a2, 2026-10-27).
+- A launched name and a Windows id name only their own program. Refs #1191 (#1196) (3eff0b8, 2026-10-27).
+- No retry hints after typed input reached a busy Chromium page. Refs #1190 (#1195) (05c0f63, 2026-10-27).
+- Linux: rebuild the key map on a keyboard layout change and never confirm a mismatched keysym. Refs #1198 (#1200) (8cb29e7, 2026-10-27).
+- Chrome reload starts a new ref epoch instead of refusing every fresh ref as `stale_ref`; a control that became irreversible after the reload and a replaced document still return `stale_ref` ahead of the confirmation gate and the display-clipped refusal. Refs #1204 (#1207) (e4ed295, 2026-10-27).
+- Linux, Chrome at a UI scale above 1: tab strip and toolbar bounds are scaled into device pixels, a click whose target is off the display is refused as `not_visible`, and a click that activated a different tab is `partial`, not `confirmed`. Refs #1208 (#1209) (dfed145, 2026-10-27).
+
+### Observation and refs
+
+- Explain controls omitted by window overflow. Fixes #952 (#958) (6ec1d61, 2026-10-23).
+- Retain issued row identity through scroll searches. Refs #977 (#1015) (7025e5a, 2026-10-24).
+- Refresh drag evidence before the stroke. Refs #1000 (#1012) (430e96b, 2026-10-24).
+- Preserve native tooltip roles in snapshots. Fixes #969 (#990) (2f5ab41, 2026-10-24).
+- Include newly added Chromium children in effect snapshots. Fixes #967 (#985) (502e605, 2026-10-24).
+- Preserve refs omitted by later find results. Fixes #961 (#979) (6e412f7, 2026-10-24).
+- Include native Chrome popup menus in snapshots. Fixes #966 (#984) (3328822, 2026-10-24).
+- Report opaque coordinate click effects as unknown. Fixes #1068 (#1070) (c3a34c8, 2026-10-25).
+- Rebind newly exposed menu item refs. Fixes #1057 (#1060) (732cdf4, 2026-10-25).
+- Verify typed text beyond snapshot preview. Fixes #1051 (#1055) (1b862dc, 2026-10-25).
+- Use verified pointer clicks for GTK 4 text refs. Fixes #1047 (#1050) (2b9958a, 2026-10-25).
+- Preserve fresh refs across document title changes. Refs #1039 (#1042) (ee5ad7a, 2026-10-25).
+- Issue fresh refs inside a newly opened GTK4 popover. Fixes #1142 (#1156) (f77c7ed, 2026-10-26).
+- Issue fresh refs under a newly opened modal or popover. Fixes #1142 (#1148) (9ff2090, 2026-10-26).
+- Bind fresh textarea refs after scroll wrapper pruning. Fixes #1130 (#1137) (4428b5a, 2026-10-26).
+- Rebind surviving controls after snapshot renumbering. Fixes #1110 (#1113) (9fdcd61, 2026-10-26).
+
+### Linux drivers
+
+- Verify uploads with multiple file inputs. Fixes #965 (#980) (e9663e2, 2026-10-23).
+- Verify region drags against the overlay owner. Refs #1000 (#1035) (fd41931, 2026-10-24).
+- Expose selected text and verify double clicks. Refs #975 Refs #976 (#1011) (e4cc9ad, 2026-10-24).
+- Support horizontal scroll-to-find directions. Fixes #995 (#1002) (5fafa85, 2026-10-24).
+- Keep drawn slider values out of ref identity. Fixes #996 (#1001) (1440243, 2026-10-24).
+- Preserve real keycodes for non-Latin Ctrl shortcuts. Fixes #989 (#998) (2558c0a, 2026-10-24).
+- Retain content in scrolled GTK 3 viewports. Fixes #994 (#997) (1cc01b2, 2026-10-24).
+- Exclude closed Chromium menus from scroll discovery. Fixes #991 (#992) (c7310f6, 2026-10-24).
+- Preserve Chromium select option clicks. Fixes #987 (#993) (c5203db, 2026-10-24).
+- Preserve Chromium dropdown list descendants. Fixes #968 (#988) (8eada93, 2026-10-24).
+- Preserve native notebook tab roles. Fixes #960 (#970) (5aa7554, 2026-10-24).
+- Deliver pointer presses to Chromium text fields. Fixes #1100 (#1108) (c3122a3, 2026-10-25).
+- Read keyboard evidence after app activation. Fixes #1101 (#1103) (8d86193, 2026-10-25).
+- Isolate browser chrome and implicit modal typing. Refs #1084 (#1090) (bb92dff, 2026-10-25).
+- Follow verified editable remounts after focus. Refs #1087 (#1089) (48f3bc9, 2026-10-25).
+- Bind ref rematches to issuing tab and window. Refs #1074 (#1077) (ad74741, 2026-10-25).
+- Allow measured modal backdrop dismiss clicks. Refs #1073 (#1076) (4c7d5d7, 2026-10-25).
+- Query Firefox document modals before walking page content. Fixes #1067 (#1071) (8c9c0ee, 2026-10-25).
+- Avoid grid verification for opaque toolbar typing. Fixes #1056 (#1065) (a26d7b7, 2026-10-25).
+- Reap launched children asynchronously. Fixes #1052 (#1064) (87fd16d, 2026-10-25).
+- Keep nested Chrome tree items under their own rows. Fixes #1168 (#1171) (c57fc46, 2026-10-26).
+- Let Chrome finish a timed-out Collection query before walking. Fixes #1169 (#1172) (7cc8cf1, 2026-10-26).
+- Search terminal scrollback with verified viewport pages. Fixes #1162 (#1166) (696b455, 2026-10-26).
+- Use visible text ranges for Evince PDF search. Fixes #1165 (#1167) (993a439, 2026-10-26).
+- Wait for a late Chrome select collapse before reporting popup_open. (#1164) (2f32b9f, 2026-10-26).
+- Busy Chromium renderer makes an unchanged ref click unverifiable. Refs #1092 (#1160) (b8c14ed, 2026-10-26).
+- Preserve zero-width Qt text glyphs. Fixes #1118 (#1123) (8cd584e, 2026-10-26).
+- Reverted "refresh focused typing baseline before dispatch" (#1120). Refs #1117 (#1125) (f4d02e6, 2026-10-26).
+- Refresh focused typing baseline before dispatch. Fixes #1117 (#1120) (80ff837, 2026-10-26).
+- Read focused Electron fields across sibling documents. Fixes #1098 (#1107) (21ff365, 2026-10-26).
+- Verify menu commands that open native dialogs. Fixes #1096 (#1109) (55cf918, 2026-10-26).
+- Selection ancestor walk mistakes app root and desktop for a cycle. Fixes #1181 (#1182) (76129b4, 2026-10-27).
+- Keep digit menu accelerators such as Ctrl+1. Fixes #1177 (#1179) (a022e26, 2026-10-27).
+- Name and verify LibreOffice sidebar toggle buttons. Fixes #1184 (#1187) (7a954e3, 2026-10-27).
+- Name `no_accessibility_bridge` for type and key into a LibreOffice with no accessibility bridge. Fixes #1183 (#1197) (4fd26a4, 2026-10-27).
+- Writer Navigator double-click: a sidebar tab is not a path-bar crumb, and a clip needs the click point off screen. Fixes #1202 (#1206) (cdb1d9e, 2026-10-27).
+
+### Performance
+
+- Remove redundant Chrome ref-click reads. Fixes #1019 (#1043) (aeece7c, 2026-10-24).
+- Bound drag evidence reads and handle group-only overlays. Refs #1000 (#1022) (4b55849, 2026-10-24).
+- Cache modal classification within snapshot reads. Fixes #1095 Refs #1088 (#1105) (41349bc, 2026-10-25).
+- Budget modal safety probes and gate release latency. Refs #1067 (#1093) (0a353dd, 2026-10-25).
+- Accelerate verified overflow-list scroll searches. Refs #1072 (#1075) (4fa6b8c, 2026-10-25).
+- Bound snapshot URL and modal discovery. Refs #1045 (#1049) (e945e72, 2026-10-25).
+- Share modal discovery within clicks. Fixes #1061 (#1069) (10d4e71, 2026-10-25).
+- Bound drag modal probes and share ref resolution. Fixes #1053 (#1058) (1e0f1fe, 2026-10-25).
+- Stop list paint polling when row movement settles. Fixes #1112 (#1114) (1ad7865, 2026-10-26).
+- Avoid duplicate modal discovery before browser keys. Fixes #1116 (#1119) (f7763d2, 2026-10-26).
+- Skip the hit-probe fallback for ARIA trees with fewer than two own rows. Refs #1168 (#1180) (8680a22, 2026-10-27).
+
+### Benchmark
+
+- Stop AT-SPI before baseline CLI finalization. (#1104) (2bcec2f, 2026-10-25).
+- Latency harness: wait for Chrome to expose the page before the R13 rows' timer. (#1203) (2529a09, 2026-10-27).
+
+### CI
+
+- Bound the Linux job to 90 minutes and its apt install steps to 15. (#1185) (d56bb1e, 2026-10-27).
+- Retry apt on a stalled mirror, with a mirror fallback; timeouts unchanged. (#1201) (9a7b1e9, 2026-10-27).
+
+### Packaging
+
+- The package version is 0.4.77.
+
+### Known issues
+
+- Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Planned for 0.4.78.
+
 ## [0.4.76] - 2026-10-23
 
 Fourteen commits since v0.4.75, through #962.
