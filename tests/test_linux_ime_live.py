@@ -133,3 +133,50 @@ def test_a_refused_type_leaves_no_ime_text_in_the_field(chrome_field, monkeypatc
         assert exc.value.detail.get("reason") == "ime_active"
         assert _value(driver) == before
     assert _ibus("engine").stdout.strip() == _ENGINE
+
+
+def _wait_for(check, seconds: float = 5.0):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        found = check()
+        if found:
+            return found
+        time.sleep(0.1)
+    return check()
+
+
+def test_an_open_composition_is_refused_and_left_intact(chrome_field) -> None:
+    """The preedit is never switched away or dropped; clearing it lets typing work again."""
+    from a11y_computer_use.drivers import _atspi
+
+    driver, runtime, field, _original = chrome_field
+    if shutil.which("xdotool") is None:
+        pytest.skip("needs xdotool to type on a real keyboard")
+    _ibus("engine", "libpinyin")
+    if _ibus("engine").stdout.strip() != "libpinyin":
+        pytest.skip("IBus cannot load libpinyin")
+    runtime.click(field.ref)
+    subprocess.run(["xdotool", "type", "--delay", "80", "nihao"], check=True, timeout=10)
+    try:
+        if not _wait_for(lambda: _atspi.ime_composition_open() is True):
+            pytest.skip("the IBus panel shows no composition (is ibus-ui-gtk3 the panel?)")
+        before = _value(driver)
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.type_text(" abc", app="chrome")
+        assert exc.value.detail.get("reason") == "ime_composition_open"
+        assert _ibus("engine").stdout.strip() == "libpinyin"  # not switched
+        assert _atspi.ime_composition_open() is True  # the preedit is still open
+        assert _value(driver) == before
+        assert "你好" in before
+        # Addressed by ref the field is focused first, which commits the preedit in
+        # Chrome. Either that or the refusal is fine; the 你好 is never dropped.
+        try:
+            runtime.type_text(" abc", ref=field.ref)
+        except ComputerUseError as err:
+            assert err.detail.get("reason") == "ime_composition_open"
+        assert "你好" in (_value(driver) or "")
+    finally:
+        subprocess.run(["xdotool", "key", "Escape"], check=False, timeout=5)
+    assert _wait_for(lambda: _atspi.ime_composition_open() is False)
+    runtime.type_text("abc", app="chrome")
+    assert "abc" in (_value(driver) or "")

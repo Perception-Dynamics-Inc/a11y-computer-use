@@ -12,7 +12,10 @@ engine and the user's engine is restored afterwards. ``xkb:*`` engines are
 what IBus uses for a plain layout, so nothing is transformed. If the switch
 cannot be made and the text has ASCII in it, nothing is typed: the call is
 refused as ``ime_active`` naming the engine, before any key is sent, so no
-transformed text is left in the field.
+transformed text is left in the field. Switching engines discards an open
+composition (uncommitted preedit), so when the IBus panel shows one the call is
+refused as ``ime_composition_open`` before the switch and before any key: the
+preedit is left as it was.
 
 Scope: IBus only. fcitx5 and others are not switched or detected.
 ``A11Y_IME_BYPASS=0`` turns the switch off.
@@ -117,6 +120,34 @@ def _refuse(ime: ActiveIme):
     )
 
 
+def _composition_open() -> bool | None:
+    """True when the IBus panel shows an uncommitted composition, None if unknown."""
+    try:
+        from a11y_computer_use.drivers import _atspi
+
+        return _atspi.ime_composition_open()
+    except Exception:
+        return None
+
+
+def _refuse_composition(ime: ActiveIme):
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"an input-method composition is open ({ime}): uncommitted text is in the field "
+        "and switching the engine to type would discard it; nothing was typed and the "
+        "composition was left as it was. Commit it (Enter or pick a candidate) or cancel "
+        "it (Escape), then retry",
+        detail={
+            "platform": "linux",
+            "reason": "ime_composition_open",
+            "ime": {"framework": ime.framework, "engine": ime.engine},
+            "typed": False,
+        },
+    )
+
+
 def _set_engine(name: str) -> bool:
     done = _ibus("engine", name)
     if done is None:
@@ -146,6 +177,8 @@ def ascii_passthrough(text: str | None = None):
     ime = active_ime()
     switched = False
     if ime is not None:
+        if _composition_open():
+            raise _refuse_composition(ime)
         switched = _set_engine(PASSTHROUGH_ENGINE)
         if not switched:
             _log.warning("could not switch %s to %s", ime, PASSTHROUGH_ENGINE)

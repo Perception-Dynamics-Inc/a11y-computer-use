@@ -45,6 +45,8 @@ def ibus(monkeypatch):
     monkeypatch.setattr(_linux_ime.subprocess, "run", run)
     monkeypatch.setenv("A11Y_IME_BYPASS", "1")
     monkeypatch.delenv("FAKE_IBUS_REFUSE", raising=False)
+    # No test reads a real panel; the composition tests set this themselves.
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: False)
 
     class Fake:
         def set(self, name: str) -> None:
@@ -302,3 +304,153 @@ def test_failed_set_value_leaves_the_field_focused(ibus, monkeypatch) -> None:
         driver._apply_set_value(_element(), "hello world 42", handle)
     assert exc.value.detail["reason"] == "text_mismatch"
     assert focus["on"] == "field"
+
+
+# --- an open composition is never discarded (#1219) ---------------------------
+
+
+def _open_composition(monkeypatch) -> None:
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: True)
+
+
+@pytest.mark.parametrize("text", ["abc", " abc", "你好世界", None])
+def test_type_string_refuses_before_any_switch_or_key_while_a_composition_is_open(
+    ibus, monkeypatch, text,
+) -> None:
+    ibus.set("libpinyin")
+    _open_composition(monkeypatch)
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "_type_string_keys", lambda t, delay=None: sent.append(t))
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_input.type_string(text or "x")
+    err = exc.value
+    assert sent == []
+    assert ibus.switches == []  # the engine is not touched, so the preedit survives
+    assert ibus.engine == "libpinyin"
+    assert err.detail["reason"] == "ime_composition_open"
+    assert err.detail["ime"] == {"framework": "ibus", "engine": "libpinyin"}
+    assert err.detail["typed"] is False
+    assert "libpinyin" in str(err) and "Escape" in str(err)
+
+
+def test_type_into_target_and_set_value_leave_an_open_composition_alone(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    _open_composition(monkeypatch)
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "你好")
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a key was sent or focus was moved")
+
+    for name in ("_x11_select_all_and_delete", "_restore_text", "grab_focus", "_type_string"):
+        monkeypatch.setattr(_atspi, name, unexpected)
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: True)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "hello")
+    assert exc.value.detail["reason"] == "ime_composition_open"
+    with pytest.raises(ComputerUseError) as again:
+        _atspi._type_into_target(object(), "hello")
+    assert again.value.detail["reason"] == "ime_composition_open"
+    assert ibus.switches == []
+
+
+def test_no_composition_means_the_engine_is_switched_as_before(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: False)
+    monkeypatch.setattr(_linux_input, "_type_string_keys", lambda t, delay=None: None)
+    _linux_input.type_string("abc")
+    assert ibus.switches == ["set xkb:us::eng", "set libpinyin"]
+    # Unknown (no panel, unreadable) is not a refusal either.
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: None)
+    _linux_input.type_string("abc")
+
+
+def test_a_plain_layout_does_not_look_for_a_composition(ibus, monkeypatch) -> None:
+    ibus.set("xkb:us::eng")
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: pytest.fail("looked"))
+    monkeypatch.setattr(_linux_input, "_type_string_keys", lambda t, delay=None: None)
+    _linux_input.type_string("abc")
+
+
+def test_a_nested_use_checks_the_composition_once(ibus, monkeypatch) -> None:
+    ibus.set("libpinyin")
+    calls: list[int] = []
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: calls.append(1) or False)
+    with _linux_ime.ascii_passthrough("a"):
+        with _linux_ime.ascii_passthrough("b"):
+            pass
+    assert calls == [1]
+
+
+class _Node:
+    def __init__(self, role, name="", showing=True, children=()):
+        self._role, self._name, self._showing, self._children = role, name, showing, list(children)
+
+    def get_role_name(self):
+        return self._role
+
+    def get_name(self):
+        return self._name
+
+    def get_child_count(self):
+        return len(self._children)
+
+    def get_child_at_index(self, index):
+        return self._children[index]
+
+    def get_state_set(self):
+        outer = self
+
+        class States:
+            names = {"SHOWING"} if outer._showing else set()
+
+        return States()
+
+
+def _panel(*, preedit="", candidates=()):
+    rows = [
+        _Node("panel", children=[_Node("label", f"{i}."), _Node("label", c)])
+        for i, c in enumerate(candidates, 1)
+    ] + [
+        _Node("panel", showing=False, children=[_Node("label", "6."), _Node("label", "", showing=False)]),
+    ]
+    window = _Node("window", children=[_Node("filler", children=[
+        _Node("label", ""), _Node("label", preedit), _Node("separator"), _Node("filler", children=rows),
+    ])])
+    return _Node("application", "ibus-ui-gtk3", children=[window])
+
+
+@pytest.mark.parametrize(
+    "panel,expected",
+    [
+        (_panel(preedit="ni hao |", candidates=["你好", "你好吗"]), True),
+        (_panel(candidates=["你好"]), True),
+        (_panel(preedit="ni"), True),
+        (_panel(), False),  # the window stays mapped after a commit; no label has text
+    ],
+    ids=["preedit+candidates", "candidates-only", "preedit-only", "idle"],
+)
+def test_the_panel_tree_tells_a_composition_from_an_idle_panel(monkeypatch, panel, expected) -> None:
+    monkeypatch.setattr(
+        _atspi, "desktop_application_roots",
+        lambda: _atspi.DesktopApplications([("ibus-ui-gtk3", panel), ("chrome", _Node("application"))], 0),
+    )
+    assert _atspi.ime_composition_open() is expected
+
+
+def test_without_a_panel_or_when_it_cannot_be_read_the_composition_is_unknown(monkeypatch) -> None:
+    monkeypatch.setattr(
+        _atspi, "desktop_application_roots",
+        lambda: _atspi.DesktopApplications([("chrome", _Node("application"))], 0),
+    )
+    assert _atspi.ime_composition_open() is None
+
+    def boom():
+        raise RuntimeError("no bus")
+
+    monkeypatch.setattr(_atspi, "desktop_application_roots", boom)
+    assert _atspi.ime_composition_open() is None
+    monkeypatch.setattr(_linux_ime, "_composition_open", _linux_ime._composition_open)
+    monkeypatch.setattr(_atspi, "ime_composition_open", boom)
+    assert _linux_ime._composition_open() is None

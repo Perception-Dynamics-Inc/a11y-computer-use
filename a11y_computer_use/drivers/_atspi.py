@@ -7146,6 +7146,47 @@ def desktop_application_roots() -> DesktopApplications:
     return DesktopApplications(ready, silent)
 
 
+_IME_PANEL_APPS = ("ibus-ui-gtk3", "ibus-ui-gtk", "ibus-ui-emojier")
+_IME_PANEL_NODE_LIMIT = 200
+
+
+def ime_composition_open() -> bool | None:
+    """True when an input-method panel is showing uncommitted text (#1219).
+
+    IBus's panel (``ibus-ui-gtk3``) keeps its candidate window mapped when no
+    composition is open, so a mapped window says nothing. What it does show
+    while the engine holds a preedit is a showing label with text in it: the
+    preedit (``ni hao |``) or a candidate. The numbered row labels (``1.``)
+    are shown empty. True when such a label is showing, False when the panel
+    is there and shows none, None when there is no panel or it cannot be read.
+    """
+    try:
+        roots = desktop_application_roots().ready
+    except Exception:
+        return None
+    panels = [acc for name, acc in roots if name.strip().lower() in _IME_PANEL_APPS]
+    if not panels:
+        return None
+    seen = 0
+    read = False
+    stack = list(panels)
+    while stack and seen < _IME_PANEL_NODE_LIMIT:
+        node = stack.pop()
+        seen += 1
+        if not _state_has(node, "SHOWING") and _role_name(node) != "application":
+            continue
+        read = True
+        if _role_name(node) == "label":
+            text = str(_call_first(node, ("get_name",), default="") or "").strip()
+            if text and not re.fullmatch(r"\d+\.?", text):
+                return True
+        for index in range(_child_count(node)):
+            child = _child_at(node, index)
+            if child is not None:
+                stack.append(child)
+    return False if read else None
+
+
 def _text_security(acc):
     """Read security metadata once; visibility is meaningful only for entries."""
     role = _role_name(acc)

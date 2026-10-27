@@ -422,6 +422,18 @@ Text with no ASCII uses spare keycodes an engine passes through, so it is still 
 `A11Y_IME_BYPASS=0` turns the switch off. fcitx5 and other
 frameworks are not switched or detected.
 
+Switching the engine discards an open composition (the uncommitted preedit, such
+as `你好` after typing `nihao`). Before it switches, `ascii_passthrough` reads the
+IBus panel (`ibus-ui-gtk3`) over AT-SPI: a showing label with text in it (the
+preedit or a candidate) means a composition is open. The call is then refused as
+`ime_composition_open` before the switch and before any key, with `detail.typed:
+false`, and the preedit is left as it was. Commit it (Enter or a candidate) or
+cancel it (Escape) and retry. The panel's candidate window stays mapped when idle,
+so the check reads its labels, not its map state. With no panel (for example
+`ibus-daemon --panel disable`) or an unreadable one the composition is unknown and
+typing goes ahead. A `type` addressed by `ref` focuses the field first, which
+commits the preedit in Chrome.
+
 ## Meld file comparisons
 
 Meld 3.22.3 (GTK 3) exposes the file-diff chunk-action gutter between text
