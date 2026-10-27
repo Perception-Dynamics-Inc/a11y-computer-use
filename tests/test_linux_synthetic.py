@@ -23097,6 +23097,56 @@ def _calc_comment_tree():
     return doc, table, callout, paragraph
 
 
+def test_calc_comment_read_back_under_a_focused_root_pane(fake_atspi, monkeypatch) -> None:
+    """Refs #1249. Synthetic tree shaped like Ubuntu's LibreOffice 24.2 build.
+
+    That build leaves FOCUSED on the frame's root pane and puts it on the
+    callout panel rather than its paragraph. The read-back still resolves to
+    the comment paragraph through the focused sheet table.
+    """
+    doc, table, callout, paragraph = _calc_comment_tree()
+    paragraph.states.discard("FOCUSED")
+    callout.states.update({"FOCUSED", "SHOWING"})
+    toolbar = _adopt(_Acc("tool bar"), _Acc("table", states={"FOCUSED", "SHOWING"}))
+    pane = _adopt(_Acc("root pane", name="comment.fods", states={"FOCUSED", "SHOWING"}),
+                  toolbar, _adopt(_Acc("scroll pane"), doc))
+    app = table.get_application()
+    for node in (pane, toolbar):
+        node.get_application = lambda: app
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (pane, False))
+    assert _atspi._calc_focused_sheet_under(pane) is table
+    assert _atspi.focused_text("soffice") == ""
+    paragraph.text = "Added by test"
+    assert _atspi.focused_text("soffice") == "Added by test"
+
+
+def test_calc_root_pane_without_a_unique_focused_sheet_has_no_read_back(fake_atspi, monkeypatch) -> None:
+    """Refs #1249. Synthetic. An unfocused, doubled, or unreadable sheet is None."""
+    doc, table, callout, paragraph = _calc_comment_tree()
+    pane = _adopt(_Acc("root pane", states={"FOCUSED", "SHOWING"}), doc)
+    table.states.discard("FOCUSED")
+    assert _atspi._calc_focused_sheet_under(pane) is None
+    table.states.add("FOCUSED")
+    twin = _Acc("table", states={"FOCUSED", "SHOWING"})
+    _adopt(doc, table, twin, callout)
+    assert _atspi._calc_focused_sheet_under(pane) is None
+    _adopt(doc, table, callout)
+    assert _atspi._calc_focused_sheet_under(pane, max_nodes=1) is None
+
+
+def test_calc_focused_callout_panel_with_two_paragraphs_is_not_a_read_back(fake_atspi) -> None:
+    """Refs #1249. Synthetic. A focused panel stands in only for a lone paragraph."""
+    doc, table, callout, paragraph = _calc_comment_tree()
+    paragraph.states.discard("FOCUSED")
+    callout.states.update({"FOCUSED", "SHOWING"})
+    assert _atspi._calc_drawing_paragraph(table) is paragraph
+    _adopt(callout, paragraph, _Acc("paragraph", states={"SHOWING"}))
+    assert _atspi._calc_drawing_paragraph(table) is None
+    _adopt(callout, paragraph)
+    callout.states.discard("FOCUSED")
+    assert _atspi._calc_drawing_paragraph(table) is None
+
+
 def test_calc_comment_paragraph_is_the_type_read_back(fake_atspi, monkeypatch) -> None:
     """Refs #1249. Synthetic Calc tree. Not a live Calc window.
 
