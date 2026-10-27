@@ -2489,6 +2489,76 @@ class LinuxDriver:
             return _page_health.BUSY
         return None
 
+    #: Reason for a refused type whose keys may still land (#1190).
+    TYPE_BUSY_REASON = "page busy, input may land later; re-observe before retrying"
+
+    def type_into(self, element: Element, text: str) -> int:
+        """Type into ``element``; see ``_type_into_unguarded`` and ``_busy_page_guard``."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def pid():
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            return self._run(lambda: _atspi.pid_of(handle)) if handle is not None else None
+
+        return self._busy_page_guard(pid, lambda: self._type_into_unguarded(element, text))
+
+    def type_text(self, text: str, *, pre_check: Callable | None = None,
+                  dry_run: bool = False) -> object:
+        """Type into the focused editable; see ``_type_text_unguarded`` and ``_busy_page_guard``."""
+        if dry_run or not text:
+            return self._type_text_unguarded(text, pre_check=pre_check, dry_run=dry_run)
+
+        def pid():
+            from a11y_computer_use.drivers import _atspi
+
+            handle = self._focused_editable
+            if handle is not None:
+                return self._run(lambda: _atspi.pid_of(handle))
+            return self.frontmost_app()[1]
+
+        return self._busy_page_guard(
+            pid, lambda: self._type_text_unguarded(text, pre_check=pre_check, dry_run=dry_run))
+
+    def _busy_page_guard(self, target_pid, write):
+        """Run ``write``; a text_mismatch on a busy Chromium page is unverifiable.
+
+        A readback taken while the renderer busy-loops reads the browser's
+        stale accessibility cache, and the keys already sent can still land
+        later. Retry hints there type the text twice (#1190). When the /proc
+        renderer sample (#1160) shows one renderer on CPU across the write,
+        the refusal becomes ``unverifiable`` with no ``next``. Apps without
+        Chromium renderers (sample None) and errors before delivery
+        (anything but text_mismatch) are unchanged.
+        """
+        from a11y_computer_use.drivers import _page_health
+
+        try:
+            pid = target_pid()
+        except Exception:  # noqa: BLE001 - no pid means no busy evidence
+            pid = None
+        ticks = _page_health.renderer_ticks(pid) if pid else None
+        started = time.monotonic()
+        try:
+            return write()
+        except ComputerUseError as exc:
+            detail = dict(exc.detail or {})
+            if ticks is None or detail.get("reason") != "text_mismatch":
+                raise
+            busy = _page_health.renderer_busy(
+                (started, ticks), (time.monotonic(), _page_health.renderer_ticks(pid)))
+            if not busy:
+                raise
+            detail.update(
+                outcome="unverifiable",
+                next=[],
+                evidence=f"{exc.message}; {self.TYPE_BUSY_REASON}",
+                renderer=_page_health.BUSY,
+                input_delivered=True,
+            )
+            raise ComputerUseError(exc.code, f"{exc.message}; {self.TYPE_BUSY_REASON}",
+                                   detail=detail) from exc
+
     _LO_TOGGLE_POLLS = 12
 
     def toggle_click_probe(self, target: Target):
@@ -5046,7 +5116,7 @@ class LinuxDriver:
             },
         )
 
-    def type_into(self, element: Element, text: str) -> int:
+    def _type_into_unguarded(self, element: Element, text: str) -> int:
         """Type ``text`` into ``element`` only after focus is confirmed on it.
 
         Chromium text fields receive a checked pointer click first; other
@@ -5303,8 +5373,8 @@ class LinuxDriver:
             )
         return app_id
 
-    def type_text(self, text: str, *, pre_check: Callable | None = None,
-                  dry_run: bool = False) -> object:
+    def _type_text_unguarded(self, text: str, *, pre_check: Callable | None = None,
+                             dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.
 
         Primary path: AT-SPI EditableText. A ref click remembers the element.
