@@ -6960,6 +6960,34 @@ def _fresh_application_children(app) -> list:
     return _without_child_cache(app, read_children)
 
 
+def live_window_contexts(app: str) -> frozenset | None:
+    """Native top-level windows the application still publishes right now.
+
+    Each entry is the ``context_identity`` a snapshot gives that window
+    (role, bus, path). An unfocused or iconified window is still listed; only
+    a destroyed one is absent. None when the application or a window's native
+    identity cannot be read, so a caller never treats "unknown" as "gone".
+    Reads the application's top-level children only, never a descendant walk.
+    """
+    from a11y_computer_use.schema import Scope
+
+    if not app:
+        return None
+    root = find_root(app, Scope.APP)
+    if root is None:
+        return None
+    contexts = set()
+    for child in _fresh_application_children(root):
+        role = _role_name(child)
+        if role not in {"frame", "window"}:
+            continue
+        context = window_context_identity(child, role)
+        if not context:
+            return None
+        contexts.add(context)
+    return frozenset(contexts)
+
+
 def _showing_chrome_frame_menus(frame) -> list:
     """Native menus in an unnamed Chromium popup frame, with real handles.
 

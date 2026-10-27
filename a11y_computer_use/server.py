@@ -3785,6 +3785,16 @@ class Runtime:
                 documents.add(tuple(context))
         return documents
 
+    @staticmethod
+    def _native_windows(elements) -> set[tuple]:
+        """Native top-level window objects named by ``elements`` (role, bus, path)."""
+        windows = set()
+        for el in elements:
+            context = getattr(el, "context_identity", None)
+            if context and str(context[0]) in {"frame", "window"}:
+                windows.add(tuple(context))
+        return windows
+
     def _note_issued(self, snap: Snapshot, refs: set[str] | None = None,
                      *, preserve_identity: bool = False) -> None:
         """Remember which app issued the refs the agent was just given.
@@ -3842,6 +3852,33 @@ class Runtime:
             and previous_documents.isdisjoint(current_documents)
             and not document_changed
         )
+        # The same holds for a top-level window (#1215): a wizard step or a
+        # notification is destroyed and an identical one shown. That needs
+        # proof the old window is gone. Another window of the app being
+        # focused, or the snapshot scoped to it, is not: the old window still
+        # exists and its refs must stay stale or they would rebind to
+        # same-numbered controls of the other window. So the previous
+        # observation's windows must be absent from the app's live window
+        # list, and the fresh observation's windows present in it. A driver
+        # that cannot list them (or errors) never starts a new epoch.
+        if (not native_replaced and last is not None and last.app == app
+                and not instance_changed and not document_changed
+                and last.snapshot_id != snap.snapshot_id):
+            previous_windows = self._native_windows(last.elements)
+            current_windows = self._native_windows(snap.elements)
+            if (previous_windows and current_windows
+                    and previous_windows.isdisjoint(current_windows)):
+                live_windows = getattr(self.driver, "live_window_contexts", None)
+                live = None
+                if callable(live_windows):
+                    try:
+                        live = live_windows(app)
+                    except Exception:
+                        live = None
+                native_replaced = bool(
+                    live is not None and previous_windows.isdisjoint(live)
+                    and not current_windows.isdisjoint(live)
+                )
         if native_replaced:
             document_changed = True
         self._issued_document_url = document_url or (
