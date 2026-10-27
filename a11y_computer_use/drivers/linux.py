@@ -3808,6 +3808,26 @@ class LinuxDriver:
         # list. The row is gone, so it never becomes SELECTED. The combobox
         # value, its name, aria-selected, or the collapsed text is the
         # read-back. That reading is taken before the click.
+        # A LibreOffice popup list row (a cell's validity list) only commits
+        # on a pointer click. Selection.select_child highlights it and VCL's
+        # cursor stays on the old entry, so the cell keeps its old value.
+        # Success is that the popup closed after the click.
+        if self._run(lambda: _atspi.libreoffice_popup_list_row(handle)):
+            bounds = element.bounds
+            if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{element.ref} ({element.role}) popup list row has no usable screen bounds",
+                    detail={"ref": element.ref, "role": element.role, "reason": "no_bounds"},
+                )
+            self.click(element)
+            if self._run(lambda: _atspi.libreoffice_popup_list_closed(handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not commit the popup list entry",
+                detail={"ref": element.ref, "role": element.role, "reason": "popup_not_closed"},
+            )
         if self._run(lambda: _atspi.chromium_select_option_parent(handle)) is not None:
             # Preserve the pointer gesture and its selected-set verification.
             # Do not swallow a refused hit or restore selection after failure.

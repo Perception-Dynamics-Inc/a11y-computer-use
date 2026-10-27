@@ -23079,3 +23079,70 @@ def test_chromium_snapshot_root_clears_again_when_the_cleared_read_is_empty() ->
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()
         _atspi._BROWSER_BAR_OPEN.clear()
+
+
+def _lo_validity_popup(window_role: str = "window"):
+    """Synthetic LibreOffice validity list. Not a live Calc window.
+
+    A GTK tree table of entries inside an undecorated popup ``window``.
+    select_child marks the row SELECTED, as GTK does, without committing.
+    """
+    red = _outline_cell("Red", ["expand or contract", "edit", "activate"])
+    green = _outline_cell("Green", ["expand or contract", "edit", "activate"])
+    window = _outline_window(red, green)
+    window.role = window_role
+    app = green.get_application()
+    app.name = "soffice"
+    return window, red, green
+
+
+def test_libreoffice_validity_row_is_a_popup_row_without_double_click_note(fake_atspi) -> None:
+    """Refs #1247. Synthetic tree. Not a live Calc window."""
+    _window, red, green = _lo_validity_popup()
+    assert _atspi.libreoffice_popup_list_row(green) is True
+    assert _atspi.libreoffice_popup_list_row(red) is True
+    assert _atspi.outline_double_click_note(green) == ""
+    framed, _red, framed_green = _lo_validity_popup(window_role="frame")
+    assert _atspi.libreoffice_popup_list_row(framed_green) is False
+    assert _atspi.outline_double_click_note(framed_green) == "activates on double-click"
+    _plain, _r, other = _lo_validity_popup()
+    other.get_application().name = "treeprobe"
+    assert _atspi.libreoffice_popup_list_row(other) is False
+
+
+def test_libreoffice_validity_row_click_is_a_pointer_click_not_select_child(fake_atspi, monkeypatch) -> None:
+    """Refs #1247. Synthetic tree. Not a live Calc window.
+
+    select_child only highlights the row and Return then commits the old
+    entry. The ref click sends one pointer click and succeeds only when the
+    popup closes. A popup that stays open is an error, not success.
+    """
+    _window, _red, green = _lo_validity_popup()
+    tree = green.get_parent()
+    selected: list[int] = []
+    tree.select_child = lambda index: selected.append(index) or True
+    clicks: list[object] = []
+
+    def click(self, target, **_kwargs):
+        clicks.append(target)
+        green.states.discard("SHOWING")
+
+    monkeypatch.setattr(LinuxDriver, "click", click)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: green)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    element = Element("e4", "AXCell", "Green", None, Bounds(0, 48, 121, 180, 21), "snap-1", clickable=True)
+    assert LinuxDriver().press_element(element) is True
+    assert clicks == [element]
+    assert selected == []
+
+    _window, _red, stuck = _lo_validity_popup()
+    clicks.clear()
+    monkeypatch.setattr(LinuxDriver, "click", lambda self, target, **_kw: clicks.append(target))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: stuck)
+    ticks = iter(range(0, 1000))
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: float(next(ticks)))
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().press_element(element)
+    assert exc.value.detail["reason"] == "popup_not_closed"
+    assert clicks == [element]

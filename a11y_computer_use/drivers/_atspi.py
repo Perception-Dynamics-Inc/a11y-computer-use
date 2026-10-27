@@ -17493,6 +17493,9 @@ def outline_double_click_note(acc) -> str:
     try:
         if navigating_folder_row(acc):
             return ""
+        # A LibreOffice popup list row commits on the single click.
+        if libreoffice_popup_list_row(acc):
+            return ""
     except Exception:
         return ""
     names = _raw_action_names(acc)
@@ -17549,6 +17552,52 @@ def folder_navigation_verdict(acc, before: str) -> tuple[str, str]:
             return "confirmed", f"the {kind} changed"
         if time.monotonic() >= deadline:
             return "partial", "the row was selected but the location did not change"
+        time.sleep(0.05)
+
+
+_LO_POPUP_ROW_ROLES = frozenset({"table cell", "list item"})
+_LO_POPUP_LIST_ROLES = frozenset({"tree table", "table", "list", "list box", "tree"})
+
+
+def libreoffice_popup_list_row(acc) -> bool:
+    """A row of a LibreOffice popup list, such as a cell's validity list.
+
+    The list is a GTK tree view inside an undecorated popup ``window``.
+    Selection.select_child highlights the row but leaves VCL's cursor on
+    the old entry, so Return then commits the old value and nothing closes
+    the popup. Only a pointer click on the row commits it. A tree or list
+    inside a frame or dialog is not a popup list and is not matched.
+    """
+    if _role_name(acc) not in _LO_POPUP_ROW_ROLES:
+        return False
+    if not libreoffice_app(_application_name(acc)):
+        return False
+    parent = _call_first(acc, ("get_parent", "getParent"))
+    if parent is None or _role_name(parent) not in _LO_POPUP_LIST_ROLES:
+        return False
+    node = _call_first(parent, ("get_parent", "getParent"))
+    for _ in range(6):
+        if node is None:
+            return False
+        role = _role_name(node)
+        if role == "window":
+            return True
+        if role in {"frame", "dialog", "application", "desktop frame"}:
+            return False
+        node = _call_first(node, ("get_parent", "getParent"))
+    return False
+
+
+def libreoffice_popup_list_closed(acc, timeout: float = 1.0) -> bool:
+    """Whether the popup that owned ``acc`` closed after the click."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _call_first(acc, ("get_parent", "getParent")) is None:
+            return True
+        if _state_has(acc, "DEFUNCT") or not _state_has(acc, "SHOWING"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
 
 
