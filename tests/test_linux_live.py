@@ -14672,3 +14672,82 @@ def test_linux_calc_validity_list_ref_click_commits_the_entry(tmp_path) -> None:
         assert d2 is not None and d2.value == "Green", None if d2 is None else d2.value
     finally:
         _stop_group(proc)
+
+
+_DATALIST_PAGE = (
+    "<!doctype html><title>Datalist lab</title>"
+    '<input id=d list=cities aria-label="City"><datalist id=cities>'
+    '<option value="Almaty"><option value="Astana"><option value="Berlin"></datalist><br>'
+    '<input id=p aria-label="Plain"><br><p id=o>S=[]</p>'
+    "<script>setInterval(()=>{o.textContent='S=[d='+d.value+' p='+p.value+']'},200)</script>"
+)
+
+
+def test_linux_firefox_datalist_input_takes_set_value_and_ref_type(tmp_path) -> None:
+    """Live Firefox. Refs #1251. A datalist ``<input list>`` is a text field.
+
+    Firefox exposes it as a combo box with an input tag, Text, and EDITABLE.
+    The snapshot flags it ``edit`` with no value from the next field's label,
+    ``find(editable=True)`` lists it, ``set_value`` writes free text, and a
+    ref ``type`` appends. The page's own readout confirms each write. The
+    address-bar combo stays non-editable. Only this test's Firefox group is
+    stopped.
+    """
+    import re
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _firefox_binary()
+    assert binary, "firefox is not installed"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    httpd = _serve_html(_DATALIST_PAGE)
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    profile = tmp_path / "ff-datalist"
+    profile.mkdir()
+    (profile / "user.js").write_text(_FIREFOX_PARA_PREFS)
+    env = os.environ.copy()
+    env.update(MOZ_ENABLE_ACCESSIBILITY="1", GTK_MODULES="gail:atk-bridge", NO_AT_BRIDGE="0")
+    proc = subprocess.Popen(
+        [binary, "--profile", str(profile), "--no-remote", "--new-instance", url],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        runtime = None
+        shot = ""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                runtime = runtime or _runtime_for(tmp_path, driver, "firefox")
+                shot = runtime.desktop_snapshot("firefox", mode="interactive")
+            except ComputerUseError:
+                continue
+            if 'combobox "City"' in shot and "S=[" in shot:
+                break
+        line = next(ln for ln in shot.splitlines() if 'combobox "City"' in ln)
+        assert "edit" in line and "Plain" not in line, line
+        # The address bar's name depends on the build and search engine
+        # ("Search or enter address", "Search with Google or enter address").
+        bar = next(ln for ln in shot.splitlines()
+                   if re.search(r'combobox "[^"]*enter address"', ln))
+        assert "edit" not in bar, bar
+        ref = re.search(r'(e\d+) combobox "City"', line).group(1)
+        found = runtime.find("firefox", text="City", editable=True)
+        assert "1 match" in found and 'combobox "City"' in found, found
+        assert runtime.set_value(ref=ref, value="Astana").startswith("set ")
+        shot = runtime.desktop_snapshot("firefox", mode="interactive")
+        assert "S=[d=Astana p=]" in shot, shot[-800:]
+        ref = re.search(r'(e\d+) combobox "City"', shot).group(1)
+        assert runtime.type_text(" Berlin", ref=ref).startswith("typed 7 characters")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            shot = runtime.desktop_snapshot("firefox", mode="interactive")
+            if "S=[d=Astana Berlin p=]" in shot:
+                break
+            time.sleep(0.3)
+        assert "S=[d=Astana Berlin p=]" in shot, shot[-800:]
+    finally:
+        _stop_group(proc)
+        httpd.shutdown()

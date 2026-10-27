@@ -9692,8 +9692,11 @@ def editable_entry(
         # Chromium ARIA autocomplete and datalist inputs own their text; their popup
         # options are not children and do not constrain the input value.
         # Gecko address-bar wrappers also report input, Text, and EDITABLE;
-        # those wrappers must retain the select-style classification.
-        if not _chromium_app(acc):
+        # those wrappers must retain the select-style classification. A
+        # Gecko datalist input has the same shape but sits inside a page
+        # document, and the address bar never does (#1251).
+        chromium = _chromium_app(acc)
+        if not chromium and not _gecko_app(acc):
             return False
         if attrs is None:
             attrs = _get_attributes(acc)
@@ -9703,6 +9706,7 @@ def editable_entry(
             str(attrs.get("tag") or "").lower() == "input"
             and state_editable and not _state_has(acc, "READ_ONLY")
             and _call_first(acc, ("get_text_iface",)) is not None
+            and (chromium or _nested_in_document(acc))
         )
     if role in _STATIC_REPLACE_ROLES:
         return False
@@ -14875,6 +14879,12 @@ def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
         if isinstance(text, str):
             return True, (_strip_objects(text) or None)
         return True, None
+    # A browser input combobox (datalist or ARIA autocomplete) is its own
+    # entry. Its value is its own text, even when empty; the sibling and
+    # label fallbacks below would report the next field's label (#1251).
+    if role_name in {"combo box", "combo-box"} and editable_entry(acc, role_str=role_name):
+        text = _full_text(acc)
+        return True, (_strip_objects(text) or None) if isinstance(text, str) else None
     # Linux Qt stores the current item in the accessible name. That name is
     # the value. The label relation, applied in the snapshot title, is the
     # widget's name. The Value interface on the combo is uninitialized.
