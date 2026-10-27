@@ -20696,6 +20696,23 @@ def gtk_dialog_toggle_state(acc) -> tuple[bool, bool] | None:
     return _click_state_bits(acc, bits, require_showing=True)
 
 
+def gtk_inline_link_state(acc) -> tuple[bool, bool] | None:
+    """Fresh VISITED bit of a GTK label's inline link (#1230 follow-up).
+
+    A GTK3 ``GtkLabel`` with ``<a href>`` markup exposes each link as a
+    ``link`` child of the label. Activating the link marks it VISITED, which
+    is the only native evidence that the click fired. Other roles, toolkits
+    and parents are None. A link that was already visited cannot show the
+    change; the probe skips it so the outcome stays honest.
+    """
+    if acc is None or _role_name(acc) != "link" or _toolkit_name(acc) != "gtk":
+        return None
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) != "label":
+        return None
+    return _click_state_bits(acc, ("VISITED", "SHOWING"), require_showing=True)
+
+
 def libreoffice_toggle_state(acc) -> tuple[bool, bool] | None:
     """Fresh CHECKED/PRESSED bits of a LibreOffice toggle button (#1184).
 
