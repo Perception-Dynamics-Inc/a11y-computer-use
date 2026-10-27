@@ -2679,6 +2679,12 @@ class LinuxDriver:
                 if state is not None and state[0]:
                     # Already visited: the click cannot change VISITED.
                     return None
+            if state is None:
+                reader = _atspi.gtk_selection_click_state
+                state = reader(handle)
+                if state is not None and any(state):
+                    # Already selected: the click cannot show a change.
+                    return None
             return (handle, state, reader) if state is not None else None
 
         try:
@@ -2718,6 +2724,8 @@ class LinuxDriver:
         if changed:
             if reader is _atspi.gtk_inline_link_state:
                 return "the clicked inline link became visited"
+            if reader is _atspi.gtk_selection_click_state:
+                return "the clicked GTK row/tile became selected"
             if reader is _atspi.gtk_dialog_toggle_state:
                 return "the clicked GTK dialog control's selected/checked state changed"
             return "the clicked toggle's checked/pressed state changed"
