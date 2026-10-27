@@ -36,6 +36,7 @@ Ninety commits since v0.4.76, through #1207.
 - No retry hints after typed input reached a busy Chromium page. Refs #1190 (#1195) (05c0f63, 2026-10-27).
 - Linux: rebuild the key map on a keyboard layout change and never confirm a mismatched keysym. Refs #1198 (#1200) (8cb29e7, 2026-10-27).
 - Chrome reload starts a new ref epoch instead of refusing every fresh ref as `stale_ref`; a control that became irreversible after the reload and a replaced document still return `stale_ref` ahead of the confirmation gate and the display-clipped refusal. Refs #1204 (#1207) (e4ed295, 2026-10-27).
+- Linux, Chrome at a UI scale above 1: tab strip and toolbar bounds are scaled into device pixels, a click whose target is off the display is refused as `not_visible`, and a click that activated a different tab is `partial`, not `confirmed`. Refs #1208 (#1209) (dfed145, 2026-10-27).
 
 ### Observation and refs
 
@@ -125,7 +126,6 @@ Ninety commits since v0.4.76, through #1207.
 
 ### Known issues
 
-- Linux, Chrome at `--force-device-scale-factor` 1.5 or 2 (#1208): tab strip and toolbar refs report unscaled bounds, so a click on a tab ref can activate a neighbouring tab and report `confirmed`. At the default scale of 1 clicks land correctly. Fix proposed in #1209; it leads 0.4.78.
 - Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Planned for 0.4.78.
 
 ## [0.4.76] - 2026-10-23
