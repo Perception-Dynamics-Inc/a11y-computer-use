@@ -3807,13 +3807,23 @@ class Runtime:
         # surviving document still shares that document and stays stale.
         previous_documents = self._native_documents(last.elements if last is not None else ())
         current_documents = self._native_documents(snap.elements)
-        if (previous_documents and current_documents
-                and previous_documents.isdisjoint(current_documents)):
+        native_replaced = bool(
+            previous_documents and current_documents
+            and previous_documents.isdisjoint(current_documents)
+            and not document_changed
+        )
+        if native_replaced:
             document_changed = True
         self._issued_document_url = document_url or (
             previous_url if last is not None and last.app == app and not instance_changed else None
         )
         changed = getattr(self, "_changed_snapshot_refs", {}).copy()
+        # The identity of the page that was replaced, kept only to refuse a
+        # ref whose control became an irreversible one (#1204 follow-up).
+        replaced_anchors = (
+            anchors.copy() if native_replaced and last is not None
+            and last.app == app and not instance_changed else None
+        )
         if last is None or last.app != app or instance_changed or document_changed:
             anchors = {}
             changed = {}
@@ -3931,6 +3941,23 @@ class Runtime:
                         or new_surface_item
                     ):
                         changed[element.ref] = snap
+                        continue
+                # A reload starts a new epoch, so refs are not compared with
+                # the old page. A ref whose control became an irreversible one
+                # (Delete All) is still the old ref naming a different node:
+                # stale_ref, decided before the confirmation gate runs.
+                held = replaced_anchors.get(element.ref) if replaced_anchors else None
+                if held is not None and held is not snap:
+                    was = next((el for el in held.elements if el.ref == element.ref), None)
+                    if (
+                        was is not None and (was.role, was.title) != (element.role, element.title)
+                        and safety.confirmation_prompt(
+                            Click(target=element), app or "",
+                            menu_path=safety.menu_path(snap, element),
+                        ) is not None
+                    ):
+                        changed[element.ref] = snap
+                        anchors[element.ref] = held
                         continue
                 changed.pop(element.ref, None)
                 anchors[element.ref] = snap

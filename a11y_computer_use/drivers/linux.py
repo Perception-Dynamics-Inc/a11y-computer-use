@@ -2405,6 +2405,18 @@ class LinuxDriver:
                                and windows[0].context_identity == old_windows[0].context_identity)
                 overflow = windows[0].content_note if same_window else ""
                 if "window extends beyond the displays" in overflow:
+                    # A page the browser replaced (reload, navigation) took its
+                    # controls with it. That is a stale ref, not a control the
+                    # display edge pruned (#1204).
+                    live_contexts = {el.context_identity for el in live.elements
+                                     if el.context_identity}
+                    if any(c not in live_contexts for c in LinuxDriver._ref_context(snap, anchor)):
+                        raise ComputerUseError(
+                            ErrorCode.STALE_REF,
+                            f"{ref} no longer belongs to the issuing window/document",
+                            detail={"ref": ref, "reason": "document_changed",
+                                    "outcome": "refused"},
+                        ) from exc
                     raise ComputerUseError(
                         ErrorCode.NOT_VISIBLE,
                         f"{ref} cannot be resolved while its {overflow}",

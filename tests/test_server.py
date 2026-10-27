@@ -6216,6 +6216,47 @@ def test_reload_replaces_native_document_without_poisoning_fresh_refs(
 
 
 @pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("snapshots", [1, 2])
+def test_reload_that_turns_a_ref_into_an_irreversible_control_is_stale_not_declined(
+    monkeypatch, mocked_driver, store, audit_dir, mode, snapshots,
+):
+    """#1204: identity is decided before the irreversible-action gate.
+
+    The reload starts a new epoch, so a harmless rename keeps working. A ref
+    whose control became "Delete All" is still the old ref naming a different
+    node: stale_ref, not confirmation_declined, and nothing is sent.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    window = Element("e1", "AXWindow", "Notes Lab - Chrome", None, None, "before",
+                     context_identity=("frame", ":1.2", "/window/1"))
+    page = Element("e2", "AXGroup", "Notes Lab", None, None, "before", parent="e1",
+                   context_identity=("document web", ":1.2", "/document/1"))
+    target = Element("e3", "AXButton", "Go", None, Bounds(1, 10, 40, 150, 25), "before",
+                     parent="e2", clickable=True)
+    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
+                                 elements=(window, page, target))
+    updated = [dataclasses.replace(el, snapshot_id="after") for el in before.elements]
+    updated[1] = dataclasses.replace(updated[1], context_identity=("document web", ":1.2", "/document/9"))
+    updated[2] = dataclasses.replace(updated[2], title="Delete All")
+    after = dataclasses.replace(before, snapshot_id="after", elements=tuple(updated))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    pressed = []
+    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el) or False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = after
+        for _ in range(snapshots):
+            runtime.desktop_snapshot(APP, mode=mode)
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e3", verify=True)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+        assert mocked_driver["click"] == pressed == []
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
 @pytest.mark.parametrize("replacement", [None, "name", "role", "parent"])
 @pytest.mark.parametrize("verify", [False, True])
 def test_snapshot_refreshes_verified_counter_name(
