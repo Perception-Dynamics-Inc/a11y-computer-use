@@ -512,6 +512,56 @@ def _parse_chord(chord: str) -> tuple[list[int], int]:
     raise ValueError(f"unknown key {key!r} in {chord!r}")
 
 
+class ShortcutUndeliverable(ValueError):
+    """A Ctrl/Alt/Super shortcut has no physical key to press on this layout."""
+
+
+# Evdev keycodes (X keycode = evdev + 8) of the US-QWERTY letter and digit
+# positions. Chromium and GTK match Ctrl/Alt shortcuts by this physical key
+# when the active layout has no Latin letters.
+_US_POSITION_KEYCODES = {
+    **{c: kc for c, kc in zip("1234567890", range(10, 20))},
+    **{c: kc for c, kc in zip("qwertyuiop", range(24, 34))},
+    **{c: kc for c, kc in zip("asdfghjkl", range(38, 47))},
+    **{c: kc for c, kc in zip("zxcvbnm", range(52, 59))},
+}
+
+
+def _is_shortcut_chord(msyms, ksym: int) -> bool:
+    """True for Ctrl/Alt/Super plus an ASCII letter or digit."""
+    if not {0xFFE3, 0xFFE9, 0xFFEB} & set(msyms):  # Control, Alt, Super
+        return False
+    return (ord("a") <= ksym <= ord("z") or ord("A") <= ksym <= ord("Z")
+            or ord("0") <= ksym <= ord("9"))
+
+
+def _us_position_keycode(ksym: int) -> int:
+    """The keycode at the US-QWERTY position of the ASCII letter/digit ``ksym``.
+
+    Refuses (ShortcutUndeliverable) when that key is unbound, or when it
+    carries a different Latin letter or digit in the active layout: pressing
+    it would send the wrong shortcut.
+    """
+    char = chr(ksym).lower()
+    keycode = _US_POSITION_KEYCODES.get(char)
+    reason = f"the layout has no Latin {char!r} and no key at its US-QWERTY position"
+    if keycode is not None:
+        d = _disp()
+        row = d.get_keyboard_mapping(keycode, 1)[0]
+        base = _sent_keysym(keycode, False, _active_group())
+        if not any(row):
+            reason = f"the US-QWERTY position of {char!r} (keycode {keycode}) is unbound on this layout"
+        elif base < 0x80 and chr(base).isalnum():
+            reason = (f"the US-QWERTY position of {char!r} (keycode {keycode}) is "
+                      f"{chr(base)!r} on this layout")
+        else:
+            return keycode
+    raise ShortcutUndeliverable(
+        f"the shortcut cannot be delivered: {reason}. Use the application's menu, or "
+        "switch to a layout with Latin letters."
+    )
+
+
 def validate_chord(chord: str) -> None:
     """Raise ValueError if ``chord`` is malformed (no events sent) — the dry-run
     / fail-fast path, mirroring macOS `act.parse_chord`."""
@@ -540,11 +590,12 @@ def press_chord(chord: str) -> None:
     mod_kcs = [_disp().keysym_to_keycode(s) for s in msyms]
     key_kc, needs_shift = _keycode_and_shift(ksym)
     physical = False
-    if (key_kc is None and _KEYSYM_MODS["ctrl"] in msyms
-            and (ord("a") <= ksym <= ord("z") or ord("A") <= ksym <= ord("Z"))):
-        # Chromium resolves non-Latin Ctrl accelerators using the real key's
-        # Latin identity in another XKB group. A spare keycode has no matching
-        # physical identity. Keep this separate from text/AltGr translation.
+    if key_kc is None and _is_shortcut_chord(msyms, ksym):
+        # Toolkits match Ctrl/Alt/Super shortcuts by the real key's Latin
+        # identity (Chromium: the US-position key), not by the keysym a layout
+        # sends. A spare keycode has no physical identity, so a remapped Latin
+        # keysym never triggers the shortcut (#1211). Keep this separate from
+        # text/AltGr translation, which keeps the remapping approach.
         candidate = _disp().keysym_to_keycode(ksym)
         if candidate:
             symbols = _disp().get_keyboard_mapping(candidate, 1)[0]
@@ -553,6 +604,12 @@ def press_chord(chord: str) -> None:
                     key_kc, needs_shift = candidate, bool(level % 2)
                     physical = True  # another group's Latin key, on purpose
                     break
+        if key_kc is None:
+            # No group has the Latin key (a single ru/gr/he/ar layout): press
+            # the key at its US-QWERTY position. Never a spare keycode.
+            key_kc = _us_position_keycode(ksym)
+            needs_shift = ord("A") <= ksym <= ord("Z")
+            physical = True
     pool = None
     if key_kc is None:  # e.g. "ctrl+ü" on a US layout: bind it for this chord
         pool = _TempKeymap()

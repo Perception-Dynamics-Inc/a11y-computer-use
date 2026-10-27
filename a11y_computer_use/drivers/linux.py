@@ -6224,7 +6224,14 @@ class LinuxDriver:
         if printable_chord(chord):
             self._refuse_xtest_password_focus()
         self._focused_editable = None
-        _linux_input.press_chord(chord)
+        try:
+            _linux_input.press_chord(chord)
+        except _linux_input.ShortcutUndeliverable as exc:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED, f"{chord}: {exc}",
+                detail={"hint": "no key was pressed; the shortcut has no physical key on the "
+                        "active keyboard layout"},
+            ) from exc
         return None
 
     def _confirm_file_chooser(self, chord: str) -> bool:
