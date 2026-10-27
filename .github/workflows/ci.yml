@@ -208,8 +208,8 @@ jobs:
       - name: install AT-SPI2 / GTK / X11 system deps
         timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash .github/scripts/apt-retry.sh update
+          bash .github/scripts/apt-retry.sh install \
             at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi python3-pyqt6 \
             libreoffice-calc libreoffice-gtk3 libreoffice-writer libreoffice-impress \
             libreoffice-draw \
@@ -226,7 +226,7 @@ jobs:
             echo "Draw already installed"
             exit 0
           fi
-          sudo apt-get install -y --no-install-recommends libreoffice-draw
+          bash .github/scripts/apt-retry.sh install libreoffice-draw
           if [ ! -x /usr/lib/libreoffice/program/sdraw ] && [ ! -x /usr/lib/libreoffice/program/sdraw.bin ]; then
             echo "::error::libreoffice-draw did not install sdraw"
             exit 1
@@ -238,7 +238,7 @@ jobs:
       - name: install GTK 4 calculator and text editor
         timeout-minutes: 15
         run: |
-          sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor gir1.2-gtk-4.0
+          bash .github/scripts/apt-retry.sh install gnome-calculator gnome-text-editor gir1.2-gtk-4.0
           command -v gnome-calculator
           command -v gnome-text-editor
       # evince is the PDF page-text and side-pane thumbnail live tests.
@@ -247,14 +247,14 @@ jobs:
       - name: install Evince
         timeout-minutes: 15
         run: |
-          sudo apt-get install -y --no-install-recommends evince
+          bash .github/scripts/apt-retry.sh install evince
           command -v evince
       # Geany 2.0 is the Scintilla document the off-screen find test drives.
       # A missing binary skips that test, so the install is what makes it run.
       - name: install Geany
         timeout-minutes: 15
         run: |
-          sudo apt-get install -y --no-install-recommends geany
+          bash .github/scripts/apt-retry.sh install geany
           command -v geany
       # OpenJDK 21 and the Java ATK Wrapper are the Swing JTable live test.
       # scroll_to_find must not type into a selected cell. A separate step,
@@ -262,7 +262,7 @@ jobs:
       - name: install OpenJDK and the Java ATK wrapper
         timeout-minutes: 15
         run: |
-          sudo apt-get install -y --no-install-recommends \
+          bash .github/scripts/apt-retry.sh install \
             openjdk-21-jdk libatk-wrapper-java libatk-wrapper-java-jni
           javac -version
           java -version
@@ -273,7 +273,7 @@ jobs:
       - name: install Inkscape
         timeout-minutes: 15
         run: |
-          sudo apt-get install -y --no-install-recommends inkscape
+          bash .github/scripts/apt-retry.sh install inkscape
           command -v inkscape
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
@@ -443,8 +443,8 @@ jobs:
       # to parse, which starts none of the jobs.
       - name: clean install lists windows
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb openbox x11-utils
+          bash .github/scripts/apt-retry.sh update
+          bash .github/scripts/apt-retry.sh install xvfb openbox x11-utils
           {
             echo 'import importlib.metadata as md'
             echo 'import time'
