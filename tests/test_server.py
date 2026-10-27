@@ -5660,6 +5660,27 @@ def test_double_click_on_static_text_is_judged_by_its_selection(
         assert 'could not be read' in result.evidence
 
 
+def test_double_click_keeps_a_paragraph_verdict_over_the_static_text_selection(tmp_path, monkeypatch):
+    """A Writer paragraph is judged by its caret; the #1224 selection check must not replace it."""
+    from dataclasses import replace
+    monkeypatch.setattr(server, '_frontmost_bundle', lambda: 'editor')
+    monkeypatch.setattr(server, '_app_at_point', lambda p: None)
+    monkeypatch.setattr(safety, 'seconds_since_user_input', lambda: None)
+    d = _HoverDriver()
+    reads = []
+    d.selection_details = lambda el: reads.append(el) or ((41, 47, 'across'),)
+    rt = _hover_runtime(tmp_path, d)
+    caret = ('confirmed', 'the caret is in the target paragraph')
+    monkeypatch.setattr(rt, '_paragraph_click_verdict', lambda target: caret)
+    snap = build_synthetic_snapshot(app='editor')
+    el = replace(snap.elements[1], role='AXStaticText', editable=False, clickable=False)
+    rt._current = replace(snap, elements=(snap.elements[0], el))
+    result = rt.click(ref=el.ref, count=2)
+    assert result.outcome == 'confirmed'
+    assert 'caret is in the target paragraph' in result.evidence
+    assert 'text selection changed' not in result.evidence
+
+
 def test_double_click_on_static_text_without_a_selection_reader_is_unchanged(tmp_path, monkeypatch):
     """A driver that cannot read selection ranges keeps the generic verdict."""
     from dataclasses import replace

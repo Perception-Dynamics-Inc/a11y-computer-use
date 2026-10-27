@@ -6332,7 +6332,12 @@ class Runtime:
                 verdict = self._folder_navigation_verdict(target, nav_before)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
-        if verify_selection and not activated:
+        # A Writer paragraph is judged by its caret (paragraph_verdict). The static
+        # text selection check added for #1224 is for page text that has no such
+        # native evidence; it must not replace the paragraph's own evidence.
+        if verify_selection and not activated and not (
+            detailed_selection and paragraph_verdict is not None
+        ):
             selection_after = selection_reader(selection_target)
             if detailed_selection:
                 deadline = time.monotonic() + 0.3
