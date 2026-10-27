@@ -173,6 +173,9 @@ jobs:
   linux:
     name: Linux · full suite + live AT-SPI2 under a window manager
     runs-on: ubuntu-latest
+    # Healthy runs take 24-43 min. Without this, a stalled apt mirror holds
+    # the runner for GitHub's 360 min default (run 40392152843).
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       # The AT-SPI2 stack: the a11y bus (at-spi2-core), the GI typelibs the
@@ -203,6 +206,7 @@ jobs:
       # The package depends on libxfce4ui and libxfconf; thunar itself stays
       # uninstalled.
       - name: install AT-SPI2 / GTK / X11 system deps
+        timeout-minutes: 15
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -216,6 +220,7 @@ jobs:
       # fails when Draw is absent, so install the component when the binary
       # is not already on the image.
       - name: install LibreOffice Draw when it is missing
+        timeout-minutes: 15
         run: |
           if [ -x /usr/lib/libreoffice/program/sdraw ] || [ -x /usr/lib/libreoffice/program/sdraw.bin ]; then
             echo "Draw already installed"
@@ -231,6 +236,7 @@ jobs:
       # also need GTK 4 introspection bindings. A separate step, so the
       # shared apt list stays as it is.
       - name: install GTK 4 calculator and text editor
+        timeout-minutes: 15
         run: |
           sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor gir1.2-gtk-4.0
           command -v gnome-calculator
@@ -239,12 +245,14 @@ jobs:
       # A separate step, so the shared apt line stays as it is. The tests
       # skip when the binary is absent.
       - name: install Evince
+        timeout-minutes: 15
         run: |
           sudo apt-get install -y --no-install-recommends evince
           command -v evince
       # Geany 2.0 is the Scintilla document the off-screen find test drives.
       # A missing binary skips that test, so the install is what makes it run.
       - name: install Geany
+        timeout-minutes: 15
         run: |
           sudo apt-get install -y --no-install-recommends geany
           command -v geany
@@ -252,6 +260,7 @@ jobs:
       # scroll_to_find must not type into a selected cell. A separate step,
       # so the shared apt line stays as it is.
       - name: install OpenJDK and the Java ATK wrapper
+        timeout-minutes: 15
         run: |
           sudo apt-get install -y --no-install-recommends \
             openjdk-21-jdk libatk-wrapper-java libatk-wrapper-java-jni
@@ -262,6 +271,7 @@ jobs:
       # shared apt line stays as it is. The test skips when the binary
       # is absent.
       - name: install Inkscape
+        timeout-minutes: 15
         run: |
           sudo apt-get install -y --no-install-recommends inkscape
           command -v inkscape
