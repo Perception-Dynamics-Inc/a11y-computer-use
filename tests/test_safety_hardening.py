@@ -1073,3 +1073,15 @@ def test_a_grant_still_covers_names_of_the_same_program(tmp_path, granted, asked
     store = safety.PermissionStore(tmp_path / "perm.json")
     store.set_tier(granted, safety.Tier.FULL)
     assert store.get_tier(asked) is safety.Tier.FULL
+
+
+@pytest.mark.parametrize("program", ["mousepad", "gedit", "gnome-text-editor"])
+def test_editor_program_grant_does_not_grant_the_role(tmp_path, program) -> None:
+    """A role grants its members, but a member does not grant the whole role."""
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    store.set_tier(program, safety.Tier.FULL)
+    assert store.get_tier("Text Editor") is None
+    store.set_tier("Text Editor", safety.Tier.READ)
+    assert store.get_tier(program) is safety.Tier.FULL
+    for other in {"mousepad", "gedit", "gnome-text-editor"} - {program}:
+        assert store.get_tier(other) is safety.Tier.READ
