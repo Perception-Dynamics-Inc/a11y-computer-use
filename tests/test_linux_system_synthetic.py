@@ -1997,3 +1997,137 @@ def test_resolve_app_does_not_turn_a_title_into_another_program(monkeypatch) -> 
     assert _linux_system.resolve_app("krita") == "krita"
     assert _linux_system.pids_matching("krita") == set()
     assert _linux_system.title_suggestion("krita") == "okular"
+
+
+# --- #1227: override-redirect popups on the root --------------------------------
+
+
+class _PopupWin(_FakeXWin):
+    """A root child. ``frame_of`` is the managed client this window frames."""
+
+    def __init__(self, wid, x, y, w, h, pid, *, override=True, mapped=True, input_output=True):
+        super().__init__(wid, x, y, w, h, pid)
+        self.override, self.mapped, self.input_output = override, mapped, input_output
+        self.parent = None
+
+    def get_attributes(self):
+        return _NS(map_state=2 if self.mapped else 0, win_class=1 if self.input_output else 2,
+                   override_redirect=self.override)
+
+    def query_tree(self):
+        return _NS(parent=self.parent, children=[])
+
+
+def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800)):
+    """Root children bottom -> top; ``managed`` are the EWMH clients."""
+    import sys
+    monkeypatch.setitem(sys.modules, "Xlib", _NS(X=_NS(IsViewable=2, InputOutput=1)))
+
+    class _Root(_FakeXRoot):
+        id = 1
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_ACTIVE_WINDOW":
+                return _NS(value=[active]) if active else None
+            return super().get_full_property(atom, kind)
+
+        def get_geometry(self):
+            return _NS(width=screen[0], height=screen[1])
+
+        def query_tree(self):
+            return _NS(children=children)
+
+    root = _Root(managed)
+    for win in children:
+        if win.parent is None:
+            win.parent = root
+    by_id = {w.id: w for w in (*managed, *children)}
+    display = _NS(screen=lambda: _NS(root=root), intern_atom=lambda name: name,
+                  create_resource_object=lambda kind, wid: by_id[int(wid)])
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(int(pid or 0)))
+    monkeypatch.setattr(_linux_system, "_win_title", lambda win, d: "")
+
+
+def _framed(client_id, x, y, w, h, pid, *, frame_id):
+    """A managed client inside its window manager's frame (an override-redirect root child)."""
+    client = _PopupWin(client_id, x, y, w, h, pid, override=False)
+    frame = _PopupWin(frame_id, x, y, w, h, 0)  # a frame has no _NET_WM_PID
+    client.parent = frame
+    return client, frame
+
+
+def test_a_popup_above_the_managed_stack_owns_the_point(monkeypatch) -> None:
+    """The IBus candidate window is not a managed client (#1227)."""
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "ibus-ui-gtk3"})
+    assert _linux_system.pid_at_point(100, 150) == 300
+    assert _linux_system.app_at_point_id(100, 150) == "ibus-ui-gtk3"
+    # Outside the popup the managed window still owns the point.
+    assert _linux_system.pid_at_point(600, 300) == 200
+    assert _linux_system.app_at_point_id(600, 300) == "chrome"
+    # ``window_at_point`` names a managed toplevel; a popup is not one.
+    assert _linux_system.window_at_point(100, 150) == {"window_id": 0x20, "title": ""}
+
+
+def test_a_popup_below_a_managed_window_does_not_cover_it(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    _popup_display(monkeypatch, [chrome], [popup, chrome_frame], {200: "chrome", 300: "ibus-ui-gtk3"})
+    assert _linux_system.pid_at_point(100, 150) == 200
+    assert _linux_system.app_at_point_id(100, 150) == "chrome"
+
+
+@pytest.mark.parametrize("kind", ["unmapped", "input_only", "not_override_redirect", "no_pid", "off_screen", "tiny"])
+def test_only_a_mapped_owned_visible_popup_counts(monkeypatch, kind) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = {
+        "unmapped": _PopupWin(0x30, 52, 124, 327, 66, 300, mapped=False),
+        "input_only": _PopupWin(0x30, 52, 124, 327, 66, 300, input_output=False),
+        "not_override_redirect": _PopupWin(0x30, 52, 124, 327, 66, 300, override=False),
+        "no_pid": _PopupWin(0x30, 52, 124, 327, 66, 0),
+        "off_screen": _PopupWin(0x30, -1000, -1000, 327, 66, 300),
+        "tiny": _PopupWin(0x30, 52, 124, 1, 1, 300),
+    }[kind]
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "ibus-ui-gtk3"})
+    point = (-900, -970) if kind == "off_screen" else (52, 124)
+    expect = None if kind == "off_screen" else 200
+    assert _linux_system.pid_at_point(*point) == expect
+    assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+def test_a_window_manager_frame_is_not_a_popup(monkeypatch) -> None:
+    """The frame is an override-redirect root child above the client's own stack slot."""
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    chrome_frame.pid = 999  # even a frame that carries a pid is the client's frame
+    _popup_display(monkeypatch, [chrome], [chrome_frame], {200: "chrome", 999: "xfwm4"})
+    assert _linux_system.pid_at_point(100, 150) == 200
+    assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+def test_running_apps_lists_the_popup_process_once_and_not_frontmost(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    first = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    second = _PopupWin(0x31, 60, 130, 50, 20, 300)
+    same_app = _PopupWin(0x32, 70, 140, 50, 20, 200)  # Chrome's own popup: no second row
+    _popup_display(monkeypatch, [chrome], [chrome_frame, first, second, same_app],
+                   {200: "chrome", 300: "ibus-ui-gtk3"}, active=0x20)
+    assert _linux_system.running_apps() == [
+        {"bundle_id": "chrome", "name": "chrome", "pid": 200, "frontmost": True},
+        {"bundle_id": "ibus-ui-gtk3", "name": "ibus-ui-gtk3", "pid": 300, "frontmost": False},
+    ]
+
+
+def test_an_unreadable_stack_keeps_the_managed_answer(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "ibus-ui-gtk3"})
+    root = _linux_system._display().screen().root
+
+    def broken():
+        raise RuntimeError("X error")
+
+    root.query_tree = broken
+    assert _linux_system.pid_at_point(100, 150) == 200
+    assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
