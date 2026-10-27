@@ -1993,3 +1993,16 @@ def test_combo_entry_rejects_child_owned_by_another_parent(atspi):
     combo.children.append(notes)
     assert notes.get_parent() is form
     assert _atspi._combo_entry(combo) is None
+
+
+def test_combo_entry_rejects_a_reused_child_drawn_outside_the_combo(atspi):
+    # Firefox reuses accessible ids: the <select>'s cached child path came to
+    # name the focused Notes field, and libatspi still cached the <select> as
+    # its parent. set_value wrote "Green" into Notes and reported "set".
+    notes = _Node("entry", states={"ENABLED", "SENSITIVE", "FOCUSABLE"}, x=10, y=200, w=200)
+    combo = _Node("combo box", children=[notes], x=10, y=120, w=120)
+    assert notes.get_parent() is combo
+    assert _atspi._combo_entry(combo) is None
+    inner = _Node("entry", states={"ENABLED", "SENSITIVE", "FOCUSABLE"}, x=12, y=120, w=100)
+    own = _Node("combo box", children=[inner], x=10, y=120, w=120)
+    assert _atspi._combo_entry(own) is inner
