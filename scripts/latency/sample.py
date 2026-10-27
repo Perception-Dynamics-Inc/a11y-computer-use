@@ -31,6 +31,23 @@ def ref(text, title):
     raise AssertionError(f"Missing {title!r}: {text}")
 
 
+async def settled_snapshot(snapshot, markers, timeout=30.0, pause=0.25):
+    """Snapshot until every marker is present, or fail with the last tree.
+
+    Chrome registers on AT-SPI before its renderer exposes the page, so the
+    first snapshot can hold only the browser UI. That is fixture setup, not a
+    measured step: wait for the page controls before the timer starts.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        text = await snapshot()
+        if all(marker in text for marker in markers):
+            return text
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Page did not expose {list(markers)} in {timeout}s: {text}")
+        await asyncio.sleep(pause)
+
+
 def run_once_click(python, point, env):
     """Run the measured CLI once, preserving crash diagnostics on failure."""
     command = [python, str(Path(__file__).with_name("run_once.py")), "run-once",
@@ -174,6 +191,7 @@ async def sample(row, head):
                                 assert re.search(r'cell "Fonts"[^\n]*selected', after), (receipt, after)
                                 assert outcomes[-1] and outcomes[-1]["outcome"] == "partial", (receipt, outcomes[-1])
                         elif row.startswith("R13-"):
+                            text = await settled_snapshot(snapshot, ('button "Go"', 'textfield "Name"'))
                             if row == "R13-key":
                                 await call("type", ref=ref(text, 'textfield "Name"'), text="hello")
                             start = time.perf_counter()
