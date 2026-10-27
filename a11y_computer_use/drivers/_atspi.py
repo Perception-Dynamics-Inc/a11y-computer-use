@@ -6737,15 +6737,66 @@ def _preferred_window(frames, is_active):
     return frames[0]
 
 
+def _program_of(candidate, name: str) -> str:
+    """The program id of an AT-SPI registrant: its process identity, else its name."""
+    from a11y_computer_use.drivers import _linux_system
+
+    pid = pid_of(candidate)
+    if pid:
+        try:
+            identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+        except Exception:  # noqa: BLE001 - an exited pid has no identity
+            identity = ""
+        if identity:
+            return identity.lower()
+    return name
+
+
+def _pick_one_program(app: str, needle: str, matched):
+    """The best registrant of the one program ``app`` names, or ``ambiguous_app``.
+
+    Rank (active frame, then frames, then any) only orders registrants of the
+    same program: a windowless python3 registrant never shadows the real
+    app. Two different programs with windows (a role label like ``Files``
+    with Nautilus and Thunar open) are not settled by which one is active;
+    an exact name picks one, otherwise the lookup refuses (#1191).
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    if not matched:
+        return None
+    windowed = [m for m in matched if m[1] >= 1]
+    programs = sorted({m[2] for m in windowed if m[2]})
+    if len(programs) > 1:
+        exact = [p for p in programs
+                 if p == needle or any(m[2] == p and m[3] == needle for m in windowed)]
+        if len(exact) != 1:
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"{app!r} matches more than one running program: {', '.join(programs)}; "
+                "name one of them",
+                detail={"app": app, "reason": "ambiguous_app", "candidates": programs},
+            )
+        matched = [m for m in windowed if m[2] == exact[0]]
+    best = None
+    best_rank = -1
+    for candidate, rank, _program, _name in matched:
+        if rank > best_rank:
+            best, best_rank = candidate, rank
+    return best
+
+
 def find_root(app: str, scope) -> object | None:
     """The AT-SPI root for ``app`` at ``scope``.
 
-    ``app`` matches an application accessible by name substring (case-insensitive)
+    ``app`` matches an application accessible by name (case-insensitive, see
+    ``_linux_system._names_program``)
     — the Linux analog of a bundle id / process exe. For `Scope.APP` the app
     accessible is returned; for `Scope.WINDOW` its active (else first) top-level
     frame. A GTK combo popup that is the only ACTIVE window does not replace
     the frame that contains the combo. None when nothing matches (the engine
-    yields an empty snapshot)."""
+    yields an empty snapshot). Matches from two different programs raise
+    ``app_not_found`` with reason ``ambiguous_app`` (see ``_pick_one_program``)."""
     from a11y_computer_use.schema import Scope
 
     Atspi = _atspi()
@@ -6814,8 +6865,7 @@ def find_root(app: str, scope) -> object | None:
             if len(frames) == 1 and _is_active(frames[0]):
                 return frames[0]
         return None
-    best = None
-    best_rank = -1
+    matched: list[tuple[object, int, str, str]] = []
     hinted = next(iter(pids)) if len(pids) == 1 else None
     for candidate in applications:
         if candidate is None:
@@ -6831,7 +6881,7 @@ def find_root(app: str, scope) -> object | None:
         if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        if needle not in name and not (pids and pid_of(candidate) in pids):
+        if not _linux_system._names_program(needle, name) and not (pids and pid_of(candidate) in pids):
             continue
         with app_reply_watch(app, hinted, candidate) as watch:
             pid = pid_of(candidate)
@@ -6839,10 +6889,8 @@ def find_root(app: str, scope) -> object | None:
                 watch.pid = pid
             frames = _frames(candidate)
             rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
-        if rank > best_rank:
-            best, best_rank = candidate, rank
-            if rank == 2:
-                break
+        matched.append((candidate, rank, _program_of(candidate, name), name))
+    best = _pick_one_program(app, needle, matched)
     app_acc = best
     if app_acc is None or scope is Scope.APP:
         return app_acc
@@ -12228,6 +12276,27 @@ def libreoffice_registration_wait() -> tuple[float, str | None]:
             continue
         wait = max(wait, min(ATSPI_REGISTER_WAIT_S, ATSPI_STARTUP_GRACE_S - age))
     return max(0.0, wait), shown
+
+
+def libreoffice_bridge_absent() -> str | None:
+    """The VCL plugin name when no soffice.bin in this session can publish a tree.
+
+    Every session soffice.bin must have a plugin mapped and none may be
+    bridge-capable (gen/x11). None when there is no soffice.bin, a plugin is
+    not mapped yet, or any process could still publish a tree. Reads only
+    /proc (cached per process instance), so an action verdict can name the
+    cause without waiting (#1183).
+    """
+    pids = _libreoffice_session_pids()
+    if not pids:
+        return None
+    shown = None
+    for pid in pids:
+        plugin = libreoffice_vcl_plugin(pid)
+        if plugin is None or plugin in _VCL_BRIDGE_PLUGINS:
+            return None
+        shown = shown or plugin
+    return shown
 
 
 # LibreOffice's X window shows up in app list and window list while AT-SPI is

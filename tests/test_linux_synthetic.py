@@ -22312,3 +22312,137 @@ def test_type_mismatch_on_a_busy_chromium_page_offers_no_retry(monkeypatch, entr
     else:
         assert result.outcome == "refused"
         assert "keyboard" in result.next
+
+
+@pytest.mark.parametrize("scope", [Scope.APP, Scope.WINDOW])
+def test_find_root_refuses_prefix_neighbour_when_named_app_is_gone(fake_atspi, monkeypatch, scope) -> None:
+    """#1191: ``python`` must not bind to the ``python3`` application's tree."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    gtk = _WindowNode("frame", "Hang Fixture GTK")
+    neighbour = _WindowNode("application", "python3", children=[gtk])
+    fake_atspi.desktop = _WindowNode("desktop", children=[neighbour])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    assert _atspi.find_root("python", scope) is None
+    assert _atspi.find_root("python3", scope) is (neighbour if scope is Scope.APP else gtk)
+
+
+def test_find_root_keeps_whole_word_application_names(fake_atspi, monkeypatch) -> None:
+    """A whole word in the AT-SPI name still matches: ``chrome`` names "Google Chrome"."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    frame = _WindowNode("frame", "New Tab - Google Chrome")
+    chrome = _WindowNode("application", "Google Chrome", children=[frame])
+    fake_atspi.desktop = _WindowNode("desktop", children=[chrome])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    assert _atspi.find_root("chrome", Scope.APP) is chrome
+
+
+class _PidNode(_WindowNode):
+    """An AT-SPI application stand-in that answers its process id."""
+
+    def __init__(self, role, name="", pid=0, children=()):
+        super().__init__(role, name, children=children)
+        self.pid = pid
+
+    def get_process_id(self):
+        return self.pid
+
+
+def _programs_by_pid(monkeypatch, table):
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: table.get(pid))
+    monkeypatch.setattr(_linux_system, "_identity_for_pid", lambda pid, comm: table.get(pid))
+
+
+def test_find_root_refuses_a_role_label_that_names_two_running_programs(fake_atspi, monkeypatch) -> None:
+    """#1191: ``Files`` with Nautilus and Thunar open is ambiguous_app, not the active one."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    nautilus = _PidNode("application", "Nautilus", pid=11,
+                        children=[_WindowNode("frame", "Home", states={"active"})])
+    thunar = _PidNode("application", "Thunar", pid=12, children=[_WindowNode("frame", "Downloads")])
+    fake_atspi.desktop = _WindowNode("desktop", children=[nautilus, thunar])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: {11, 12})
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    _programs_by_pid(monkeypatch, {11: "nautilus", 12: "thunar"})
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.find_root("files", Scope.APP)
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert exc.value.detail["reason"] == "ambiguous_app"
+    assert exc.value.detail["candidates"] == ["nautilus", "thunar"]
+    # An exact program name still picks that program.
+    assert _atspi.find_root("thunar", Scope.APP) is thunar
+
+
+@pytest.mark.parametrize("app,other", [("chrome", "chromium"), ("python", "python3"),
+                                       ("gedit", "mousepad"), ("nautilus", "thunar")])
+def test_snapshot_does_not_retry_under_a_different_program(fake_atspi, monkeypatch, app, other) -> None:
+    """#1191: an exited/frozen ``app`` must not be snapshotted as ``other`` via resolve_app."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    probes = []
+    window = _WindowNode("frame", "Other")
+
+    def find_root(name, scope):
+        probes.append(name)
+        return window if name == other else None
+
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda name: None)
+    monkeypatch.setattr(_atspi, "should_wait_for_atspi", lambda name: False)
+    monkeypatch.setattr(_atspi, "libreoffice_without_bridge", lambda name: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: other)
+    monkeypatch.setattr(_linux_system, "class_names_program", lambda name, identity: False)
+    monkeypatch.setattr(_linux_system, "title_suggestion", lambda name: None)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, app)
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert exc.value.detail["reason"] == "app_not_running"
+    assert probes == [app]
+
+
+def test_snapshot_still_retries_under_the_same_program(fake_atspi, monkeypatch) -> None:
+    """LibreOffice -> soffice.bin is one program, so the second lookup stays."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    window = _WindowNode("frame", "Untitled 1 - LibreOffice Calc")
+    office = _PidNode("application", "soffice", pid=21, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window if name == "soffice.bin" else None)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: "soffice.bin")
+    _programs_by_pid(monkeypatch, {21: "soffice.bin"})
+    assert LinuxDriver()._root_for_snapshot("LibreOffice", Scope.WINDOW) == ("soffice.bin", window)
+    assert office.children == [window]
+
+
+def test_a_bound_name_is_not_rebound_to_a_different_program(fake_atspi, monkeypatch) -> None:
+    """#1191 pin: ``Files`` bound to Nautilus; Nautilus closes, Thunar is app_not_running."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    nautilus_win = _WindowNode("frame", "Home")
+    _PidNode("application", "Nautilus", pid=11, children=[nautilus_win])
+    restarted_win = _WindowNode("frame", "Home")
+    _PidNode("application", "Nautilus", pid=13, children=[restarted_win])
+    thunar_win = _WindowNode("frame", "Downloads")
+    _PidNode("application", "Thunar", pid=12, children=[thunar_win])
+    current = {"root": nautilus_win}
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: current["root"])
+    _programs_by_pid(monkeypatch, {11: "nautilus", 12: "thunar", 13: "nautilus"})
+    driver = LinuxDriver()
+    assert driver._root_for_snapshot("files", Scope.WINDOW) == ("files", nautilus_win)
+    current["root"] = restarted_win  # the same program restarted binds again
+    assert driver._root_for_snapshot("files", Scope.WINDOW) == ("files", restarted_win)
+    current["root"] = thunar_win
+    with pytest.raises(ComputerUseError) as exc:
+        driver._root_for_snapshot("files", Scope.WINDOW)
+    assert exc.value.detail["reason"] == "app_not_running"
+    assert exc.value.detail["bound"] == "nautilus"
