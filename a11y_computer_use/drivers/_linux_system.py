@@ -524,13 +524,91 @@ def command_launcher_open(app: str) -> bool:
     return False
 
 
-def _window_at_point(d, x: float, y: float):
+def _root_ranks(d) -> tuple[object, dict[int, int]]:
+    """``(root, {child id: stack index})`` for the root's children, bottom to top."""
+    root = d.screen().root
+    return root, {int(win.id): index for index, win in enumerate(root.query_tree().children)}
+
+
+def _stack_rank(win, root, ranks: dict[int, int]) -> int | None:
+    """Stack index of the root child that holds ``win``, or None when unknown.
+
+    A managed client sits inside its window manager's frame, so the frame is the
+    root child. With no frame the window is the root child itself.
+    """
+    node = win
+    for _ in range(8):
+        if int(node.id) in ranks:
+            return ranks[int(node.id)]
+        parent = node.query_tree().parent
+        if parent is None or int(parent.id) == int(root.id):
+            return None
+        node = parent
+    return None
+
+
+def _popup_windows(d, managed) -> list[tuple[int, object, tuple[int, int, int, int]]]:
+    """Mapped override-redirect windows on the root with an owner, bottom to top.
+
+    ``(stack index, window, (x, y, w, h))``. A tooltip, a menu, or the IBus
+    candidate window (#1227) is not in ``_NET_CLIENT_LIST_STACKING``, so the
+    managed list cannot say it covers a point. The window manager's own frames
+    (the parent of each managed client) and its edge windows are not popups:
+    a frame is excluded by identity, and a window with no ``_NET_WM_PID`` has no
+    owner to name. Any read failure gives no popups, which is the managed-only
+    answer the callers had before.
+    """
+    try:
+        from Xlib import X
+
+        root, ranks = _root_ranks(d)
+        screen = root.get_geometry()
+        frames = set()
+        for win in managed:
+            try:
+                rank = _stack_rank(win, root, ranks)
+            except Exception:
+                continue
+            if rank is not None:
+                frames.update(wid for wid, index in ranks.items() if index == rank)
+        found = []
+        for win in root.query_tree().children:
+            if int(win.id) in frames:
+                continue
+            try:
+                attrs = win.get_attributes()
+                if (attrs.map_state != X.IsViewable or attrs.win_class != X.InputOutput
+                        or not attrs.override_redirect):
+                    continue
+                geom = _geometry_on_root(win, d)
+                if geom is None or geom[2] <= 1 or geom[3] <= 1 or not _pid_of(win, d):
+                    continue
+                # The window manager parks helper windows off screen.
+                if (geom[0] + geom[2] <= 0 or geom[1] + geom[3] <= 0
+                        or geom[0] >= screen.width or geom[1] >= screen.height):
+                    continue
+                found.append((ranks[int(win.id)], win, geom))
+            except Exception:
+                continue
+        return found
+    except Exception:
+        return []
+
+
+def _window_at_point(d, x: float, y: float, *, popups: bool = False):
     """Topmost on-screen managed window containing a screen point, or None.
 
     A minimized window keeps the rectangle it had before it was iconified.
     That rectangle is not on screen, so it is not a hit and not a cover.
+
+    ``popups=True`` also counts a mapped override-redirect window above that
+    managed window (#1227). Only the owner questions, ``pid_at_point`` and
+    ``app_at_point_id``, ask for it: ``window_at_point`` names a managed
+    toplevel, and a popup is not one.
     """
-    for win in reversed(_managed_windows(d)):  # topmost first
+    managed = _managed_windows(d)
+    hit = None
+    for win in reversed(managed):  # topmost first
         if _is_hidden(win, d):
             continue
         geom = _geometry_on_root(win, d)
@@ -538,15 +616,30 @@ def _window_at_point(d, x: float, y: float):
             continue
         gx, gy, gw, gh = geom
         if gx <= x < gx + gw and gy <= y < gy + gh:
-            return win
-    return None
+            hit = win
+            break
+    if not popups:
+        return hit
+    over = [(rank, win) for rank, win, (gx, gy, gw, gh) in _popup_windows(d, managed)
+            if gx <= x < gx + gw and gy <= y < gy + gh]
+    if not over:
+        return hit
+    rank, popup = max(over, key=lambda item: item[0])
+    if hit is None:
+        return popup
+    try:
+        root, ranks = _root_ranks(d)
+        below = _stack_rank(hit, root, ranks)
+    except Exception:
+        return hit  # the managed answer when the order cannot be read
+    return popup if below is not None and rank > below else hit
 
 
 def _top_window_pid(x: float, y: float) -> int | None:
     """Pid of the topmost client window containing a screen point, or None."""
     try:
         with _open_display() as d:
-            win = _window_at_point(d, x, y)
+            win = _window_at_point(d, x, y, popups=True)
             if win is None:
                 return None
             pid = _pid_of(win, d)
@@ -556,6 +649,25 @@ def _top_window_pid(x: float, y: float) -> int | None:
     except Exception:
         return None
     return None
+
+
+def popup_pid_at_point(x: float, y: float) -> int | None:
+    """Pid of the override-redirect popup that is topmost at a point, else None.
+
+    None when the topmost window there is a managed one, when no popup is above
+    it, or when the stack cannot be read. A popup is not a managed toplevel, so
+    ``window_at_point`` never names it; a ref whose own window is that popup
+    asks this to tell "covered by a sibling window" from "on top" (#1227).
+    """
+    try:
+        with _open_display() as d:
+            top = _window_at_point(d, x, y, popups=True)
+            if top is None or top.id == getattr(_window_at_point(d, x, y), "id", None):
+                return None
+            pid = _pid_of(top, d)
+            return int(pid) if pid else None
+    except Exception:
+        return None
 
 
 def drag_overlay_at_point(x: float, y: float) -> tuple[int, str] | None:
@@ -615,7 +727,7 @@ def app_at_point_id(x: float, y: float) -> str | None:
     """
     try:
         with _open_display() as d:
-            win = _window_at_point(d, x, y)
+            win = _window_at_point(d, x, y, popups=True)
             if win is None:
                 return None
             return _app_id(win, d) or None
@@ -941,6 +1053,16 @@ def running_apps() -> list[dict]:
                 seen.add(comm)
                 out.append({"bundle_id": comm, "name": comm, "pid": pid,
                             "frontmost": int(win.id) == active_id})
+            # A mapped popup with an owner, such as the IBus candidate window,
+            # is not managed; its process is still on screen (#1227).
+            managed = _managed_windows(d)
+            for _rank, win, _geom in reversed(_popup_windows(d, managed)):
+                comm = _app_id(win, d)
+                if not comm or comm in seen:
+                    continue
+                seen.add(comm)
+                out.append({"bundle_id": comm, "name": comm, "pid": _pid_of(win, d),
+                            "frontmost": False})
     except ComputerUseError:
         raise
     except Exception:

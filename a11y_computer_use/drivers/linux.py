@@ -3114,6 +3114,13 @@ class LinuxDriver:
         if target is None:
             return
         _active, title, pid, extents = target
+        if (pid and extents and len(extents) == 4 and _linux_system.popup_pid_at_point(
+                extents[0] + extents[2] / 2.0, extents[1] + extents[3] / 2.0) == int(pid)):
+            # The target's own window is an override-redirect popup (an IBus
+            # candidate list) on top. It has no managed window to raise, and
+            # the window under it that overlaps it most is not its owner:
+            # raising that one buries the popup and drops the composition (#1227).
+            return
         try:
             window_id = _linux_system.window_id_for_toplevel(
                 title=title, pid=pid, extents=extents,
@@ -6827,6 +6834,8 @@ class LinuxDriver:
                 front = next((row for row in reversed(rows) if _window_covers(row, cx, cy)), None)
                 if (pid and front and front.get("pid") and int(front["pid"]) == int(pid)
                         and target_id is not None and front["window_id"] != target_id):
+                    if _linux_system.popup_pid_at_point(cx, cy) == int(pid):
+                        return None  # the target's own popup is on top (#1227)
                     return front["title"] or "another window"
                 return None
             owner_pid = _linux_system.pid_at_point(cx, cy)
@@ -6837,6 +6846,8 @@ class LinuxDriver:
             )
             front = _linux_system.window_at_point(cx, cy)
             if target_id is not None and front is not None and front["window_id"] != target_id:
+                if _linux_system.popup_pid_at_point(cx, cy) == int(pid):
+                    return None  # the target's own popup is on top (#1227)
                 return front["title"] or "another window"
         except Exception:  # no reliable toplevel hit-test
             pass
