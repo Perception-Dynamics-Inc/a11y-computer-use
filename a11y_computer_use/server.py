@@ -6052,8 +6052,15 @@ class Runtime:
         detailed_selection = callable(selection_reader)
         if not detailed_selection:
             selection_reader = getattr(self.driver, "text_selection", None)
+        # A double-click on a word of page text (Chrome static text, #1224) selects
+        # it and publishes the range, but changes nothing else the generic
+        # comparison reads, so it was reported as a no-op. Only a driver that reads
+        # the selection on the clicked node and its descendants checks static text.
+        selectable_roles = {"AXTextArea", "AXTextField", "AXSearchField"}
+        if detailed_selection:
+            selectable_roles = selectable_roles | {"AXStaticText"}
         verify_selection = (count == 2 and isinstance(target, Element)
-                            and target.role in {"AXTextArea", "AXTextField", "AXSearchField"}
+                            and target.role in selectable_roles
                             and callable(selection_reader))
         selection_before = None
         selection_target = target
@@ -6325,7 +6332,12 @@ class Runtime:
                 verdict = self._folder_navigation_verdict(target, nav_before)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
-        if verify_selection and not activated:
+        # A Writer paragraph is judged by its caret (paragraph_verdict). The static
+        # text selection check added for #1224 is for page text that has no such
+        # native evidence; it must not replace the paragraph's own evidence.
+        if verify_selection and not activated and not (
+            detailed_selection and paragraph_verdict is not None
+        ):
             selection_after = selection_reader(selection_target)
             if detailed_selection:
                 deadline = time.monotonic() + 0.3
