@@ -22287,7 +22287,7 @@ def test_type_mismatch_on_a_busy_chromium_page_offers_no_retry(monkeypatch, entr
         raise _atspi._text_mismatch("text_mismatch", "field reads 'ab' after typing 'abc'")
 
     monkeypatch.setattr(_page_health, "renderer_ticks", ticks)
-    monkeypatch.setattr("os.sysconf", lambda name: 100)
+    monkeypatch.setattr("os.sysconf", lambda name: 100, raising=False)
     monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
     monkeypatch.setattr(LinuxDriver, "_type_text_unguarded", write, raising=False)
     monkeypatch.setattr(LinuxDriver, "_type_into_unguarded", write, raising=False)
