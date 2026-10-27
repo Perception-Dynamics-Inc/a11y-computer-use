@@ -22,6 +22,7 @@ Two commits since v0.4.78, through #1226. A patch release: two Linux fixes for a
 ### Known issues
 
 - Linux input methods (#1219): with an IBus engine active (for example libpinyin or `ru:translit`), typing ASCII into Chrome writes the engine's output and returns `text_mismatch`, and `set_value` is refused and leaves the field empty. The fix is not in 0.4.79; it needs another Tester pass.
+- Linux GTK 3 entries (#1232): typing by ref into a filled GTK 3 entry replaces the existing text, for example "keep me" + " more" becomes " more", but the result is reported as `confirmed`. Not new in 0.4.79: it is already in 0.4.78. The fix is planned for 0.4.80.
 - Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Not in 0.4.79.
 
 ## [0.4.78] - 2026-10-27
