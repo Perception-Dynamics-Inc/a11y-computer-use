@@ -7795,7 +7795,14 @@ def chromium_snapshot_root(root):
             and _application_bar_frame(app) is None
             and not _is_browser_bar_frame(root)
         ):
-            return _chrome_page_window(app, root)
+            page = _chrome_page_window(app, root)
+            # The one clear can run while Escape is still closing the bar.
+            # libatspi then caches the transient empty frame, and every later
+            # read is that untitled group with no rows. Only that empty
+            # result clears again: it has no document, so the clear does not
+            # re-walk a page and the short-page budget is kept.
+            if not _sparse_untitled_chrome_frame(page):
+                return page
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
@@ -14004,6 +14011,46 @@ def retry_evidence(action, target, focus):
     return _without_child_cache(target, lambda: _retry_evidence(action, target, focus))
 
 
+class _ReadBudget:
+    """A wall-clock budget that does not charge the read for CPU it was denied.
+
+    The scoped retry read is capped at a few tens of milliseconds, and running
+    out means "unknown" (unverifiable). On a busy host the read is slowed by
+    waiting for a CPU, not by its own work, and a verdict that was readable
+    on an idle host flipped to unverifiable (#1231, #1234 CI). The time this
+    thread spent runnable but not running (schedstat run-queue wait) is
+    credited back, so the cap measures the read itself. The cap is unchanged
+    on a quiet host, and where schedstat is unreadable nothing is credited.
+    """
+
+    __slots__ = ("limit", "start", "wait0")
+
+    def __init__(self, limit: float) -> None:
+        self.limit = limit
+        self.start = time.monotonic()
+        self.wait0 = self._runq_wait()
+
+    @staticmethod
+    def _runq_wait() -> float | None:
+        try:
+            with open("/proc/thread-self/schedstat", encoding="ascii") as handle:
+                return int(handle.read().split()[1]) / 1e9
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def spent(self) -> bool:
+        elapsed = time.monotonic() - self.start
+        if elapsed < self.limit:
+            return False
+        waited = self._runq_wait()
+        credit = 0.0
+        if waited is not None and self.wait0 is not None and waited >= self.wait0:
+            # Never credit more than half the elapsed time: a read that was
+            # mostly waiting on the application still runs out.
+            credit = min(waited - self.wait0, elapsed / 2)
+        return elapsed - credit >= self.limit
+
+
 def _retry_evidence(action, target, focus):
     """Scoped evidence for formatting and inert labels; unknown elsewhere.
 
@@ -14018,7 +14065,7 @@ def _retry_evidence(action, target, focus):
 
     if target is None:
         return None
-    deadline = time.monotonic() + 0.04
+    budget = _ReadBudget(0.04)
     formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
         "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
     }
@@ -14039,7 +14086,7 @@ def _retry_evidence(action, target, focus):
                 from a11y_computer_use.drivers._page_health import UNKNOWN
                 return RetryEvidence(reason=UNKNOWN)
             return None
-        if time.monotonic() >= deadline:
+        if budget.spent():
             return None
         if outline:
             states = _call_first(target, ("get_state_set",))
@@ -14064,7 +14111,7 @@ def _retry_evidence(action, target, focus):
             attributes, start, end = api.get_attribute_run(target, caret, False)
             attribute = {"b": "weight", "i": "style", "u": "underline"}[action.chord[-1].lower()]
             value = attributes.get(attribute)
-            if value is None or not start <= caret < end or time.monotonic() >= deadline:
+            if value is None or not start <= caret < end or budget.spent():
                 return RetryEvidence(toggle=True, reason="formatting attributes could not be read")
             return RetryEvidence(
                 toggle=True, effect=(target, caret, attribute, value),
@@ -14079,7 +14126,7 @@ def _retry_evidence(action, target, focus):
 
         @cache
         def identity(node):
-            if time.monotonic() >= deadline:
+            if budget.spent():
                 raise TimeoutError
             _drop_cached_properties(node)
             name = _call_first(node, ("get_name", "getName"))
@@ -14202,7 +14249,7 @@ def _retry_evidence(action, target, focus):
             return None
         state = identity(target)
         text, value = content(target)
-        if time.monotonic() >= deadline:
+        if budget.spent():
             return None
         return RetryEvidence(
             context=(focus_identity, tuple(windows), (parent, parent_count)),
@@ -14589,9 +14636,32 @@ def _combo_entry(acc):
         acc_key = _atspi_wrapper_key(acc)
         if parent is not acc and (acc_key is None or _atspi_wrapper_key(parent) != acc_key):
             continue
+        # The parent link is not enough. Firefox reuses accessible ids, so a
+        # cached child path of a <select> can come to name the focused Notes
+        # field while libatspi still caches the <select> as its parent: both
+        # cached reads agree and both are stale. Extents are a live read, and
+        # an entry that belongs to this combo is drawn inside it.
+        if not _entry_drawn_inside(acc, child):
+            continue
         if _editable_iface(child) is not None or role in {"entry", "text"}:
             return child
     return None
+
+
+def _entry_drawn_inside(combo, entry) -> bool:
+    """False when both boxes are readable and the entry's center is outside the combo.
+
+    An unreadable box on either side is not evidence against the entry.
+    """
+    cpos, csize = _extents(combo)
+    epos, esize = _extents(entry)
+    if cpos is None or csize is None or epos is None or esize is None:
+        return True
+    if csize[0] < 0 or esize[0] < 0:
+        return True
+    cx = epos[0] + esize[0] / 2.0
+    cy = epos[1] + esize[1] / 2.0
+    return cpos[0] <= cx <= cpos[0] + csize[0] and cpos[1] <= cy <= cpos[1] + csize[1]
 
 
 def _label_texts(acc) -> set[str]:
