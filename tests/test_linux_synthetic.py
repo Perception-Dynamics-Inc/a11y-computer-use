@@ -23079,6 +23079,9 @@ def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monk
     entry.states.add("SINGLE_LINE")
     entry.text, entry.selection, entry.caret = "", None, 0
     assert _atspi.append_target_entry(entry)
+    assert not _atspi.whole_text_selected(entry)
+    assert driver.type_into(element, "x") == 1
+    assert entry.text == "x"
 
 
 @pytest.mark.parametrize("already_cleared", [False, True])
@@ -23117,9 +23120,6 @@ def test_chromium_frame_recovery_bypasses_repopulated_native_children(
         assert _atspi.chromium_snapshot_root(empty) is page
     assert clears == ["application"]
     assert masks == [127, 125, 128]
-    assert not _atspi.whole_text_selected(entry)
-    assert driver.type_into(element, "x") == 1
-    assert entry.text == "x"
 
 
 def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
