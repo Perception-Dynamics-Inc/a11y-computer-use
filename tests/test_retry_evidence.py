@@ -384,6 +384,8 @@ def test_native_retry_deadline_exhaustion_remains_unknown(readable_native_button
     assert before is not None
     ticks = iter((0.0, 0.041))
     monkeypatch.setattr(native.time, "monotonic", lambda: next(ticks, 0.041))
+    # No run-queue wait to credit: this pins the cap itself, not the host.
+    monkeypatch.setattr(native._ReadBudget, "_runq_wait", staticmethod(lambda: None))
     after = native.retry_evidence(action, button, None)
     assert after is None
     verdict = outcome.retry_verdict(("suspected_noop", "unchanged"), before, after)
@@ -498,3 +500,45 @@ def test_linux_renderer_hang_compares_the_pre_dispatch_sample(monkeypatch):
     assert driver.renderer_hung_since(Click(None)) is None
     driver._renderer_sample = (action, 42, 10.0, {7: 199})
     assert driver.renderer_hung_since(action) is None  # idle renderer
+
+
+def _budget(native, monkeypatch, start, waits):
+    """A _ReadBudget on a fake clock and a fake run-queue wait counter."""
+    clock = [start]
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    waits = iter(waits)
+    monkeypatch.setattr(native._ReadBudget, "_runq_wait", staticmethod(lambda: next(waits)))
+    return native._ReadBudget(0.04), clock
+
+
+def test_read_budget_cap_is_unchanged_without_run_queue_wait(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    budget, clock = _budget(native, monkeypatch, 0.0, (1.0, 1.0, 1.0))
+    clock[0] = 0.0399
+    assert budget.spent() is False
+    clock[0] = 0.04
+    assert budget.spent() is True
+
+
+def test_read_budget_unreadable_schedstat_credits_nothing(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    budget, clock = _budget(native, monkeypatch, 0.0, (None, None))
+    clock[0] = 0.05
+    assert budget.spent() is True
+
+
+def test_read_budget_credits_time_spent_waiting_for_a_cpu(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    # 50 ms elapsed, 20 ms of it runnable-but-not-running: 30 ms charged.
+    budget, clock = _budget(native, monkeypatch, 0.0, (1.0, 1.02))
+    clock[0] = 0.05
+    assert budget.spent() is False
+
+
+def test_read_budget_credit_is_capped_at_half_the_elapsed_time(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    # 100 ms elapsed and a huge wait counter: at most 50 ms credited, so the
+    # read has still used 50 ms and runs out.
+    budget, clock = _budget(native, monkeypatch, 0.0, (1.0, 5.0))
+    clock[0] = 0.1
+    assert budget.spent() is True
