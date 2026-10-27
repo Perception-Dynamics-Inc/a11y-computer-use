@@ -6161,6 +6161,102 @@ def test_snapshot_title_change_keeps_context_but_refuses_replacement(
 
 
 @pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("change", ["reload", "reload_then_rename", "reload_one_of_two"])
+def test_reload_replaces_native_document_without_poisoning_fresh_refs(
+    monkeypatch, mocked_driver, store, audit_dir, mode, change,
+):
+    """#1204: a reload keeps the URL but replaces the native document object.
+
+    Refs from a snapshot taken after the reload name the new page, so they must
+    click. A node that really changed inside a document that survived (the
+    #1039/#1014 guard) must still return stale_ref.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    window = Element("e1", "AXWindow", "Notes Lab - Chrome", None, None, "before",
+                     context_identity=("frame", ":1.2", "/window/1"))
+    page = Element("e2", "AXGroup", "Notes Lab", None, None, "before", parent="e1",
+                   context_identity=("document web", ":1.2", "/document/1"))
+    target = Element("e3", "AXButton", "Go", None, Bounds(1, 10, 40, 150, 25), "before",
+                     parent="e2", clickable=True)
+    elements = [window, page, target]
+    if change == "reload_one_of_two":
+        # A second document (an iframe) survives the reload of the first.
+        frame = Element("e4", "AXGroup", "Frame", None, None, "before", parent="e1",
+                        context_identity=("document frame", ":1.2", "/document/2"))
+        inner = Element("e5", "AXButton", "Inner", None, Bounds(1, 10, 80, 150, 25), "before",
+                        parent="e4", clickable=True)
+        elements += [frame, inner]
+    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
+                                 elements=tuple(elements))
+    updated = [dataclasses.replace(el, snapshot_id="after") for el in before.elements]
+    updated[1] = dataclasses.replace(updated[1], context_identity=("document web", ":1.2", "/document/9"))
+    if change == "reload_then_rename":
+        updated[2] = dataclasses.replace(updated[2], title="Stop")
+    after = dataclasses.replace(before, snapshot_id="after", elements=tuple(updated))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    pressed = []
+    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el) or False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = after
+        for _ in range(2):
+            runtime.desktop_snapshot(APP, mode=mode)
+        if change == "reload_one_of_two":
+            # Only part of the documents were replaced: the page that was
+            # reloaded is not told apart from an edited one, so it stays refused.
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref="e3", verify=True)
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert caught.value.detail["reason"] == "target_changed"
+            assert mocked_driver["click"] == pressed == []
+            return
+        runtime.click(ref="e3", verify=True)
+        assert len(mocked_driver["click"]) == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
+@pytest.mark.parametrize("snapshots", [1, 2])
+def test_reload_that_turns_a_ref_into_an_irreversible_control_is_stale_not_declined(
+    monkeypatch, mocked_driver, store, audit_dir, mode, snapshots,
+):
+    """#1204: identity is decided before the irreversible-action gate.
+
+    The reload starts a new epoch, so a harmless rename keeps working. A ref
+    whose control became "Delete All" is still the old ref naming a different
+    node: stale_ref, not confirmation_declined, and nothing is sent.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    window = Element("e1", "AXWindow", "Notes Lab - Chrome", None, None, "before",
+                     context_identity=("frame", ":1.2", "/window/1"))
+    page = Element("e2", "AXGroup", "Notes Lab", None, None, "before", parent="e1",
+                   context_identity=("document web", ":1.2", "/document/1"))
+    target = Element("e3", "AXButton", "Go", None, Bounds(1, 10, 40, 150, 25), "before",
+                     parent="e2", clickable=True)
+    before = dataclasses.replace(build_synthetic_snapshot(), snapshot_id="before",
+                                 elements=(window, page, target))
+    updated = [dataclasses.replace(el, snapshot_id="after") for el in before.elements]
+    updated[1] = dataclasses.replace(updated[1], context_identity=("document web", ":1.2", "/document/9"))
+    updated[2] = dataclasses.replace(updated[2], title="Delete All")
+    after = dataclasses.replace(before, snapshot_id="after", elements=tuple(updated))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    pressed = []
+    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el) or False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP, mode=mode)
+        current[0] = after
+        for _ in range(snapshots):
+            runtime.desktop_snapshot(APP, mode=mode)
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e3", verify=True)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
+        assert mocked_driver["click"] == pressed == []
+
+
+@pytest.mark.parametrize("mode", ["full", "interactive", "diff"])
 @pytest.mark.parametrize("replacement", [None, "name", "role", "parent"])
 @pytest.mark.parametrize("verify", [False, True])
 def test_snapshot_refreshes_verified_counter_name(
