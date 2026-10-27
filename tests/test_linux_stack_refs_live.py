@@ -45,7 +45,11 @@ _FIXTURE = textwrap.dedent(
     alpha.pack_start(alpha_btn, False, False, 0)
     beta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
     beta_btn = Gtk.Button(label="BetaBtn")
-    beta_btn.connect("clicked", lambda *_: (log.write("BetaBtn\\n"), log.flush()))
+    def beta_clicked(button):
+        log.write("BetaBtn\\n")
+        log.flush()
+        button.set_label("BetaDone")
+    beta_btn.connect("clicked", beta_clicked)
     beta.pack_start(beta_btn, False, False, 0)
     stack.add_titled(alpha, "alpha", "Alpha")
     stack.add_titled(beta, "beta", "Beta")
@@ -110,8 +114,14 @@ def test_fresh_ref_after_a_stack_page_switch_clicks(tmp_path):
                 break
         beta_ref = _ref_of(text, "BetaBtn")
         assert beta_ref != alpha_ref, text
-        runtime.click(ref=beta_ref)
+        result = runtime.click(ref=beta_ref)
         time.sleep(0.5)
+        # The result names the ref the agent used (not the number the backend
+        # gave the live node) and judges the click against that control: the
+        # label change is seen, so the click is confirmed, not a no-op.
+        assert f"clicked {beta_ref} " in str(result), str(result)
+        assert alpha_ref not in str(result).split("(")[0], str(result)
+        assert result.outcome == "confirmed", (result.outcome, result.evidence)
         assert log.read_text().split() == ["BetaBtn"]
         with pytest.raises(ComputerUseError) as caught:
             runtime.click(ref=alpha_ref)

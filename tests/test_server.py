@@ -7312,3 +7312,17 @@ def test_window_replacement_still_refuses_a_ref_whose_control_changed(
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail["reason"] == "target_changed"
         assert mocked_driver["click"] == []
+
+
+def test_result_label_quotes_the_ref_the_agent_used(tmp_path) -> None:
+    """#1235: a re-issued control is live under another number; the result names the issued one."""
+    store = safety.PermissionStore(tmp_path / "p.json")
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    assert rt._label("e11", live) == "e11 (AXButton 'BetaBtn')"
+    assert rt._label("e10", live) == "e10 (AXButton 'BetaBtn')"
+    assert rt._label(None, live) == "e10 (AXButton 'BetaBtn')"

@@ -4789,6 +4789,11 @@ class Runtime:
                 return f"{ref} (text {self._screen_text.line(ref).text!r})"
             except KeyError:
                 pass
+        if isinstance(target, Element) and ref and target.ref != ref:
+            # The live element carries the number the backend gave it; the
+            # agent used the ref it was issued, which a re-issued control
+            # (#1235) does not share. Quote the one the agent used.
+            target = replace(target, ref=ref)
         return _describe(target)
 
     @_serialized
