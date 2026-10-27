@@ -121,3 +121,33 @@ def test_find_by_role_link_and_ref_clicks_activate_each_link(lab) -> None:
             time.sleep(0.1)
         assert log.read_text().count(uri) == before + 1, f"{title} did not open {uri}"
     assert "lab://delta" not in log.read_text()
+
+
+def _outcome(result) -> str:
+    return getattr(result, "outcome", None) or str(result)
+
+
+def test_ref_click_on_an_unvisited_label_link_is_confirmed_by_visited(lab) -> None:
+    """A fired inline link turns VISITED; a revisit has no evidence (#1230)."""
+    driver, runtime, app, log = lab
+    runtime._current = driver.snapshot(Scope.WINDOW, app)
+    link = next(e for e in runtime._current.elements if e.title == "beta notes")
+    result = runtime.click(link.ref)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "lab://beta" not in log.read_text():
+        time.sleep(0.1)
+    assert log.read_text().count("lab://beta") == 1
+    assert getattr(result, "outcome", None) == "confirmed", _outcome(result)
+    assert "inline link became visited" in (getattr(result, "evidence", "") or "")
+    # Already visited: the second click fires but VISITED cannot change, so
+    # the outcome must not claim confirmation. Wait out GTK's double-click
+    # window so the second press is a separate click.
+    time.sleep(1.0)
+    runtime._current = driver.snapshot(Scope.WINDOW, app)
+    link = next(e for e in runtime._current.elements if e.title == "beta notes")
+    again = runtime.click(link.ref)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and log.read_text().count("lab://beta") < 2:
+        time.sleep(0.1)
+    assert log.read_text().count("lab://beta") == 2
+    assert getattr(again, "outcome", None) != "confirmed", _outcome(again)

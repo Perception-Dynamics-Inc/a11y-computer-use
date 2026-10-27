@@ -107,3 +107,35 @@ def test_a_very_long_link_reads_a_bounded_number_of_characters(monkeypatch) -> N
     monkeypatch.setattr(_atspi, "_parent_of", lambda node: node.parent)
     assert _atspi._inline_link_box(_label_link(0, 5000)) is not None
     assert len(seen) <= _atspi._INLINE_LINK_CHARS
+
+
+def _visited_node(role, parent_role, toolkit, names):
+    parent = NS(role=parent_role)
+    states = NS(names=set(names))
+    return NS(role=role, parent=parent, toolkit=toolkit, get_state_set=lambda: states)
+
+
+@pytest.fixture
+def visited_env(monkeypatch):
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: node.role)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda node: node.parent)
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: node.toolkit)
+    monkeypatch.setattr(_atspi, "_drop_cached_properties", lambda node: None)
+
+
+def test_inline_link_state_reads_visited_of_a_gtk_label_link(visited_env) -> None:
+    fresh = _visited_node("link", "label", "gtk", {"SHOWING"})
+    seen = _visited_node("link", "label", "gtk", {"SHOWING", "VISITED"})
+    assert _atspi.gtk_inline_link_state(fresh) == (False, True)
+    assert _atspi.gtk_inline_link_state(seen) == (True, True)
+
+
+@pytest.mark.parametrize("role,parent,toolkit,names", [
+    ("link", "document web", "gtk", {"SHOWING"}),   # a page link, not a label link
+    ("link", "label", "Chromium", {"SHOWING"}),     # another toolkit
+    ("push button", "label", "gtk", {"SHOWING"}),   # not a link
+    ("link", "label", "gtk", set()),                # not showing
+    ("link", "label", "gtk", {"SHOWING", "DEFUNCT"}),
+])
+def test_inline_link_state_is_none_off_a_live_gtk_label_link(visited_env, role, parent, toolkit, names) -> None:
+    assert _atspi.gtk_inline_link_state(_visited_node(role, parent, toolkit, names)) is None

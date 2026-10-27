@@ -2650,7 +2650,7 @@ class LinuxDriver:
     _LO_TOGGLE_POLLS = 12
 
     def toggle_click_probe(self, target: Target):
-        """Capture a page toggle or GTK dialog selection before the click."""
+        """Capture a page toggle, GTK dialog selection or GTK inline link before the click."""
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
@@ -2673,6 +2673,12 @@ class LinuxDriver:
             if state is None:
                 reader = _atspi.libreoffice_toggle_state
                 state = reader(handle)
+            if state is None:
+                reader = _atspi.gtk_inline_link_state
+                state = reader(handle)
+                if state is not None and state[0]:
+                    # Already visited: the click cannot change VISITED.
+                    return None
             return (handle, state, reader) if state is not None else None
 
         try:
@@ -2710,6 +2716,8 @@ class LinuxDriver:
 
         changed = flipped()
         if changed:
+            if reader is _atspi.gtk_inline_link_state:
+                return "the clicked inline link became visited"
             if reader is _atspi.gtk_dialog_toggle_state:
                 return "the clicked GTK dialog control's selected/checked state changed"
             return "the clicked toggle's checked/pressed state changed"
