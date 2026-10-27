@@ -6947,3 +6947,44 @@ def test_reread_passes_no_accessibility_bridge_to_the_verdict(tmp_path, monkeypa
     verdict = runtime._judge_mutation("soffice.bin", {"scope": Scope.WINDOW}, None, "hello")
     assert verdict[0] == "unverifiable"
     assert verdict[1].startswith("no_accessibility_bridge")
+
+
+@pytest.mark.parametrize("tool, verdict, chord", [
+    ("type", ("unverifiable", "unverified"), None),
+    ("key", ("unverifiable", "the accessibility state could not be read"), "ctrl+a"),
+])
+@pytest.mark.parametrize("plugin", ["gen", "gtk3"])
+def test_type_and_key_into_a_libreoffice_without_bridge_name_the_cause(
+    tmp_path, monkeypatch, tool, verdict, chord, plugin,
+):
+    """#1183 problem 2. type/key evidence names no_accessibility_bridge and the
+    plugin, with no retry hints; a bridge-capable plugin keeps the old verdict."""
+    from a11y_computer_use.drivers import _atspi
+
+    class LinuxDriver:
+        name = "linux"
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(_atspi, "_libreoffice_session_pids", lambda: [4242])
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin", lambda pid: plugin)
+    result = runtime._conclude("did it", tool=tool, app="soffice.bin", verdict=verdict, key_chord=chord)
+    assert result.outcome == "unverifiable"
+    if plugin == "gen":
+        assert result.evidence.startswith("no_accessibility_bridge")
+        assert "gen VCL plugin" in result.evidence and "libreoffice-gtk3" in result.evidence
+        assert list(result.next) == []
+    else:
+        assert "no_accessibility_bridge" not in result.evidence
+
+
+def test_libreoffice_bridge_absent_needs_every_process_bridgeless(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    plugins = {1: "gen", 2: "x11", 3: "gtk3", 4: None}
+    monkeypatch.setattr(_atspi, "libreoffice_vcl_plugin", plugins.get)
+    for pids, want in [([], None), ([1], "gen"), ([1, 2], "gen"), ([1, 3], None), ([4], None)]:
+        monkeypatch.setattr(_atspi, "_libreoffice_session_pids", lambda pids=pids: pids)
+        assert _atspi.libreoffice_bridge_absent() == want

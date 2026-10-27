@@ -3666,6 +3666,19 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
+        no_bridge = False
+        if tool in {"type", "key"} and judged == "unverifiable" and not died:
+            plugin = self._libreoffice_without_bridge(app)
+            if plugin:
+                # Name the cause: a gen/x11 LibreOffice never publishes a
+                # tree, so no retry or re-observe can verify this (#1183).
+                no_bridge = True
+                evidence = (
+                    f"no_accessibility_bridge: LibreOffice runs the {plugin} VCL plugin, "
+                    "which publishes no accessibility tree, so the effect cannot be read; "
+                    "check it with a screenshot. Install libreoffice-gtk3 and start it "
+                    "with SAL_USE_VCLPLUGIN=gtk3 for verified input"
+                )
         hung = False
         if tool == "click" and judged == "suspected_noop" and reads is not None and reads[0] == app:
             # A hung page overrides an unchanged readable signal: the click may
@@ -3678,7 +3691,7 @@ class Runtime:
             if isinstance(why, str) and why:
                 hung = True
                 judged, evidence = "unverifiable", evidence + "; " + why
-        no_retry = hung or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        no_retry = hung or no_bridge or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
@@ -3695,6 +3708,19 @@ class Runtime:
             ),
             evidence=evidence,
         )
+
+    def _libreoffice_without_bridge(self, app: str | None) -> str | None:
+        """The VCL plugin when ``app`` is a LibreOffice that cannot publish a tree."""
+        if getattr(self.driver, "name", None) != "linux" or not app:
+            return None
+        try:
+            from a11y_computer_use.drivers import _atspi
+
+            if not _atspi.libreoffice_app(app):
+                return None
+            return _atspi.libreoffice_bridge_absent()
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail the action
+            return None
 
     def _effect_after(self, pre: "Snapshot | None") -> str:
         """Effect Receipt: re-snapshot ``pre``'s app after a mutating action and
