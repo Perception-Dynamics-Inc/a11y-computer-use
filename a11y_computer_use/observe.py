@@ -1924,6 +1924,44 @@ def _alloc_ref(used: set[str]) -> str:
             return ref
 
 
+def rename_refs(snap: Snapshot, mapping: dict[str, str]) -> Snapshot:
+    """A copy of ``snap`` with some refs renamed, under a new snapshot id.
+
+    ``snap`` stays registered under its own id, so a ref already anchored to
+    it keeps working. The copy gets its own epoch with the live handles,
+    elision counts and unclipped values moved to the new refs, and children
+    follow their parent's new ref. ``mapping`` must not send two refs to one
+    name or onto a ref that stays.
+    """
+    if not mapping:
+        return snap
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements = tuple(
+        dataclasses.replace(
+            el,
+            ref=mapping.get(el.ref, el.ref),
+            parent=mapping.get(el.parent, el.parent) if el.parent else el.parent,
+            snapshot_id=snapshot_id,
+        )
+        for el in snap.elements
+    )
+
+    def move(held):
+        return {mapping.get(key, key): value for key, value in (held or {}).items()}
+
+    _register_epoch(
+        snapshot_id,
+        move(_EPOCHS.get(snap.snapshot_id)),
+        move(_HANDLES.get(snap.snapshot_id)),
+        move(_FULL_VALUES.get(snap.snapshot_id)),
+    )
+    touch_epoch(snap.snapshot_id)
+    root = _ACTIVE_ROOTS.get(snap.snapshot_id)
+    if root is not None:
+        _note_active_root(snapshot_id, mapping.get(root, root))
+    return dataclasses.replace(snap, snapshot_id=snapshot_id, elements=elements)
+
+
 def align_refs(basis: Snapshot, current: Snapshot) -> Snapshot:
     """Copy ``current`` so elements that still exist keep ``basis`` refs.
 
