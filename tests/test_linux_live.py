@@ -722,9 +722,11 @@ def test_linux_type_ref_lands_only_in_the_named_gtk_entry(tmp_path) -> None:
         final = _wait_two_entry(driver)
         assert final is not None
         assert _shown(_value_of(final, "FieldA")) == "in-a"
-        # Focusing FieldB selects its current text, so the second type
-        # replaces "from-none". The new characters are only in FieldB.
-        assert _shown(_value_of(final, "FieldB")) == "from-a"
+        # Focusing FieldB selects its current text, but a ref type appends:
+        # it moves the caret to the end first, so "from-none" is kept and the
+        # verifier expects the prior text plus what was typed (#1232). The new
+        # characters are only in FieldB.
+        assert _shown(_value_of(final, "FieldB")) == "from-nonefrom-a"
         assert "from-a" not in _shown(_value_of(final, "FieldA"))
     finally:
         proc.terminate()
