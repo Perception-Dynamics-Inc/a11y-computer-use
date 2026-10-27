@@ -13925,6 +13925,46 @@ def retry_evidence(action, target, focus):
     return _without_child_cache(target, lambda: _retry_evidence(action, target, focus))
 
 
+class _ReadBudget:
+    """A wall-clock budget that does not charge the read for CPU it was denied.
+
+    The scoped retry read is capped at a few tens of milliseconds, and running
+    out means "unknown" (unverifiable). On a busy host the read is slowed by
+    waiting for a CPU, not by its own work, and a verdict that was readable
+    on an idle host flipped to unverifiable (#1231, #1234 CI). The time this
+    thread spent runnable but not running (schedstat run-queue wait) is
+    credited back, so the cap measures the read itself. The cap is unchanged
+    on a quiet host, and where schedstat is unreadable nothing is credited.
+    """
+
+    __slots__ = ("limit", "start", "wait0")
+
+    def __init__(self, limit: float) -> None:
+        self.limit = limit
+        self.start = time.monotonic()
+        self.wait0 = self._runq_wait()
+
+    @staticmethod
+    def _runq_wait() -> float | None:
+        try:
+            with open("/proc/thread-self/schedstat", encoding="ascii") as handle:
+                return int(handle.read().split()[1]) / 1e9
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def spent(self) -> bool:
+        elapsed = time.monotonic() - self.start
+        if elapsed < self.limit:
+            return False
+        waited = self._runq_wait()
+        credit = 0.0
+        if waited is not None and self.wait0 is not None and waited >= self.wait0:
+            # Never credit more than half the elapsed time: a read that was
+            # mostly waiting on the application still runs out.
+            credit = min(waited - self.wait0, elapsed / 2)
+        return elapsed - credit >= self.limit
+
+
 def _retry_evidence(action, target, focus):
     """Scoped evidence for formatting and inert labels; unknown elsewhere.
 
@@ -13939,7 +13979,7 @@ def _retry_evidence(action, target, focus):
 
     if target is None:
         return None
-    deadline = time.monotonic() + 0.04
+    budget = _ReadBudget(0.04)
     formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
         "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
     }
@@ -13960,7 +14000,7 @@ def _retry_evidence(action, target, focus):
                 from a11y_computer_use.drivers._page_health import UNKNOWN
                 return RetryEvidence(reason=UNKNOWN)
             return None
-        if time.monotonic() >= deadline:
+        if budget.spent():
             return None
         if outline:
             states = _call_first(target, ("get_state_set",))
@@ -13985,7 +14025,7 @@ def _retry_evidence(action, target, focus):
             attributes, start, end = api.get_attribute_run(target, caret, False)
             attribute = {"b": "weight", "i": "style", "u": "underline"}[action.chord[-1].lower()]
             value = attributes.get(attribute)
-            if value is None or not start <= caret < end or time.monotonic() >= deadline:
+            if value is None or not start <= caret < end or budget.spent():
                 return RetryEvidence(toggle=True, reason="formatting attributes could not be read")
             return RetryEvidence(
                 toggle=True, effect=(target, caret, attribute, value),
@@ -14000,7 +14040,7 @@ def _retry_evidence(action, target, focus):
 
         @cache
         def identity(node):
-            if time.monotonic() >= deadline:
+            if budget.spent():
                 raise TimeoutError
             _drop_cached_properties(node)
             name = _call_first(node, ("get_name", "getName"))
@@ -14123,7 +14163,7 @@ def _retry_evidence(action, target, focus):
             return None
         state = identity(target)
         text, value = content(target)
-        if time.monotonic() >= deadline:
+        if budget.spent():
             return None
         return RetryEvidence(
             context=(focus_identity, tuple(windows), (parent, parent_count)),
