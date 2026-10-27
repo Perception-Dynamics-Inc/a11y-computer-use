@@ -7,6 +7,22 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.78] - 2026-10-27
+
+Two commits since v0.4.77, through #1216. A patch release: the only code change is the #1215 regression fix.
+
+### Safety
+
+- Fresh refs after a window is replaced by a new one: a wizard step or notification replaced by an identical window no longer makes every ref from a fresh `desktop_snapshot` fail as `stale_ref`/`target_changed`. A replaced window starts a new ref epoch like a reloaded document (#1204); a node changed inside a surviving window, a restarted app instance and a ref that became an irreversible control are still refused. Refs #1215 (#1216) (HASH1216, 2026-10-27).
+
+### CI
+
+- Re-read the Firefox snapshot until the form is exposed, bounded (test only). (#1212) (eee320d, 2026-10-27).
+
+### Known issues
+
+- Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Not in 0.4.78.
+
 ## [0.4.77] - 2026-10-27
 
 Ninety commits since v0.4.76, through #1207.
