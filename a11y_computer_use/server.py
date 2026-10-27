@@ -3745,6 +3745,16 @@ class Runtime:
 
     # -- target resolution ----------------------------------------------------
 
+    @staticmethod
+    def _native_documents(elements) -> set[tuple]:
+        """Native document objects named by ``elements`` (role, bus, path)."""
+        documents = set()
+        for el in elements:
+            context = getattr(el, "context_identity", None)
+            if context and str(context[0]).startswith("document"):
+                documents.add(tuple(context))
+        return documents
+
     def _note_issued(self, snap: Snapshot, refs: set[str] | None = None,
                      *, preserve_identity: bool = False) -> None:
         """Remember which app issued the refs the agent was just given.
@@ -3789,6 +3799,17 @@ class Runtime:
             )
         previous_url = getattr(self, "_issued_document_url", None)
         document_changed = bool(previous_url and document_url and previous_url != document_url)
+        # A reload keeps the URL but replaces the native document object, so
+        # every ref issued before it is bound to a node that no longer exists
+        # (#1204). When every native document the previous observation named is
+        # gone and the fresh one names only new ones, the document was replaced
+        # rather than edited: start a new epoch. A node that changed inside a
+        # surviving document still shares that document and stays stale.
+        previous_documents = self._native_documents(last.elements if last is not None else ())
+        current_documents = self._native_documents(snap.elements)
+        if (previous_documents and current_documents
+                and previous_documents.isdisjoint(current_documents)):
+            document_changed = True
         self._issued_document_url = document_url or (
             previous_url if last is not None and last.app == app and not instance_changed else None
         )

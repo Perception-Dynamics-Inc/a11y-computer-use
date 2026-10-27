@@ -14513,3 +14513,88 @@ def test_xfce4_terminal_scroll_to_find_turns_up_from_bottom(tmp_path) -> None:
         print(f"terminal default-direction search: {elapsed:.3f}s", flush=True)
     finally:
         _stop_group(proc)
+
+
+def test_linux_chrome_refs_from_a_fresh_snapshot_click_after_a_reload(tmp_path) -> None:
+    """Live Chrome, #1204: after F5 every ref of a fresh snapshot must click.
+
+    A reload keeps the URL but replaces the native document object. The #1042
+    identity check used to compare the fresh snapshot against the identity
+    cached before the reload and refused every ref as stale_ref/target_changed.
+    The page's button renames the window title, so the click is read back from
+    the accessibility tree. Skips when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the reload test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "reload1204.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>Reload Lab</title>"
+        "<h1>Lab</h1><button onclick=\"document.title='Clicked After Reload'\">Go</button>"
+        "<button>Other</button>"
+    )
+    profile = tmp_path / "chrome-reload-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    def wait_for(predicate, what: str, limit_s: float = 45.0):
+        deadline = time.monotonic() + limit_s
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before {what}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code not in (ErrorCode.APP_NOT_FOUND, ErrorCode.UNSUPPORTED):
+                    raise
+            else:
+                if predicate(shot):
+                    return shot
+            time.sleep(0.3)
+        raise AssertionError(f"Chrome did not show {what}")
+
+    try:
+        wait_for(lambda shot: "Go" in _titles(shot), "the Go button")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime.desktop_snapshot("chrome", scope="window", mode="interactive")
+        before = runtime._current
+        go_before = next(el for el in before.elements if el.title == "Go")
+        docs_before = {el.context_identity for el in before.elements
+                       if el.context_identity and el.context_identity[0].startswith("document")}
+        runtime.key("f5")
+        # The reload replaced the native document: wait for the new object.
+        wait_for(
+            lambda shot: "Go" in _titles(shot) and {
+                el.context_identity for el in shot.elements
+                if el.context_identity and el.context_identity[0].startswith("document")
+            }.isdisjoint(docs_before),
+            "the reloaded page",
+        )
+        for _ in range(3):
+            runtime.desktop_snapshot("chrome", scope="window", mode="interactive")
+            time.sleep(0.5)
+        fresh = runtime._current
+        go_after = next(el for el in fresh.elements if el.title == "Go")
+        assert go_after.ref == go_before.ref, "the repro needs the same ref numbering"
+        runtime.click(ref=go_after.ref, verify=True)
+        wait_for(
+            lambda shot: any("Clicked After Reload" in str(el.title or "") for el in shot.elements),
+            "the click result in the window title",
+            limit_s=15.0,
+        )
+    finally:
+        _stop_group(proc)
