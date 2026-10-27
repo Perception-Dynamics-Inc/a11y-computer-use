@@ -7870,6 +7870,17 @@ def chromium_snapshot_root(root):
             # re-walk a page and the short-page budget is kept.
             if not _sparse_untitled_chrome_frame(page):
                 return page
+    # A cache event can restore CHILDREN during clear_cache's D-Bus calls.
+    # Keep child caching disabled through both the clear and frame selection;
+    # otherwise even repeated clears can select the same stale empty frame.
+    return _without_child_cache(
+        app, lambda: _refresh_chromium_snapshot_root(app, root, latched),
+        preserve_properties=True,
+    )
+
+
+def _refresh_chromium_snapshot_root(app, root, latched):
+    """Clear and select the page while native child caching is disabled."""
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
