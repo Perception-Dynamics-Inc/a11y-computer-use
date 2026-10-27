@@ -12278,6 +12278,27 @@ def libreoffice_registration_wait() -> tuple[float, str | None]:
     return max(0.0, wait), shown
 
 
+def libreoffice_bridge_absent() -> str | None:
+    """The VCL plugin name when no soffice.bin in this session can publish a tree.
+
+    Every session soffice.bin must have a plugin mapped and none may be
+    bridge-capable (gen/x11). None when there is no soffice.bin, a plugin is
+    not mapped yet, or any process could still publish a tree. Reads only
+    /proc (cached per process instance), so an action verdict can name the
+    cause without waiting (#1183).
+    """
+    pids = _libreoffice_session_pids()
+    if not pids:
+        return None
+    shown = None
+    for pid in pids:
+        plugin = libreoffice_vcl_plugin(pid)
+        if plugin is None or plugin in _VCL_BRIDGE_PLUGINS:
+            return None
+        shown = shown or plugin
+    return shown
+
+
 # LibreOffice's X window shows up in app list and window list while AT-SPI is
 # still registering. That gap was 3–13 s. Snapshot polls until this deadline,
 # then reports the app missing (or the missing gtk3 bridge).

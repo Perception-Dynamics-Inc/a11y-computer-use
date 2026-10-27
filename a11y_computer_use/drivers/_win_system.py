@@ -57,16 +57,62 @@ def app_at_point_id(x: float, y: float) -> str | None:
     return _exe_for_pid(_pid_for_hwnd(hwnd))
 
 
-def resolve_app(identifier: str) -> str:
-    """Resolve a window title / class / exe substring to the owning process image
-    name (the permission-keying id), or the identifier itself if unmatched."""
+def exe_matches(identifier: str, exe: str) -> bool:
+    """Whether ``identifier`` names the process image ``exe``: the basename,
+    case-insensitive, with ".exe" optional. Never a substring: "notepad" is
+    not "notepad++.exe", and a window title is not a program (#1191)."""
+    want = os.path.basename((identifier or "").strip().replace("\\", "/")).lower()
+    have = (exe or "").lower()
+    if not want or not have:
+        return False
+    if want.endswith(".exe"):
+        want = want[:-4]
+    if have.endswith(".exe"):
+        have = have[:-4]
+    return want == have
+
+
+def pick_window(identifier: str, rows):
+    """From ``(window, pid, exe)`` rows, the one window whose exe is named by
+    ``identifier``, or None. More than one process of that program is
+    ambiguous: raises APP_NOT_FOUND with reason ``ambiguous_app`` rather than
+    acting on whichever window happens to be listed first."""
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    hits = [(w, pid, exe) for w, pid, exe in rows if exe_matches(identifier, exe)]
+    if not hits:
+        return None
+    pids = sorted({int(pid or 0) for _, pid, _ in hits})
+    if len(pids) > 1:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"{identifier!r} matches {len(pids)} running processes; name one by pid",
+            {"reason": "ambiguous_app", "app": identifier,
+             "candidates": [{"pid": p, "exe": next(e for _, q, e in hits if int(q or 0) == p)}
+                            for p in pids]},
+        )
+    return hits[0][0]
+
+
+def _top_level_rows():
     import uiautomation as auto
 
-    needle = (identifier or "").lower()
+    rows = []
     for w in auto.GetRootControl().GetChildren():
-        name = (getattr(w, "Name", "") or "").lower()
-        cls = (getattr(w, "ClassName", "") or "").lower()
-        exe = (_exe_for_pid(getattr(w, "ProcessId", 0)) or "").lower()
-        if needle and (needle in name or needle in cls or needle in exe):
-            return exe or identifier
+        try:
+            pid = int(getattr(w, "ProcessId", 0) or 0)
+        except Exception:
+            pid = 0
+        rows.append((w, pid, _exe_for_pid(pid) or ""))
+    return rows
+
+
+def resolve_app(identifier: str) -> str:
+    """Resolve an exe name (".exe" optional) to the owning process image name
+    (the permission-keying id), or the identifier itself if unmatched. Window
+    titles and classes no longer resolve: a browser tab titled "notepad tips"
+    is not Notepad (#1191)."""
+    for _w, _pid, exe in _top_level_rows():
+        if exe_matches(identifier, exe):
+            return exe
     return identifier
