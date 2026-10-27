@@ -978,7 +978,13 @@ def _launched_as(app_id: str, command: str) -> bool:
     on macOS are exact and never take this path."""
     if sys.platform == "darwin" or len(command) < 4:
         return False
-    return app_id.startswith(command) or command.endswith("-" + app_id) or command[:15] == app_id
+    if command[:15] == app_id or command.endswith("-" + app_id):
+        return True
+    # Only a comm cut at exactly 15 bytes may extend the launched name
+    # ("gnome-terminal-" for gnome-terminal-server). A shorter id that merely
+    # starts with it is a different program: code-insiders is not code,
+    # python3 is not python, firefox-esr is not firefox (#1191).
+    return len(app_id) == 15 and app_id.startswith(command)
 
 
 def _running_app(identifier: str) -> tuple[object, str]:

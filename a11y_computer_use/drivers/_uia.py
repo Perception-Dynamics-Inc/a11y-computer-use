@@ -241,16 +241,23 @@ def primary_geometry() -> tuple[DisplayGeometry, ...]:
 
 
 def find_window(app: str):
-    """The top-level window Control whose title, class, or process-exe matches
-    ``app`` (substring, case-insensitive), or None. ``app`` may be a window
-    title, a window ClassName, or a process exe name (e.g. "notepad.exe")."""
+    """The top-level window Control owned by the process exe ``app`` names
+    (case-insensitive basename, ".exe" optional), or None. Titles and classes
+    are not matched: "notepad" must not land in a browser tab or Notepad++.
+    Raises APP_NOT_FOUND (reason ``ambiguous_app``) when several processes of
+    that program have windows."""
     import uiautomation as auto
 
     from a11y_computer_use.drivers import _win_system
 
-    needle = (app or "").lower()
-    if not needle:
+    if not (app or "").strip():
         return None
+    root = auto.GetRootControl()
+    rows = []
+    for w in _safe(lambda: root.GetChildren(), []) or []:
+        pid = _safe(lambda: w.ProcessId, 0) or 0
+        rows.append((w, pid, _win_system._exe_for_pid(pid) or ""))
+    return _win_system.pick_window(app, rows)
     root = auto.GetRootControl()
     for w in _safe(lambda: root.GetChildren(), []) or []:
         name = (_safe(lambda: w.Name, "") or "").lower()

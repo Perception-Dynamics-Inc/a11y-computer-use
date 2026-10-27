@@ -22390,6 +22390,59 @@ def test_a_keysym_that_does_not_match_the_request_is_reported_not_confirmed(
     assert list(result.next) == []
 
 
+@pytest.mark.parametrize("entry", ["type_text", "type_into"])
+@pytest.mark.parametrize("busy", [True, False])
+def test_type_mismatch_on_a_busy_chromium_page_offers_no_retry(monkeypatch, entry, busy) -> None:
+    """#1190: keys sent to a busy-looping renderer can land after the readback.
+
+    A text_mismatch read from Chromium's stale cache must then be unverifiable
+    with no next, or following the retry hint types the text twice. An idle
+    renderer keeps the plain refusal and its hints.
+    """
+    from a11y_computer_use import observe, outcome
+    from a11y_computer_use.drivers import _page_health
+
+    clock = {"t": 100.0}
+    reads = {"n": 0}
+
+    def ticks(pid):
+        assert pid == 77
+        reads["n"] += 1
+        # 100 ticks over 1.0 s is one renderer fully on CPU (CLK_TCK 100).
+        return {501: 1000 + (100 if busy and reads["n"] > 1 else 0)}
+
+    def write(*_args, **_kwargs):
+        clock["t"] += 1.0
+        raise _atspi._text_mismatch("text_mismatch", "field reads 'ab' after typing 'abc'")
+
+    monkeypatch.setattr(_page_health, "renderer_ticks", ticks)
+    monkeypatch.setattr("os.sysconf", lambda name: 100, raising=False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr(LinuxDriver, "_type_text_unguarded", write, raising=False)
+    monkeypatch.setattr(LinuxDriver, "_type_into_unguarded", write, raising=False)
+    monkeypatch.setattr(LinuxDriver, "frontmost_app", lambda self: ("chrome", 77))
+    monkeypatch.setattr(LinuxDriver, "_run", lambda self, fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: object())
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 77)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    element = Element(ref="e1", role="entry", title="", value="", bounds=None, snapshot_id="s1")
+    with pytest.raises(ComputerUseError) as exc:
+        if entry == "type_text":
+            driver.type_text("abc")
+        else:
+            driver.type_into(element, "abc")
+    result = outcome.refused_result(text="type", code=exc.value.code.value,
+                                    message=exc.value.message, detail=exc.value.detail)
+    if busy:
+        assert result.outcome == "unverifiable"
+        assert list(result.next) == []
+        assert "page busy, input may land later; re-observe before retrying" in result.evidence
+    else:
+        assert result.outcome == "refused"
+        assert "keyboard" in result.next
+
+
 @pytest.mark.parametrize("scope", [Scope.APP, Scope.WINDOW])
 def test_find_root_refuses_prefix_neighbour_when_named_app_is_gone(fake_atspi, monkeypatch, scope) -> None:
     """#1191: ``python`` must not bind to the ``python3`` application's tree."""

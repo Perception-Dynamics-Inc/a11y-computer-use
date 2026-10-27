@@ -134,3 +134,27 @@ def test_cli_launcher_does_not_load_native_bindings_for_cli_errors(monkeypatch):
         run_once.main()
     assert exc.value.code == 2
     assert "gi.repository.Atspi" not in sys.modules
+
+
+def test_settled_snapshot_waits_for_the_page_not_just_the_browser_ui():
+    import asyncio
+    import pytest
+    from scripts.latency import sample
+
+    browser_ui = '[snap-1] chrome (window)\n  e1 window "Latency Lab"\n    e2 group'
+    page = browser_ui + '\n    e3 textfield "Name"\n    e4 button "Go" (click)'
+    trees = [browser_ui, browser_ui, page]
+    calls = []
+
+    async def snapshot():
+        calls.append(1)
+        return trees[min(len(calls) - 1, len(trees) - 1)]
+
+    text = asyncio.run(sample.settled_snapshot(snapshot, ('button "Go"', 'textfield "Name"'), pause=0))
+    assert text == page and len(calls) == 3
+
+    async def never():
+        return browser_ui
+
+    with pytest.raises(AssertionError, match="did not expose"):
+        asyncio.run(sample.settled_snapshot(never, ('button "Go"',), timeout=0.05, pause=0.01))
