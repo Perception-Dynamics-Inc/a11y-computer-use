@@ -15300,6 +15300,52 @@ def test_firefox_input_combo_wrapper_and_static_text_are_not_editable(fake_atspi
         assert _atspi.control_kind(node) == "combo"
 
 
+def test_firefox_datalist_input_in_a_page_is_an_editable_entry(fake_atspi):
+    """Refs #1251. Synthetic Gecko nodes. Not a live Firefox.
+
+    A Firefox ``<input list>`` is a combo box with an input tag, Text, and
+    EDITABLE, the same shape as the address-bar wrapper. It sits inside a
+    page document, and the wrapper never does. The page combo is an
+    editable entry, and its value is its own (empty) text, never the next
+    field's label. The live Firefox test covers the writes.
+    """
+    app = _Acc("application", name="Firefox")
+    app.get_toolkit_name = lambda: "Gecko"
+    combo = _Acc("combo box", name="City", width=180, height=24,
+                 states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    combo.get_application = lambda: app
+    combo.get_attributes = lambda: {"tag": "input", "id": "d"}
+    combo.text = ""
+    combo.get_text_iface = lambda: combo
+    combo.get_text = lambda *_args: combo.text
+    combo.get_character_count = lambda: len(combo.text)
+    plain = _Acc("entry", name="Plain", width=180, height=24,
+                 states={"EDITABLE", "ENABLED", "SHOWING", "VISIBLE", "FOCUSABLE"})
+    plain.get_application = lambda: app
+    doc = _adopt(_Acc("document web", name="Bench", width=400, height=300,
+                          states={"SHOWING", "VISIBLE", "ENABLED"}), combo, plain)
+    doc.get_document_attribute_value = lambda key: "http://127.0.0.1:8000/" if key == "DocURL" else None
+    doc.get_application = lambda: app
+    doc.component._rect.y = 90.0
+    combo.component._rect.y = 120.0
+    plain.component._rect.y = 150.0
+    window = _adopt(_Acc("frame", name="Firefox", width=400, height=300), doc)
+    window.get_application = lambda: app
+    _add_tab_strip(window)
+    assert _atspi.editable_entry(combo)
+    assert not _atspi._blocks_text_replace(combo)
+    snap = build_snapshot(window, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="firefox", pid=1251, geometry=_geometry())
+    field, = [el for el in snap.elements if el.role == "AXComboBox"]
+    assert field.editable
+    assert field.value in (None, "")
+    rendered = observe.render_text(snap, mode="interactive")
+    assert 'combobox "City" (click,edit)' in rendered, rendered
+    assert _atspi._choice_value(combo, "AXComboBox", "combo box") == (True, None)
+    combo.text = "Astana"
+    assert _atspi._choice_value(combo, "AXComboBox", "combo box") == (True, "Astana")
+
+
 def test_non_chromium_focused_readback_does_not_repeat_focus_lookup(fake_atspi, monkeypatch):
     """Chrome entry discovery must not traverse Calc's focus tree again."""
     field = _Acc("entry", name="Calc editor")
@@ -23082,6 +23128,44 @@ def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monk
     assert not _atspi.whole_text_selected(entry)
     assert driver.type_into(element, "x") == 1
     assert entry.text == "x"
+
+
+@pytest.mark.parametrize("already_cleared", [False, True])
+def test_chromium_frame_recovery_bypasses_repopulated_native_children(
+    fake_atspi, monkeypatch, already_cleared,
+):
+    """A cache event during clear must not pin recovery to an empty frame."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    fake_atspi.Cache = _NS(NONE=0, CHILDREN=2, DEFAULT=127, UNDEFINED=128)
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_PIDS", {6262})
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_CLEARED", {6262} if already_cleared else set())
+    monkeypatch.setattr(_atspi, "_BROWSER_BAR_OPEN", set())
+    empty = _adopt(_Acc("frame", states=("ACTIVE",)), _Acc("panel"))
+    page = _adopt(_Acc("frame", name="rowtable - Google Chrome", states=("SHOWING",)),
+                  _Acc("document web", name="rowtable"))
+    app = _Acc("application", name="Google Chrome")
+    masks = [127]
+    clears = []
+    app.set_cache_mask = masks.append
+    for node in (app, empty, page):
+        node.get_application = lambda: app
+        node.get_toolkit_name = lambda: "Chrome"
+        node.get_process_id = lambda: 6262
+
+    def children():
+        # Simulate a native CHILDREN cache event repopulating the stale array
+        # during every clear. Only a mask bypass exposes the real page sibling.
+        return [empty] if masks[-1] & 2 else [empty, page]
+
+    app.get_child_count = lambda: len(children())
+    app.get_child_at_index = lambda index: children()[index]
+    app.clear_cache = lambda: clears.append("application")
+    with _atspi.read_cache():
+        assert _atspi.chromium_snapshot_root(empty) is page
+    assert clears == ["application"]
+    assert masks == [127, 125, 128]
 
 
 def test_calc_cell_comment_comes_from_the_note_attribute(fake_atspi) -> None:

@@ -2833,6 +2833,33 @@ def _gtk4_app(acc) -> bool:
     return major is not None and major >= 4
 
 
+def gtk4_entry_needs_pointer_focus(acc) -> bool:
+    """A GTK 4 editable text node that AT-SPI cannot focus (#1237).
+
+    GTK 4's Component.GrabFocus is not implemented (the call errors), so a
+    ref ``type`` into an unfocused GTK 4 entry never got focus. Its only
+    action is ``activate``, which submits; a pointer press is the one way in.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    if _role_name(acc) not in {"text", "entry", "password text"}:
+        return False
+    return _state_has(acc, "EDITABLE") and _state_has(acc, "SHOWING")
+
+
+def place_caret_at_end(acc) -> bool:
+    """Move the caret to the end of ``acc``'s text; True only when read back."""
+    text = _full_text(acc)
+    if text is None:
+        return False
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return False
+    _move_caret(Atspi, acc, len(text))
+    return _caret_offset(acc) == len(text)
+
+
 def _gtk4_frame_size(acc) -> tuple[int, int]:
     """Client size of ``acc``'s frame, from WINDOW extents, else SCREEN."""
     frame = _frame_ancestor(acc) or acc
@@ -7892,6 +7919,17 @@ def chromium_snapshot_root(root):
             # re-walk a page and the short-page budget is kept.
             if not _sparse_untitled_chrome_frame(page):
                 return page
+    # A cache event can restore CHILDREN during clear_cache's D-Bus calls.
+    # Keep child caching disabled through both the clear and frame selection;
+    # otherwise even repeated clears can select the same stale empty frame.
+    return _without_child_cache(
+        app, lambda: _refresh_chromium_snapshot_root(app, root, latched),
+        preserve_properties=True,
+    )
+
+
+def _refresh_chromium_snapshot_root(app, root, latched):
+    """Clear and select the page while native child caching is disabled."""
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
@@ -9676,8 +9714,11 @@ def editable_entry(
         # Chromium ARIA autocomplete and datalist inputs own their text; their popup
         # options are not children and do not constrain the input value.
         # Gecko address-bar wrappers also report input, Text, and EDITABLE;
-        # those wrappers must retain the select-style classification.
-        if not _chromium_app(acc):
+        # those wrappers must retain the select-style classification. A
+        # Gecko datalist input has the same shape but sits inside a page
+        # document, and the address bar never does (#1251).
+        chromium = _chromium_app(acc)
+        if not chromium and not _gecko_app(acc):
             return False
         if attrs is None:
             attrs = _get_attributes(acc)
@@ -9687,6 +9728,7 @@ def editable_entry(
             str(attrs.get("tag") or "").lower() == "input"
             and state_editable and not _state_has(acc, "READ_ONLY")
             and _call_first(acc, ("get_text_iface",)) is not None
+            and (chromium or _nested_in_document(acc))
         )
     if role in _STATIC_REPLACE_ROLES:
         return False
@@ -14859,6 +14901,12 @@ def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
         if isinstance(text, str):
             return True, (_strip_objects(text) or None)
         return True, None
+    # A browser input combobox (datalist or ARIA autocomplete) is its own
+    # entry. Its value is its own text, even when empty; the sibling and
+    # label fallbacks below would report the next field's label (#1251).
+    if role_name in {"combo box", "combo-box"} and editable_entry(acc, role_str=role_name):
+        text = _full_text(acc)
+        return True, (_strip_objects(text) or None) if isinstance(text, str) else None
     # Linux Qt stores the current item in the accessible name. That name is
     # the value. The label relation, applied in the snapshot title, is the
     # widget's name. The Value interface on the combo is uninitialized.
@@ -20844,6 +20892,86 @@ def gtk_dialog_toggle_state(acc) -> tuple[bool, bool] | None:
         return None
     bits = ("SELECTED", "CHECKED") if role == "page tab" else ("CHECKED", "PRESSED")
     return _click_state_bits(acc, bits, require_showing=True)
+
+
+def gtk_inline_link_state(acc) -> tuple[bool, bool] | None:
+    """Fresh VISITED bit of a GTK label's inline link (#1230 follow-up).
+
+    A GTK3 ``GtkLabel`` with ``<a href>`` markup exposes each link as a
+    ``link`` child of the label. Activating the link marks it VISITED, which
+    is the only native evidence that the click fired. Other roles, toolkits
+    and parents are None. A link that was already visited cannot show the
+    change; the probe skips it so the outcome stays honest.
+    """
+    if acc is None or _role_name(acc) != "link" or _toolkit_name(acc) != "gtk":
+        return None
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) != "label":
+        return None
+    return _click_state_bits(acc, ("VISITED", "SHOWING"), require_showing=True)
+
+
+_GTK_SELECTABLE_ITEMS = frozenset({"list item", "table cell"})
+_GTK_SELECTION_CONTAINERS = frozenset({"list", "list box", "table", "tree table"})
+
+
+def _gtk_selectable_item(acc):
+    """The GTK row/tile at or just above ``acc`` and its container, or None."""
+    node = acc
+    for _ in range(3):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role in {"frame", "window", "dialog", "application"}:
+            return None
+        if role in _GTK_SELECTABLE_ITEMS:
+            parent = _parent_of(node)
+            if parent is not None and _role_name(parent) in _GTK_SELECTION_CONTAINERS:
+                return node, parent
+            return None
+        node = _parent_of(node)
+    return None
+
+
+def _index_of(acc) -> int | None:
+    try:
+        index = acc.get_index_in_parent()
+    except Exception:
+        return None
+    return index if isinstance(index, int) and index >= 0 else None
+
+
+def gtk_selection_click_state(acc) -> tuple[bool, bool] | None:
+    """Fresh selection of a GTK ListBox row or FlowBox tile (#1238, #1240).
+
+    A GtkListBox row sets SELECTED on itself, but the generic state diff can
+    miss it. A GtkFlowBox tile never sets SELECTED; the parent table's
+    ``Selection`` interface names it instead. Returns (item SELECTED, item in
+    the container's selection). None for other widgets, toolkits, an
+    unreadable state, or an item that is already selected (the click cannot
+    show a change).
+    """
+    if acc is None or _toolkit_name(acc) != "gtk":
+        return None
+    found = _gtk_selectable_item(acc)
+    if found is None:
+        return None
+    item, container = found
+    bits = _click_state_bits(item, ("SELECTED", "SHOWING"), require_showing=True)
+    if bits is None:
+        return None
+    in_selection = False
+    iface = _selection_iface(container)
+    index = _index_of(item)
+    if iface is not None and index is not None:
+        count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+        if isinstance(count, int) and not isinstance(count, bool):
+            for position in range(min(max(count, 0), 64)):
+                child = _call_first(iface, ("get_selected_child", "getSelectedChild"), position)
+                if child is not None and _index_of(child) == index:
+                    in_selection = True
+                    break
+    return (bool(bits[0]), in_selection)
 
 
 def libreoffice_toggle_state(acc) -> tuple[bool, bool] | None:

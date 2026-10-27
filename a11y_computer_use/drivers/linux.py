@@ -2650,7 +2650,7 @@ class LinuxDriver:
     _LO_TOGGLE_POLLS = 12
 
     def toggle_click_probe(self, target: Target):
-        """Capture a page toggle or GTK dialog selection before the click."""
+        """Capture a page toggle, GTK dialog selection or GTK inline link before the click."""
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
@@ -2673,6 +2673,18 @@ class LinuxDriver:
             if state is None:
                 reader = _atspi.libreoffice_toggle_state
                 state = reader(handle)
+            if state is None:
+                reader = _atspi.gtk_inline_link_state
+                state = reader(handle)
+                if state is not None and state[0]:
+                    # Already visited: the click cannot change VISITED.
+                    return None
+            if state is None:
+                reader = _atspi.gtk_selection_click_state
+                state = reader(handle)
+                if state is not None and any(state):
+                    # Already selected: the click cannot show a change.
+                    return None
             return (handle, state, reader) if state is not None else None
 
         try:
@@ -2710,6 +2722,10 @@ class LinuxDriver:
 
         changed = flipped()
         if changed:
+            if reader is _atspi.gtk_inline_link_state:
+                return "the clicked inline link became visited"
+            if reader is _atspi.gtk_selection_click_state:
+                return "the clicked GTK row/tile became selected"
             if reader is _atspi.gtk_dialog_toggle_state:
                 return "the clicked GTK dialog control's selected/checked state changed"
             return "the clicked toggle's checked/pressed state changed"
@@ -5334,6 +5350,17 @@ class LinuxDriver:
             if not math_focused:
                 handle = self._focus_web_entry(element, handle, context=context)
                 self._run(lambda: _atspi.grab_focus(handle))
+            if (not math_focused and context is None
+                    and not self._run(lambda: _atspi._focus_on_target(handle))
+                    and self._run(lambda: _atspi.gtk4_entry_needs_pointer_focus(handle))):
+                # GTK 4 cannot take focus over AT-SPI (#1237). Use the
+                # geometry-checked pointer press, then put the caret at the
+                # end so the press point does not split the existing text.
+                self.click(element)
+                if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                    raise self._focus_lost_on(element)
+                if not self._run(lambda: _atspi.place_caret_at_end(handle)):
+                    raise self._focus_lost_on(element)
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
                 if context is None:
                     raise self._focus_lost_on(element)
