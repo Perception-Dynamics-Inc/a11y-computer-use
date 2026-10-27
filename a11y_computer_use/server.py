@@ -3685,6 +3685,12 @@ class Runtime:
                     "check it with a screenshot. Install libreoffice-gtk3 and start it "
                     "with SAL_USE_VCLPLUGIN=gtk3 for verified input"
                 )
+        layout_mismatch = self._take_keysym_mismatch()
+        if layout_mismatch and not died:
+            # The key that went out is not the one requested (a layout
+            # switch, #1198). Never confirm it, and never offer a retry: the
+            # wrong key already landed.
+            judged, evidence = "unverifiable", layout_mismatch + "; re-observe before acting again"
         hung = False
         if tool == "click" and judged == "suspected_noop" and reads is not None and reads[0] == app:
             # A hung page overrides an unchanged readable signal: the click may
@@ -3697,7 +3703,7 @@ class Runtime:
             if isinstance(why, str) and why:
                 hung = True
                 judged, evidence = "unverifiable", evidence + "; " + why
-        no_retry = hung or no_bridge or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        no_retry = hung or no_bridge or bool(layout_mismatch) or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
@@ -3725,6 +3731,17 @@ class Runtime:
             if not _atspi.libreoffice_app(app):
                 return None
             return _atspi.libreoffice_bridge_absent()
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail the action
+            return None
+
+    def _take_keysym_mismatch(self) -> str | None:
+        """The X keystroke mismatch the last XTEST input recorded, once (#1198)."""
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        try:
+            from a11y_computer_use.drivers import _linux_input
+
+            return _linux_input.take_mismatch()
         except Exception:  # noqa: BLE001 - a diagnostic must not fail the action
             return None
 
