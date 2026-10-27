@@ -2018,6 +2018,17 @@ class LinuxDriver:
             elements.append(el)
         return replace(snap, elements=tuple(elements))
 
+    def live_window_contexts(self, app: str | None) -> frozenset | None:
+        """Top-level windows ``app`` publishes now, or None when unknown (#1215)."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not app:
+            return None
+        try:
+            return self._run(lambda: _atspi.live_window_contexts(app))
+        except Exception:  # unknown is not "destroyed"
+            return None
+
     def snapshot_document_url(self, snap: Snapshot) -> str | None:
         """Content URL from emitted handles, without discovering unseen rows.
 
