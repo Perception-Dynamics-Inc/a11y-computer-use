@@ -224,6 +224,34 @@ def _wait_for_form(driver, timeout_s: float = 25.0):
     return last
 
 
+_FORM_FIELDS = ("Name", "Count", "Notes", "Color")
+
+
+def _observe_form(runtime, extra: tuple[str, ...] = (), timeout_s: float = 15.0):
+    """``runtime.desktop_snapshot`` until the form's controls are in the tree.
+
+    Firefox can drop the page document from the accessibility tree for a moment
+    after the fixture has seen it (a first read of only the menu bar), so one read
+    is not proof the form is absent. Read again, bounded by ``timeout_s``. A
+    form that never appears returns the last snapshot, so the caller's own
+    assertion fails on what was really there.
+    """
+    wanted = set(_FORM_FIELDS) | set(extra)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            runtime.desktop_snapshot("firefox")
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+        snap = runtime._current
+        if snap is not None and wanted <= {el.title for el in snap.elements}:
+            return snap
+        if time.monotonic() >= deadline:
+            return snap
+        time.sleep(0.4)
+
+
 def _field(snap, title: str):
     return next((el for el in snap.elements if el.title == title and (el.editable or el.role == "AXComboBox")), None)
 
@@ -404,8 +432,7 @@ def test_firefox_set_value_and_type_land_in_web_fields(firefox_form, tmp_path) -
     """Live Firefox. set_value fills the four controls. type inserts after a ref click."""
     driver = firefox_form
     runtime = _runtime(tmp_path, driver)
-    runtime.desktop_snapshot("firefox")
-    snap = runtime._current
+    snap = _observe_form(runtime)
     assert snap is not None
     name = _field(snap, "Name")
     count = _field(snap, "Count")
@@ -423,8 +450,7 @@ def test_firefox_set_value_and_type_land_in_web_fields(firefox_form, tmp_path) -
     blob = " ".join(f"{el.title or ''} {el.value or ''}" for el in after.elements)
     assert "t:input" in blob or "t:change" in blob, blob
 
-    runtime.desktop_snapshot("firefox")
-    cleared = runtime._current
+    cleared = _observe_form(runtime)
     name = _field(cleared, "Name")
     count = _field(cleared, "Count")
     notes = _field(cleared, "Notes")
@@ -432,8 +458,7 @@ def test_firefox_set_value_and_type_land_in_web_fields(firefox_form, tmp_path) -
     assert runtime.set_value(name.ref, "").startswith("set ")
     assert runtime.set_value(count.ref, "").startswith("set ")
     assert runtime.set_value(notes.ref, "").startswith("set ")
-    runtime.desktop_snapshot("firefox")
-    empty = runtime._current
+    empty = _observe_form(runtime)
     name = _field(empty, "Name")
     count = _field(empty, "Count")
     notes = _field(empty, "Notes")
@@ -452,6 +477,7 @@ def test_firefox_hidden_tabs_are_absent_and_not_clickable(firefox_form, tmp_path
     """Live Firefox. Background tab and the preloaded New Tab are not targets."""
     driver = firefox_form
     runtime = _runtime(tmp_path, driver)
+    _observe_form(runtime)
     text = runtime.desktop_snapshot("firefox", mode="full")
     snap = runtime._current
     titles = {el.title for el in snap.elements}
@@ -496,8 +522,7 @@ def test_firefox_background_ref_is_not_showing_not_stale(firefox_form, tmp_path)
     is refused, and it does not say re-observe."""
     driver = firefox_form
     runtime = _runtime(tmp_path, driver)
-    runtime.desktop_snapshot("firefox")
-    snap = runtime._current
+    snap = _observe_form(runtime)
     assert snap is not None
     name = _field(snap, "Name")
     assert name is not None, _dump(driver)
@@ -568,8 +593,7 @@ def test_firefox_type_and_key_with_app_carry_an_outcome(firefox_form, tmp_path) 
     """
     driver = firefox_form
     runtime = _runtime(tmp_path, driver)
-    runtime.desktop_snapshot("firefox")
-    snap = runtime._current
+    snap = _observe_form(runtime)
     assert snap is not None
     name = _field(snap, "Name")
     assert name is not None, _dump(driver)
@@ -588,8 +612,7 @@ def test_firefox_second_inert_click_without_a_snapshot_is_suspected_noop(firefox
     """Live Firefox. Retry an inert click only with complete unchanged reads."""
     driver = firefox_form
     runtime = _runtime(tmp_path, driver)
-    runtime.desktop_snapshot("firefox")
-    snap = runtime._current
+    snap = _observe_form(runtime, ("Div button",))
     assert snap is not None
     button = next((el for el in snap.elements if el.title == "Div button" and el.clickable), None)
     assert button is not None, _dump(driver)
@@ -1519,3 +1542,33 @@ def test_linux_firefox_set_value_on_select_in_modal_dialog_keeps_it_open(tmp_pat
     finally:
         _stop(proc)
         proc._log.close()  # type: ignore[attr-defined]
+
+
+def test_observe_form_rereads_until_the_page_is_exposed() -> None:
+    """A first read of only the menu bar is retried; the last read is returned on a miss."""
+    def node(title):
+        return type("Node", (), {"title": title})()
+
+    menu = node("Application")
+    page = [node(t) for t in _FORM_FIELDS]
+
+    class _Runtime:
+        def __init__(self, reads):
+            self.reads = list(reads)
+            self.calls = 0
+            self._current = None
+
+        def desktop_snapshot(self, app):
+            assert app == "firefox"
+            self.calls += 1
+            elements = self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
+            self._current = type("Snap", (), {"elements": elements})()
+
+    flaky = _Runtime([[menu], [menu], [menu, *page]])
+    assert {el.title for el in _observe_form(flaky, timeout_s=10.0).elements} >= set(_FORM_FIELDS)
+    assert flaky.calls == 3
+
+    never = _Runtime([[menu]])
+    snap = _observe_form(never, timeout_s=0.5)
+    assert [el.title for el in snap.elements] == ["Application"]
+    assert 1 < never.calls < 10
