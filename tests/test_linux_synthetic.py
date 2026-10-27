@@ -22996,3 +22996,56 @@ def test_live_window_contexts_lists_every_published_window_and_never_guesses(mon
         raise RuntimeError("busy")
     monkeypatch.setattr(_atspi, "find_root", boom)
     assert driver.live_window_contexts("wizard") is None
+
+
+def _fake_gecko_entry(monkeypatch, *, text: str, caret: int, selection=None, states=("SINGLE_LINE",),
+                      gecko=True, secure=False):
+    import types
+
+    from a11y_computer_use.drivers import _atspi
+
+    state = {"caret": caret}
+    text_api = types.SimpleNamespace(
+        get_character_count=lambda acc: len(text),
+        get_caret_offset=lambda acc: state["caret"],
+        set_caret_offset=lambda acc, offset: state.__setitem__("caret", offset) or True,
+        get_n_selections=lambda acc: 1 if selection else 0,
+        get_selection=lambda acc, n: selection,
+    )
+    monkeypatch.setattr(_atspi, "_atspi", lambda: types.SimpleNamespace(Text=text_api))
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: gecko)
+    monkeypatch.setattr(_atspi, "_gecko_contenteditable", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in states)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: secure)
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object())
+    monkeypatch.setattr(_atspi, "_selection_bounds", lambda value: value)
+    return state
+
+
+@pytest.mark.parametrize("states", [("SINGLE_LINE",), ("MULTI_LINE",)])
+def test_gecko_entry_caret_moves_to_the_end_of_a_prefilled_field(monkeypatch, states):
+    """#1236: Firefox focuses a prefilled input or textarea with the caret at 0."""
+    from a11y_computer_use.drivers import _atspi
+
+    state = _fake_gecko_entry(monkeypatch, text="keep me", caret=0, states=states)
+    assert _atspi.gecko_entry_caret_to_end(object()) is True
+    assert state["caret"] == len("keep me")
+
+
+@pytest.mark.parametrize("case", ["selection", "not_gecko", "secure", "not_an_entry", "at_end", "empty"])
+def test_gecko_entry_caret_is_left_alone_when_it_is_not_a_plain_prefilled_entry(monkeypatch, case):
+    from a11y_computer_use.drivers import _atspi
+
+    kwargs = {
+        "selection": {"selection": (0, 7)},
+        "not_gecko": {"gecko": False},
+        "secure": {"secure": True},
+        "not_an_entry": {"states": ()},
+        "at_end": {"caret": 7},
+        "empty": {"text": ""},
+    }[case]
+    params = {"text": "keep me", "caret": 0}
+    params.update(kwargs)
+    state = _fake_gecko_entry(monkeypatch, **params)
+    assert _atspi.gecko_entry_caret_to_end(object()) is False
+    assert state["caret"] == params["caret"]

@@ -5311,6 +5311,7 @@ class LinuxDriver:
             math_focused = self._run(lambda: (
                 _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
             ))
+            had_focus = self._run(lambda: _atspi._focus_on_target(handle))
             if not math_focused:
                 handle = self._focus_web_entry(element, handle, context=context)
                 self._run(lambda: _atspi.grab_focus(handle))
@@ -5320,6 +5321,12 @@ class LinuxDriver:
                 handle = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
                 )
+            if not had_focus:
+                # Firefox puts the caret of a prefilled input or textarea at
+                # offset 0 when it is just focused, so the keys would land
+                # in front of the existing text. A field that already had
+                # focus keeps the caret the page or the user set.
+                self._run(lambda: _atspi.gecko_entry_caret_to_end(handle))
         self._focused_editable = handle
         peers: dict = {}
         try:
