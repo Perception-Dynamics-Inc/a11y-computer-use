@@ -7795,7 +7795,14 @@ def chromium_snapshot_root(root):
             and _application_bar_frame(app) is None
             and not _is_browser_bar_frame(root)
         ):
-            return _chrome_page_window(app, root)
+            page = _chrome_page_window(app, root)
+            # The one clear can run while Escape is still closing the bar.
+            # libatspi then caches the transient empty frame, and every later
+            # read is that untitled group with no rows. Only that empty
+            # result clears again: it has no document, so the clear does not
+            # re-walk a page and the short-page budget is kept.
+            if not _sparse_untitled_chrome_frame(page):
+                return page
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
@@ -14536,9 +14543,32 @@ def _combo_entry(acc):
         acc_key = _atspi_wrapper_key(acc)
         if parent is not acc and (acc_key is None or _atspi_wrapper_key(parent) != acc_key):
             continue
+        # The parent link is not enough. Firefox reuses accessible ids, so a
+        # cached child path of a <select> can come to name the focused Notes
+        # field while libatspi still caches the <select> as its parent: both
+        # cached reads agree and both are stale. Extents are a live read, and
+        # an entry that belongs to this combo is drawn inside it.
+        if not _entry_drawn_inside(acc, child):
+            continue
         if _editable_iface(child) is not None or role in {"entry", "text"}:
             return child
     return None
+
+
+def _entry_drawn_inside(combo, entry) -> bool:
+    """False when both boxes are readable and the entry's center is outside the combo.
+
+    An unreadable box on either side is not evidence against the entry.
+    """
+    cpos, csize = _extents(combo)
+    epos, esize = _extents(entry)
+    if cpos is None or csize is None or epos is None or esize is None:
+        return True
+    if csize[0] < 0 or esize[0] < 0:
+        return True
+    cx = epos[0] + esize[0] / 2.0
+    cy = epos[1] + esize[1] / 2.0
+    return cpos[0] <= cx <= cpos[0] + csize[0] and cpos[1] <= cy <= cpos[1] + csize[1]
 
 
 def _label_texts(acc) -> set[str]:

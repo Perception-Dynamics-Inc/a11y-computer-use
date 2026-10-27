@@ -23049,3 +23049,85 @@ def test_gecko_entry_caret_is_left_alone_when_it_is_not_a_plain_prefilled_entry(
     state = _fake_gecko_entry(monkeypatch, **params)
     assert _atspi.gecko_entry_caret_to_end(object()) is False
     assert state["caret"] == params["caret"]
+
+def test_chromium_snapshot_root_clears_again_when_the_cleared_read_is_empty() -> None:
+    """Synthetic AT-SPI nodes, not a live Chrome.
+
+    The one clear per latch can run while Escape is still closing the find
+    bar. libatspi then caches only the empty untitled frame. A later read of
+    that pid must clear again and return the titled page window, not the
+    empty group (the scroll_to_find ROW-0300 "not found after 0 scroll(s)",
+    "last_rows: none" CI flake). A cleared read that is already the page is
+    not cleared again.
+    """
+
+    class _States:
+        def __init__(self, names):
+            self.names = frozenset(names)
+
+    clears: list[str] = []
+
+    class _Node:
+        def __init__(self, name, *, role="frame", children=(), states=(), pid=6262):
+            self._name = name
+            self._role = role
+            self._children = list(children)
+            self._fresh = None
+            self._states = frozenset(states)
+            self._pid = pid
+            self._app = None
+
+        def get_name(self):
+            return self._name
+
+        def get_role_name(self):
+            return self._role
+
+        def get_child_count(self):
+            return len(self._children)
+
+        def get_child_at_index(self, index):
+            return self._children[index]
+
+        def get_state_set(self):
+            return _States(self._states)
+
+        def get_process_id(self):
+            return self._pid
+
+        def get_application(self):
+            return self._app
+
+        def get_toolkit_name(self):
+            return "Chrome"
+
+        def clear_cache(self):
+            clears.append(self._role)
+            if self._fresh is not None:
+                self._children = list(self._fresh)
+
+    filler = _Node("", role="panel")
+    empty = _Node("", children=[_Node("", role="panel", children=[filler])],
+                  states=("ACTIVE", "SHOWING"))
+    page = _Node("rowtable - Google Chrome", states=("SHOWING",),
+                 children=[_Node("rowtable", role="document web")])
+    app = _Node("Google Chrome", role="application", children=[empty])
+    app._fresh = [empty, page]
+    empty._app = app
+    page._app = app
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    try:
+        _atspi._BROWSER_BAR_PIDS.add(6262)
+        _atspi._BROWSER_BAR_CLEARED.add(6262)
+        assert _atspi.chromium_snapshot_root(empty) is page
+        assert "application" in clears
+        clears.clear()
+        assert _atspi.chromium_snapshot_root(empty) is page
+        assert clears == []
+    finally:
+        _atspi._BROWSER_BAR_PIDS.clear()
+        _atspi._BROWSER_BAR_CLEARED.clear()
+        _atspi._BROWSER_BAR_OPEN.clear()
