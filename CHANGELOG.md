@@ -35,7 +35,7 @@ Ninety commits since v0.4.76, through #1207.
 - A launched name and a Windows id name only their own program. Refs #1191 (#1196) (3eff0b8, 2026-10-27).
 - No retry hints after typed input reached a busy Chromium page. Refs #1190 (#1195) (05c0f63, 2026-10-27).
 - Linux: rebuild the key map on a keyboard layout change and never confirm a mismatched keysym. Refs #1198 (#1200) (8cb29e7, 2026-10-27).
-- Chrome reload starts a new ref epoch instead of refusing every fresh ref as `stale_ref`; a control that became irreversible after the reload and a replaced document still return `stale_ref` ahead of the confirmation gate and the display-clipped refusal. Refs #1204 (#1207) (HASH1207, 2026-10-27).
+- Chrome reload starts a new ref epoch instead of refusing every fresh ref as `stale_ref`; a control that became irreversible after the reload and a replaced document still return `stale_ref` ahead of the confirmation gate and the display-clipped refusal. Refs #1204 (#1207) (e4ed295, 2026-10-27).
 
 ### Observation and refs
 
