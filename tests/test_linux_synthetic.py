@@ -23079,3 +23079,22 @@ def test_chromium_snapshot_root_clears_again_when_the_cleared_read_is_empty() ->
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()
         _atspi._BROWSER_BAR_OPEN.clear()
+
+
+def test_calc_cell_comment_comes_from_the_note_attribute(fake_atspi) -> None:
+    """Refs #1248. Synthetic cells. Not a live Calc window.
+
+    Calc publishes a cell comment as the cell's ``Note`` attribute with no
+    hover. Only a LibreOffice table cell with a non-blank Note has one.
+    """
+    office = _Acc("application", name="soffice")
+    other = _Acc("application", name="gnumeric")
+    cell = _Acc("table cell", name="B2")
+    cell.get_application = lambda: office
+    assert _atspi._calc_cell_comment(cell, "table cell", {"Note": "Check stock\nlevel"}) == "Check stock level"
+    assert _atspi._calc_cell_comment(cell, "table cell", {"Note": "  "}) == ""
+    assert _atspi._calc_cell_comment(cell, "table cell", {}) == ""
+    assert _atspi._calc_cell_comment(cell, "paragraph", {"Note": "x"}) == ""
+    foreign = _Acc("table cell", name="B2")
+    foreign.get_application = lambda: other
+    assert _atspi._calc_cell_comment(foreign, "table cell", {"Note": "x"}) == ""

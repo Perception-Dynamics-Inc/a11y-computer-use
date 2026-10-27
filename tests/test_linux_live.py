@@ -14598,3 +14598,61 @@ def test_linux_chrome_refs_from_a_fresh_snapshot_click_after_a_reload(tmp_path) 
         )
     finally:
         _stop_group(proc)
+
+
+def test_linux_calc_cell_comments_show_in_snapshot_and_find(tmp_path) -> None:
+    """Live Calc. Refs #1248. Cell comments are readable without a hover.
+
+    B2 has "Check stock level" and C3 has "Region pending review". The
+    snapshot shows both on their cells, and find matches each comment to
+    its cell. A1 has no comment. The pointer is never moved. Only this
+    test's own soffice group is stopped.
+    """
+    import re
+    import shutil
+    from pathlib import Path
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    doc = tmp_path / "comments.fods"
+    shutil.copy(Path(__file__).parent / "fixtures" / "calc_cell_comments.fods", doc)
+    profile = tmp_path / "lo-comments"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env.update(SAL_USE_VCLPLUGIN="gtk3", GTK_MODULES="gail:atk-bridge", NO_AT_BRIDGE="0")
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(doc),
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        runtime = None
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                runtime = runtime or _runtime_for(tmp_path, driver, "soffice")
+                if 'cell "B2"' in runtime.find("soffice", text="B2"):
+                    break
+            except ComputerUseError:
+                continue
+        assert runtime is not None, "Calc did not expose B2"
+        shot = runtime.desktop_snapshot("soffice")
+        assert re.search(r'cell "B2" hint="comment: Check stock level"', shot), shot[:2000]
+        assert re.search(r'cell "C3" hint="comment: Region pending review"', shot), shot[:2000]
+        assert not re.search(r'cell "A1" hint=', shot)
+        first = runtime.find("soffice", text="Check stock level")
+        assert "1 match" in first and 'cell "B2"' in first, first
+        second = runtime.find("soffice", text="Region pending review")
+        assert "1 match" in second and 'cell "C3"' in second, second
+    finally:
+        _stop_group(proc)
