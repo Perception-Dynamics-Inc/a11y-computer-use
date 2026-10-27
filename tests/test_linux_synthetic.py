@@ -22389,6 +22389,7 @@ def test_a_keysym_that_does_not_match_the_request_is_reported_not_confirmed(
     assert "keyboard layout mismatch" in result.evidence
     assert list(result.next) == []
 
+
 @pytest.mark.parametrize("scope", [Scope.APP, Scope.WINDOW])
 def test_find_root_refuses_prefix_neighbour_when_named_app_is_gone(fake_atspi, monkeypatch, scope) -> None:
     """#1191: ``python`` must not bind to the ``python3`` application's tree."""
