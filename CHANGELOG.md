@@ -9,7 +9,7 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.77] - 2026-10-27
 
-Seventy-eight commits since v0.4.76, through #1186.
+Ninety commits since v0.4.76, through #1207.
 
 ### Safety
 
@@ -30,6 +30,12 @@ Seventy-eight commits since v0.4.76, through #1186.
 - Report display clipping without unsafe retry hints. Fixes #1111 (#1115) (f6f33fa, 2026-10-26).
 - Linux: fail fast for LibreOffice with no accessibility bridge. Fixes #1183 (#1186) (16b3d7f, 2026-10-27).
 - Re-resolve an evicted ref in actionable waits. Refs #1175 (#1176) (ad61a1b, 2026-10-27).
+- Never resolve an app name to a longer program sharing its prefix, so `python` is not `python3` and `firefox` is not `firefox-esr`. Refs #1191 (#1193) (d58ac5e, 2026-10-27).
+- Permission grants cover one program, not an alias family: a chrome grant no longer covers chromium. Refs #1191 (#1194) (b41a2a2, 2026-10-27).
+- A launched name and a Windows id name only their own program. Refs #1191 (#1196) (3eff0b8, 2026-10-27).
+- No retry hints after typed input reached a busy Chromium page. Refs #1190 (#1195) (05c0f63, 2026-10-27).
+- Linux: rebuild the key map on a keyboard layout change and never confirm a mismatched keysym. Refs #1198 (#1200) (8cb29e7, 2026-10-27).
+- Chrome reload starts a new ref epoch instead of refusing every fresh ref as `stale_ref`; a control that became irreversible after the reload and a replaced document still return `stale_ref` ahead of the confirmation gate and the display-clipped refusal. Refs #1204 (#1207) (HASH1207, 2026-10-27).
 
 ### Observation and refs
 
@@ -85,6 +91,9 @@ Seventy-eight commits since v0.4.76, through #1186.
 - Verify menu commands that open native dialogs. Fixes #1096 (#1109) (55cf918, 2026-10-26).
 - Selection ancestor walk mistakes app root and desktop for a cycle. Fixes #1181 (#1182) (76129b4, 2026-10-27).
 - Keep digit menu accelerators such as Ctrl+1. Fixes #1177 (#1179) (a022e26, 2026-10-27).
+- Name and verify LibreOffice sidebar toggle buttons. Fixes #1184 (#1187) (7a954e3, 2026-10-27).
+- Name `no_accessibility_bridge` for type and key into a LibreOffice with no accessibility bridge. Fixes #1183 (#1197) (4fd26a4, 2026-10-27).
+- Writer Navigator double-click: a sidebar tab is not a path-bar crumb, and a clip needs the click point off screen. Fixes #1202 (#1206) (cdb1d9e, 2026-10-27).
 
 ### Performance
 
@@ -103,10 +112,21 @@ Seventy-eight commits since v0.4.76, through #1186.
 ### Benchmark
 
 - Stop AT-SPI before baseline CLI finalization. (#1104) (2bcec2f, 2026-10-25).
+- Latency harness: wait for Chrome to expose the page before the R13 rows' timer. (#1203) (2529a09, 2026-10-27).
+
+### CI
+
+- Bound the Linux job to 90 minutes and its apt install steps to 15. (#1185) (d56bb1e, 2026-10-27).
+- Retry apt on a stalled mirror, with a mirror fallback; timeouts unchanged. (#1201) (9a7b1e9, 2026-10-27).
 
 ### Packaging
 
 - The package version is 0.4.77.
+
+### Known issues
+
+- Linux, Chrome at `--force-device-scale-factor` 1.5 or 2 (#1208): tab strip and toolbar refs report unscaled bounds, so a click on a tab ref can activate a neighbouring tab and report `confirmed`. At the default scale of 1 clicks land correctly. Fix proposed in #1209; it leads 0.4.78.
+- Linux multi-monitor (#1210): RandR monitors are treated as one display, so `screenshot` cannot target one monitor and a window in the gap between monitors is reported on screen. Planned for 0.4.78.
 
 ## [0.4.76] - 2026-10-23
 
