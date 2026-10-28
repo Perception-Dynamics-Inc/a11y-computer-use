@@ -197,38 +197,100 @@ def grant_exe(name: str) -> str | None:
     return None
 
 
-def _ppid(pid: int) -> int | None:
-    """Parent pid from ``/proc/<pid>/status`` (readable for non-dumpable processes)."""
+def _status(pid: int) -> tuple[int | None, tuple[int, ...]]:
+    """(PPid, NSpid) from ``/proc/<pid>/status`` (readable for non-dumpable processes).
+
+    Both are kernel-maintained: a process cannot rewrite its parent or the
+    pid namespaces it was created in.
+    """
+    ppid: int | None = None
+    nspid: tuple[int, ...] = ()
     try:
         with open(f"/proc/{int(pid)}/status", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if line.startswith("PPid:"):
-                    return int(line.split()[1])
+                    ppid = int(line.split()[1])
+                elif line.startswith("NSpid:"):
+                    nspid = tuple(int(x) for x in line.split()[1:])
     except (OSError, ValueError, IndexError):
-        return None
-    return None
+        return None, ()
+    return ppid, nspid
+
+
+def _gone(pid: int) -> bool:
+    """True for a zombie or dead process (State Z/X), or one that has exited.
+
+    Its ``/proc/PID/exe`` is unreadable because the kernel already dropped
+    its memory map, not because of anything it chose; it runs no code, owns
+    no window and no AT-SPI connection. Chrome's zygote reaps exited
+    renderers lazily, so they linger as zombies after every navigation.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    state = text[text.rfind(")") + 2: text.rfind(")") + 3]
+    return state in ("Z", "X", "x")
+
+
+def _ppid(pid: int) -> int | None:
+    """Parent pid from ``/proc/<pid>/status``."""
+    return _status(pid)[0]
 
 
 def _verified_ancestor_exe(pid: int, exes: dict[int, str | None]) -> str | None:
-    """Exe of the nearest same-name ancestor when ``pid``'s own exe is unreadable.
+    """Exe of the verified Chrome browser behind an unreadable sandbox helper.
 
-    Chrome's sandboxed zygote/renderers are non-dumpable, so their
-    ``/proc/PID/exe`` cannot be read. Such a process is accepted only as a
-    descendant of a named process whose exe IS readable; that ancestor's exe
-    is then checked like any other (recorded path or system-owned). A
-    stand-alone process that makes itself non-dumpable has no such ancestor
-    and stays unreadable, so it is still refused.
+    Chrome's sandboxed zygote/renderers can be non-dumpable, so their
+    ``/proc/PID/exe`` may be unreadable. A name and a non-dumpable flag are
+    both self-chosen, so being a non-dumpable descendant of Chrome proves
+    nothing (a launch-flag, native-messaging or protocol-handler child of
+    the browser can ``prctl(PR_SET_DUMPABLE, 0)`` and rename itself).
+
+    What the child cannot choose is where the kernel created it: Chrome's
+    namespace sandbox clones the zygote straight into a new pid namespace
+    (``clone(CLONE_NEWPID)``) from the browser process itself, so the
+    zygote is pid 1 of a namespace one level below the browser and its
+    parent is the browser. Any process the browser fork+execs (every helper
+    route) lands in the browser's own namespace; it can make a namespace
+    of its own only for its *children*, whose namespace init then has that
+    helper, not the browser, as parent. So an unreadable process passes
+    only when:
+
+    * every step up its PPid chain stays inside the named processes,
+      either in the same pid namespace (same NSpid depth) or by leaving a
+      namespace whose init it is (innermost NSpid 1, depth one less);
+    * the first readable ancestor is reached by such a namespace exit,
+      i.e. that ancestor itself created the sandbox namespace.
+
+    The readable ancestor's exe is returned and then checked like any other
+    (recorded path or system-owned). Anything else returns None (refused).
     """
     seen = {pid}
-    cur = _ppid(pid)
-    while cur and cur > 1 and cur not in seen:
-        seen.add(cur)
-        if cur in exes:
-            if exes[cur] is not None:
-                return exes[cur]
-        else:
+    cur = pid
+    cur_ppid, cur_ns = _status(cur)
+    if not cur_ns:
+        return None
+    while cur_ppid and cur_ppid > 1 and cur_ppid not in seen:
+        parent = cur_ppid
+        seen.add(parent)
+        if parent not in exes:
             return None  # the chain leaves the named processes
-        cur = _ppid(cur)
+        parent_ppid, parent_ns = _status(parent)
+        if not parent_ns:
+            return None
+        if len(parent_ns) == len(cur_ns):
+            crossed = False
+        elif len(parent_ns) == len(cur_ns) - 1 and cur_ns[-1] == 1:
+            crossed = True
+        else:
+            return None
+        if exes[parent] is not None:
+            return exes[parent] if crossed else None
+        cur, cur_ppid, cur_ns = parent, parent_ppid, parent_ns
     return None
 
 
@@ -244,6 +306,10 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     if not pids or interpreter_key(name):
         return name, None
     exes = {pid: exe_of(pid) for pid in pids}
+    # A zombie's exe is unreadable because it has exited; it is not a live app.
+    exes = {pid: exe for pid, exe in exes.items() if exe is not None or not _gone(pid)}
+    if not exes:
+        return name, None
     exes = {pid: (exe if exe is not None else _verified_ancestor_exe(pid, exes))
             for pid, exe in exes.items()}
     hosts = {interpreter_key(e) for e in exes.values() if interpreter_key(e)}

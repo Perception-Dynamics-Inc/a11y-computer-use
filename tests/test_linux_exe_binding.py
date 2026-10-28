@@ -286,31 +286,149 @@ def test_grant_records_the_installed_binary(monkeypatch) -> None:
     assert _linux_exe.grant_exe("python3") is None
 
 
-def test_unreadable_child_of_a_verified_process_inherits_its_exe(monkeypatch) -> None:
-    """Chrome's non-dumpable renderers: unreadable exe, parent is the real chrome."""
+CHROME = "/opt/google/chrome/chrome"
+
+
+def _procs(monkeypatch, table: dict[int, tuple[str | None, int, tuple[int, ...]]], named=None,
+           zombies=None):
+    """Fake /proc: pid -> (readable exe or None, PPid, NSpid)."""
     from a11y_computer_use.drivers import _linux_exe as m
 
-    monkeypatch.setattr(m, "pids_named", lambda n: {10, 11, 12})
-    monkeypatch.setattr(m, "exe_of", lambda pid: "/opt/google/chrome/chrome" if pid == 10 else None)
-    monkeypatch.setattr(m, "_ppid", lambda pid: {11: 10, 12: 11, 10: 1}.get(pid))
-    assert m.check("chrome", "/opt/google/chrome/chrome") == ("chrome", None)
+    names = set(table) if named is None else set(named)
+    monkeypatch.setattr(m, "pids_named", lambda n: set(names))
+    monkeypatch.setattr(m, "exe_of", lambda pid: table[pid][0] if pid in table else None)
+    monkeypatch.setattr(m, "_status", lambda pid: (table[pid][1], table[pid][2]) if pid in table else (None, ()))
+    monkeypatch.setattr(m, "_gone", lambda pid: pid in (zombies or ()))
+    return m
+
+
+def test_unreadable_child_of_a_verified_process_inherits_its_exe(monkeypatch) -> None:
+    """Real Chrome (as measured on the box): browser -> zygote (pid 1 of a new
+    pid ns) -> zygote child -> renderers (each pid 1 of a nested ns), all unreadable."""
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        11: (None, 10, (11, 1)),
+        12: (None, 11, (12, 3)),
+        13: (None, 12, (13, 14, 1)),
+        14: (None, 12, (14, 26, 1)),
+    })
+    assert m.check("chrome", CHROME) == ("chrome", None)
 
 
 def test_unreadable_process_without_a_verified_named_parent_is_refused(monkeypatch) -> None:
     """A spoof that sets PR_SET_DUMPABLE=0 has no verified chrome ancestor."""
-    from a11y_computer_use.drivers import _linux_exe as m
-
-    monkeypatch.setattr(m, "pids_named", lambda n: {10, 20})
-    monkeypatch.setattr(m, "exe_of", lambda pid: "/opt/google/chrome/chrome" if pid == 10 else None)
-    monkeypatch.setattr(m, "_ppid", lambda pid: {20: 500, 500: 1, 10: 1}.get(pid))
-    key, hint = m.check("chrome", "/opt/google/chrome/chrome")
+    m = _procs(monkeypatch, {10: (CHROME, 1, (10,)), 20: (None, 500, (20,))}, named={10, 20})
+    key, hint = m.check("chrome", CHROME)
     assert hint and "(unreadable)" in hint
 
 
 def test_unreadable_child_of_a_spoofed_parent_is_refused(monkeypatch) -> None:
+    m = _procs(monkeypatch, {30: ("/tmp/x/chrome", 1, (30,)), 31: (None, 30, (31, 1))})
+    assert m.check("chrome", CHROME)[1]
+
+
+def test_non_dumpable_launch_flag_child_of_real_chrome_is_refused(monkeypatch) -> None:
+    """Tester run 2339: a process real Chrome fork+execs (launch flag) that
+    renames itself chrome and sets PR_SET_DUMPABLE=0 stays in the browser's
+    pid namespace, so it is not the browser's sandbox namespace init."""
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        11: (None, 10, (11, 1)),      # the genuine zygote still passes
+        20: (None, 10, (20,)),        # the spoof
+    })
+    key, hint = m.check("chrome", CHROME)
+    assert hint and "(unreadable)" in hint
+
+
+def test_non_dumpable_native_messaging_host_with_own_namespace_is_refused(monkeypatch) -> None:
+    """A native-messaging host (non-dumpable, same ns as the browser) that
+    unshares a pid namespace: its child is a namespace init, but its parent
+    is the host, not the verified browser."""
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        20: (None, 10, (20,)),
+        21: (None, 20, (21, 1)),
+        22: (None, 21, (22, 2)),
+    })
+    assert m.check("chrome", CHROME)[1]
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        20: (None, 10, (20,)),
+        21: (None, 20, (21, 1)),
+    }, named={10, 21})                 # the host itself is not named chrome
+    assert m.check("chrome", CHROME)[1]
+
+
+def test_protocol_handler_child_namespace_under_a_foreign_exe_is_refused(monkeypatch) -> None:
+    """A protocol handler (readable, its own exe) whose namespace child calls
+    itself chrome: the readable ancestor is the handler, refused either way."""
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        20: ("/usr/bin/xdg-open-handler", 10, (20,)),
+        21: (None, 20, (21, 1)),
+    }, named={10, 21})
+    assert m.check("chrome", CHROME)[1]
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        20: ("/home/u/chrome", 10, (20,)),
+        21: (None, 20, (21, 1)),
+    })
+    assert m.check("chrome", CHROME)[1]
+
+
+def test_unreadable_process_skipping_a_namespace_level_is_refused(monkeypatch) -> None:
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        11: (None, 10, (11, 5, 1)),   # two levels down: not a clone by the browser
+    })
+    assert m.check("chrome", CHROME)[1]
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        11: (None, 10, (11, 7)),      # deeper but not the namespace init
+    })
+    assert m.check("chrome", CHROME)[1]
+
+
+def test_status_reads_the_kernel_ppid_and_nspid() -> None:
+    import os
+
     from a11y_computer_use.drivers import _linux_exe as m
 
-    monkeypatch.setattr(m, "pids_named", lambda n: {30, 31})
-    monkeypatch.setattr(m, "exe_of", lambda pid: "/tmp/x/chrome" if pid == 30 else None)
-    monkeypatch.setattr(m, "_ppid", lambda pid: {31: 30, 30: 1}.get(pid))
-    assert m.check("chrome", "/opt/google/chrome/chrome")[1]
+    ppid, nspid = m._status(os.getpid())
+    assert ppid == os.getppid() and nspid and nspid[0] == os.getpid()
+    assert m._status(2**22 + 12345) == (None, ())
+
+
+def test_a_zombie_renderer_does_not_refuse_real_chrome(monkeypatch) -> None:
+    """CI on 80b8530e: an exited renderer the zygote has not reaped yet has an
+    unreadable exe; it is gone, not a spoof, so real Chrome keeps its grant."""
+    m = _procs(monkeypatch, {
+        10: (CHROME, 1, (10,)),
+        11: (CHROME, 10, (11,)),
+        12: (None, 11, (12,)),
+    }, zombies={12})
+    assert m.check("chrome", CHROME) == ("chrome", None)
+
+
+def test_a_live_non_dumpable_process_is_not_treated_as_gone(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (CHROME, 1, (10,)), 12: (None, 10, (12,))}, zombies=set())
+    assert m.check("chrome", CHROME)[1]
+
+
+def test_gone_reads_the_kernel_state() -> None:
+    import os
+    import subprocess
+
+    from a11y_computer_use.drivers import _linux_exe as m
+
+    assert m._gone(os.getpid()) is False
+    child = subprocess.Popen(["true"])
+    for _ in range(200):
+        if m._gone(child.pid):
+            break
+        import time
+        time.sleep(0.01)
+    assert m._gone(child.pid) is True      # exited, not yet reaped: a zombie
+    assert m.exe_of(child.pid) is None
+    child.wait()
+    assert m._gone(child.pid) is True      # reaped: /proc entry gone
