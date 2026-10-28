@@ -197,3 +197,40 @@ def test_a_cell_readback_for_another_ref_is_not_used(rig, monkeypatch):
     drv._type_expected = None
     (verdict, _ev), _r = _judge_cell_edit(monkeypatch, drv, "Bob", "Alice", "Bob")
     assert verdict != "confirmed"
+
+
+def test_a_qt_list_item_also_opens_the_cell_editor(rig):
+    # #1288: QListWidget items snapshot as AXRow, not AXCell.
+    import dataclasses
+
+    drv, _cell, _keys = rig
+    row = dataclasses.replace(_element(), role="AXRow", path=("AXRow",))
+    assert drv.opens_cell_editor(row) is True
+    rt = SimpleNamespace(driver=drv)
+    assert Runtime._type_target_error(rt, row) is None
+    button = dataclasses.replace(_element(), role="AXButton", path=("AXButton",))
+    assert drv.opens_cell_editor(button) is False
+
+
+class _Node:
+    def __init__(self, role, parent=None, table_cell=True, editable=False):
+        self.role, self.parent = role, parent
+        self.table_cell, self.editable = table_cell, editable
+
+
+@pytest.mark.parametrize("role,parent_role,table_cell,expect", [
+    ("list item", "list", True, True),      # QListWidget item (#1288)
+    ("table cell", "table", True, True),    # QTableWidget cell (#1278)
+    ("list item", "list", False, False),    # no TableCell: another toolkit's row
+    ("list item", "panel", True, False),    # not inside an item view
+    ("push button", "list", True, False),
+])
+def test_qt_item_view_cell_accepts_qt_list_items(monkeypatch, role, parent_role, table_cell, expect):
+    view = _Node(parent_role)
+    node = _Node(role, parent=view, table_cell=table_cell)
+    monkeypatch.setattr(_atspi, "_qt_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_role_name", lambda acc: acc.role)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda acc: acc.parent)
+    monkeypatch.setattr(_atspi, "_table_cell_iface", lambda acc: object() if acc.table_cell else None)
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object() if acc.editable else None)
+    assert _atspi.qt_item_view_cell(node) is expect
