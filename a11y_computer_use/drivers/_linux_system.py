@@ -1012,6 +1012,81 @@ def grant_app_id(identifier: str, resolved: str | None = None) -> str:
     return resolved
 
 
+_INTERPRETER_RE = re.compile(r"^(python|pypy)[0-9.]*(-dbg)?$")
+#: CPython options that consume the next argument.
+_PY_VALUE_OPTS = frozenset({"-W", "-X", "-Q"})
+
+
+def is_interpreter(name: str) -> bool:
+    """True for a Python interpreter comm such as ``python3`` or ``python3.12``."""
+    return bool(_INTERPRETER_RE.match(os.path.basename(name or "")))
+
+
+def script_identity(pid: int) -> str | None:
+    """Realpath of the script a Python interpreter ``pid`` runs, or None.
+
+    Read from ``/proc/PID/exe`` and ``/proc/PID/cmdline``. ``-c``, ``-m``,
+    stdin, or anything unparsable gives None: no positive identity.
+    """
+    try:
+        exe = os.path.realpath(f"/proc/{int(pid)}/exe")
+        if not is_interpreter(os.path.basename(exe)):
+            return None
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
+            argv = [a.decode("utf-8", "surrogateescape") for a in fh.read().split(b"\0") if a]
+        cwd = os.readlink(f"/proc/{int(pid)}/cwd")
+    except (OSError, ValueError):
+        return None
+    return _script_from_argv(argv, cwd)
+
+
+def _script_from_argv(argv: list[str], cwd: str) -> str | None:
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg == "-" or (arg.startswith("-") and not arg.startswith("--")
+                          and ("c" in arg[1:] or "m" in arg[1:])):
+            return None  # -c / -m / stdin (also bundled, e.g. -uc): no script
+        if arg in _PY_VALUE_OPTS:
+            i += 2
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        break
+    if i >= len(argv) or not argv[i] or argv[i] == "-":
+        return None
+    path = argv[i] if os.path.isabs(argv[i]) else os.path.join(cwd, argv[i])
+    real = os.path.realpath(path)
+    return real if os.path.isfile(real) else None
+
+
+def prgname_scripts(identifier: str, resolved: str) -> list[str | None]:
+    """Script identities of every window claiming prgname ``identifier``.
+
+    One entry per mapped window of ``resolved`` (the comm) whose WM_CLASS
+    instance is exactly ``identifier``; None where no identity is provable.
+    Empty when no such window is mapped. Read fresh on every call.
+    """
+    found: list[str | None] = []
+    want = (identifier or "").strip()
+    if not want:
+        return found
+    with _open_display() as d:
+        for win in _managed_windows(d):
+            if (_app_id(win, d) or "").lower() != (resolved or "").lower():
+                continue
+            instance, _klass = _wm_class_strings(win, d)
+            if (instance or "") != want:
+                continue
+            pid = _pid_of(win, d)
+            found.append(script_identity(pid) if pid else None)
+    return found
+
+
 def _flatpak_application_dirs() -> list[str]:
     home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
     return [

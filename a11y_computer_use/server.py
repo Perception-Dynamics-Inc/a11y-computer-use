@@ -738,12 +738,32 @@ def error_text(exc: ComputerUseError) -> str:
     return " | ".join(parts)
 
 
+#: Interpreter comm -> (requested prgname, live script, grant was bound) from
+#: the last prgname key refused for want of a matching script binding.
+_PRGNAME_HINTS: dict[str, tuple[str, str | None, bool]] = {}
+
+
+def _prgname_hint(app: str, need: str) -> str | None:
+    seen = _PRGNAME_HINTS.get(app)
+    if not seen:
+        return None
+    name, script, bound = seen
+    where = script or "/path/to/script.py"
+    why = ("its grant is bound to a different script" if bound
+           else "a plain name grant is never inherited by an interpreter")
+    return (f"this {app} process names itself {name!r}, but {why}. To grant that script, run "
+            f"`a11y-computer-use grant {name} {need} --script {where}`.")
+
+
 def refusal_text(decision: safety.Decision) -> str:
     """Render a non-ALLOW safety decision as one tool-error line, with the
     one-step way to get the grant when the app is merely ungranted."""
     text = f"{decision.verdict.value}: {decision.reason}"
     if decision.verdict is safety.Verdict.NEEDS_PERMISSION and decision.app:
         need = decision.required.value if decision.required else "click"
+        special = _prgname_hint(decision.app, need)
+        if special:
+            return text + f" | hint: {special}"
         text += (f" | hint: grant_app(app='{decision.app}', tier='{need}') "
                  f"records the grant in this host, or run "
                  f"`a11y-computer-use grant {decision.app} {need}`.")
@@ -2475,6 +2495,7 @@ class Runtime:
         """
         from a11y_computer_use.drivers import _linux_system
 
+        _PRGNAME_HINTS.pop(resolved, None)
         try:
             named = _linux_system.grant_app_id(identifier, resolved)
         except Exception:  # noqa: BLE001 - no X11 evidence keeps the comm
@@ -2487,10 +2508,23 @@ class Runtime:
         name_grant, name_denied, _err, _block = self.store.policy(named)
         if name_denied:
             return named
-        if name_grant is not None and self.store.has_exact_grant(named):
-            # Only a grant keyed on exactly this name: no case folding or
-            # alias reaches another app's grant on this path (#1296).
+        if name_grant is None or not self.store.has_exact_grant(named):
+            return resolved
+        if not _linux_system.is_interpreter(resolved):
+            return resolved
+        # Positive proof only (#1296): a plain name grant is never inherited
+        # by an interpreter. The grant must be bound to a script, and every
+        # window claiming the name must run exactly that script.
+        binding = self.store.script_binding(named)
+        try:
+            scripts = _linux_system.prgname_scripts(named, resolved)
+        except Exception:  # noqa: BLE001 - no evidence keeps the comm
+            scripts = []
+        if binding and scripts and all(script == binding for script in scripts):
+            _PRGNAME_HINTS.pop(resolved, None)
             return named
+        live = next((script for script in scripts if script), None)
+        _PRGNAME_HINTS[resolved] = (named, live, bool(binding))
         return resolved
 
     def _recheck_frontmost_app(self, app: str) -> None:

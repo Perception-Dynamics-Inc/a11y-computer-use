@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace as _NS
 
+import os
+
 import pytest
 
 from a11y_computer_use.drivers import _linux_system
@@ -2170,6 +2172,18 @@ def _prgname_display(monkeypatch, windows: list, comms: dict) -> None:
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
     monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
     monkeypatch.setattr(_linux_system, "_installed_program_names", lambda: {"mousepad"})
+    monkeypatch.setattr(_linux_system, "script_identity", lambda pid: _SCRIPTS.get(pid))
+
+
+#: pid -> script realpath the fake /proc reports (tests set it).
+_SCRIPTS: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _clear_scripts():
+    _SCRIPTS.clear()
+    yield
+    _SCRIPTS.clear()
 
 
 def _gate_runtime(tmp_path, monkeypatch, tiers: dict, deny: tuple = ()):
@@ -2197,11 +2211,15 @@ def test_grant_key_keeps_a_late_mapped_prgname_under_a_long_lived_server(tmp_pat
     windows: list = []
     comms: dict = {}
     _prgname_display(monkeypatch, windows, comms)
-    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": safety.Tier.FULL})
+    script = tmp_path / "P1296app.py"
+    script.write_text("# probe\n")
+    rt = _gate_runtime(tmp_path, monkeypatch, {})
+    rt.store.set_tier("cuprobe1296", safety.Tier.FULL, script=str(script))
     for launch, pid in enumerate((41, 42, 43)):
         windows.clear()
         assert rt._resolve_app("cuprobe1296") == (None, "cuprobe1296")  # not mapped yet
         comms[pid] = "python3"
+        _SCRIPTS[pid] = os.path.realpath(script)
         windows.append(_PrgnameWin(0x100 + launch, pid, b"cuprobe1296", b"P1296app.py"))
         assert _linux_system.resolve_app("cuprobe1296") == "python3"  # the old key
         assert rt._resolve_app("cuprobe1296") == (None, "cuprobe1296")
@@ -2307,3 +2325,146 @@ def test_prgname_key_needs_a_grant_keyed_on_exactly_that_name(tmp_path, monkeypa
     _prgname_display(monkeypatch, [_PrgnameWin(0x800, 97, b"Cuprobe1296", b"x.py")], {97: "python3"})
     rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": safety.Tier.FULL})
     assert rt._resolve_app("Cuprobe1296")[1] == "python3"
+
+
+# --- #1296 positive proof: a python3 prgname needs a grant bound to its script ---
+
+def _bound_runtime(tmp_path, monkeypatch, name="cuprobe1296", script_name="P1296app.py"):
+    from a11y_computer_use import safety
+
+    script = tmp_path / script_name
+    script.write_text("# probe\n")
+    rt = _gate_runtime(tmp_path, monkeypatch, {})
+    rt.store.set_tier(name, safety.Tier.FULL, script=str(script))
+    return rt, os.path.realpath(script)
+
+
+@pytest.mark.parametrize("prgname", ["zzimg", "Zzimg", "Mousepad", "mousepad", "org.xfce.mousepad",
+                                     "cuprobe1296", "localtool"])
+def test_a_plain_name_grant_is_never_inherited_by_python3(tmp_path, monkeypatch, prgname) -> None:
+    """AppImage on PATH, ~/.local/bin off PATH, case and desktop-id spoofs: all python3."""
+    from a11y_computer_use import safety, server
+
+    # The denylist sees nothing installed: only the missing binding refuses.
+    _prgname_display(monkeypatch, [_PrgnameWin(0x900, 101, prgname.encode(), b"x.py")], {101: "python3"})
+    monkeypatch.setattr(_linux_system, "_installed_program_names", lambda: set())
+    _SCRIPTS[101] = "/tmp/attacker.py"
+    rt = _gate_runtime(tmp_path, monkeypatch, {prgname: safety.Tier.FULL, "mousepad": safety.Tier.FULL})
+    key = rt._resolve_app(prgname)[1]
+    assert key == "python3"
+    decision = safety.check_action(_snapshot_op(), key, store=rt.store)
+    assert not decision.allowed
+    text = server.refusal_text(decision)
+    if prgname.casefold() in {"mousepad", "org.xfce.mousepad"}:
+        # An installed app's name is refused before any hint to bind it.
+        assert "--script" not in text
+    else:
+        assert "--script /tmp/attacker.py" in text and f"grant {prgname} read" in text
+
+
+def test_appimage_named_after_the_grant_does_not_open_it(tmp_path, monkeypatch) -> None:
+    """Zzimg-x86_64.AppImage on PATH: a python3 zzimg still needs a script binding."""
+    from a11y_computer_use import safety
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "Zzimg-x86_64.AppImage").write_text("")
+    monkeypatch.setenv("PATH", str(bindir))
+    _prgname_display(monkeypatch, [_PrgnameWin(0x910, 102, b"zzimg", b"x.py")], {102: "python3"})
+    _SCRIPTS[102] = "/tmp/zz.py"
+    rt = _gate_runtime(tmp_path, monkeypatch, {"zzimg": safety.Tier.FULL})
+    assert rt._resolve_app("zzimg")[1] == "python3"
+
+
+def test_local_bin_copy_off_path_does_not_open_the_grant(tmp_path, monkeypatch) -> None:
+    """A granted app in ~/.local/bin while that dir is off PATH: python3 copy refused."""
+    from a11y_computer_use import safety
+
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "bin" / "localtool").write_text("#!/usr/bin/python3\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
+    _prgname_display(monkeypatch, [_PrgnameWin(0x920, 103, b"localtool", b"x.py")], {103: "python3"})
+    _SCRIPTS[103] = "/tmp/copy-of-localtool.py"
+    rt = _gate_runtime(tmp_path, monkeypatch, {"localtool": safety.Tier.FULL})
+    assert rt._resolve_app("localtool")[1] == "python3"
+
+
+def test_a_bound_grant_opens_only_for_the_exact_script(tmp_path, monkeypatch) -> None:
+    rt, real = _bound_runtime(tmp_path, monkeypatch)
+    _prgname_display(monkeypatch, [_PrgnameWin(0x930, 104, b"cuprobe1296", b"x.py")], {104: "python3"})
+    _SCRIPTS[104] = real
+    assert rt._resolve_app("cuprobe1296")[1] == "cuprobe1296"
+    for other in (real + "x", None, "/tmp/P1296app.py"):
+        _SCRIPTS[104] = other
+        assert rt._resolve_app("cuprobe1296")[1] == "python3", other
+
+
+def test_a_second_window_with_another_script_blocks_the_name(tmp_path, monkeypatch) -> None:
+    rt, real = _bound_runtime(tmp_path, monkeypatch)
+    _prgname_display(monkeypatch, [_PrgnameWin(0x940, 105, b"cuprobe1296", b"x.py"),
+                                   _PrgnameWin(0x941, 106, b"cuprobe1296", b"y.py")],
+                     {105: "python3", 106: "python3"})
+    _SCRIPTS.update({105: real, 106: "/tmp/evil.py"})
+    assert rt._resolve_app("cuprobe1296")[1] == "python3"
+
+
+def test_a_binding_is_exact_key_only(tmp_path, monkeypatch) -> None:
+    """A bound ``cuprobe1296`` grant is not reached by ``Cuprobe1296``."""
+    rt, real = _bound_runtime(tmp_path, monkeypatch)
+    _prgname_display(monkeypatch, [_PrgnameWin(0x950, 107, b"Cuprobe1296", b"x.py")], {107: "python3"})
+    _SCRIPTS[107] = real
+    assert rt._resolve_app("Cuprobe1296")[1] == "python3"
+
+
+def test_a_deny_beats_a_bound_grant(tmp_path, monkeypatch) -> None:
+    from a11y_computer_use import safety
+
+    rt, real = _bound_runtime(tmp_path, monkeypatch)
+    rt.store.add_deny("cuprobe1296")
+    _prgname_display(monkeypatch, [_PrgnameWin(0x960, 108, b"cuprobe1296", b"x.py")], {108: "python3"})
+    _SCRIPTS[108] = real
+    key = rt._resolve_app("cuprobe1296")[1]
+    assert not safety.check_action(_snapshot_op(), key, store=rt.store).allowed
+
+
+def test_script_binding_persists_and_revoke_clears_it(tmp_path) -> None:
+    from a11y_computer_use import safety
+
+    script = tmp_path / "a.py"
+    script.write_text("")
+    path = tmp_path / "p.json"
+    store = safety.PermissionStore(path)
+    store.set_tier("cuprobe1296", safety.Tier.READ, script=str(script))
+    store.set_tier("cuprobe1296", safety.Tier.FULL)  # re-grant keeps the binding
+    again = safety.PermissionStore(path)
+    assert again.script_binding("cuprobe1296") == os.path.realpath(script)
+    assert again.get_tier("cuprobe1296") is safety.Tier.FULL
+    again.revoke("cuprobe1296")
+    again.set_tier("cuprobe1296", safety.Tier.FULL)
+    assert again.script_binding("cuprobe1296") is None
+    with pytest.raises(ValueError):
+        store.set_tier("x", safety.Tier.FULL, script=str(tmp_path / "missing.py"))
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["python3", "app.py"], "app.py"),
+    (["python3", "-u", "-W", "ignore", "app.py", "--flag"], "app.py"),
+    (["python3", "-c", "print(1)"], None),
+    (["python3", "-m", "pkg"], None),
+    (["python3", "-uc", "x"], None),
+    (["python3", "-"], None),
+    (["python3"], None),
+])
+def test_script_from_argv(tmp_path, argv, expected) -> None:
+    (tmp_path / "app.py").write_text("")
+    got = _linux_system._script_from_argv(argv, str(tmp_path))
+    assert got == (os.path.realpath(tmp_path / expected) if expected else None)
+
+
+def test_is_interpreter() -> None:
+    assert _linux_system.is_interpreter("python3")
+    assert _linux_system.is_interpreter("python3.12")
+    assert not _linux_system.is_interpreter("soffice.bin")
+    assert not _linux_system.is_interpreter("mousepad")
