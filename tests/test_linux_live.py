@@ -14674,6 +14674,147 @@ def test_linux_calc_validity_list_ref_click_commits_the_entry(tmp_path) -> None:
         _stop_group(proc)
 
 
+_DATALIST_PAGE = (
+    "<!doctype html><title>Datalist lab</title>"
+    '<input id=d list=cities aria-label="City"><datalist id=cities>'
+    '<option value="Almaty"><option value="Astana"><option value="Berlin"></datalist><br>'
+    '<input id=p aria-label="Plain"><br><p id=o>S=[]</p>'
+    "<script>setInterval(()=>{o.textContent='S=[d='+d.value+' p='+p.value+']'},200)</script>"
+)
+
+
+def test_linux_firefox_datalist_input_takes_set_value_and_ref_type(tmp_path) -> None:
+    """Live Firefox. Refs #1251. A datalist ``<input list>`` is a text field.
+
+    Firefox exposes it as a combo box with an input tag, Text, and EDITABLE.
+    The snapshot flags it ``edit`` with no value from the next field's label,
+    ``find(editable=True)`` lists it, ``set_value`` writes free text, and a
+    ref ``type`` appends. The page's own readout confirms each write. The
+    address-bar combo stays non-editable. Only this test's Firefox group is
+    stopped.
+    """
+    import re
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _firefox_binary()
+    assert binary, "firefox is not installed"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    httpd = _serve_html(_DATALIST_PAGE)
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    profile = tmp_path / "ff-datalist"
+    profile.mkdir()
+    (profile / "user.js").write_text(_FIREFOX_PARA_PREFS)
+    env = os.environ.copy()
+    env.update(MOZ_ENABLE_ACCESSIBILITY="1", GTK_MODULES="gail:atk-bridge", NO_AT_BRIDGE="0")
+    proc = subprocess.Popen(
+        [binary, "--profile", str(profile), "--no-remote", "--new-instance", url],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        runtime = None
+        shot = ""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                runtime = runtime or _runtime_for(tmp_path, driver, "firefox")
+                shot = runtime.desktop_snapshot("firefox", mode="interactive")
+            except ComputerUseError:
+                continue
+            if 'combobox "City"' in shot and "S=[" in shot:
+                break
+        line = next(ln for ln in shot.splitlines() if 'combobox "City"' in ln)
+        assert "edit" in line and "Plain" not in line, line
+        # The address bar's name depends on the build and search engine
+        # ("Search or enter address", "Search with Google or enter address").
+        bar = next(ln for ln in shot.splitlines()
+                   if re.search(r'combobox "[^"]*enter address"', ln))
+        assert "edit" not in bar, bar
+        ref = re.search(r'(e\d+) combobox "City"', line).group(1)
+        found = runtime.find("firefox", text="City", editable=True)
+        assert "1 match" in found and 'combobox "City"' in found, found
+        assert runtime.set_value(ref=ref, value="Astana").startswith("set ")
+        shot = runtime.desktop_snapshot("firefox", mode="interactive")
+        assert "S=[d=Astana p=]" in shot, shot[-800:]
+        ref = re.search(r'(e\d+) combobox "City"', shot).group(1)
+        assert runtime.type_text(" Berlin", ref=ref).startswith("typed 7 characters")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            shot = runtime.desktop_snapshot("firefox", mode="interactive")
+            if "S=[d=Astana Berlin p=]" in shot:
+                break
+            time.sleep(0.3)
+        assert "S=[d=Astana Berlin p=]" in shot, shot[-800:]
+    finally:
+        _stop_group(proc)
+        httpd.shutdown()
+
+
+def test_linux_calc_new_comment_type_is_confirmed_once(tmp_path) -> None:
+    """Live Calc. Refs #1249. Typing a new cell comment is confirmed once.
+
+    A4 holds Cherry and no comment. ctrl+alt+c opens the comment editor;
+    FOCUSED stays on the sheet table and the callout paragraph. ``type``
+    must succeed (no text_mismatch, no retry hint), and the callout must
+    hold the text exactly once. Only this test's own soffice group is
+    stopped.
+    """
+    import re
+    import shutil
+    from pathlib import Path
+
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    doc = tmp_path / "comment.fods"
+    shutil.copy(Path(__file__).parent / "fixtures" / "calc_comment_type.fods", doc)
+    profile = tmp_path / "lo-comment"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env.update(SAL_USE_VCLPLUGIN="gtk3", GTK_MODULES="gail:atk-bridge", NO_AT_BRIDGE="0")
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(doc),
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        runtime = None
+        ref = None
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and ref is None:
+            time.sleep(0.5)
+            try:
+                runtime = runtime or _runtime_for(tmp_path, driver, "soffice")
+                match = re.search(r'(e\d+) cell "A4"', runtime.find("soffice", text="A4"))
+            except ComputerUseError:
+                continue
+            ref = match.group(1) if match else None
+        assert runtime is not None and ref is not None, "Calc did not expose A4"
+        runtime.click(ref=ref)
+        runtime.key("ctrl+alt+c", "soffice")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and driver._run(lambda: _atspi.focused_text("soffice")) != "":
+            time.sleep(0.2)
+        assert driver._run(lambda: _atspi.focused_text("soffice")) == "", "the comment editor did not open"
+        typed = runtime.type_text("Added by test")
+        assert "13" in str(typed), typed
+        assert driver._run(lambda: _atspi.focused_text("soffice")) == "Added by test"
+    finally:
+        _stop_group(proc)
+
+
 _CHROME_PRIOR_PAGE = (
     "<!doctype html><meta charset=utf-8><title>chprior1269</title>"
     '<p><label>Name <input id="t" value="keep me"></label></p>'

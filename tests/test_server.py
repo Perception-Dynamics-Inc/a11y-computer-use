@@ -6173,6 +6173,49 @@ def test_fresh_snapshot_after_an_in_place_page_switch_issues_a_working_ref(
         assert len(mocked_driver["click"]) == 1
 
 
+def test_find_after_an_in_place_page_switch_returns_the_reissued_ref(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1235 follow-up: find names the re-issued control by its re-issued ref.
+
+    After a fresh snapshot shows BetaBtn under a new ref, find must not
+    return the reused 'e2' for it (one control, two refs), and must not
+    rebind 'e2', which still names AlphaBtn for the agent that held it.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Untitled", None, None, "before")
+    alpha = Element("e2", "AXButton", "AlphaBtn", None, Bounds(1, 240, 140, 120, 56),
+                    "before", parent="e1", clickable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, alpha))
+
+    def page(sid):
+        return dataclasses.replace(base, snapshot_id=sid, elements=(
+            dataclasses.replace(window, snapshot_id=sid),
+            dataclasses.replace(alpha, title="BetaBtn", snapshot_id=sid),
+        ))
+
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = page("after")
+        text = runtime.desktop_snapshot(APP)
+        line = next(row for row in text.splitlines() if "BetaBtn" in row)
+        issued = re.search(r"\be(\d+)\b", line).group(0)
+        assert issued != "e2"
+        current[0] = page("found")
+        found = runtime.find(APP, text="BetaBtn")
+        refs = set(re.findall(r"\be\d+\b", next(row for row in found.splitlines() if "BetaBtn" in row)))
+        assert issued in refs and "e2" not in refs, found
+        runtime.click(ref=issued)
+        assert len(mocked_driver["click"]) == 1
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.detail["reason"] == "target_changed"
+        assert len(mocked_driver["click"]) == 1
+
+
 @pytest.mark.parametrize('readable', [True, False])
 def test_coordinate_drag_observes_overlay_not_unchanged_foreground(tmp_path, readable):
     """Xfwm keeps Mousepad active while screenshooter owns the region overlay."""
@@ -7396,3 +7439,39 @@ def test_result_label_quotes_the_ref_the_agent_used(tmp_path) -> None:
     assert rt._label("e11", live) == "e11 (AXButton 'BetaBtn')"
     assert rt._label("e10", live) == "e10 (AXButton 'BetaBtn')"
     assert rt._label(None, live) == "e10 (AXButton 'BetaBtn')"
+
+
+def test_driver_refusal_names_the_ref_the_agent_used() -> None:
+    """#1262: a not_editable refusal for a re-issued control quotes the issued ref."""
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    exc = ComputerUseError(
+        ErrorCode.UNSUPPORTED, "e10 (AXButton 'BetaBtn') is not editable",
+        detail={"ref": "e10", "role": "AXButton", "reason": "not_editable"},
+    )
+    out = server._with_issued_ref(exc, "e11", live)
+    assert out is exc
+    assert out.message == "e11 (AXButton 'BetaBtn') is not editable"
+    assert str(out) == out.message
+    assert out.detail == {"ref": "e11", "role": "AXButton", "reason": "not_editable"}
+
+    # e100 is not e10; only whole refs are replaced.
+    other = ComputerUseError(ErrorCode.UNSUPPORTED, "e10 near e100", detail={"ref": "e10"})
+    assert server._with_issued_ref(other, "e11", live).message == "e11 near e100"
+
+
+def test_driver_refusal_keeps_its_ref_when_it_is_not_the_live_number() -> None:
+    """#1262: the same ref, no ref, or a detail naming another element is untouched."""
+    live = Element(
+        ref="e10", role="AXButton", title="BetaBtn", value=None,
+        bounds=Bounds(0, 0, 10, 10, 0), snapshot_id="snap-live", parent=None,
+        path=("AXWindow", "AXButton"),
+    )
+    for ref, detail in (("e10", {"ref": "e10"}), (None, {"ref": "e10"}), ("e11", {"ref": "e7"}), ("e11", {})):
+        exc = ComputerUseError(ErrorCode.UNSUPPORTED, "e10 is not editable", detail=dict(detail))
+        out = server._with_issued_ref(exc, ref, live)
+        assert out.message == "e10 is not editable"
+        assert out.detail == detail

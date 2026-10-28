@@ -2093,6 +2093,24 @@ def _snapshot_text_wake():
     return wake
 
 
+
+def _with_issued_ref(exc: ComputerUseError, ref: str | None, live: object) -> ComputerUseError:
+    """``exc`` naming the ref the agent passed instead of the element's native one.
+
+    A re-issued control (#1235) keeps the backend's number on the live
+    element, and a driver refusal (``not_editable`` and the like) quotes that
+    number. Like ``Runtime._label``, the agent must see the ref it used.
+    """
+    native = getattr(live, "ref", None)
+    detail = exc.detail if isinstance(exc.detail, dict) else None
+    if not ref or not native or native == ref or detail is None or detail.get("ref") != native:
+        return exc
+    message = re.sub(rf"(?<![\w]){re.escape(native)}(?![\w])", ref, str(exc.message))
+    exc.message = message
+    exc.args = (message,)
+    exc.detail = {**detail, "ref": ref}
+    return exc
+
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
 
@@ -4091,6 +4109,50 @@ class Runtime:
         self._reissued_refs = earlier
         return renamed
 
+    def _use_reissued_refs(self, snap: Snapshot, matches) -> tuple[Snapshot, list]:
+        """Name a ``find`` match by the ref a snapshot re-issued for it (#1235).
+
+        A fresh snapshot shows a control behind a refused, reused number
+        under a new ref. ``find`` reads the native tree again, which numbers
+        that control with the reused number. Returning that number would
+        give one control two refs, and issuing it would rebind the refused
+        number the agent may still hold for the old control. A match whose
+        identity is the re-issued control's, in the same app, is named by
+        the re-issued ref instead. Anything else is unchanged.
+        """
+        reissued = getattr(self, "_reissued_refs", None)
+        last = getattr(self, "_last_issued", None)
+        if not reissued or not matches or last is None or last.app != getattr(snap, "app", None):
+            return snap, list(matches)
+        anchors = getattr(self, "_issued_anchors", {})
+        by_identity = {
+            identity: ref for ref, identity in reissued.items() if ref in anchors
+        }
+        if not by_identity:
+            return snap, list(matches)
+        index = {el.ref: el for el in snap.elements}
+        mapping: dict[str, str] = {}
+        for el in matches:
+            if el.ref not in index:
+                continue
+            ref = by_identity.get(self._issued_identity(index, el.ref))
+            if ref is None or ref == el.ref or ref in index or ref in mapping.values():
+                continue
+            mapping[el.ref] = ref
+        if not mapping:
+            return snap, list(matches)
+        renamed = observe.rename_refs(snap, mapping)
+        self._current = renamed
+        moved = [
+            replace(
+                el, ref=mapping.get(el.ref, el.ref),
+                parent=mapping.get(el.parent, el.parent) if el.parent else el.parent,
+                snapshot_id=renamed.snapshot_id,
+            )
+            for el in matches
+        ]
+        return renamed, moved
+
     _SURFACE_ROLES = frozenset({"AXDialog", "AXSheet", "AXPopover"})
     # #1142: GTK4 exposes a DropDown or MenuButton popover as neither modal
     # nor AXPopover. It is a list box or menu child of the expanded owner.
@@ -5523,6 +5585,7 @@ class Runtime:
                     if el.ref in replacements else el for el in snap.elements
                 ))
                 self._current = snap
+            snap, matches = self._use_reissued_refs(snap, matches)
             self._note_issued(snap, {el.ref for el in matches})
             rendered = observe.render_matches(snap, matches, text=text)
             warning_reader = getattr(self.driver, "observation_warning", None)
@@ -5843,6 +5906,50 @@ class Runtime:
             element.ref, "off_screen", bounds,
             f"the ref's center ({cx}, {cy}) is outside display {display.display_id} "
             f"({display.width}x{display.height}); move or resize the window, or scroll it into view",
+        )
+
+    def _refuse_center_outside_window(self, element: Element) -> None:
+        """A pointer click must land inside the ref's own window (#1259).
+
+        Firefox can keep reporting a control's pre-zoom extents. The center
+        then sits above the window (on the title bar or another app), and a
+        synthesized click there hits something else. Linux only; a ref with
+        no reported window box in the snapshot is left to the other guards.
+        """
+        bounds = element.bounds
+        current = getattr(self, "_current", None)
+        if (
+            getattr(self.driver, "name", None) != "linux" or current is None
+            or bounds is None or bounds.width < 1 or bounds.height < 1
+        ):
+            return
+        by_ref = {e.ref: e for e in current.elements}
+        window = None
+        seen = set()
+        parent = element.parent
+        while parent and parent not in seen:
+            seen.add(parent)
+            node = by_ref.get(parent)
+            if node is None:
+                break
+            if node.role in ("AXWindow", "AXDialog") and node.bounds is not None:
+                window = node.bounds
+                break
+            parent = node.parent
+        if (
+            window is None or window.width < 1 or window.height < 1
+            or window.display_id != bounds.display_id
+        ):
+            return
+        cx = bounds.x + bounds.width // 2
+        cy = bounds.y + bounds.height // 2
+        if window.x <= cx < window.x + window.width and window.y <= cy < window.y + window.height:
+            return
+        raise _not_visible(
+            element.ref, "outside_window", bounds,
+            f"the ref's reported center ({cx}, {cy}) is outside its window "
+            f"({window.x}, {window.y}, {window.width}x{window.height}); the app reported "
+            "stale bounds, so take a fresh snapshot before clicking",
         )
 
     def _display_for_bounds(self, bounds: Bounds):
@@ -6235,6 +6342,7 @@ class Runtime:
             # A text ref uses the control's box, not the line-wide text box.
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
+                self._refuse_center_outside_window(act)
             try:
                 self._recheck_target(app, act)
             except ComputerUseError as exc:
@@ -7152,7 +7260,7 @@ class Runtime:
         gate = element_app or app or self._frontmost()
         refused = self._type_target_error(live)
         if refused is not None:
-            raise refused
+            raise _with_issued_ref(refused, ref, live)
         before = self._capture(gate)
         if before is not None and getattr(snap, "scope", None) is not None:
             before = {**before, "scope": snap.scope}
@@ -7191,7 +7299,10 @@ class Runtime:
             self._guard_user(gate)
             note.append(self._dismiss_open_menu(gate))
             self._refuse_vanished_target(live)
-            return self._deliver_type_at_ref(live, text)
+            try:
+                return self._deliver_type_at_ref(live, text)
+            except ComputerUseError as exc:
+                raise _with_issued_ref(exc, ref, live)
 
         count = self._run_gated(action, gate, execute, input_target=live, secure=private)
         if private:
@@ -7843,7 +7954,10 @@ class Runtime:
             # origin, so an iframe is not allowed just because the top page is.
             self._reject_domain(Click(target=live), app=app)
             self._refuse_disabled(live, verb="set_value")
-            result = self.driver.set_value(live, value)  # an AX write lands on this element only
+            try:
+                result = self.driver.set_value(live, value)  # an AX write lands on this element only
+            except ComputerUseError as exc:
+                raise _with_issued_ref(exc, ref, live)
             if result:
                 private = private or getattr(result, "private_text_verified", False) is True
                 if private:

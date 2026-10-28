@@ -2833,6 +2833,33 @@ def _gtk4_app(acc) -> bool:
     return major is not None and major >= 4
 
 
+def gtk4_entry_needs_pointer_focus(acc) -> bool:
+    """A GTK 4 editable text node that AT-SPI cannot focus (#1237).
+
+    GTK 4's Component.GrabFocus is not implemented (the call errors), so a
+    ref ``type`` into an unfocused GTK 4 entry never got focus. Its only
+    action is ``activate``, which submits; a pointer press is the one way in.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    if _role_name(acc) not in {"text", "entry", "password text"}:
+        return False
+    return _state_has(acc, "EDITABLE") and _state_has(acc, "SHOWING")
+
+
+def place_caret_at_end(acc) -> bool:
+    """Move the caret to the end of ``acc``'s text; True only when read back."""
+    text = _full_text(acc)
+    if text is None:
+        return False
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return False
+    _move_caret(Atspi, acc, len(text))
+    return _caret_offset(acc) == len(text)
+
+
 def _gtk4_frame_size(acc) -> tuple[int, int]:
     """Client size of ``acc``'s frame, from WINDOW extents, else SCREEN."""
     frame = _frame_ancestor(acc) or acc
@@ -7217,6 +7244,23 @@ _IME_PANEL_APPS = ("ibus-ui-gtk3", "ibus-ui-gtk", "ibus-ui-emojier")
 _IME_PANEL_NODE_LIMIT = 200
 
 
+def ime_panel_absent() -> bool:
+    """True when a clean read of the desktop lists no IME panel app (#1220).
+
+    The panel is disabled or not running, so waiting will not make it
+    readable. A failed read, an empty desktop, or an app that did not answer
+    (it could be the panel) is not absence.
+    """
+    try:
+        listing = desktop_application_roots()
+    except Exception:
+        return False
+    roots = listing.ready
+    if not roots or listing.silent:
+        return False
+    return not any(name.strip().lower() in _IME_PANEL_APPS for name, _acc in roots)
+
+
 def ime_composition_open() -> bool | None:
     """True when an input-method panel is showing uncommitted text (#1219).
 
@@ -7870,6 +7914,17 @@ def chromium_snapshot_root(root):
             # re-walk a page and the short-page budget is kept.
             if not _sparse_untitled_chrome_frame(page):
                 return page
+    # A cache event can restore CHILDREN during clear_cache's D-Bus calls.
+    # Keep child caching disabled through both the clear and frame selection;
+    # otherwise even repeated clears can select the same stale empty frame.
+    return _without_child_cache(
+        app, lambda: _refresh_chromium_snapshot_root(app, root, latched),
+        preserve_properties=True,
+    )
+
+
+def _refresh_chromium_snapshot_root(app, root, latched):
+    """Clear and select the page while native child caching is disabled."""
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
@@ -8094,6 +8149,90 @@ def _focused_office_paragraph(app: str, *, max_nodes: int):
     return None if queue else candidate
 
 
+def _calc_drawing_paragraph(table):
+    """The focused paragraph of a Calc drawing text object, or None.
+
+    While a cell comment (a callout) or another shape's text is edited,
+    FOCUSED stays on the sheet ``table`` and also sits on the paragraph
+    inside a ``panel`` sibling of that table under ``document spreadsheet``.
+    The table has no Text, so the paragraph is the read-back. Only the
+    document's direct panel children are walked, never the table's cells.
+    Two focused paragraphs are ambiguous and give None.
+    """
+    if _role_name(table) != "table":
+        return None
+    doc = _call_first(table, ("get_parent", "getParent"))
+    if doc is None or _role_name(doc) != "document spreadsheet":
+        return None
+    found = None
+    count = int(_call_first(doc, ("get_child_count",), default=0) or 0)
+    for index in range(min(count, 64)):
+        panel = _call_first(doc, ("get_child_at_index",), index)
+        if panel is None or _role_name(panel) != "panel":
+            continue
+        inner = int(_call_first(panel, ("get_child_count",), default=0) or 0)
+        # Ubuntu's 24.2 build puts FOCUSED on the callout panel instead of
+        # its paragraph. A focused panel with exactly one paragraph child
+        # is that paragraph's editor.
+        panel_focused = (
+            inner == 1 and _state_has(panel, "FOCUSED") and _state_has(panel, "SHOWING")
+        )
+        for sub in range(min(inner, 16)):
+            node = _call_first(panel, ("get_child_at_index",), sub)
+            if (
+                node is not None
+                and _role_name(node) == "paragraph"
+                and (_state_has(node, "FOCUSED") or panel_focused)
+                and _state_has(node, "SHOWING")
+                and not is_secure(node)
+            ):
+                if found is not None:
+                    return None
+                found = node
+    return found
+
+
+_CALC_SHEET_WALK_SKIP = frozenset({"tool bar", "menu bar", "status bar", "menu", "popup menu"})
+
+
+def _calc_focused_sheet_under(pane, *, max_nodes: int = 400):
+    """The unique focused, showing Calc sheet table under a root pane, or None.
+
+    Ubuntu's LibreOffice 24.2 build leaves FOCUSED on the frame's ``root
+    pane`` while the sheet table (and an open comment editor) also carry it.
+    The root pane has no Text, so the sheet is the read-back anchor. A
+    table's cells are never walked; an incomplete or ambiguous walk is None.
+    """
+    queue = [pane]
+    found = None
+    seen = 0
+    while queue:
+        if seen >= max_nodes:
+            return None
+        node = queue.pop(0)
+        seen += 1
+        if node is not pane and _role_name(node) == "table":
+            parent = _call_first(node, ("get_parent", "getParent"))
+            if (
+                parent is not None
+                and _role_name(parent) == "document spreadsheet"
+                and _state_has(node, "FOCUSED")
+                and _state_has(node, "SHOWING")
+            ):
+                if found is not None:
+                    return None
+                found = node
+            continue
+        if node is not pane and _role_name(node) in _CALC_SHEET_WALK_SKIP:
+            continue
+        count = int(_call_first(node, ("get_child_count",), default=0) or 0)
+        for index in range(min(count, 64)):
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                queue.append(child)
+    return found
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -8112,6 +8251,14 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         acc = _focused_office_paragraph(app, max_nodes=max_nodes)
         if acc is None:
             return None
+    if _role_name(acc) == "root pane" and _libreoffice_accessible(acc):
+        sheet = _calc_focused_sheet_under(acc)
+        if sheet is not None:
+            acc = sheet
+    if _role_name(acc) == "table" and _libreoffice_accessible(acc):
+        paragraph = _calc_drawing_paragraph(acc)
+        if paragraph is not None:
+            acc = paragraph
     if _chromium_app(acc):
         entry = focused_chromium_entry(app, max_nodes=max_nodes)
         if entry is not None:
@@ -9654,8 +9801,11 @@ def editable_entry(
         # Chromium ARIA autocomplete and datalist inputs own their text; their popup
         # options are not children and do not constrain the input value.
         # Gecko address-bar wrappers also report input, Text, and EDITABLE;
-        # those wrappers must retain the select-style classification.
-        if not _chromium_app(acc):
+        # those wrappers must retain the select-style classification. A
+        # Gecko datalist input has the same shape but sits inside a page
+        # document, and the address bar never does (#1251).
+        chromium = _chromium_app(acc)
+        if not chromium and not _gecko_app(acc):
             return False
         if attrs is None:
             attrs = _get_attributes(acc)
@@ -9665,6 +9815,7 @@ def editable_entry(
             str(attrs.get("tag") or "").lower() == "input"
             and state_editable and not _state_has(acc, "READ_ONLY")
             and _call_first(acc, ("get_text_iface",)) is not None
+            and (chromium or _nested_in_document(acc))
         )
     if role in _STATIC_REPLACE_ROLES:
         return False
@@ -10405,6 +10556,26 @@ def web_entry_context(acc):
     parent = _parent_of(acc)
     box = _extents(acc)
     return role, name, doc, window, parent, box, _ancestor_key(doc), _ancestor_key(window)
+
+
+def chromium_nested_web_entry(acc) -> bool:
+    """A Chromium web entry whose document sits inside another document.
+
+    An Electron ``<webview>`` guest is exposed as a document under an
+    internal frame of the host document, like an iframe. AT-SPI
+    ``grab_focus`` on a guest node returns True, but Chromium does not
+    move keyboard focus out of the host page into the guest (#1266). Only
+    real input crosses that boundary.
+    """
+    if not _chromium_app(acc):
+        return False
+    docs = 0
+    for node in _ancestor_chain(acc):
+        if _role_name(node) in {"document web", "document frame"}:
+            docs += 1
+            if docs > 1:
+                return True
+    return False
 
 
 def focus_web_entry(acc, *, context=None, request_focus: bool = True):
@@ -14868,6 +15039,12 @@ def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
         if isinstance(text, str):
             return True, (_strip_objects(text) or None)
         return True, None
+    # A browser input combobox (datalist or ARIA autocomplete) is its own
+    # entry. Its value is its own text, even when empty; the sibling and
+    # label fallbacks below would report the next field's label (#1251).
+    if role_name in {"combo box", "combo-box"} and editable_entry(acc, role_str=role_name):
+        text = _full_text(acc)
+        return True, (_strip_objects(text) or None) if isinstance(text, str) else None
     # Linux Qt stores the current item in the accessible name. That name is
     # the value. The label relation, applied in the snapshot title, is the
     # widget's name. The Value interface on the combo is uninitialized.
@@ -20853,6 +21030,86 @@ def gtk_dialog_toggle_state(acc) -> tuple[bool, bool] | None:
         return None
     bits = ("SELECTED", "CHECKED") if role == "page tab" else ("CHECKED", "PRESSED")
     return _click_state_bits(acc, bits, require_showing=True)
+
+
+def gtk_inline_link_state(acc) -> tuple[bool, bool] | None:
+    """Fresh VISITED bit of a GTK label's inline link (#1230 follow-up).
+
+    A GTK3 ``GtkLabel`` with ``<a href>`` markup exposes each link as a
+    ``link`` child of the label. Activating the link marks it VISITED, which
+    is the only native evidence that the click fired. Other roles, toolkits
+    and parents are None. A link that was already visited cannot show the
+    change; the probe skips it so the outcome stays honest.
+    """
+    if acc is None or _role_name(acc) != "link" or _toolkit_name(acc) != "gtk":
+        return None
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) != "label":
+        return None
+    return _click_state_bits(acc, ("VISITED", "SHOWING"), require_showing=True)
+
+
+_GTK_SELECTABLE_ITEMS = frozenset({"list item", "table cell"})
+_GTK_SELECTION_CONTAINERS = frozenset({"list", "list box", "table", "tree table"})
+
+
+def _gtk_selectable_item(acc):
+    """The GTK row/tile at or just above ``acc`` and its container, or None."""
+    node = acc
+    for _ in range(3):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role in {"frame", "window", "dialog", "application"}:
+            return None
+        if role in _GTK_SELECTABLE_ITEMS:
+            parent = _parent_of(node)
+            if parent is not None and _role_name(parent) in _GTK_SELECTION_CONTAINERS:
+                return node, parent
+            return None
+        node = _parent_of(node)
+    return None
+
+
+def _index_of(acc) -> int | None:
+    try:
+        index = acc.get_index_in_parent()
+    except Exception:
+        return None
+    return index if isinstance(index, int) and index >= 0 else None
+
+
+def gtk_selection_click_state(acc) -> tuple[bool, bool] | None:
+    """Fresh selection of a GTK ListBox row or FlowBox tile (#1238, #1240).
+
+    A GtkListBox row sets SELECTED on itself, but the generic state diff can
+    miss it. A GtkFlowBox tile never sets SELECTED; the parent table's
+    ``Selection`` interface names it instead. Returns (item SELECTED, item in
+    the container's selection). None for other widgets, toolkits, an
+    unreadable state, or an item that is already selected (the click cannot
+    show a change).
+    """
+    if acc is None or _toolkit_name(acc) != "gtk":
+        return None
+    found = _gtk_selectable_item(acc)
+    if found is None:
+        return None
+    item, container = found
+    bits = _click_state_bits(item, ("SELECTED", "SHOWING"), require_showing=True)
+    if bits is None:
+        return None
+    in_selection = False
+    iface = _selection_iface(container)
+    index = _index_of(item)
+    if iface is not None and index is not None:
+        count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+        if isinstance(count, int) and not isinstance(count, bool):
+            for position in range(min(max(count, 0), 64)):
+                child = _call_first(iface, ("get_selected_child", "getSelectedChild"), position)
+                if child is not None and _index_of(child) == index:
+                    in_selection = True
+                    break
+    return (bool(bits[0]), in_selection)
 
 
 def libreoffice_toggle_state(acc) -> tuple[bool, bool] | None:

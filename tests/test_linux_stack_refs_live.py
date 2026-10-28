@@ -129,3 +129,49 @@ def test_fresh_ref_after_a_stack_page_switch_clicks(tmp_path):
         assert log.read_text().split() == ["BetaBtn"]
     finally:
         _stop_group(proc)
+
+
+def test_refusal_on_a_reissued_ref_names_the_ref_the_agent_passed(tmp_path):
+    """#1262: type / set_value on a re-issued button is refused as not_editable
+    and both the message and detail.ref name the ref the agent passed."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    _gtk3_ready()
+    script = tmp_path / "stack1262.py"
+    script.write_text(_FIXTURE)
+    log = tmp_path / "clicks.log"
+    log.write_text("")
+    proc = subprocess.Popen(["/usr/bin/python3", str(script), str(log)], start_new_session=True)
+    try:
+        runtime = _runtime_for(tmp_path, LinuxDriver(), "python3")
+        deadline = time.monotonic() + 30
+        text = ""
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                text = runtime.desktop_snapshot("python3", mode="full")
+            except ComputerUseError:
+                continue
+            if "AlphaBtn" in text and "Beta" in text:
+                break
+        alpha_ref = _ref_of(text, "AlphaBtn")
+        runtime.click(ref=_ref_of(text, "Beta"))
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            text = runtime.desktop_snapshot("python3", mode="full")
+            if "BetaBtn" in text:
+                break
+        beta_ref = _ref_of(text, "BetaBtn")
+        assert beta_ref != alpha_ref, text
+        for attempt in (lambda: runtime.type_text("x", ref=beta_ref),
+                        lambda: runtime.set_value(beta_ref, "x")):
+            with pytest.raises(ComputerUseError) as caught:
+                attempt()
+            assert caught.value.detail["reason"] == "not_editable", caught.value.to_dict()
+            assert caught.value.detail["ref"] == beta_ref, caught.value.to_dict()
+            assert caught.value.message.startswith(f"{beta_ref} "), caught.value.message
+            assert not re.search(rf"\b{alpha_ref}\b", caught.value.message), caught.value.message
+        assert log.read_text().split() == []
+    finally:
+        _stop_group(proc)
