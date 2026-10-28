@@ -24037,6 +24037,30 @@ def qt_item_view_cell(acc) -> bool:
     return _editable_iface(acc) is None
 
 
+def qt_item_view_of(cell):
+    """The ``table`` / ``tree table`` / ``list`` node holding a Qt cell, or None."""
+    node = cell
+    for _ in range(3):
+        node = _parent_of(node) if node is not None else None
+        if node is None:
+            return None
+        if _role_name(node) in ("table", "tree table", "tree", "list"):
+            return node
+    return None
+
+
+def qt_view_focused(cell) -> bool:
+    """Whether the item view holding ``cell`` has keyboard focus (#1278).
+
+    Qt 6 does not expose the delegate editor (QLineEdit) it opens over a
+    cell. The only bus signal is that the view itself loses FOCUSED while
+    the editor holds focus, and regains it when the editor closes. A
+    read-only cell leaves the view focused after F2.
+    """
+    view = qt_item_view_of(cell)
+    return view is not None and _state_has(view, "FOCUSED")
+
+
 def qt_cell_editor(cell):
     """The focused editor Qt opened over ``cell``, or None.
 

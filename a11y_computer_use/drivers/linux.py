@@ -5478,19 +5478,44 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         before = self._run(lambda: _atspi._node_name(handle)) or ""
-        self._run(lambda: _atspi.grab_focus(handle))
+        # Qt 6 refuses AT-SPI grab_focus on a cell, and F2 then edits the
+        # view's *current* index, not this cell. Make the target current
+        # with a click on its centre when grab_focus does not take.
+        if not self._run(lambda: _atspi.grab_focus(handle)):
+            pos, size = self._run(lambda: _atspi._extents(handle))
+            if pos is None or size is None:
+                raise _not_editable(element)
+            _linux_input.click(int(pos[0] + size[0] // 2), int(pos[1] + size[1] // 2))
+            for _ in range(8):
+                if self._run(lambda: _atspi._state_has(handle, "FOCUSED")):
+                    break
+                time.sleep(0.025)
+            else:
+                raise self._focus_lost_on(element)
+        view_focused = bool(self._run(lambda: _atspi.qt_view_focused(handle)))
         _linux_input.press_chord("F2")
         editor = None
-        for _ in range(10):
-            editor = self._run(lambda: _atspi.qt_cell_editor(handle))
+        for _ in range(8):
+            if view_focused:
+                # Qt 6 does not expose its delegate editor: it shows only as
+                # the view losing focus. Do not walk for a focused editable
+                # here; that walk closes the open editor on Qt 6.11.
+                if not self._run(lambda: _atspi.qt_view_focused(handle)):
+                    editor = True
+            else:
+                editor = self._run(lambda: _atspi.qt_cell_editor(handle))
             if editor is not None:
                 break
-            time.sleep(0.05)
+            time.sleep(0.025)
         if editor is None:
             raise _not_editable(element)
-        if replace:
-            _linux_input.press_chord("ctrl+a")
-        _linux_input.type_string(text)
+        try:
+            # Qt's F2 editor opens with its text selected: append from End.
+            _linux_input.press_chord("ctrl+a" if replace else "End")
+            _linux_input.type_string(text)
+        except BaseException:
+            _linux_input.press_chord("Escape")  # never leave the editor open
+            raise
         _linux_input.press_chord("Return")
         want = text if replace else before + text
         got = before

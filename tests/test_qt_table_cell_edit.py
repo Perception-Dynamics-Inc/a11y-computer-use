@@ -88,3 +88,59 @@ def test_runtime_lets_type_reach_a_qt_cell(rig):
     assert Runtime._type_target_error(rt, _element()) is None
     rt = SimpleNamespace(driver=SimpleNamespace())
     assert Runtime._type_target_error(rt, _element()).detail["reason"] == "not_editable"
+
+
+def test_qt6_unexposed_editor_is_detected_by_the_view_losing_focus(rig, monkeypatch):
+    # Qt 6 never exposes the delegate editor; the view drops FOCUSED instead.
+    drv, cell, keys = rig
+    monkeypatch.setattr(_atspi, "qt_cell_editor", lambda acc: None)
+    monkeypatch.setattr(_atspi, "qt_view_focused", lambda acc: not cell.editing)
+    drv._edit_qt_cell(_element(), cell, "Bob", replace=True)
+    assert cell.name == "Bob"
+    assert keys == ["F2", "ctrl+a", ("type", "Bob"), "Return"]
+
+
+def test_qt6_read_only_cell_keeps_the_view_focused_and_nothing_is_typed(rig, monkeypatch):
+    drv, cell, keys = rig
+    cell.editor_opens = False
+    monkeypatch.setattr(_atspi, "qt_cell_editor", lambda acc: None)
+    monkeypatch.setattr(_atspi, "qt_view_focused", lambda acc: not cell.editing)
+    with pytest.raises(ComputerUseError) as err:
+        drv._edit_qt_cell(_element(), cell, "Bob", replace=True)
+    assert err.value.detail["reason"] == "not_editable"
+    assert keys == ["F2"]
+    assert cell.name == "Alice"
+
+
+def test_target_cell_is_made_current_by_a_click_when_grab_focus_fails(rig, monkeypatch):
+    # Qt 6 refuses grab_focus on a cell; F2 would then edit the current index.
+    drv, cell, keys = rig
+    clicks = []
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_extents", lambda acc: ((100, 40), (80, 20)))
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: bool(clicks))
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **_: clicks.append((x, y)))
+    drv._edit_qt_cell(_element(), cell, "Bob", replace=True)
+    assert clicks == [(140, 50)]
+    assert keys[0] == "F2" and cell.name == "Bob"
+
+
+def test_no_keys_are_sent_when_the_click_does_not_make_the_cell_current(rig, monkeypatch):
+    drv, cell, keys = rig
+    monkeypatch.setattr(_atspi, "grab_focus", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_extents", lambda acc: ((100, 40), (80, 20)))
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: False)
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **_: None)
+    monkeypatch.setattr(drv, "_focus_lost_on",
+                        lambda el: ComputerUseError(linux.ErrorCode.UNSUPPORTED, "lost",
+                                                    detail={"reason": "focus_lost"}), raising=False)
+    with pytest.raises(ComputerUseError):
+        drv._edit_qt_cell(_element(), cell, "Bob", replace=True)
+    assert keys == [] and cell.name == "Alice"
+
+
+def test_type_moves_to_the_end_before_appending(rig):
+    # Qt's F2 editor opens with all text selected; typing there would replace it.
+    drv, cell, keys = rig
+    drv._edit_qt_cell(_element(), cell, "son", replace=False)
+    assert keys == ["F2", "End", ("type", "son"), "Return"]
