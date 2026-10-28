@@ -168,9 +168,10 @@ def _system_owned(path: str) -> bool:
 
 def legacy_exe_ok(name: str, exe: str) -> bool:
     """Whether a name-only (pre-binding) grant for ``name`` covers ``exe``."""
-    if exe in installed_exes(name):
+    # Cheap test first; the .desktop scan runs only when it fails.
+    if os.path.basename(exe) == name and _system_owned(exe):
         return True
-    return os.path.basename(exe) == name and _system_owned(exe)
+    return exe in installed_exes(name)
 
 
 def grant_exe(name: str) -> str | None:
@@ -196,6 +197,41 @@ def grant_exe(name: str) -> str | None:
     return None
 
 
+def _ppid(pid: int) -> int | None:
+    """Parent pid from ``/proc/<pid>/status`` (readable for non-dumpable processes)."""
+    try:
+        with open(f"/proc/{int(pid)}/status", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _verified_ancestor_exe(pid: int, exes: dict[int, str | None]) -> str | None:
+    """Exe of the nearest same-name ancestor when ``pid``'s own exe is unreadable.
+
+    Chrome's sandboxed zygote/renderers are non-dumpable, so their
+    ``/proc/PID/exe`` cannot be read. Such a process is accepted only as a
+    descendant of a named process whose exe IS readable; that ancestor's exe
+    is then checked like any other (recorded path or system-owned). A
+    stand-alone process that makes itself non-dumpable has no such ancestor
+    and stays unreadable, so it is still refused.
+    """
+    seen = {pid}
+    cur = _ppid(pid)
+    while cur and cur > 1 and cur not in seen:
+        seen.add(cur)
+        if cur in exes:
+            if exes[cur] is not None:
+                return exes[cur]
+        else:
+            return None  # the chain leaves the named processes
+        cur = _ppid(cur)
+    return None
+
+
 def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     """(key, refusal hint) for the live processes behind ``name``.
 
@@ -208,12 +244,15 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     if not pids or interpreter_key(name):
         return name, None
     exes = {pid: exe_of(pid) for pid in pids}
+    exes = {pid: (exe if exe is not None else _verified_ancestor_exe(pid, exes))
+            for pid, exe in exes.items()}
     hosts = {interpreter_key(e) for e in exes.values() if interpreter_key(e)}
     natives = {e for e in exes.values() if e and not interpreter_key(e)}
     if hosts and not natives and len(hosts) == 1:
         return next(iter(hosts)), None
     bad: list[str] = []
-    for exe in exes.values():
+    # One verdict per distinct exe: Chrome runs dozens of processes.
+    for exe in set(exes.values()):
         if exe is None or interpreter_key(exe):
             bad.append(exe or "(unreadable)")
         elif recorded is not None:

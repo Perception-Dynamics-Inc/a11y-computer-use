@@ -284,3 +284,33 @@ def test_grant_records_the_installed_binary(monkeypatch) -> None:
     monkeypatch.setattr(_linux_exe, "installed_exes", lambda name: {"/usr/bin/" + name})
     assert _linux_exe.grant_exe("mousepad") == "/usr/bin/mousepad"
     assert _linux_exe.grant_exe("python3") is None
+
+
+def test_unreadable_child_of_a_verified_process_inherits_its_exe(monkeypatch) -> None:
+    """Chrome's non-dumpable renderers: unreadable exe, parent is the real chrome."""
+    from a11y_computer_use.drivers import _linux_exe as m
+
+    monkeypatch.setattr(m, "pids_named", lambda n: {10, 11, 12})
+    monkeypatch.setattr(m, "exe_of", lambda pid: "/opt/google/chrome/chrome" if pid == 10 else None)
+    monkeypatch.setattr(m, "_ppid", lambda pid: {11: 10, 12: 11, 10: 1}.get(pid))
+    assert m.check("chrome", "/opt/google/chrome/chrome") == ("chrome", None)
+
+
+def test_unreadable_process_without_a_verified_named_parent_is_refused(monkeypatch) -> None:
+    """A spoof that sets PR_SET_DUMPABLE=0 has no verified chrome ancestor."""
+    from a11y_computer_use.drivers import _linux_exe as m
+
+    monkeypatch.setattr(m, "pids_named", lambda n: {10, 20})
+    monkeypatch.setattr(m, "exe_of", lambda pid: "/opt/google/chrome/chrome" if pid == 10 else None)
+    monkeypatch.setattr(m, "_ppid", lambda pid: {20: 500, 500: 1, 10: 1}.get(pid))
+    key, hint = m.check("chrome", "/opt/google/chrome/chrome")
+    assert hint and "(unreadable)" in hint
+
+
+def test_unreadable_child_of_a_spoofed_parent_is_refused(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_exe as m
+
+    monkeypatch.setattr(m, "pids_named", lambda n: {30, 31})
+    monkeypatch.setattr(m, "exe_of", lambda pid: "/tmp/x/chrome" if pid == 30 else None)
+    monkeypatch.setattr(m, "_ppid", lambda pid: {31: 30, 30: 1}.get(pid))
+    assert m.check("chrome", "/opt/google/chrome/chrome")[1]
