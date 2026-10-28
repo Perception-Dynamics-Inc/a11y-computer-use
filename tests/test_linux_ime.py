@@ -609,3 +609,45 @@ def test_the_driver_refuses_set_value_before_focus_dom_write_or_window_raise(ibu
     with pytest.raises(ComputerUseError) as exc:
         driver.set_value(_element(), "hello world 42")
     assert exc.value.detail["reason"] == "ime_composition_open"
+
+
+def test_a_panel_listed_absent_is_unknown_after_the_settle_window(monkeypatch) -> None:
+    # #1220: a disabled panel will not appear by waiting the whole budget.
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: None)
+    monkeypatch.setattr(_linux_ime, "_panel_absent", lambda: True)
+    started = time.monotonic()
+    assert _linux_ime.composition_state() is None
+    took = time.monotonic() - started
+    assert _linux_ime._SETTLE_S <= took < _linux_ime._BUDGET_S, took
+
+
+def test_an_unreadable_panel_still_gets_the_whole_budget(monkeypatch) -> None:
+    monkeypatch.setattr(_linux_ime, "_composition_open", lambda: None)
+    monkeypatch.setattr(_linux_ime, "_panel_absent", lambda: False)
+    started = time.monotonic()
+    assert _linux_ime.composition_state() is None
+    assert time.monotonic() - started >= _linux_ime._BUDGET_S
+
+
+def test_a_panel_that_appears_during_the_settle_window_is_read(monkeypatch) -> None:
+    started = time.monotonic()
+    monkeypatch.setattr(
+        _linux_ime, "_composition_open",
+        lambda: None if time.monotonic() - started < 0.1 else True,
+    )
+    monkeypatch.setattr(_linux_ime, "_panel_absent", lambda: True)
+    assert _linux_ime.composition_state() is True
+
+
+def test_panel_absent_needs_a_clean_listing(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    listing = lambda ready, silent: (lambda: _atspi.DesktopApplications(ready, silent))
+    monkeypatch.setattr(_atspi, "desktop_application_roots", listing([("firefox", 1)], 0))
+    assert _atspi.ime_panel_absent() is True
+    monkeypatch.setattr(_atspi, "desktop_application_roots", listing([("firefox", 1), ("ibus-ui-gtk3", 2)], 0))
+    assert _atspi.ime_panel_absent() is False
+    monkeypatch.setattr(_atspi, "desktop_application_roots", listing([("firefox", 1)], 1))
+    assert _atspi.ime_panel_absent() is False
+    monkeypatch.setattr(_atspi, "desktop_application_roots", listing([], 0))
+    assert _atspi.ime_panel_absent() is False

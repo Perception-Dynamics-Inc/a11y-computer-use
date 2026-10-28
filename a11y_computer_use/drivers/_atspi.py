@@ -7244,6 +7244,23 @@ _IME_PANEL_APPS = ("ibus-ui-gtk3", "ibus-ui-gtk", "ibus-ui-emojier")
 _IME_PANEL_NODE_LIMIT = 200
 
 
+def ime_panel_absent() -> bool:
+    """True when a clean read of the desktop lists no IME panel app (#1220).
+
+    The panel is disabled or not running, so waiting will not make it
+    readable. A failed read, an empty desktop, or an app that did not answer
+    (it could be the panel) is not absence.
+    """
+    try:
+        listing = desktop_application_roots()
+    except Exception:
+        return False
+    roots = listing.ready
+    if not roots or listing.silent:
+        return False
+    return not any(name.strip().lower() in _IME_PANEL_APPS for name, _acc in roots)
+
+
 def ime_composition_open() -> bool | None:
     """True when an input-method panel is showing uncommitted text (#1219).
 

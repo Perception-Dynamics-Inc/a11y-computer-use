@@ -141,30 +141,54 @@ def _composition_open() -> bool | None:
         return None
 
 
+def _panel_absent() -> bool:
+    """True when a clean desktop read lists no IBus panel (#1220)."""
+    try:
+        from a11y_computer_use.drivers import _atspi
+
+        return bool(_atspi.ime_panel_absent())
+    except Exception:
+        return False
+
+
+def _composition_read() -> str:
+    """``open``, ``clear``, ``absent`` (no panel on a clean read) or ``unreadable``."""
+    state = _composition_open()
+    if state is True:
+        return "open"
+    if state is False:
+        return "clear"
+    return "absent" if _panel_absent() else "unreadable"
+
+
 def composition_state() -> bool | None:
     """Whether an IBus composition is open: True, False, or None when unknown.
 
     True as soon as one read of the panel shows it. False only when every read
     over ``_SETTLE_S`` shows none, so a preedit the panel has not published yet
     is waited for rather than missed. None when the panel could not be read
-    cleanly for ``_BUDGET_S``.
+    cleanly for ``_BUDGET_S``, or sooner when every read over ``_SETTLE_S``
+    cleanly lists no panel at all (#1220): a disabled panel will not appear by
+    waiting, and a failed read still gets the whole budget.
     """
     deadline = time.monotonic() + _BUDGET_S
-    clean_since: float | None = None
+    since: float | None = None
+    last: str | None = None
     reads = 0
     while True:
-        state = _composition_open()
-        reads += 1
+        state = _composition_read()
         now = time.monotonic()
-        if state is True:
+        if state == "open":
             return True
-        if state is False:
-            if clean_since is None:
-                clean_since = now
-            if now - clean_since >= _SETTLE_S and reads >= 3:
-                return False
+        if state in ("clear", "absent"):
+            if state != last:
+                since, reads = now, 0
+            reads += 1
+            if now - since >= _SETTLE_S and reads >= 3:
+                return False if state == "clear" else None
         else:
-            clean_since = None
+            since, reads = None, 0
+        last = state
         if now >= deadline:
             return None
         time.sleep(_POLL_S)
