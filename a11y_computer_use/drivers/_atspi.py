@@ -10109,6 +10109,37 @@ def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
     return len(now) >= len(prior) and now.startswith(head) and now.endswith(tail)
 
 
+def gecko_plain_entry(acc) -> bool:
+    """A plain, non-secure Firefox input or textarea (not contenteditable)."""
+    if acc is None or not _gecko_app(acc) or _gecko_contenteditable(acc):
+        return False
+    if not (_state_has(acc, "SINGLE_LINE") or _state_has(acc, "MULTI_LINE")):
+        return False
+    return not is_secure(acc) and _editable_iface(acc) is not None
+
+
+def gecko_entry_caret_to_end(acc) -> bool:
+    """Put the caret at the end of a Firefox input or textarea; ``True`` if moved.
+
+    Firefox places the caret at offset 0 of a prefilled field it was just
+    given focus. A ref ``type`` appends, so the caller moves the caret first.
+    A field with a selection, or any node that is not a plain Gecko entry
+    (contenteditable, password, anything without a text interface), is left as
+    it is. The caller reads the caret back before it types.
+    """
+    if not gecko_plain_entry(acc):
+        return False
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    caret, start, end = _caret_and_selection(acc, count)
+    if end > start or caret >= count:
+        return False
+    _move_caret(Atspi, acc, count)
+    return _safe(lambda: Atspi.Text.get_caret_offset(acc)) == count
+
+
 def _text_mismatch(reason: str, message: str, **detail):
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 

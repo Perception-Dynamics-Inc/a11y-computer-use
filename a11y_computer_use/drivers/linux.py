@@ -5306,6 +5306,7 @@ class LinuxDriver:
         # type(ref=...) shows the same overlay as click/scroll/set_value.
         self._visible_action(element, "Type")
         context = self._run(lambda: _atspi.web_entry_context(handle))
+        gecko_append = False
         if (element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
                 and self._run(lambda: _atspi._chromium_app(handle))):
             if context is not None:
@@ -5359,6 +5360,7 @@ class LinuxDriver:
             math_focused = self._run(lambda: (
                 _atspi.math_command_editable(handle) and _atspi._focus_on_target(handle)
             ))
+            had_focus = self._run(lambda: _atspi._focus_on_target(handle))
             if not math_focused:
                 handle = self._focus_web_entry(element, handle, context=context)
                 self._run(lambda: _atspi.grab_focus(handle))
@@ -5379,6 +5381,13 @@ class LinuxDriver:
                 handle = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
                 )
+            if not had_focus:
+                # Firefox puts the caret of a prefilled input or textarea at
+                # offset 0 when it is just focused, so the keys would land
+                # in front of the existing text. A field that already had
+                # focus keeps the caret the page or the user set.
+                self._run(lambda: _atspi.gecko_entry_caret_to_end(handle))
+                gecko_append = self._run(lambda: _atspi.gecko_plain_entry(handle))
         self._focused_editable = handle
         append_state = None
         if self._run(lambda: _atspi.append_target_entry(handle)):
@@ -5391,6 +5400,19 @@ class LinuxDriver:
                     "the field's whole text is selected and typing would replace it; "
                     "nothing was typed. Use set_value to replace the text",
                 )
+            append_state = self._run(lambda: _atspi.entry_text_and_caret(handle))
+            if gecko_append and append_state is not None:
+                # Gecko's AT-SPI caret still reads 0 right after the grab,
+                # though the keys go where the caret was put: the end (#1241).
+                # Judge the read-back against an append. A write that loses
+                # or splits the prior text still fails this check.
+                append_state = (append_state[0], len(append_state[0]))
+        if append_state is None and context is not None and self._run(
+            lambda: _atspi._chromium_app(handle)
+        ):
+            # Chrome web entries keep the caret the pointer press placed. A
+            # page handler that drops or moves the prior text must not read
+            # back as confirmed (#1269): judge the write at that caret.
             append_state = self._run(lambda: _atspi.entry_text_and_caret(handle))
         peers: dict = {}
         try:
