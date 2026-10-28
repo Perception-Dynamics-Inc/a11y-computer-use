@@ -14916,6 +14916,21 @@ def focused_key_evidence(app: str, *, include_page: bool = False) -> tuple:
     return result
 
 
+def qt_checkable_item(acc) -> bool:
+    """A checkable Qt item-view item: ``list item`` or ``table cell`` (#1287).
+
+    Qt 6 publishes CHECKABLE on a QListWidget item with ItemIsUserCheckable
+    (and a QStandardItem with setCheckable). Its only action, Toggle, is a
+    selection toggle, so the check state changes only through the keyboard
+    (space on the current item) or a click on the indicator.
+    """
+    if acc is None or not _qt_app(acc):
+        return False
+    if _role_name(acc) not in ("list item", "table cell", "tree item"):
+        return False
+    return _state_has(acc, "CHECKABLE")
+
+
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
 
