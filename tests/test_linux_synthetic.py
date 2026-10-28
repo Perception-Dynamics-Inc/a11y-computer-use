@@ -23024,6 +23024,25 @@ def test_snapshot_still_retries_under_the_same_program(fake_atspi, monkeypatch) 
     assert office.children == [window]
 
 
+def test_snapshot_keeps_the_requested_name_when_the_comm_lookup_finds_it(fake_atspi, monkeypatch) -> None:
+    """A GTK app found by its comm while registering keeps its prgname.
+
+    Seen in CI run 40647502987: the by-name lookup missed, the ``python3``
+    lookup found the app already named ``cuaiconprobe``, and the snapshot
+    was keyed on ``python3``, which had no grant.
+    """
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    window = _WindowNode("frame", "cuaiconprobe")
+    _PidNode("application", "cuaiconprobe", pid=31, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window if name == "python3" else None)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: "python3")
+    monkeypatch.setattr(_linux_system, "class_names_program", lambda name, identity: True)
+    _programs_by_pid(monkeypatch, {31: "python3"})
+    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW) == ("cuaiconprobe", window)
+
+
 def test_a_bound_name_is_not_rebound_to_a_different_program(fake_atspi, monkeypatch) -> None:
     """#1191 pin: ``Files`` bound to Nautilus; Nautilus closes, Thunar is app_not_running."""
     from a11y_computer_use.drivers import _atspi_events

@@ -103,6 +103,17 @@ def _same_program_name(app: str, other: str) -> bool:
         or _linux_system.class_names_program(app, other)
 
 
+def _registered_as(root, app: str) -> bool:
+    """Whether ``root``'s AT-SPI application is named ``app`` (case-insensitive)."""
+    from a11y_computer_use.drivers import _atspi
+
+    application = _atspi._application_of(root)
+    if application is None:
+        return False
+    name = _atspi._node_name(application) or ""
+    return bool(name.strip()) and name.strip().casefold() == app.strip().casefold()
+
+
 def _resolved_app(identifier: str) -> str:
     """The app id app list would show for ``identifier``.
 
@@ -1432,6 +1443,11 @@ class LinuxDriver:
         resolved = _resolved_app(app)
         if resolved != app and _same_program_name(app, resolved):
             root = self._run(lambda name=resolved: lookup(name))
+            if root is not None and self._run(lambda: _registered_as(root, app)):
+                # The by-name lookup ran before the application registered;
+                # the comm lookup a moment later found it under the requested
+                # name. Keep that name so the grant keyed on it still applies.
+                return app, self._pinned(app, root)
             return resolved, (self._pinned(app, root) if root is not None else None)
         # A different program's name is kept only to word the error (VLC's
         # bridge hint); nothing is bound to it.
