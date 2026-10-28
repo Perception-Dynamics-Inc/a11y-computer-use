@@ -3532,6 +3532,28 @@ class Runtime:
         except Exception:
             return None
 
+    def _key_window_probe(self, app: str | None) -> tuple | None:
+        """The focused window, read SHOWING before a key, or None (#1283)."""
+        reader = getattr(self.driver, "key_window_probe", None)
+        if not app or not callable(reader):
+            return None
+        try:
+            found = reader(app)
+        except Exception:
+            return None
+        return found if isinstance(found, tuple) and len(found) == 2 and found[1] == "showing" else None
+
+    def _key_window_after(self, probe: tuple | None) -> str | None:
+        """That window's state after the key: showing, hidden, closed or None."""
+        reader = getattr(self.driver, "key_window_state", None)
+        if probe is None or not callable(reader):
+            return None
+        try:
+            found = reader(probe)
+        except Exception:
+            return None
+        return found if found in {"showing", "hidden", "closed"} else None
+
     def _key_focus_probe(self, app: str | None) -> tuple | None:
         """Focused text, caret, selection, and sheet cell, or None off Linux.
 
@@ -3677,6 +3699,7 @@ class Runtime:
         clipboard_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
+        key_window: tuple | None = None,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if tool == "type" and getattr(self, "_private_text_result", False):
@@ -3734,6 +3757,14 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
+        if tool == "key" and not died and judged in {"suspected_noop", "unverifiable"}:
+            # #1283: Return on a wizard's last page or Escape on a dialog
+            # closes the window the key went to. Its tree is gone, so the
+            # page comparison cannot see the effect; the window's own
+            # before/after visibility can (the #1281 click signal).
+            closed = self._key_window_after(key_window)
+            if closed in {"hidden", "closed"}:
+                judged, evidence = "confirmed", f"the focused window was {closed} by the key"
         if (
             tool == "click" and element is not None and not died
             and judged in {"suspected_noop", "unverifiable"}
@@ -6404,6 +6435,8 @@ class Runtime:
         # A hidden notebook tab has a name and no box. A pointer click at an
         # invented point would land on the page or the menu.
         unbound: list[Element] = []
+        # A tab scrolled out of its tab bar, selected by the driver (#1286).
+        offscreen_tab: list[Element] = []
         # The re-resolved ref after raising its app over another app's window.
         raised: list[Element] = []
 
@@ -6412,6 +6445,10 @@ class Runtime:
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
+                selector = getattr(self.driver, "select_offscreen_tab", None)
+                if callable(selector) and selector(target):
+                    offscreen_tab.append(target)
+                    return
                 unbound.append(target)
                 return
             act: Target = target
@@ -6590,6 +6627,15 @@ class Runtime:
             )
         if raised and not activated:
             target = raised[0]
+        if offscreen_tab:
+            el = offscreen_tab[0]
+            title = f" {el.title!r}" if el.title else ""
+            return self._conclude(
+                f"selected {el.ref} ({el.role}{title}) through its tab list; "
+                "it was scrolled out of the tab bar",
+                tool="click", app=app, before=before, element=el, had_ref=ref is not None,
+                verdict=("confirmed", "the tab now reads selected and showing"),
+            )
         if unbound:
             el = unbound[0]
             title = f" {el.title!r}" if el.title else ""
@@ -7333,9 +7379,11 @@ class Runtime:
 
         before = None
         clipboard_before = writer_before = focus_before = sheet_before = None
+        window_before = None
 
         def execute() -> None:
             nonlocal before, clipboard_before, writer_before, focus_before, sheet_before
+            nonlocal window_before
             self._guard_user(bundle)
             if self._ensure_linux_window(chosen, candidates, bundle, identifier):
                 focused.append(True)
@@ -7345,6 +7393,7 @@ class Runtime:
             focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
             sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
             target = self._open_menu_app(bundle) or bundle
+            window_before = self._key_window_probe(bundle)
             if not self._open_mnemonic_menu(target, chord):
                 self.driver.key_chord(chord)
 
@@ -7355,6 +7404,7 @@ class Runtime:
             tool="key", app=bundle, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
             writer_before=writer_before, clipboard_before=clipboard_before,
+            key_window=window_before,
         )
 
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
@@ -7594,8 +7644,13 @@ class Runtime:
             focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
             sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
 
+            window_bg: list[tuple] = []
+
             def execute_bg() -> None:
                 self._guard_user(bundle, addressed=True)
+                probe = self._key_window_probe(bundle)
+                if probe is not None:
+                    window_bg.append(probe)
                 self.driver.key_chord(chord, pid=self._input_pid(pid))
 
             self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid), confirm=confirm)
@@ -7604,6 +7659,7 @@ class Runtime:
                 tool="key", app=bundle, before=before,
                 key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
                 writer_before=writer_before, clipboard_before=clipboard_before,
+                key_window=window_bg[0] if window_bg else None,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -7617,8 +7673,15 @@ class Runtime:
         focus_before = None if writer_before is not None else self._key_focus_probe(target)
         sheet_before = None if writer_before is not None else self._sheet_key_probe(target, chord)
 
+        window_front: list[tuple] = []
+
         def execute() -> None:
             self._guard_user(target)
+            # No app: record the focused app's active top-level now, so a key
+            # that closes it (QWizard Return/Escape) is judged like app= (#1283).
+            probe = self._key_window_probe(target if front != "unknown" else None)
+            if probe is not None:
+                window_front.append(probe)
             # Alt+letter while a menu is open is the menu bar's mnemonic, not
             # a key for the menu that is already up. Sending it into Edit
             # leaves Edit open. Pressing the matching top-level menu switches
@@ -7633,6 +7696,7 @@ class Runtime:
             tool="key", app=target, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
             writer_before=writer_before, clipboard_before=clipboard_before,
+            key_window=window_front[0] if window_front else None,
         )
 
     @_serialized
@@ -8173,6 +8237,18 @@ class Runtime:
             self.driver.type_text(value)
 
         self._run_gated(action, app, execute, input_target=live, secure=private)
+        taker = getattr(self.driver, "take_check_readback", None)
+        check = taker(live) if callable(taker) else None
+        if isinstance(check, tuple):
+            # #1287: a checkable item's CHECKED state read back live.
+            state, changed = check
+            word = "checked" if state else "unchecked"
+            return self._conclude(
+                f"set {ref} = {value!r}", tool="set_value", app=app, before=before,
+                element=live, had_ref=True,
+                verdict=("confirmed", f"the item now reads {word}" if changed
+                         else f"the item already read {word}; no key was sent"),
+            )
         if private:
             return self._conclude(
                 "set field (text redacted)", tool="set_value", app=app,
@@ -9238,6 +9314,27 @@ class Runtime:
                     refuse_opaque_find(anchor_now)
                 if not matches and container_not_readable(snap, anchor_now):
                     return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
+                if matches and not visible_matches(snap):
+                    # A notebook tab scrolled out of its tab bar is in the
+                    # tree with no box, and wheel steps never reach it. Its
+                    # tab list selects it and scrolls it in (#1286). The
+                    # result is the next snapshot showing it on screen.
+                    selector = getattr(self.driver, "select_offscreen_tab", None)
+                    tab = next((el for el in matches if el.bounds is None
+                                and el.role == "AXTab"), None)
+                    if tab is not None and callable(selector) and selector(tab):
+                        later = self.driver.snapshot(Scope(scope), bundle)
+                        self._current = later
+                        shown = visible_matches(later)
+                        if shown:
+                            self._note_issued(later, {el.ref for el in shown})
+                            return (
+                                "found after selecting the tab in its tab list "
+                                "(it was scrolled out of the tab bar):\n"
+                                f"{observe.render_matches(later, shown)}"
+                            )
+                        matches = search_matches(later)
+                        snap = later
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:

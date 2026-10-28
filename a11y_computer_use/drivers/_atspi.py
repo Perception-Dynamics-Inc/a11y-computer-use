@@ -1737,6 +1737,57 @@ def _hidden_page_tab(node) -> bool:
     return _negative_extent(size)
 
 
+def overflowed_page_tab(node) -> bool:
+    """A GTK notebook tab scrolled out of a scrollable tab bar (#1286).
+
+    GTK keeps the tab VISIBLE but not SHOWING and parks it at -2^31 with a
+    1x1 box. Its tab list is SHOWING and implements Selection, which selects
+    the tab and scrolls it into the bar. A tab with GTK's (-1, -1) no-bar
+    sentinel is ``_hidden_page_tab``, not this.
+    """
+    if node is None or _role_name(node) != "page tab":
+        return False
+    if _state_has(node, "SHOWING") or not _state_has(node, "VISIBLE"):
+        return False
+    position, size = _extents(node, keep_zero=True)
+    if _negative_extent(size) or position is None:
+        return False
+    try:
+        parked = min(float(position[0]), float(position[1])) <= -1_000_000
+    except (TypeError, ValueError):
+        return False
+    if not parked:
+        return False
+    parent = _parent_of(node)
+    return (_role_name(parent) == "page tab list" and _state_has(parent, "SHOWING")
+            and _selection_iface(parent) is not None)
+
+
+def select_overflowed_page_tab(node) -> bool:
+    """Select an overflowed tab through its tab list's Selection.
+
+    True only once the tab reads SELECTED and SHOWING with a real box; the
+    caller treats anything else as not done.
+    """
+    parent = _parent_of(node)
+    iface = _selection_iface(parent) if parent is not None else None
+    index = _child_index(parent, node) if iface is not None else None
+    if index is None:
+        return False
+    _call_first(iface, ("select_child", "selectChild"), index, default=False)
+    for attempt in range(10):
+        _call_first(node, ("clear_cache", "clearCache"))
+        if _state_has(node, "SELECTED") and _state_has(node, "SHOWING"):
+            position, size = _extents(node, keep_zero=True)
+            if (position is not None and size is not None
+                    and min(float(position[0]), float(position[1])) > -1_000_000
+                    and min(float(size[0]), float(size[1])) > 1):
+                return True
+        if attempt < 9:
+            time.sleep(0.05)
+    return False
+
+
 def _terminal_page_frame_title(node) -> str:
     """Borrow a frame title only for its single, terminal-content page."""
     notebook = _call_first(node, ("get_parent", "getParent"))
@@ -4863,6 +4914,12 @@ class ATSPIAccessor:
                 if not str(name).strip():
                     name = inline_text
         unallocated = False
+        overflowed_tab = role_str == "page tab" and overflowed_page_tab(node)
+        if overflowed_tab:
+            # Scrolled out of the tab bar (#1286). Keep the name with no box;
+            # a ref click selects it through the tab list's Selection.
+            position, size = None, None
+            unallocated = True
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
             # allocation and, for a terminal, an empty name. Only a main
@@ -5001,6 +5058,8 @@ class ATSPIAccessor:
         )
         if embedded_properties:
             content_note = hint
+        if overflowed_tab:
+            content_note = "scrolled out of the tab bar; a ref click selects it"
         panel_note = ""
         if (
             role_str == "panel" and role == "AXGroup"
@@ -7027,6 +7086,41 @@ def find_root(app: str, scope) -> object | None:
 _TOPLEVEL_ROLES = frozenset({
     "frame", "window", "dialog", "alert", "file chooser", "color chooser",
 })
+
+
+def key_window_handle(app: str):
+    """The app's focused top-level window before a key press, or None (#1283).
+
+    Only a real top-level (frame, dialog, ...) that is SHOWING is returned:
+    ``key_window_state`` reads the same object after the key, so a key whose
+    effect is closing or hiding that window (Return on a wizard's last page,
+    Escape on a dialog) is seen even though the tree no longer has it.
+    """
+    from a11y_computer_use.schema import Scope
+
+    top = find_root(app, Scope.WINDOW)
+    if top is None or _role_name(top) not in _TOPLEVEL_ROLES:
+        return None
+    return top if key_window_state(top) == "showing" else None
+
+
+def key_window_state(top) -> str | None:
+    """``showing``, ``hidden`` or ``closed`` for a top-level window (#1283).
+
+    The same before/after visibility signal #1281 reads for a click, applied
+    to the window a key went to. None means the state was unreadable.
+    """
+    if top is None:
+        return None
+    try:
+        _drop_cached_properties(top)
+        if _state_has(top, "DEFUNCT"):
+            return "closed"
+        if _state_has(top, "SHOWING"):
+            return "showing"
+        return "hidden"
+    except Exception:  # noqa: BLE001 - an unreadable window is unknown, not closed
+        return None
 
 
 def _application_of(node):
@@ -14820,6 +14914,21 @@ def focused_key_evidence(app: str, *, include_page: bool = False) -> tuple:
         if page is not None:
             return (*result, page)
     return result
+
+
+def qt_checkable_item(acc) -> bool:
+    """A checkable Qt item-view item: ``list item`` or ``table cell`` (#1287).
+
+    Qt 6 publishes CHECKABLE on a QListWidget item with ItemIsUserCheckable
+    (and a QStandardItem with setCheckable). Its only action, Toggle, is a
+    selection toggle, so the check state changes only through the keyboard
+    (space on the current item) or a click on the indicator.
+    """
+    if acc is None or not _qt_app(acc):
+        return False
+    if _role_name(acc) not in ("list item", "table cell", "tree item"):
+        return False
+    return _state_has(acc, "CHECKABLE")
 
 
 def control_kind(acc) -> str | None:
