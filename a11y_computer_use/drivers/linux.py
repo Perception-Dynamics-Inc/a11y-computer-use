@@ -3583,6 +3583,29 @@ class LinuxDriver:
                         "hint": "Take a fresh snapshot and select the intended row again."},
             )
 
+    def select_offscreen_tab(self, element: Element) -> bool:
+        """Select a GTK notebook tab scrolled out of its tab bar (#1286).
+
+        The tab has no box, so a pointer click has nowhere to land. Its tab
+        list's Selection switches to it and GTK scrolls it into the bar.
+        False when the ref is not such a tab. A tab that does not end up
+        SELECTED and SHOWING is an error, not a click.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None or not self._run(lambda: _atspi.overflowed_page_tab(handle)):
+            return False
+        self._check_modal_target(element)
+        if self._run(lambda: _atspi.select_overflowed_page_tab(handle)):
+            return True
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}) tab scrolled out of the tab bar was not selected",
+            detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
