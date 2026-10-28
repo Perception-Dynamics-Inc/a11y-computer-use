@@ -7953,40 +7953,6 @@ def _sparse_untitled_chrome_frame(frame) -> bool:
     return True
 
 
-def _hollow_titled_chrome_frame(frame) -> bool:
-    """True for a titled Chrome frame whose cached children are all empty (#1242).
-
-    After Reload the one clear per latch can cache the page window while its
-    views are rebuilt: the frame keeps its title but its only panel has no
-    children. That snapshot is the window plus one untitled group with no
-    rows, and ``scroll_to_find`` stops before the wheel. A live page window
-    always has a panel with children, so this never matches it.
-    """
-    if frame is None or _is_browser_bar_frame(frame):
-        return False
-    if _role_name(frame) != "frame" or not (_node_name(frame) or "").strip():
-        return False
-    try:
-        count = _child_count(frame)
-    except Exception:
-        return False
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > 2:
-        return False
-    for index in range(int(count)):
-        child = _child_at(frame, index)
-        if child is None:
-            continue
-        if _role_name(child) in {"document web", "document frame", "internal frame"}:
-            return False
-        try:
-            kids = _child_count(child)
-        except Exception:
-            return False
-        if not isinstance(kids, int) or isinstance(kids, bool) or kids != 0:
-            return False
-    return True
-
-
 def _chrome_page_window(app, root):
     """The named page window when ``root`` is an empty untitled frame.
 
@@ -8062,8 +8028,7 @@ def chromium_snapshot_root(root):
             # read is that untitled group with no rows. Only that empty
             # result clears again: it has no document, so the clear does not
             # re-walk a page and the short-page budget is kept.
-            # The titled window can be that empty read too (#1242).
-            if not _sparse_untitled_chrome_frame(page) and not _hollow_titled_chrome_frame(page):
+            if not _sparse_untitled_chrome_frame(page):
                 return page
     # A cache event can restore CHILDREN during clear_cache's D-Bus calls.
     # Keep child caching disabled through both the clear and frame selection;
