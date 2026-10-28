@@ -5908,13 +5908,21 @@ class Runtime:
             f"({display.width}x{display.height}); move or resize the window, or scroll it into view",
         )
 
-    def _refuse_center_outside_window(self, element: Element) -> None:
+    def _refuse_center_outside_window(
+        self, element: Element, tree: "Snapshot | None" = None, issued_ref: str | None = None,
+    ) -> None:
         """A pointer click must land inside the ref's own window (#1259).
 
         Firefox can keep reporting a control's pre-zoom extents. The center
         then sits above the window (on the title bar or another app), and a
         synthesized click there hits something else. Linux only; a ref with
         no reported window box in the snapshot is left to the other guards.
+
+        The window is read from the tree the element itself belongs to (#1272).
+        A click target re-resolved into a fresh live tree carries that tree's
+        refs; walking its parents through the agent's snapshot climbed to an
+        unrelated node and judged a floating Qt dock button against the main
+        window. ``issued_ref`` is the ref the caller sent, named in the refusal.
         """
         bounds = element.bounds
         current = getattr(self, "_current", None)
@@ -5923,7 +5931,16 @@ class Runtime:
             or bounds is None or bounds.width < 1 or bounds.height < 1
         ):
             return
-        by_ref = {e.ref: e for e in current.elements}
+        source = None
+        for candidate in (tree, current):
+            if candidate is not None and getattr(
+                candidate, "snapshot_id", element.snapshot_id
+            ) == element.snapshot_id:
+                source = candidate
+                break
+        if source is None:
+            return  # no tree that owns these parent refs; other guards apply
+        by_ref = {e.ref: e for e in source.elements}
         window = None
         seen = set()
         parent = element.parent
@@ -5946,7 +5963,7 @@ class Runtime:
         if window.x <= cx < window.x + window.width and window.y <= cy < window.y + window.height:
             return
         raise _not_visible(
-            element.ref, "outside_window", bounds,
+            issued_ref or element.ref, "outside_window", bounds,
             f"the ref's reported center ({cx}, {cy}) is outside its window "
             f"({window.x}, {window.y}, {window.width}x{window.height}); no click was sent. "
             "The reported bounds may be out of date (for example after a page zoom) or the "
@@ -6343,7 +6360,11 @@ class Runtime:
             # A text ref uses the control's box, not the line-wide text box.
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
-                self._refuse_center_outside_window(act)
+                self._refuse_center_outside_window(
+                    act,
+                    resolved_tree if isinstance(resolved_tree, Snapshot) else None,
+                    ref if act is target else None,
+                )
             try:
                 self._recheck_target(app, act)
             except ComputerUseError as exc:
