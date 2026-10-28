@@ -24031,10 +24031,24 @@ def qt_item_view_cell(acc) -> bool:
     Qt 6 exposes QTableWidget / QTableView cells as ``table cell`` nodes
     without EDITABLE or EditableText, even when the item is editable: the
     editor widget exists only after F2 or a double click.
+
+    Qt 6 QListWidget / QListView items are ``list item`` nodes with the
+    same shape: the TableCell interface, no EditableText, inside a ``list``
+    (#1288). A list item without TableCell is some other toolkit's row.
     """
-    if acc is None or _role_name(acc) != "table cell" or not _qt_app(acc):
+    if acc is None or not _qt_app(acc):
+        return False
+    role = _role_name(acc)
+    if role == "list item":
+        if _table_cell_iface(acc) is None or qt_item_view_of(acc) is None:
+            return False
+    elif role != "table cell":
         return False
     return _editable_iface(acc) is None
+
+
+def _table_cell_iface(acc):
+    return _call_first(acc, ("get_table_cell", "get_table_cell_iface"))
 
 
 def qt_item_view_of(cell):
