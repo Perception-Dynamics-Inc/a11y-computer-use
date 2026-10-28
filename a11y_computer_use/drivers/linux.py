@@ -103,6 +103,18 @@ def _same_program_name(app: str, other: str) -> bool:
         or _linux_system.class_names_program(app, other)
 
 
+def _interpreter_of(root) -> str | None:
+    """Interpreter comm (``python3``) of ``root``'s process, else None."""
+    from a11y_computer_use.drivers import _atspi, _linux_system
+
+    application = _atspi._application_of(root) or root
+    pid = _atspi.pid_of(application) or _atspi.pid_of(root)
+    if not pid:
+        return None
+    comm = _linux_system._comm_for_pid(pid)
+    return comm if _linux_system.is_interpreter(comm) else None
+
+
 def _resolved_app(identifier: str) -> str:
     """The app id app list would show for ``identifier``.
 
@@ -1414,6 +1426,22 @@ class LinuxDriver:
                         "--force-renderer-accessibility. See docs/linux-port.md."},
             )
 
+    def interpreter_host(self, app: str) -> str | None:
+        """Interpreter comm of the application registered as ``app``, else None.
+
+        Covers an interpreter-hosted app before its window maps, when only
+        the AT-SPI registry knows it (#1296).
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            root = self._run(lambda: _atspi.find_root(app, Scope.APP))
+            if root is None:
+                return None
+            return self._run(lambda: _interpreter_of(root))
+        except Exception:  # noqa: BLE001 - no bus evidence
+            return None
+
     def _root_for_snapshot(self, app: str, scope: Scope):
         """(name, accessible) for a snapshot.
 
@@ -1433,6 +1461,9 @@ class LinuxDriver:
 
         root = self._run(lambda name=app: lookup(name))
         if root is not None:
+            # The requested name stays the label so a re-observe finds this
+            # process, not another python3 app. Runtime gates every action
+            # on the interpreter key instead (#1296).
             return app, self._pinned(app, root)
         # The second lookup is only for another name of the same program
         # (LibreOffice -> soffice.bin, a WM_CLASS). resolve_app no longer
