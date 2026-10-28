@@ -7220,6 +7220,9 @@ class Runtime:
 
         if element.role in _EDITABLE_ROLES:
             return None
+        opens = getattr(self.driver, "opens_cell_editor", None)
+        if element.role == "AXCell" and callable(opens) and opens(element) is True:
+            return None  # #1278: Qt item-view cell, edited through F2
         title = f" {element.title!r}" if element.title else ""
         return ComputerUseError(
             ErrorCode.UNSUPPORTED,

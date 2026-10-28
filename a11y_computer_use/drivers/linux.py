@@ -4112,6 +4112,11 @@ class LinuxDriver:
             # the cell text or the formula attribute has to match.
             self._write_sheet_cell(handle, value)
             return True
+        if (handle is not None and not _accepts_text(element)
+                and self._run(lambda: _atspi.qt_table_cell(handle))):
+            # #1278: a Qt 6 item-view cell edits through its delegate editor.
+            self._edit_qt_cell(element, handle, value, replace=True)
+            return True
         if handle is not None:
             kind = self._run(lambda: _atspi.control_kind(handle))
             if kind == "combo":
@@ -5300,6 +5305,10 @@ class LinuxDriver:
             raise self._focus_lost_on(element)
         self._refuse_hidden(element, handle)
         self._raise_handle_window(handle)
+        if not _accepts_text(element) and self._run(lambda: _atspi.qt_table_cell(handle)):
+            self._visible_action(element, "Type")
+            self._edit_qt_cell(element, handle, text, replace=False)
+            return len(text)
         if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
             raise _not_editable(element)
         # Ref typing goes through type_into, not type_text; announce here so
@@ -5443,6 +5452,60 @@ class LinuxDriver:
         if live is not handle:
             observe._HANDLES.get(element.snapshot_id, {})[element.ref] = live
         return live
+
+    def opens_cell_editor(self, element: Element) -> bool:
+        """True for a Qt table cell that edits through F2 (#1278)."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role != "AXCell":
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        return handle is not None and bool(self._run(lambda: _atspi.qt_table_cell(handle)))
+
+    def _edit_qt_cell(self, element: Element, handle, text: str, *, replace: bool) -> None:
+        """Edit a Qt item-view cell through its delegate editor (#1278).
+
+        Focus the cell, press F2, and require a focused editor in the same
+        process before any text is sent. No editor means the item is read
+        only: nothing was typed and the refusal is ``not_editable``. The
+        editor is committed with Return and the cell itself is read back.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if _on_wayland():
+            raise _wayland_input_error("edit table cell")
+        from a11y_computer_use.drivers import _linux_input
+
+        before = self._run(lambda: _atspi._node_name(handle)) or ""
+        self._run(lambda: _atspi.grab_focus(handle))
+        _linux_input.press_chord("F2")
+        editor = None
+        for _ in range(10):
+            editor = self._run(lambda: _atspi.qt_cell_editor(handle))
+            if editor is not None:
+                break
+            time.sleep(0.05)
+        if editor is None:
+            raise _not_editable(element)
+        if replace:
+            _linux_input.press_chord("ctrl+a")
+        _linux_input.type_string(text)
+        _linux_input.press_chord("Return")
+        want = text if replace else before + text
+        got = before
+        for _ in range(10):
+            self._run(lambda: _atspi._drop_cached_properties(handle))
+            got = self._run(lambda: _atspi._node_name(handle)) or ""
+            if got == want:
+                return
+            time.sleep(0.05)
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} reads {got!r} after the edit, not {want!r}",
+            detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch",
+                    "expected": want, "actual": got},
+        )
 
     def _focus_lost_on(self, element: Element) -> ComputerUseError:
         return ComputerUseError(

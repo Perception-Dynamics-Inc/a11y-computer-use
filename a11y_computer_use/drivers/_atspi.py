@@ -24023,3 +24023,31 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, poi
                              if all(modal_document(node) is not None for node in modals) else [])})
 
     return bool(modals)
+
+
+def qt_table_cell(acc) -> bool:
+    """A Qt item-view cell with no EditableText of its own (#1278).
+
+    Qt 6 exposes QTableWidget / QTableView cells as ``table cell`` nodes
+    without EDITABLE or EditableText, even when the item is editable: the
+    editor widget exists only after F2 or a double click.
+    """
+    if acc is None or _role_name(acc) != "table cell" or not _qt_app(acc):
+        return False
+    return _editable_iface(acc) is None
+
+
+def qt_cell_editor(cell):
+    """The focused editor Qt opened over ``cell``, or None.
+
+    It must be a focused editable in the same process, and not the cell.
+    """
+    app = _application_name(cell)
+    if not app:
+        return None
+    editor = focused_editable(app)
+    if editor is None or editor is cell or is_secure(editor):
+        return None
+    if pid_of(editor) != pid_of(cell):
+        return None
+    return editor
