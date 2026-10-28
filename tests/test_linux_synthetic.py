@@ -23024,25 +23024,6 @@ def test_snapshot_still_retries_under_the_same_program(fake_atspi, monkeypatch) 
     assert office.children == [window]
 
 
-def test_snapshot_keeps_the_requested_name_when_the_comm_lookup_finds_it(fake_atspi, monkeypatch) -> None:
-    """A GTK app found by its comm while registering keeps its prgname.
-
-    Seen in CI run 40647502987: the by-name lookup missed, the ``python3``
-    lookup found the app already named ``cuaiconprobe``, and the snapshot
-    was keyed on ``python3``, which had no grant.
-    """
-    from a11y_computer_use.drivers import _atspi_events, _linux_system
-
-    window = _WindowNode("frame", "cuaiconprobe")
-    _PidNode("application", "cuaiconprobe", pid=31, children=[window])
-    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
-    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window if name == "python3" else None)
-    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: "python3")
-    monkeypatch.setattr(_linux_system, "class_names_program", lambda name, identity: True)
-    _programs_by_pid(monkeypatch, {31: "python3"})
-    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW) == ("cuaiconprobe", window)
-
-
 def test_a_bound_name_is_not_rebound_to_a_different_program(fake_atspi, monkeypatch) -> None:
     """#1191 pin: ``Files`` bound to Nautilus; Nautilus closes, Thunar is app_not_running."""
     from a11y_computer_use.drivers import _atspi_events
@@ -23675,3 +23656,35 @@ def test_set_value_presses_a_webview_guest_field_that_grab_focus_cannot_reach(
         assert calls == [("click", "e1"), ("focus", False)]
     else:
         assert calls == [("focus", True)]
+
+
+def test_snapshot_labels_an_interpreter_hosted_app_as_its_interpreter(fake_atspi, monkeypatch) -> None:
+    """#1296: a python3 app named ``cuaiconprobe`` is labelled python3, found by either name.
+
+    CI run 40647502987 saw the by-name lookup miss and the python3 lookup
+    find the app. Neither path may hand the self-chosen name to the gate.
+    """
+    from a11y_computer_use.drivers import _atspi_events, _linux_system
+
+    window = _WindowNode("frame", "cuaiconprobe")
+    _PidNode("application", "cuaiconprobe", pid=31, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: "python3")
+    _programs_by_pid(monkeypatch, {31: "python3"})
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window if name == "python3" else None)
+    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW)[0] == "python3"
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)  # pre-window, by name
+    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW)[0] == "python3"
+    assert LinuxDriver().interpreter_host("cuaiconprobe") == "python3"
+
+
+def test_snapshot_keeps_a_native_app_name(fake_atspi, monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi_events
+
+    window = _WindowNode("frame", "Untitled")
+    _PidNode("application", "mousepad", pid=32, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    _programs_by_pid(monkeypatch, {32: "mousepad"})
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)
+    assert LinuxDriver()._root_for_snapshot("mousepad", Scope.WINDOW)[0] == "mousepad"
+    assert LinuxDriver().interpreter_host("mousepad") is None

@@ -738,21 +738,8 @@ def error_text(exc: ComputerUseError) -> str:
     return " | ".join(parts)
 
 
-#: Interpreter comm -> (requested prgname, live script, grant was bound) from
-#: the last prgname key refused for want of a matching script binding.
-_PRGNAME_HINTS: dict[str, tuple[str, str | None, bool]] = {}
-
-
-def _prgname_hint(app: str, need: str) -> str | None:
-    seen = _PRGNAME_HINTS.get(app)
-    if not seen:
-        return None
-    name, script, bound = seen
-    where = script or "/path/to/script.py"
-    why = ("its grant is bound to a different script" if bound
-           else "a plain name grant is never inherited by an interpreter")
-    return (f"this {app} process names itself {name!r}, but {why}. To grant that script, run "
-            f"`a11y-computer-use grant {name} {need} --script {where}`.")
+#: Interpreter comm -> the name the last interpreter-hosted app gave itself.
+_PRGNAME_HINTS: dict[str, str] = {}
 
 
 def refusal_text(decision: safety.Decision) -> str:
@@ -761,9 +748,13 @@ def refusal_text(decision: safety.Decision) -> str:
     text = f"{decision.verdict.value}: {decision.reason}"
     if decision.verdict is safety.Verdict.NEEDS_PERMISSION and decision.app:
         need = decision.required.value if decision.required else "click"
-        special = _prgname_hint(decision.app, need)
-        if special:
-            return text + f" | hint: {special}"
+        named = _PRGNAME_HINTS.get(decision.app)
+        if named:
+            return text + (
+                f" | hint: this {decision.app} process names itself {named!r}; grants for "
+                f"interpreter-hosted apps are keyed as {decision.app}. Grant {decision.app} "
+                f"explicitly if you trust every {decision.app} app: "
+                f"`a11y-computer-use grant {decision.app} {need}`.")
         text += (f" | hint: grant_app(app='{decision.app}', tier='{need}') "
                  f"records the grant in this host, or run "
                  f"`a11y-computer-use grant {decision.app} {need}`.")
@@ -2479,53 +2470,44 @@ class Runtime:
             return None, identifier  # the driver validates/binds at snapshot time
         running, bundle = _running_app(identifier)
         if sys.platform.startswith("linux"):
-            bundle = self._linux_prgname_key(identifier, bundle)
+            bundle = self._linux_interpreter_key(identifier, bundle)
         return running, bundle
 
-    def _linux_prgname_key(self, identifier: str, resolved: str) -> str:
-        """``identifier`` when it is the prgname the grant names, else ``resolved``.
+    def _linux_interpreter_key(self, identifier: str, resolved: str) -> str:
+        """The interpreter (``python3``) when one hosts ``identifier``, else ``resolved``.
 
-        A GTK app run by python3 maps a window whose WM_CLASS instance is its
-        prgname, and ``resolve_app`` keys it as ``python3``. A grant for the
-        prgname then never matched once the window was mapped, so a
-        long-lived server refused 14 of 15 launches (#1296). The prgname is
-        used only when it is granted and the comm is not. A deny on either
-        name wins, and a grant on the comm keeps the comm. Read fresh on
+        Every name an interpreter-hosted app shows (WM_CLASS, prgname, AT-SPI
+        name, cmdline) is set by that process, so a grant on the requested
+        name is never inherited by it, before or after its window maps
+        (#1296). A deny on the requested name still wins. Read fresh on
         every call; nothing is cached.
         """
         from a11y_computer_use.drivers import _linux_system
 
         _PRGNAME_HINTS.pop(resolved, None)
-        try:
-            named = _linux_system.grant_app_id(identifier, resolved)
-        except Exception:  # noqa: BLE001 - no X11 evidence keeps the comm
+        wanted = (identifier or "").strip()
+        if not wanted:
             return resolved
-        if not named or named == resolved:
+        host: str | None = None
+        if _linux_system.is_interpreter(resolved):
+            if resolved.casefold() == wanted.casefold():
+                return resolved
+            host = resolved
+        elif resolved.casefold() == wanted.casefold() and not _linux_system.is_interpreter(wanted):
+            host = _linux_system.interpreter_hosting(wanted)
+            if host is None:
+                probe = getattr(self.driver, "interpreter_host", None)
+                if callable(probe):
+                    try:
+                        host = probe(wanted)
+                    except Exception:  # noqa: BLE001 - no evidence keeps the name
+                        host = None
+        if not host:
             return resolved
-        comm_grant, comm_denied, _err, _block = self.store.policy(resolved)
-        if comm_denied or comm_grant is not None:
-            return resolved
-        name_grant, name_denied, _err, _block = self.store.policy(named)
-        if name_denied:
-            return named
-        if name_grant is None or not self.store.has_exact_grant(named):
-            return resolved
-        if not _linux_system.is_interpreter(resolved):
-            return resolved
-        # Positive proof only (#1296): a plain name grant is never inherited
-        # by an interpreter. The grant must be bound to a script, and every
-        # window claiming the name must run exactly that script.
-        binding = self.store.script_binding(named)
-        try:
-            scripts = _linux_system.prgname_scripts(named, resolved)
-        except Exception:  # noqa: BLE001 - no evidence keeps the comm
-            scripts = []
-        if binding and scripts and all(script == binding for script in scripts):
-            _PRGNAME_HINTS.pop(resolved, None)
-            return named
-        live = next((script for script in scripts if script), None)
-        _PRGNAME_HINTS[resolved] = (named, live, bool(binding))
-        return resolved
+        if self.store.policy(wanted)[1]:
+            return wanted  # a deny on the requested name wins
+        _PRGNAME_HINTS[host] = wanted
+        return host
 
     def _recheck_frontmost_app(self, app: str) -> None:
         front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()

@@ -965,211 +965,41 @@ def resolve_app(identifier: str) -> str:
     return by_class or identifier
 
 
-def grant_app_id(identifier: str, resolved: str | None = None) -> str:
-    """The id a grant for ``identifier`` is checked under.
+#: Comms of interpreters that host apps. Every identity such a process shows
+#: (WM_CLASS, prgname, AT-SPI name, cmdline, cwd) is its own to set, so no
+#: requested name is ever trusted for it (#1296).
+_INTERPRETER_RE = re.compile(
+    r"^(python|pypy|perl|ruby|node|nodejs|gjs|lua|luajit|tclsh|wish|php|sh|bash|dash|zsh)"
+    r"[0-9.]*(-dbg)?$"
+)
 
-    ``resolve_app`` turns a window found only by its WM_CLASS into the
-    owning comm. For a GTK app run by an interpreter that comm is
-    ``python3``, while the app names itself with ``GLib.set_prgname``: the
-    WM_CLASS instance and the AT-SPI application name. Keying the grant on
-    ``python3`` refuses the name the user granted, and only a check that
-    ran before the window was mapped saw the requested name (#1296: 1 of 15
-    launches under a long-lived server).
 
-    The requested name is kept when a window's WM_CLASS instance is exactly
-    that name, its process is a different program, and no executable of
-    that name is on PATH, so a script cannot borrow an installed program's
-    grant by naming itself after it. Every other result of ``resolve_app``
-    is unchanged (``LibreOffice`` still keys as ``soffice.bin``). Nothing is
-    cached: each call reads the windows open now. ``resolved`` is a
-    ``resolve_app`` answer the caller already read.
+def is_interpreter(name: str | None) -> bool:
+    """True for an interpreter comm such as ``python3``, ``python3.12`` or ``gjs``."""
+    return bool(name) and bool(_INTERPRETER_RE.match(os.path.basename(str(name)).casefold()))
+
+
+def interpreter_hosting(identifier: str) -> str | None:
+    """The interpreter comm of a mapped window whose WM_CLASS names ``identifier``.
+
+    None when no such window is mapped or its program is not an interpreter.
+    Read fresh on every call; nothing is cached.
     """
-    if resolved is None:
-        resolved = resolve_app(identifier)
-    wanted = (identifier or "").strip()
-    if not wanted or resolved.casefold() == wanted.casefold():
-        return resolved
-    if "/" in wanted or shutil.which(wanted):
-        return resolved
-    from a11y_computer_use.app_identity import program_alias
-
-    if program_alias(wanted, resolved.lower()):
-        return resolved  # another name of the same program (soffice.bin)
-    if _names_installed_program(wanted):
-        return resolved  # a script must not borrow an installed app's grant
-    folded = wanted.casefold()
+    wanted = (identifier or "").strip().casefold()
+    if not wanted:
+        return None
     try:
         with _open_display() as d:
             for win in _managed_windows(d):
-                identity = (_app_id(win, d) or "").lower()
-                if identity != resolved.lower():
+                identity = _app_id(win, d) or ""
+                if not is_interpreter(identity):
                     continue
-                instance, _klass = _wm_class_strings(win, d)
-                if (instance or "").casefold() == folded:
-                    return wanted
-    except Exception:  # noqa: BLE001 - no X11 means no prgname evidence
-        return resolved
-    return resolved
-
-
-_INTERPRETER_RE = re.compile(r"^(python|pypy)[0-9.]*(-dbg)?$")
-#: CPython options that consume the next argument.
-_PY_VALUE_OPTS = frozenset({"-W", "-X", "-Q"})
-
-
-def is_interpreter(name: str) -> bool:
-    """True for a Python interpreter comm such as ``python3`` or ``python3.12``."""
-    return bool(_INTERPRETER_RE.match(os.path.basename(name or "")))
-
-
-def script_identity(pid: int) -> str | None:
-    """Realpath of the script a Python interpreter ``pid`` runs, or None.
-
-    Read from ``/proc/PID/exe`` and ``/proc/PID/cmdline``. ``-c``, ``-m``,
-    stdin, or anything unparsable gives None: no positive identity.
-    """
-    try:
-        exe = os.path.realpath(f"/proc/{int(pid)}/exe")
-        if not is_interpreter(os.path.basename(exe)):
-            return None
-        with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
-            argv = [a.decode("utf-8", "surrogateescape") for a in fh.read().split(b"\0") if a]
-        cwd = os.readlink(f"/proc/{int(pid)}/cwd")
-    except (OSError, ValueError):
+                instance, klass = _wm_class_strings(win, d)
+                if wanted in {(instance or "").casefold(), (klass or "").casefold()}:
+                    return identity
+    except Exception:  # noqa: BLE001 - no X11 means no window evidence
         return None
-    return _script_from_argv(argv, cwd)
-
-
-def _script_from_argv(argv: list[str], cwd: str) -> str | None:
-    i = 1
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--":
-            i += 1
-            break
-        if arg == "-" or (arg.startswith("-") and not arg.startswith("--")
-                          and ("c" in arg[1:] or "m" in arg[1:])):
-            return None  # -c / -m / stdin (also bundled, e.g. -uc): no script
-        if arg in _PY_VALUE_OPTS:
-            i += 2
-            continue
-        if arg.startswith("-"):
-            i += 1
-            continue
-        break
-    if i >= len(argv) or not argv[i] or argv[i] == "-":
-        return None
-    path = argv[i] if os.path.isabs(argv[i]) else os.path.join(cwd, argv[i])
-    real = os.path.realpath(path)
-    return real if os.path.isfile(real) else None
-
-
-def prgname_scripts(identifier: str, resolved: str) -> list[str | None]:
-    """Script identities of every window claiming prgname ``identifier``.
-
-    One entry per mapped window of ``resolved`` (the comm) whose WM_CLASS
-    instance is exactly ``identifier``; None where no identity is provable.
-    Empty when no such window is mapped. Read fresh on every call.
-    """
-    found: list[str | None] = []
-    want = (identifier or "").strip()
-    if not want:
-        return found
-    with _open_display() as d:
-        for win in _managed_windows(d):
-            if (_app_id(win, d) or "").lower() != (resolved or "").lower():
-                continue
-            instance, _klass = _wm_class_strings(win, d)
-            if (instance or "") != want:
-                continue
-            pid = _pid_of(win, d)
-            found.append(script_identity(pid) if pid else None)
-    return found
-
-
-def _flatpak_application_dirs() -> list[str]:
-    home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    return [
-        os.path.join(home, "flatpak", "exports", "share", "applications"),
-        "/var/lib/flatpak/exports/share/applications",
-    ]
-
-
-def _bin_dirs() -> list[str]:
-    raw = os.environ.get("PATH") or ""
-    dirs = [part for part in raw.split(os.pathsep) if part]
-    for extra in ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
-                  "/usr/games", "/snap/bin", "/var/lib/flatpak/exports/bin",
-                  os.path.join(os.path.expanduser("~"), ".local", "share", "flatpak", "exports", "bin")):
-        if extra not in dirs:
-            dirs.append(extra)
-    return dirs
-
-
-def _installed_program_names() -> set[str]:
-    """Casefolded names of installed programs, read fresh.
-
-    Executables in PATH and the standard bin dirs, every desktop id (both the
-    ``foo-bar`` and ``foo/bar`` spellings), and each entry's ``Exec`` basename
-    and ``StartupWMClass``, across the XDG and Flatpak application dirs.
-    """
-    from a11y_computer_use.app_identity import tokens
-
-    names: set[str] = set()
-    for folder in _bin_dirs():
-        try:
-            for entry in os.listdir(folder):
-                names.add(entry.casefold())
-        except OSError:
-            continue
-    for root in [*_application_dirs(), *_flatpak_application_dirs()]:
-        for dirpath, _dirs, files in os.walk(root):
-            for name in files:
-                if not name.endswith(".desktop"):
-                    continue
-                rel = os.path.relpath(os.path.join(dirpath, name), root)
-                desktop_id = rel.replace(os.sep, "-")
-                names.update(tokens(desktop_id))
-                names.update(tokens(name))
-                try:
-                    with open(os.path.join(dirpath, name), encoding="utf-8", errors="replace") as fh:
-                        for line in fh:
-                            key, sep, value = line.partition("=")
-                            if not sep:
-                                continue
-                            key = key.strip()
-                            value = value.strip()
-                            if key == "StartupWMClass" and value:
-                                names.update(tokens(value))
-                            elif key == "Exec" and value:
-                                first = value.split()[0].strip('"')
-                                names.update(tokens(first))
-                except OSError:
-                    continue
-    return names
-
-
-def _names_installed_program(wanted: str) -> bool:
-    """True when ``wanted`` names, or may name, an installed program.
-
-    Compared the way grants match: case-insensitive, with desktop ids and
-    alias groups. A name in an alias group or shaped like a reverse-DNS
-    desktop id is treated as installed, and so is any read error: when in
-    doubt the requested name is refused (#1296).
-    """
-    from a11y_computer_use.app_identity import identity_keys, tokens
-
-    own = tokens(wanted)
-    keys = identity_keys(wanted)
-    if not own or keys != own:
-        return True  # an alias group names a known app
-    if any("." in key for key in own):
-        return True  # a desktop / flatpak id spelling
-    try:
-        installed = _installed_program_names()
-    except Exception:  # noqa: BLE001 - unreadable means unknown, so refuse
-        return True
-    return bool(keys & installed)
+    return None
 
 
 def class_names_program(identifier: str, identity: str) -> bool:

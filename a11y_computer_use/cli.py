@@ -68,9 +68,6 @@ def _build_parser() -> argparse.ArgumentParser:
     grant.add_argument("tier", nargs="?", choices=("read", "click", "full"),
                        help="read = observe; click = press elements, menus, dialogs; full = type and key chords")
     grant.add_argument("--revoke", action="store_true", help="remove the app's grant")
-    grant.add_argument("--script", metavar="PATH",
-                       help="Linux: bind the grant to this interpreter script, so a python3 app "
-                            "named APP gets it only while running exactly this script")
     grant.set_defaults(handler=_cmd_grant)
 
     mcp = sub.add_parser("mcp", help="run the MCP server over stdio")
@@ -761,7 +758,7 @@ def _cmd_grant(args: argparse.Namespace) -> int:
         if not args.tier:
             print("tier required: read, click, or full", file=sys.stderr)
             return 2
-        store.set_tier(bundle, safety.Tier(args.tier), script=getattr(args, "script", None))
+        store.set_tier(bundle, safety.Tier(args.tier))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

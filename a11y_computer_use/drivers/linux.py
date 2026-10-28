@@ -103,15 +103,16 @@ def _same_program_name(app: str, other: str) -> bool:
         or _linux_system.class_names_program(app, other)
 
 
-def _registered_as(root, app: str) -> bool:
-    """Whether ``root``'s AT-SPI application is named ``app`` (case-insensitive)."""
-    from a11y_computer_use.drivers import _atspi
+def _interpreter_of(root) -> str | None:
+    """Interpreter comm (``python3``) of ``root``'s process, else None."""
+    from a11y_computer_use.drivers import _atspi, _linux_system
 
-    application = _atspi._application_of(root)
-    if application is None:
-        return False
-    name = _atspi._node_name(application) or ""
-    return bool(name.strip()) and name.strip().casefold() == app.strip().casefold()
+    application = _atspi._application_of(root) or root
+    pid = _atspi.pid_of(application) or _atspi.pid_of(root)
+    if not pid:
+        return None
+    comm = _linux_system._comm_for_pid(pid)
+    return comm if _linux_system.is_interpreter(comm) else None
 
 
 def _resolved_app(identifier: str) -> str:
@@ -1415,6 +1416,22 @@ class LinuxDriver:
                         "--force-renderer-accessibility. See docs/linux-port.md."},
             )
 
+    def interpreter_host(self, app: str) -> str | None:
+        """Interpreter comm of the application registered as ``app``, else None.
+
+        Covers an interpreter-hosted app before its window maps, when only
+        the AT-SPI registry knows it (#1296).
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            root = self._run(lambda: _atspi.find_root(app, Scope.APP))
+            if root is None:
+                return None
+            return self._run(lambda: _interpreter_of(root))
+        except Exception:  # noqa: BLE001 - no bus evidence
+            return None
+
     def _root_for_snapshot(self, app: str, scope: Scope):
         """(name, accessible) for a snapshot.
 
@@ -1434,6 +1451,11 @@ class LinuxDriver:
 
         root = self._run(lambda name=app: lookup(name))
         if root is not None:
+            host = self._run(lambda: _interpreter_of(root))
+            if host and host.casefold() != app.casefold():
+                # An interpreter-hosted app names itself; it is keyed as its
+                # interpreter, before and after its window maps (#1296).
+                return host, self._pinned(app, root)
             return app, self._pinned(app, root)
         # The second lookup is only for another name of the same program
         # (LibreOffice -> soffice.bin, a WM_CLASS). resolve_app no longer
@@ -1441,13 +1463,15 @@ class LinuxDriver:
         # here as well, so an exited `python` never becomes `python3`
         # (#1191).
         resolved = _resolved_app(app)
-        if resolved != app and _same_program_name(app, resolved):
+        from a11y_computer_use.drivers import _linux_system
+
+        if resolved != app and (
+            _same_program_name(app, resolved)
+            or (_linux_system.is_interpreter(resolved) and not _linux_system.is_interpreter(app))
+        ):
+            # An interpreter-hosted app is labelled as its interpreter, so the
+            # permission gate keys it as python3, never its self-chosen name.
             root = self._run(lambda name=resolved: lookup(name))
-            if root is not None and self._run(lambda: _registered_as(root, app)):
-                # The by-name lookup ran before the application registered;
-                # the comm lookup a moment later found it under the requested
-                # name. Keep that name so the grant keyed on it still applies.
-                return app, self._pinned(app, root)
             return resolved, (self._pinned(app, root) if root is not None else None)
         # A different program's name is kept only to word the error (VLC's
         # bridge hint); nothing is bound to it.
