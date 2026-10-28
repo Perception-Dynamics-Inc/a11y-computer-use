@@ -23290,6 +23290,25 @@ def test_calc_comment_paragraph_is_the_type_read_back(fake_atspi, monkeypatch) -
     assert exc.value.detail["reason"] == "text_mismatch"
 
 
+def test_calc_cell_comment_comes_from_the_note_attribute(fake_atspi) -> None:
+    """Refs #1248. Synthetic cells. Not a live Calc window.
+
+    Calc publishes a cell comment as the cell's ``Note`` attribute with no
+    hover. Only a LibreOffice table cell with a non-blank Note has one.
+    """
+    office = _Acc("application", name="soffice")
+    other = _Acc("application", name="gnumeric")
+    cell = _Acc("table cell", name="B2")
+    cell.get_application = lambda: office
+    assert _atspi._calc_cell_comment(cell, "table cell", {"Note": "Check stock\nlevel"}) == "Check stock level"
+    assert _atspi._calc_cell_comment(cell, "table cell", {"Note": "  "}) == ""
+    assert _atspi._calc_cell_comment(cell, "table cell", {}) == ""
+    assert _atspi._calc_cell_comment(cell, "paragraph", {"Note": "x"}) == ""
+    foreign = _Acc("table cell", name="B2")
+    foreign.get_application = lambda: other
+    assert _atspi._calc_cell_comment(foreign, "table cell", {"Note": "x"}) == ""
+
+
 def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
     """#1232: GTK 4 marks an entry neither SINGLE_LINE nor MULTI_LINE."""
     driver, entry, element = _select_all_entry(monkeypatch)
