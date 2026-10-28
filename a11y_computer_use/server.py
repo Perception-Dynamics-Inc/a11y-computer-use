@@ -2093,6 +2093,24 @@ def _snapshot_text_wake():
     return wake
 
 
+
+def _with_issued_ref(exc: ComputerUseError, ref: str | None, live: object) -> ComputerUseError:
+    """``exc`` naming the ref the agent passed instead of the element's native one.
+
+    A re-issued control (#1235) keeps the backend's number on the live
+    element, and a driver refusal (``not_editable`` and the like) quotes that
+    number. Like ``Runtime._label``, the agent must see the ref it used.
+    """
+    native = getattr(live, "ref", None)
+    detail = exc.detail if isinstance(exc.detail, dict) else None
+    if not ref or not native or native == ref or detail is None or detail.get("ref") != native:
+        return exc
+    message = re.sub(rf"(?<![\w]){re.escape(native)}(?![\w])", ref, str(exc.message))
+    exc.message = message
+    exc.args = (message,)
+    exc.detail = {**detail, "ref": ref}
+    return exc
+
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
 
@@ -5890,6 +5908,50 @@ class Runtime:
             f"({display.width}x{display.height}); move or resize the window, or scroll it into view",
         )
 
+    def _refuse_center_outside_window(self, element: Element) -> None:
+        """A pointer click must land inside the ref's own window (#1259).
+
+        Firefox can keep reporting a control's pre-zoom extents. The center
+        then sits above the window (on the title bar or another app), and a
+        synthesized click there hits something else. Linux only; a ref with
+        no reported window box in the snapshot is left to the other guards.
+        """
+        bounds = element.bounds
+        current = getattr(self, "_current", None)
+        if (
+            getattr(self.driver, "name", None) != "linux" or current is None
+            or bounds is None or bounds.width < 1 or bounds.height < 1
+        ):
+            return
+        by_ref = {e.ref: e for e in current.elements}
+        window = None
+        seen = set()
+        parent = element.parent
+        while parent and parent not in seen:
+            seen.add(parent)
+            node = by_ref.get(parent)
+            if node is None:
+                break
+            if node.role in ("AXWindow", "AXDialog") and node.bounds is not None:
+                window = node.bounds
+                break
+            parent = node.parent
+        if (
+            window is None or window.width < 1 or window.height < 1
+            or window.display_id != bounds.display_id
+        ):
+            return
+        cx = bounds.x + bounds.width // 2
+        cy = bounds.y + bounds.height // 2
+        if window.x <= cx < window.x + window.width and window.y <= cy < window.y + window.height:
+            return
+        raise _not_visible(
+            element.ref, "outside_window", bounds,
+            f"the ref's reported center ({cx}, {cy}) is outside its window "
+            f"({window.x}, {window.y}, {window.width}x{window.height}); the app reported "
+            "stale bounds, so take a fresh snapshot before clicking",
+        )
+
     def _display_for_bounds(self, bounds: Bounds):
         found = self._known_displays()
         if found is None:
@@ -6280,6 +6342,7 @@ class Runtime:
             # A text ref uses the control's box, not the line-wide text box.
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
+                self._refuse_center_outside_window(act)
             try:
                 self._recheck_target(app, act)
             except ComputerUseError as exc:
@@ -7197,7 +7260,7 @@ class Runtime:
         gate = element_app or app or self._frontmost()
         refused = self._type_target_error(live)
         if refused is not None:
-            raise refused
+            raise _with_issued_ref(refused, ref, live)
         before = self._capture(gate)
         if before is not None and getattr(snap, "scope", None) is not None:
             before = {**before, "scope": snap.scope}
@@ -7236,7 +7299,10 @@ class Runtime:
             self._guard_user(gate)
             note.append(self._dismiss_open_menu(gate))
             self._refuse_vanished_target(live)
-            return self._deliver_type_at_ref(live, text)
+            try:
+                return self._deliver_type_at_ref(live, text)
+            except ComputerUseError as exc:
+                raise _with_issued_ref(exc, ref, live)
 
         count = self._run_gated(action, gate, execute, input_target=live, secure=private)
         if private:
@@ -7888,7 +7954,10 @@ class Runtime:
             # origin, so an iframe is not allowed just because the top page is.
             self._reject_domain(Click(target=live), app=app)
             self._refuse_disabled(live, verb="set_value")
-            result = self.driver.set_value(live, value)  # an AX write lands on this element only
+            try:
+                result = self.driver.set_value(live, value)  # an AX write lands on this element only
+            except ComputerUseError as exc:
+                raise _with_issued_ref(exc, ref, live)
             if result:
                 private = private or getattr(result, "private_text_verified", False) is True
                 if private:

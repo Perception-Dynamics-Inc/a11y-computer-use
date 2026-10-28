@@ -14753,6 +14753,68 @@ def test_linux_firefox_datalist_input_takes_set_value_and_ref_type(tmp_path) -> 
         httpd.shutdown()
 
 
+def test_linux_calc_new_comment_type_is_confirmed_once(tmp_path) -> None:
+    """Live Calc. Refs #1249. Typing a new cell comment is confirmed once.
+
+    A4 holds Cherry and no comment. ctrl+alt+c opens the comment editor;
+    FOCUSED stays on the sheet table and the callout paragraph. ``type``
+    must succeed (no text_mismatch, no retry hint), and the callout must
+    hold the text exactly once. Only this test's own soffice group is
+    stopped.
+    """
+    import re
+    import shutil
+    from pathlib import Path
+
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    doc = tmp_path / "comment.fods"
+    shutil.copy(Path(__file__).parent / "fixtures" / "calc_comment_type.fods", doc)
+    profile = tmp_path / "lo-comment"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env.update(SAL_USE_VCLPLUGIN="gtk3", GTK_MODULES="gail:atk-bridge", NO_AT_BRIDGE="0")
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(doc),
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        runtime = None
+        ref = None
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and ref is None:
+            time.sleep(0.5)
+            try:
+                runtime = runtime or _runtime_for(tmp_path, driver, "soffice")
+                match = re.search(r'(e\d+) cell "A4"', runtime.find("soffice", text="A4"))
+            except ComputerUseError:
+                continue
+            ref = match.group(1) if match else None
+        assert runtime is not None and ref is not None, "Calc did not expose A4"
+        runtime.click(ref=ref)
+        runtime.key("ctrl+alt+c", "soffice")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and driver._run(lambda: _atspi.focused_text("soffice")) != "":
+            time.sleep(0.2)
+        assert driver._run(lambda: _atspi.focused_text("soffice")) == "", "the comment editor did not open"
+        typed = runtime.type_text("Added by test")
+        assert "13" in str(typed), typed
+        assert driver._run(lambda: _atspi.focused_text("soffice")) == "Added by test"
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_calc_cell_comments_show_in_snapshot_and_find(tmp_path) -> None:
     """Live Calc. Refs #1248. Cell comments are readable without a hover.
 

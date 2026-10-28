@@ -7266,6 +7266,23 @@ _IME_PANEL_APPS = ("ibus-ui-gtk3", "ibus-ui-gtk", "ibus-ui-emojier")
 _IME_PANEL_NODE_LIMIT = 200
 
 
+def ime_panel_absent() -> bool:
+    """True when a clean read of the desktop lists no IME panel app (#1220).
+
+    The panel is disabled or not running, so waiting will not make it
+    readable. A failed read, an empty desktop, or an app that did not answer
+    (it could be the panel) is not absence.
+    """
+    try:
+        listing = desktop_application_roots()
+    except Exception:
+        return False
+    roots = listing.ready
+    if not roots or listing.silent:
+        return False
+    return not any(name.strip().lower() in _IME_PANEL_APPS for name, _acc in roots)
+
+
 def ime_composition_open() -> bool | None:
     """True when an input-method panel is showing uncommitted text (#1219).
 
@@ -8154,6 +8171,90 @@ def _focused_office_paragraph(app: str, *, max_nodes: int):
     return None if queue else candidate
 
 
+def _calc_drawing_paragraph(table):
+    """The focused paragraph of a Calc drawing text object, or None.
+
+    While a cell comment (a callout) or another shape's text is edited,
+    FOCUSED stays on the sheet ``table`` and also sits on the paragraph
+    inside a ``panel`` sibling of that table under ``document spreadsheet``.
+    The table has no Text, so the paragraph is the read-back. Only the
+    document's direct panel children are walked, never the table's cells.
+    Two focused paragraphs are ambiguous and give None.
+    """
+    if _role_name(table) != "table":
+        return None
+    doc = _call_first(table, ("get_parent", "getParent"))
+    if doc is None or _role_name(doc) != "document spreadsheet":
+        return None
+    found = None
+    count = int(_call_first(doc, ("get_child_count",), default=0) or 0)
+    for index in range(min(count, 64)):
+        panel = _call_first(doc, ("get_child_at_index",), index)
+        if panel is None or _role_name(panel) != "panel":
+            continue
+        inner = int(_call_first(panel, ("get_child_count",), default=0) or 0)
+        # Ubuntu's 24.2 build puts FOCUSED on the callout panel instead of
+        # its paragraph. A focused panel with exactly one paragraph child
+        # is that paragraph's editor.
+        panel_focused = (
+            inner == 1 and _state_has(panel, "FOCUSED") and _state_has(panel, "SHOWING")
+        )
+        for sub in range(min(inner, 16)):
+            node = _call_first(panel, ("get_child_at_index",), sub)
+            if (
+                node is not None
+                and _role_name(node) == "paragraph"
+                and (_state_has(node, "FOCUSED") or panel_focused)
+                and _state_has(node, "SHOWING")
+                and not is_secure(node)
+            ):
+                if found is not None:
+                    return None
+                found = node
+    return found
+
+
+_CALC_SHEET_WALK_SKIP = frozenset({"tool bar", "menu bar", "status bar", "menu", "popup menu"})
+
+
+def _calc_focused_sheet_under(pane, *, max_nodes: int = 400):
+    """The unique focused, showing Calc sheet table under a root pane, or None.
+
+    Ubuntu's LibreOffice 24.2 build leaves FOCUSED on the frame's ``root
+    pane`` while the sheet table (and an open comment editor) also carry it.
+    The root pane has no Text, so the sheet is the read-back anchor. A
+    table's cells are never walked; an incomplete or ambiguous walk is None.
+    """
+    queue = [pane]
+    found = None
+    seen = 0
+    while queue:
+        if seen >= max_nodes:
+            return None
+        node = queue.pop(0)
+        seen += 1
+        if node is not pane and _role_name(node) == "table":
+            parent = _call_first(node, ("get_parent", "getParent"))
+            if (
+                parent is not None
+                and _role_name(parent) == "document spreadsheet"
+                and _state_has(node, "FOCUSED")
+                and _state_has(node, "SHOWING")
+            ):
+                if found is not None:
+                    return None
+                found = node
+            continue
+        if node is not pane and _role_name(node) in _CALC_SHEET_WALK_SKIP:
+            continue
+        count = int(_call_first(node, ("get_child_count",), default=0) or 0)
+        for index in range(min(count, 64)):
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                queue.append(child)
+    return found
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -8172,6 +8273,14 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         acc = _focused_office_paragraph(app, max_nodes=max_nodes)
         if acc is None:
             return None
+    if _role_name(acc) == "root pane" and _libreoffice_accessible(acc):
+        sheet = _calc_focused_sheet_under(acc)
+        if sheet is not None:
+            acc = sheet
+    if _role_name(acc) == "table" and _libreoffice_accessible(acc):
+        paragraph = _calc_drawing_paragraph(acc)
+        if paragraph is not None:
+            acc = paragraph
     if _chromium_app(acc):
         entry = focused_chromium_entry(app, max_nodes=max_nodes)
         if entry is not None:
@@ -10438,6 +10547,26 @@ def web_entry_context(acc):
     parent = _parent_of(acc)
     box = _extents(acc)
     return role, name, doc, window, parent, box, _ancestor_key(doc), _ancestor_key(window)
+
+
+def chromium_nested_web_entry(acc) -> bool:
+    """A Chromium web entry whose document sits inside another document.
+
+    An Electron ``<webview>`` guest is exposed as a document under an
+    internal frame of the host document, like an iframe. AT-SPI
+    ``grab_focus`` on a guest node returns True, but Chromium does not
+    move keyboard focus out of the host page into the guest (#1266). Only
+    real input crosses that boundary.
+    """
+    if not _chromium_app(acc):
+        return False
+    docs = 0
+    for node in _ancestor_chain(acc):
+        if _role_name(node) in {"document web", "document frame"}:
+            docs += 1
+            if docs > 1:
+                return True
+    return False
 
 
 def focus_web_entry(acc, *, context=None, request_focus: bool = True):
