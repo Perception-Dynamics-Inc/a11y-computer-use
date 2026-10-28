@@ -87,6 +87,17 @@ def _ibus(*args: str) -> subprocess.CompletedProcess | None:
 _NO_ENGINE_REPLIES = ("No engine is set.", "Can't connect to IBus.")
 
 
+def _says_no_engine(stream: str | None) -> bool:
+    """True when a line of ``stream`` is one of ``_NO_ENGINE_REPLIES``.
+
+    ibus prints these on stderr (#1271), after any IBUS-WARNING/CRITICAL log
+    lines, so each line is checked, on either stream.
+    """
+    return any(
+        line.strip().endswith(_NO_ENGINE_REPLIES) for line in (stream or "").splitlines()
+    )
+
+
 class _Unreadable:
     def __repr__(self) -> str:
         return "UNREADABLE"
@@ -108,7 +119,7 @@ def _engine_query() -> str | None | _Unreadable:
     if done is None:
         return UNREADABLE
     out = (done.stdout or "").strip()
-    if out in _NO_ENGINE_REPLIES or (done.stderr or "").strip().endswith(_NO_ENGINE_REPLIES[1]):
+    if _says_no_engine(done.stdout) or _says_no_engine(done.stderr):
         return None
     if done.returncode != 0 or not out or any(ch.isspace() for ch in out):
         return UNREADABLE

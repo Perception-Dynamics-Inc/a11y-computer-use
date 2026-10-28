@@ -700,3 +700,26 @@ def test_no_engine_replies_still_type(ibus, monkeypatch, reply) -> None:
     monkeypatch.setattr(_linux_ime.subprocess, "run", run)
     with _linux_ime.ascii_passthrough("hello"):
         pass
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        (1, "", "No engine is set.\n"),
+        (1, "", "\n(ibus:4242): IBUS-WARNING **: 06:30:01.000: Unable to connect to IBus: "
+                "Could not connect: No such file or directory\nCan't connect to IBus.\n"),
+        (0, "", "No engine is set.\n"),
+    ],
+)
+def test_no_engine_replies_on_stderr_still_type(ibus, monkeypatch, reply) -> None:
+    """#1271: ibus prints 'No engine is set.' on stderr; that is no engine, not ime_unknown."""
+    def run(args, **kw):
+        return subprocess.CompletedProcess(args, *reply)
+
+    monkeypatch.setattr(_linux_ime.subprocess, "run", run)
+    assert _linux_ime._engine_query() is None
+    sent: list[str] = []
+    with _linux_ime.ascii_passthrough("hello world 42"):
+        sent.append("keys")
+    assert sent == ["keys"]
+    assert ibus.switches == []
