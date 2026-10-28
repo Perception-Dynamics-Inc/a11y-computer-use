@@ -1189,6 +1189,37 @@ def active_transient_dialog(*, pid: int, title: str, parent_title: str) -> bool:
         return False
 
 
+def x11_modal_dialog(*, pid: int, title: str) -> bool:
+    """True when ``title`` names one mapped same-process X11 modal transient.
+
+    Qt 6 never sets AT-SPI ``MODAL`` on a ``QDialog`` opened with ``exec()``,
+    ``open()`` or ``setModal(True)`` (#745), but marks its X window
+    ``_NET_WM_STATE_MODAL`` and ``WM_TRANSIENT_FOR`` a window of the same
+    process. Both are required: a transient alone is ownership, not modality.
+    An ambiguous title or an unreadable display returns False.
+    """
+    if not pid or not title:
+        return False
+    try:
+        with _open_display() as d:
+            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            children = [win for win in owned if _win_title(win, d) == title]
+            if len(children) != 1:
+                return False
+            child = children[0]
+            transient = _prop(child, d, "WM_TRANSIENT_FOR")
+            if not transient or len(transient) != 1 or not any(
+                    win.id == int(transient[0]) and win.id != child.id for win in owned):
+                return False
+            states = _prop(child, d, "_NET_WM_STATE")
+            modal = _atom(d, "_NET_WM_STATE_MODAL")
+            if not states or not any(_atom_is(state, modal) for state in states):
+                return False
+            return child.get_attributes().map_state == 2 and not _is_hidden(child, d)
+    except Exception:
+        return False
+
+
 def transient_modal_windows(*, pid: int, parent_title: str) -> list[dict]:
     """Mapped same-process windows that declare themselves modal for one parent.
 

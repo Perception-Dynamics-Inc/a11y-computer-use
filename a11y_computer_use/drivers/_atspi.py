@@ -23479,7 +23479,29 @@ def is_modal(acc, *, attrs: dict | None = None) -> bool:
     attrs = _get_attributes(acc) if attrs is None else attrs
     return (_state_has(acc, "MODAL") or
             str(attrs.get("modal", attrs.get("aria-modal", ""))).lower() == "true"
-            or _chromium_modal_parent(acc) is not None)
+            or _chromium_modal_parent(acc) is not None
+            or _x11_modal_dialog(acc))
+
+
+def _x11_modal_dialog(acc) -> bool:
+    """A native dialog the window manager knows is modal, though AT-SPI omits it.
+
+    Qt 6 dialogs carry no AT-SPI ``MODAL`` (#745); their X window has
+    ``_NET_WM_STATE_MODAL`` and a same-process ``WM_TRANSIENT_FOR``. Without
+    this, ``set_value`` wrote into the blocked parent and reported success.
+    Only dialog roles outside Chromium are probed, matched by pid and title.
+    """
+    if _role_name(acc) != "dialog" or _chromium_app(acc):
+        return False
+    key = ("x11_modal_dialog", ())
+    cached = _lookup_read_cache(acc, key)
+    if cached is not _CACHE_MISS:
+        return cached
+    from a11y_computer_use.drivers import _linux_system
+
+    found = _linux_system.x11_modal_dialog(pid=pid_of(acc), title=_node_name(acc))
+    _store_read_cache(acc, key, found)
+    return found
 
 
 def _modal_collection(root, *, split: bool = False):
