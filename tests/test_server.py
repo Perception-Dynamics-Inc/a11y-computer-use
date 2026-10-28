@@ -6216,6 +6216,66 @@ def test_find_after_an_in_place_page_switch_returns_the_reissued_ref(
         assert len(mocked_driver["click"]) == 1
 
 
+@pytest.mark.parametrize("action", ["click", "set_value"])
+def test_refs_of_controls_blocked_by_a_modal_are_reissued_not_stale(
+    monkeypatch, mocked_driver, store, audit_dir, action,
+):
+    """#1274: a snapshot taken while a modal is open must print usable refs.
+
+    Opening the dialog renumbers the parent's controls onto refs an earlier
+    snapshot gave other controls. Those controls are blocked (neither
+    clickable nor editable), but they still need a fresh ref, so acting on
+    the printed ref is refused outside_active_modal, not stale_ref against
+    the first snapshot.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "QModalLab", None, None, "before")
+    opener = Element("e2", "AXButton", "Open dialog", None, Bounds(1, 40, 40, 120, 30),
+                     "before", parent="e1", clickable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, opener))
+
+    def modal_open(sid):
+        return dataclasses.replace(base, snapshot_id=sid, elements=(
+            dataclasses.replace(window, snapshot_id=sid),
+            Element("e2", "AXTextArea", "Main field", None, Bounds(1, 40, 80, 200, 60), sid,
+                    parent="e1", blocked_by_modal=True),
+            Element("e3", "AXDialog", "Confirm dialog", None, Bounds(1, 300, 80, 300, 200), sid,
+                    modal=True),
+            Element("e4", "AXTextArea", "Dialog field", None, Bounds(1, 320, 120, 200, 40), sid,
+                    parent="e3", editable=True),
+        ))
+
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = modal_open("modal")
+        text = runtime.desktop_snapshot(APP)
+        line = next(row for row in text.splitlines() if "Main field" in row and "outside" in row)
+        issued = re.search(r"\be(\d+)\b", line).group(0)
+        assert issued != "e2", text
+        current[0] = modal_open("modal2")
+        resolved = []
+        monkeypatch.setattr(observe, "resolve_ref",
+                            lambda snap, ref, *, live=None: resolved.append(snap.element(ref))
+                            or snap.element(ref))
+        # The driver's modal guard (Linux: outside_active_modal) decides the
+        # action; the Runtime must hand it the control, not refuse the ref.
+        try:
+            if action == "click":
+                runtime.click(ref=issued)
+            else:
+                runtime.set_value(ref=issued, value="MAINSET")
+        except ComputerUseError as exc:
+            assert exc.code is not ErrorCode.STALE_REF, exc
+        assert [el.title for el in resolved][:1] == ["Main field"], resolved
+        # The old number still names "Open dialog" for whoever held it.
+        with pytest.raises(ComputerUseError) as old:
+            runtime.click(ref="e2")
+        assert old.value.code is ErrorCode.STALE_REF
+
+
 @pytest.mark.parametrize('readable', [True, False])
 def test_coordinate_drag_observes_overlay_not_unchanged_foreground(tmp_path, readable):
     """Xfwm keeps Mousepad active while screenshooter owns the region overlay."""

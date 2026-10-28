@@ -1447,6 +1447,147 @@ def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
         proc._log.close()
 
 
+_PREFILLED_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>ffprefilled1236</title></head>
+    <body>
+    <label>Name <input id="t" value="keep me"></label>
+    <label>Notes <textarea id="ta">first line
+    second line</textarea></label>
+    </body>
+    </html>
+    """
+)
+
+
+def test_linux_firefox_ref_type_appends_to_a_prefilled_input_and_textarea(tmp_path) -> None:
+    """#1236: Firefox gives a just-focused prefilled field the caret at 0.
+
+    Ref ``type`` has to append at the end, and the result is confirmed
+    rather than unverifiable: before, the text landed in front of the
+    existing value (``' morekeep me'``) and the read-back could not match.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "ffprefilled1236.html"
+    page.write_text(_PREFILLED_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            _focus_window_titled(driver, "ffprefilled1236")
+            try:
+                runtime.find("firefox", text="Name")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                snap = runtime._current
+                titles = {el.title for el in snap.elements}
+                if "ffprefilled1236" in observe.render_text(snap) and {"Name", "Notes"} <= titles:
+                    break
+            time.sleep(0.4)
+        else:
+            raise AssertionError("Firefox did not expose the prefilled page")
+
+        for title, before, after in (
+            ("Name", "keep me", "keep me more"),
+            ("Notes", "first line\nsecond line", "first line\nsecond line more"),
+        ):
+            snap = runtime._current
+            field = next(el for el in snap.elements if el.title == title and el.editable)
+            assert field.value == before, (title, field.value)
+            try:
+                result = runtime.type_text(text=" more", ref=field.ref)
+            except ComputerUseError as exc:
+                raise AssertionError((title, exc.detail)) from exc
+            assert result.outcome == "confirmed", (title, result.outcome, result.evidence)
+            deadline = time.monotonic() + 10
+            value = None
+            while time.monotonic() < deadline:
+                runtime.find("firefox", text=title)
+                value = next(
+                    el.value for el in runtime._current.elements
+                    if el.title == title and el.editable
+                )
+                if value == after:
+                    break
+                time.sleep(0.3)
+            assert value == after, (title, value)
+    finally:
+        _stop(proc)
+        proc._log.close()
+
+
+_WIPING_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>ffwipe1241</title></head>
+    <body>
+    <label>Wipe <input id="w" value="keep me"></label>
+    <script>
+    document.getElementById("w").addEventListener("input", function (ev) {
+      ev.target.value = ev.target.value.replace("keep me", "");
+    });
+    </script>
+    </body>
+    </html>
+    """
+)
+
+
+def test_linux_firefox_ref_type_still_refuses_a_lost_prior_text(tmp_path) -> None:
+    """#1241: judging a Gecko append at the end must still catch a real loss.
+
+    The page drops the prefilled text on input. The ref ``type`` must
+    refuse with ``prior_text_lost`` rather than confirm the write.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "ffwipe1241.html"
+    page.write_text(_WIPING_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            _focus_window_titled(driver, "ffwipe1241")
+            try:
+                runtime.find("firefox", text="Wipe")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if any(el.title == "Wipe" and el.editable for el in runtime._current.elements):
+                    break
+            time.sleep(0.4)
+        else:
+            raise AssertionError("Firefox did not expose the wiping page")
+        field = next(el for el in runtime._current.elements if el.title == "Wipe" and el.editable)
+        assert field.value == "keep me", field.value
+        with pytest.raises(ComputerUseError) as info:
+            runtime.type_text(text=" more", ref=field.ref)
+        assert (info.value.detail or {}).get("reason") == "prior_text_lost", info.value.detail
+    finally:
+        _stop(proc)
+        proc._log.close()
+
+
 _MODAL_SELECT = textwrap.dedent(
     """\
     <!doctype html>
