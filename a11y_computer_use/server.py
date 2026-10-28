@@ -8221,6 +8221,18 @@ class Runtime:
             self.driver.type_text(value)
 
         self._run_gated(action, app, execute, input_target=live, secure=private)
+        taker = getattr(self.driver, "take_check_readback", None)
+        check = taker(live) if callable(taker) else None
+        if isinstance(check, tuple):
+            # #1287: a checkable item's CHECKED state read back live.
+            state, changed = check
+            word = "checked" if state else "unchecked"
+            return self._conclude(
+                f"set {ref} = {value!r}", tool="set_value", app=app, before=before,
+                element=live, had_ref=True,
+                verdict=("confirmed", f"the item now reads {word}" if changed
+                         else f"the item already read {word}; no key was sent"),
+            )
         if private:
             return self._conclude(
                 "set field (text redacted)", tool="set_value", app=app,
