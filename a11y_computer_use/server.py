@@ -5974,8 +5974,9 @@ class Runtime:
         raise _not_visible(
             issued_ref or element.ref, "outside_window", bounds,
             f"the ref's reported center ({cx}, {cy}) is outside its window "
-            f"({window.x}, {window.y}, {window.width}x{window.height}); the app reported "
-            "stale bounds, so take a fresh snapshot before clicking",
+            f"({window.x}, {window.y}, {window.width}x{window.height}); no click was sent. "
+            "The reported bounds may be out of date (for example after a page zoom) or the "
+            "control may be out of view: take a fresh snapshot, or scroll it into view, then retry",
         )
 
     def _refuse_center_under_active_sibling_window(
