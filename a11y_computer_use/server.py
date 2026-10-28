@@ -2773,9 +2773,13 @@ class Runtime:
                     modal_check(action, app, input_target=input_target)
                 started = time.perf_counter()
                 retry_before = self._retry_probe(action, app, input_target)
+                window_before = self._click_window_probe(action)
                 result = execute()
                 retry_after = self._retry_probe(action, app, input_target)
                 self._retry_reads = (app, action, retry_before, retry_after)
+                self._click_window = (
+                    (action.target, window_before) if window_before == "showing" else None
+                )
             # Linux can discover an unknown focused entry during implicit type.
             # Its private verification returns a count, never the buffer text.
             if isinstance(action, TypeText) and getattr(result, "private_text_verified", False) is True:
@@ -3647,6 +3651,21 @@ class Runtime:
             return None
         return evidence if isinstance(evidence, outcome.RetryEvidence) else None
 
+    def _click_window_probe(self, action) -> str | None:
+        """The clicked button's window state, read before dispatch (#1281)."""
+        self._click_window = None
+        target = getattr(action, "target", None) if isinstance(action, Click) else None
+        if not isinstance(target, Element) or target.role != "AXButton":
+            return None
+        reader = getattr(self.driver, "click_window_state", None)
+        if not callable(reader):
+            return None
+        try:
+            found = reader(target)
+        except Exception:
+            return None
+        return found if isinstance(found, str) else None
+
     def _conclude(
         self,
         text: str,
@@ -3734,6 +3753,34 @@ class Runtime:
             closed = self._key_window_after(key_window)
             if closed in {"hidden", "closed"}:
                 judged, evidence = "confirmed", f"the focused window was {closed} by the key"
+        if (
+            tool == "click" and element is not None and not died
+            and judged in {"suspected_noop", "unverifiable"}
+        ):
+            # #1281: the click's own window closing or hiding is the effect,
+            # even though the tree no longer has the control to compare.
+            shown = getattr(self, "_click_window", None)
+            self._click_window = None
+            closed = None
+            reader = getattr(self.driver, "click_window_state", None)
+            if (isinstance(shown, tuple) and shown[1] == "showing"
+                    and isinstance(shown[0], Element)
+                    and (shown[0].snapshot_id, shown[0].ref) == (element.snapshot_id, element.ref)
+                    and callable(reader)):
+                try:
+                    closed = reader(element)
+                except Exception:
+                    closed = None
+            if closed in {"hidden", "closed"}:
+                judged, evidence = "confirmed", f"the target's window was {closed} by the click"
+            elif judged == "suspected_noop" and outcome.commits_action(element):
+                # A commit button can run its action without any change the
+                # tree shows (a wizard that stays open after Apply). A retry
+                # would repeat the action, so never suggest one.
+                judged, evidence = "unverifiable", (
+                    evidence + "; a retry may repeat a committed action; "
+                    "re-observe first (snapshot/screenshot)"
+                )
         no_bridge = False
         if tool in {"type", "key"} and judged == "unverifiable" and not died:
             plugin = self._libreoffice_without_bridge(app)
@@ -6005,9 +6052,86 @@ class Runtime:
         raise _not_visible(
             issued_ref or element.ref, "outside_window", bounds,
             f"the ref's reported center ({cx}, {cy}) is outside its window "
-            f"({window.x}, {window.y}, {window.width}x{window.height}); the app reported "
-            "stale bounds, so take a fresh snapshot before clicking",
+            f"({window.x}, {window.y}, {window.width}x{window.height}); no click was sent. "
+            "The reported bounds may be out of date (for example after a page zoom) or the "
+            "control may be out of view: take a fresh snapshot, or scroll it into view, then retry",
         )
+
+    def _refuse_center_under_active_sibling_window(
+        self, element: Element, tree: "Snapshot | None" = None, issued_ref: str | None = None,
+    ) -> None:
+        """Refuse a pointer click whose center lies under the active sibling window (#1273).
+
+        Qt MDI subwindows are child windows inside one X11 top-level, so the
+        X11 cover check cannot see them. The active subwindow is the front
+        one; when it is not the ref's window and contains the ref's center, a
+        synthesized click lands on it, not on the ref. Linux only; the walk
+        reads the tree that owns the ref and fails open without one.
+        """
+        bounds = element.bounds
+        current = getattr(self, "_current", None)
+        if (
+            getattr(self.driver, "name", None) != "linux"
+            or bounds is None or bounds.width < 1 or bounds.height < 1
+        ):
+            return
+        source = next(
+            (c for c in (tree, current) if c is not None
+             and getattr(c, "snapshot_id", element.snapshot_id) == element.snapshot_id),
+            None,
+        )
+        if source is None:
+            return
+        by_ref = {e.ref: e for e in source.elements}
+
+        def chain(node):
+            seen, out, parent = set(), [], node.parent
+            while parent and parent not in seen:
+                seen.add(parent)
+                up = by_ref.get(parent)
+                if up is None:
+                    break
+                out.append(up)
+                parent = up.parent
+            return out
+
+        ancestors = chain(element)
+        windows = [n for n in ancestors if n.role == "AXWindow"]
+        if len(windows) < 2:
+            return  # not a child window inside another window
+        own, frame = windows[0], windows[-1]
+        cx = bounds.x + bounds.width // 2
+        cy = bounds.y + bounds.height // 2
+        focused_refs = {n.ref for n in source.elements if n.focused}
+        if own.focused or any(own in chain(by_ref[r]) for r in focused_refs):
+            return  # the ref's own subwindow is the active (front) one
+        for node in source.elements:
+            box = node.bounds
+            if (
+                node.role != "AXWindow" or node is own or node in ancestors
+                or box is None or box.display_id != bounds.display_id
+                or not (box.x <= cx < box.x + box.width and box.y <= cy < box.y + box.height)
+            ):
+                continue
+            up = chain(node)
+            if frame not in up or own in up:
+                continue  # not a sibling child window of the same top-level
+            if not (node.focused or any(node in chain(by_ref[r]) for r in focused_refs)):
+                continue  # z-order is only known for the active subwindow
+            name = node.title or node.ref
+            ref = issued_ref or element.ref
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{ref} is covered by {name!r}: its center ({cx}, {cy}) lies under the active "
+                f"subwindow {name!r}; no click was sent. Activate {own.title or own.ref!r} "
+                "first (e.g. type into or focus a field in it), then click again",
+                detail={
+                    "ref": ref, "role": element.role,
+                    "reason": "covered", "outcome": "refused",
+                    "next": ["foreground", "ref"],
+                    "evidence": f"the subwindow is covered by {name}",
+                },
+            )
 
     def _display_for_bounds(self, bounds: Bounds):
         found = self._known_displays()
@@ -6400,6 +6524,11 @@ class Runtime:
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
                 self._refuse_center_outside_window(
+                    act,
+                    resolved_tree if isinstance(resolved_tree, Snapshot) else None,
+                    ref if act is target else None,
+                )
+                self._refuse_center_under_active_sibling_window(
                     act,
                     resolved_tree if isinstance(resolved_tree, Snapshot) else None,
                     ref if act is target else None,

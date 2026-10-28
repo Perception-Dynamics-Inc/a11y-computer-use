@@ -24133,3 +24133,31 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, poi
                              if all(modal_document(node) is not None for node in modals) else [])})
 
     return bool(modals)
+
+
+
+def click_window_state(target) -> str | None:
+    """``showing``, ``hidden`` or ``closed`` for a control's window (#1281).
+
+    Read once before and once after a button click. A window that was
+    showing before and is DEFUNCT or no longer SHOWING after is the click's
+    own effect (a wizard's Apply, a dialog's OK), even though the tree no
+    longer has the control to compare. None means the state was unreadable.
+    """
+    if target is None:
+        return None
+    try:
+        _drop_cached_properties(target)
+        if _state_has(target, "DEFUNCT"):
+            return "closed"
+        top = _toplevel_of(target)
+        if top is None:
+            return None
+        _drop_cached_properties(top)
+        if _state_has(top, "DEFUNCT"):
+            return "closed"
+        if _state_has(top, "SHOWING"):
+            return "showing"
+        return "hidden"
+    except Exception:
+        return None
