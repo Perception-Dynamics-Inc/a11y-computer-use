@@ -7029,6 +7029,41 @@ _TOPLEVEL_ROLES = frozenset({
 })
 
 
+def key_window_handle(app: str):
+    """The app's focused top-level window before a key press, or None (#1283).
+
+    Only a real top-level (frame, dialog, ...) that is SHOWING is returned:
+    ``key_window_state`` reads the same object after the key, so a key whose
+    effect is closing or hiding that window (Return on a wizard's last page,
+    Escape on a dialog) is seen even though the tree no longer has it.
+    """
+    from a11y_computer_use.schema import Scope
+
+    top = find_root(app, Scope.WINDOW)
+    if top is None or _role_name(top) not in _TOPLEVEL_ROLES:
+        return None
+    return top if key_window_state(top) == "showing" else None
+
+
+def key_window_state(top) -> str | None:
+    """``showing``, ``hidden`` or ``closed`` for a top-level window (#1283).
+
+    The same before/after visibility signal #1281 reads for a click, applied
+    to the window a key went to. None means the state was unreadable.
+    """
+    if top is None:
+        return None
+    try:
+        _drop_cached_properties(top)
+        if _state_has(top, "DEFUNCT"):
+            return "closed"
+        if _state_has(top, "SHOWING"):
+            return "showing"
+        return "hidden"
+    except Exception:  # noqa: BLE001 - an unreadable window is unknown, not closed
+        return None
+
+
 def _application_of(node):
     """The AT-SPI application that owns ``node``, or None."""
     if node is None:

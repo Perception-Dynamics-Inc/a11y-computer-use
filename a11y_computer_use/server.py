@@ -3516,6 +3516,28 @@ class Runtime:
         except Exception:
             return None
 
+    def _key_window_probe(self, app: str | None) -> tuple | None:
+        """The focused window, read SHOWING before a key, or None (#1283)."""
+        reader = getattr(self.driver, "key_window_probe", None)
+        if not app or not callable(reader):
+            return None
+        try:
+            found = reader(app)
+        except Exception:
+            return None
+        return found if isinstance(found, tuple) and len(found) == 2 and found[1] == "showing" else None
+
+    def _key_window_after(self, probe: tuple | None) -> str | None:
+        """That window's state after the key: showing, hidden, closed or None."""
+        reader = getattr(self.driver, "key_window_state", None)
+        if probe is None or not callable(reader):
+            return None
+        try:
+            found = reader(probe)
+        except Exception:
+            return None
+        return found if found in {"showing", "hidden", "closed"} else None
+
     def _key_focus_probe(self, app: str | None) -> tuple | None:
         """Focused text, caret, selection, and sheet cell, or None off Linux.
 
@@ -3646,6 +3668,7 @@ class Runtime:
         clipboard_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
+        key_window: tuple | None = None,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if tool == "type" and getattr(self, "_private_text_result", False):
@@ -3703,6 +3726,14 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
+        if tool == "key" and not died and judged in {"suspected_noop", "unverifiable"}:
+            # #1283: Return on a wizard's last page or Escape on a dialog
+            # closes the window the key went to. Its tree is gone, so the
+            # page comparison cannot see the effect; the window's own
+            # before/after visibility can (the #1281 click signal).
+            closed = self._key_window_after(key_window)
+            if closed in {"hidden", "closed"}:
+                judged, evidence = "confirmed", f"the focused window was {closed} by the key"
         no_bridge = False
         if tool in {"type", "key"} and judged == "unverifiable" and not died:
             plugin = self._libreoffice_without_bridge(app)
@@ -7192,9 +7223,11 @@ class Runtime:
 
         before = None
         clipboard_before = writer_before = focus_before = sheet_before = None
+        window_before = None
 
         def execute() -> None:
             nonlocal before, clipboard_before, writer_before, focus_before, sheet_before
+            nonlocal window_before
             self._guard_user(bundle)
             if self._ensure_linux_window(chosen, candidates, bundle, identifier):
                 focused.append(True)
@@ -7204,6 +7237,7 @@ class Runtime:
             focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
             sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
             target = self._open_menu_app(bundle) or bundle
+            window_before = self._key_window_probe(bundle)
             if not self._open_mnemonic_menu(target, chord):
                 self.driver.key_chord(chord)
 
@@ -7214,6 +7248,7 @@ class Runtime:
             tool="key", app=bundle, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
             writer_before=writer_before, clipboard_before=clipboard_before,
+            key_window=window_before,
         )
 
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
