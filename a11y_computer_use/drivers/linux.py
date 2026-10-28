@@ -2556,6 +2556,17 @@ class LinuxDriver:
             return RetryEvidence(reason=_page_health.UNRESPONSIVE)
         return evidence
 
+    def click_window_state(self, element: Element) -> str | None:
+        """``showing``/``hidden``/``closed`` for the ref's window (#1281)."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        found = self._run(lambda: _atspi.click_window_state(handle))
+        return found if found in {"showing", "hidden", "closed"} else None
+
     def renderer_hung_since(self, action) -> str | None:
         """Why a Chromium page looks hung since ``action``'s pre-dispatch read.
 
