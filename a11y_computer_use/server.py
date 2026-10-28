@@ -6423,6 +6423,8 @@ class Runtime:
         # A hidden notebook tab has a name and no box. A pointer click at an
         # invented point would land on the page or the menu.
         unbound: list[Element] = []
+        # A tab scrolled out of its tab bar, selected by the driver (#1286).
+        offscreen_tab: list[Element] = []
         # The re-resolved ref after raising its app over another app's window.
         raised: list[Element] = []
 
@@ -6431,6 +6433,10 @@ class Runtime:
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if isinstance(target, Element) and target.bounds is None:
+                selector = getattr(self.driver, "select_offscreen_tab", None)
+                if callable(selector) and selector(target):
+                    offscreen_tab.append(target)
+                    return
                 unbound.append(target)
                 return
             act: Target = target
@@ -6609,6 +6615,15 @@ class Runtime:
             )
         if raised and not activated:
             target = raised[0]
+        if offscreen_tab:
+            el = offscreen_tab[0]
+            title = f" {el.title!r}" if el.title else ""
+            return self._conclude(
+                f"selected {el.ref} ({el.role}{title}) through its tab list; "
+                "it was scrolled out of the tab bar",
+                tool="click", app=app, before=before, element=el, had_ref=ref is not None,
+                verdict=("confirmed", "the tab now reads selected and showing"),
+            )
         if unbound:
             el = unbound[0]
             title = f" {el.title!r}" if el.title else ""
@@ -9271,6 +9286,27 @@ class Runtime:
                     refuse_opaque_find(anchor_now)
                 if not matches and container_not_readable(snap, anchor_now):
                     return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
+                if matches and not visible_matches(snap):
+                    # A notebook tab scrolled out of its tab bar is in the
+                    # tree with no box, and wheel steps never reach it. Its
+                    # tab list selects it and scrolls it in (#1286). The
+                    # result is the next snapshot showing it on screen.
+                    selector = getattr(self.driver, "select_offscreen_tab", None)
+                    tab = next((el for el in matches if el.bounds is None
+                                and el.role == "AXTab"), None)
+                    if tab is not None and callable(selector) and selector(tab):
+                        later = self.driver.snapshot(Scope(scope), bundle)
+                        self._current = later
+                        shown = visible_matches(later)
+                        if shown:
+                            self._note_issued(later, {el.ref for el in shown})
+                            return (
+                                "found after selecting the tab in its tab list "
+                                "(it was scrolled out of the tab bar):\n"
+                                f"{observe.render_matches(later, shown)}"
+                            )
+                        matches = search_matches(later)
+                        snap = later
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
