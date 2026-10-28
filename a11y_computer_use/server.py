@@ -3256,6 +3256,18 @@ class Runtime:
                 if isinstance(copied, str) and copied and requested and requested in copied:
                     readback = copied
                     self.driver._chooser_readback = None
+                cell_read = getattr(self.driver, "_cell_readback", None)
+                if hasattr(self.driver, "_cell_readback"):
+                    self.driver._cell_readback = None
+                if (
+                    element is not None and isinstance(cell_read, tuple) and len(cell_read) == 3
+                    and cell_read[:2] == (element.snapshot_id, element.ref)
+                    and isinstance(cell_read[2], str)
+                ):
+                    # #1278: the driver read this live cell back after the
+                    # edit. Its title is its text, so the snapshot match by
+                    # title above cannot find it again.
+                    readback = cell_read[2]
                 if _atspi.libreoffice_app(app or ""):
                     handle = None
                     if anchor is not None:

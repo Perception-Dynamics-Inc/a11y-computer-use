@@ -144,3 +144,56 @@ def test_type_moves_to_the_end_before_appending(rig):
     drv, cell, keys = rig
     drv._edit_qt_cell(_element(), cell, "son", replace=False)
     assert keys == ["F2", "End", ("type", "son"), "Return"]
+
+
+def _judge_cell_edit(monkeypatch, drv, requested, previous, after_title):
+    """Run the outcome layer after a cell edit whose new text is the title."""
+    import dataclasses
+
+    drv.name = "linux"
+    el = _element()
+    before_snap = SimpleNamespace(elements=[el])
+    after_snap = SimpleNamespace(elements=[dataclasses.replace(el, ref="e9", title=after_title,
+                                                               snapshot_id="s1")])
+    rt = Runtime.__new__(Runtime)
+    rt.driver = drv
+    rereads = []
+
+    def reread(*_a):
+        rereads.append(1)
+        return after_snap
+
+    monkeypatch.setattr(rt, "_reread", reread)
+    monkeypatch.setattr(rt, "_process_died", lambda _b: False)
+    monkeypatch.setattr(rt, "_remember_baseline", lambda _s: None, raising=False)
+    verdict = rt._judge_mutation("qtprobe", {"snap": before_snap, "scope": None}, el,
+                                 requested, previous=previous)
+    return verdict, rereads
+
+
+def test_set_value_on_a_qt_cell_is_confirmed_from_the_driver_readback(rig, monkeypatch):
+    # #1278 Tester: the edit landed, but the renamed cell no longer matched by
+    # title, so the outcome was unverifiable after ~1.7 s of rereads.
+    drv, cell, _keys = rig
+    drv._edit_qt_cell(_element(), cell, "Bob", replace=True)
+    (verdict, evidence), rereads = _judge_cell_edit(monkeypatch, drv, "Bob", "Alice", "Bob")
+    assert verdict == "confirmed" and "Bob" in evidence
+    assert len(rereads) == 1
+    assert drv._cell_readback is None  # single use
+
+
+def test_type_on_a_qt_cell_is_confirmed_from_the_driver_readback(rig, monkeypatch):
+    drv, cell, _keys = rig
+    drv._type_expected = None
+    drv._edit_qt_cell(_element(), cell, "son", replace=False)
+    (verdict, _ev), rereads = _judge_cell_edit(monkeypatch, drv, "son", None, "Aliceson")
+    assert verdict == "confirmed"
+    assert len(rereads) == 1
+
+
+def test_a_cell_readback_for_another_ref_is_not_used(rig, monkeypatch):
+    drv, _cell, _keys = rig
+    drv._cell_readback = ("s0", "e99", "Bob")
+    drv._type_expected = None
+    (verdict, _ev), _r = _judge_cell_edit(monkeypatch, drv, "Bob", "Alice", "Bob")
+    assert verdict != "confirmed"

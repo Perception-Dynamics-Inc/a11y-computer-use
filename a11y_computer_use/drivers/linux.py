@@ -1316,6 +1316,11 @@ class LinuxDriver:
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
         self._sheet_type_readback: tuple[str, str] | None = None
+        # (snapshot_id, ref, text) after a Qt item-view cell edit read the
+        # live cell back equal to the request (#1278). The outcome judge
+        # reads it once: the cell's text is its title, so the post-edit
+        # snapshot no longer matches the old control by title.
+        self._cell_readback: tuple[str, str, str] | None = None
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
@@ -5473,6 +5478,7 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi
 
+        self._cell_readback = None
         if _on_wayland():
             raise _wayland_input_error("edit table cell")
         from a11y_computer_use.drivers import _linux_input
@@ -5523,6 +5529,9 @@ class LinuxDriver:
             self._run(lambda: _atspi._drop_cached_properties(handle))
             got = self._run(lambda: _atspi._node_name(handle)) or ""
             if got == want:
+                self._cell_readback = (element.snapshot_id, element.ref, got)
+                if not replace:
+                    self._type_expected = got
                 return
             time.sleep(0.05)
         raise ComputerUseError(
