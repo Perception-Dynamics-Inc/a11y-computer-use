@@ -965,6 +965,51 @@ def resolve_app(identifier: str) -> str:
     return by_class or identifier
 
 
+def grant_app_id(identifier: str, resolved: str | None = None) -> str:
+    """The id a grant for ``identifier`` is checked under.
+
+    ``resolve_app`` turns a window found only by its WM_CLASS into the
+    owning comm. For a GTK app run by an interpreter that comm is
+    ``python3``, while the app names itself with ``GLib.set_prgname``: the
+    WM_CLASS instance and the AT-SPI application name. Keying the grant on
+    ``python3`` refuses the name the user granted, and only a check that
+    ran before the window was mapped saw the requested name (#1296: 1 of 15
+    launches under a long-lived server).
+
+    The requested name is kept when a window's WM_CLASS instance is exactly
+    that name, its process is a different program, and no executable of
+    that name is on PATH, so a script cannot borrow an installed program's
+    grant by naming itself after it. Every other result of ``resolve_app``
+    is unchanged (``LibreOffice`` still keys as ``soffice.bin``). Nothing is
+    cached: each call reads the windows open now. ``resolved`` is a
+    ``resolve_app`` answer the caller already read.
+    """
+    if resolved is None:
+        resolved = resolve_app(identifier)
+    wanted = (identifier or "").strip()
+    if not wanted or resolved.casefold() == wanted.casefold():
+        return resolved
+    if "/" in wanted or shutil.which(wanted):
+        return resolved
+    from a11y_computer_use.app_identity import program_alias
+
+    if program_alias(wanted, resolved.lower()):
+        return resolved  # another name of the same program (soffice.bin)
+    folded = wanted.casefold()
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                identity = (_app_id(win, d) or "").lower()
+                if identity != resolved.lower():
+                    continue
+                instance, _klass = _wm_class_strings(win, d)
+                if (instance or "").casefold() == folded:
+                    return wanted
+    except Exception:  # noqa: BLE001 - no X11 means no prgname evidence
+        return resolved
+    return resolved
+
+
 def class_names_program(identifier: str, identity: str) -> bool:
     """True when a window of ``identity`` has a WM_CLASS ``identifier`` names."""
     want = (identity or "").lower()

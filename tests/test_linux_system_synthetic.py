@@ -2142,3 +2142,111 @@ def test_an_unreadable_stack_keeps_the_managed_answer(monkeypatch) -> None:
     root.query_tree = broken
     assert _linux_system.pid_at_point(100, 150) == 200
     assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+class _PrgnameWin(_FakeXWin):
+    """A mapped client whose WM_CLASS instance is its GTK prgname."""
+
+    def __init__(self, wid: int, pid: int, instance: bytes, klass: bytes):
+        super().__init__(wid, 10, 20, 320, 120, pid=pid)
+        self._wm_class = instance + b"\x00" + klass + b"\x00"
+
+    def get_full_property(self, atom, kind):
+        if atom == "_NET_WM_PID":
+            return _NS(value=[self.pid])
+        if atom == "WM_CLASS":
+            return _NS(value=self._wm_class)
+        return None
+
+
+def _prgname_display(monkeypatch, windows: list, comms: dict) -> None:
+    root = _FakeXRoot(windows)
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: next(w for w in root.stacking if w.id == int(wid)),
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
+    monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
+
+
+def _gate_runtime(tmp_path, monkeypatch, tiers: dict, deny: tuple = ()):
+    from a11y_computer_use import safety, server
+
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    for app, tier in tiers.items():
+        store.set_tier(app, tier)
+    for app in deny:
+        store.add_deny(app)
+    return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_NS(name="linux"))
+
+
+def test_grant_key_keeps_a_late_mapped_prgname_under_a_long_lived_server(tmp_path, monkeypatch) -> None:
+    """#1296 live: a python3 GTK app launched after the server starts keyed as python3.
+
+    One long-lived Runtime asks before the window maps and after, over three
+    launches. Before the map the key is the requested name. Once the window
+    maps with WM_CLASS ``cuprobe1296`` under comm ``python3``, the key must
+    stay ``cuprobe1296`` (the granted name) on every launch, never python3.
+    """
+    from a11y_computer_use import safety
+
+    windows: list = []
+    comms: dict = {}
+    _prgname_display(monkeypatch, windows, comms)
+    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": safety.Tier.FULL})
+    for launch, pid in enumerate((41, 42, 43)):
+        windows.clear()
+        assert rt._resolve_app("cuprobe1296") == (None, "cuprobe1296")  # not mapped yet
+        comms[pid] = "python3"
+        windows.append(_PrgnameWin(0x100 + launch, pid, b"cuprobe1296", b"P1296app.py"))
+        assert _linux_system.resolve_app("cuprobe1296") == "python3"  # the old key
+        assert rt._resolve_app("cuprobe1296") == (None, "cuprobe1296")
+        assert _linux_system.grant_app_id("cuprobe1296") == "cuprobe1296"
+        decision = safety.check_action(_snapshot_op(), rt._resolve_app("cuprobe1296")[1], store=rt.store)
+        assert decision.allowed, decision.reason
+
+
+def _snapshot_op():
+    from a11y_computer_use.schema import ObserveOp, ObserveVerb
+
+    return ObserveOp(verb=ObserveVerb.SNAPSHOT, app="cuprobe1296")
+
+
+def test_grant_key_keeps_a_granted_comm_and_a_deny_on_either_name(tmp_path, monkeypatch) -> None:
+    """A python3 grant still keys as python3; a deny on the prgname or comm wins."""
+    from a11y_computer_use import safety
+
+    _prgname_display(monkeypatch, [_PrgnameWin(0x150, 44, b"cuprobe1296", b"P1296app.py")], {44: "python3"})
+    both = _gate_runtime(tmp_path / "a", monkeypatch,
+                         {"python3": safety.Tier.FULL, "cuprobe1296": safety.Tier.FULL})
+    assert both._resolve_app("cuprobe1296")[1] == "python3"
+    neither = _gate_runtime(tmp_path / "b", monkeypatch, {})
+    assert neither._resolve_app("cuprobe1296")[1] == "python3"
+    denied = _gate_runtime(tmp_path / "c", monkeypatch, {}, deny=("cuprobe1296",))
+    key = denied._resolve_app("cuprobe1296")[1]
+    assert key == "cuprobe1296"
+    assert not safety.check_action(_snapshot_op(), key, store=denied.store).allowed
+
+
+def test_grant_key_does_not_borrow_an_installed_program_name(monkeypatch) -> None:
+    """A script that names itself after a program on PATH keys as its own comm."""
+    _prgname_display(monkeypatch, [_PrgnameWin(0x200, 51, b"firefox", b"Firefox")], {51: "python3"})
+    monkeypatch.setattr(_linux_system.shutil, "which", lambda name: "/usr/bin/" + name)
+    assert _linux_system.grant_app_id("firefox") == "python3"
+
+
+def test_grant_key_needs_the_exact_prgname(monkeypatch) -> None:
+    """A WM_CLASS class or a different instance is not the requested name."""
+    _prgname_display(monkeypatch, [_PrgnameWin(0x300, 61, b"otherprobe", b"Cuprobe1296")], {61: "python3"})
+    assert _linux_system.grant_app_id("cuprobe1296") == _linux_system.resolve_app("cuprobe1296")
+    assert _linux_system.grant_app_id("/tmp/cuprobe1296") == _linux_system.resolve_app("/tmp/cuprobe1296")
+
+
+def test_grant_key_keeps_the_libreoffice_alias(monkeypatch) -> None:
+    """LibreOffice still keys as soffice.bin, the program the bus names."""
+    _prgname_display(monkeypatch, [_PrgnameWin(0x400, 71, b"libreoffice", b"LibreOffice")], {71: "soffice.bin"})
+    assert _linux_system.resolve_app("LibreOffice") == "soffice.bin"
+    assert _linux_system.grant_app_id("LibreOffice") == "soffice.bin"

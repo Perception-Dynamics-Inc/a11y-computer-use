@@ -2457,7 +2457,37 @@ class Runtime:
     def _resolve_app(self, identifier: str) -> tuple[object, str]:
         if self._resolves_apps():
             return None, identifier  # the driver validates/binds at snapshot time
-        return _running_app(identifier)
+        running, bundle = _running_app(identifier)
+        if sys.platform.startswith("linux"):
+            bundle = self._linux_prgname_key(identifier, bundle)
+        return running, bundle
+
+    def _linux_prgname_key(self, identifier: str, resolved: str) -> str:
+        """``identifier`` when it is the prgname the grant names, else ``resolved``.
+
+        A GTK app run by python3 maps a window whose WM_CLASS instance is its
+        prgname, and ``resolve_app`` keys it as ``python3``. A grant for the
+        prgname then never matched once the window was mapped, so a
+        long-lived server refused 14 of 15 launches (#1296). The prgname is
+        used only when it is granted and the comm is not. A deny on either
+        name wins, and a grant on the comm keeps the comm. Read fresh on
+        every call; nothing is cached.
+        """
+        from a11y_computer_use.drivers import _linux_system
+
+        try:
+            named = _linux_system.grant_app_id(identifier, resolved)
+        except Exception:  # noqa: BLE001 - no X11 evidence keeps the comm
+            return resolved
+        if not named or named == resolved:
+            return resolved
+        comm_grant, comm_denied, _err, _block = self.store.policy(resolved)
+        if comm_denied or comm_grant is not None:
+            return resolved
+        name_grant, name_denied, _err, _block = self.store.policy(named)
+        if name_denied or name_grant is not None:
+            return named
+        return resolved
 
     def _recheck_frontmost_app(self, app: str) -> None:
         front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
