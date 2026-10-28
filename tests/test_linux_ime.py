@@ -651,3 +651,75 @@ def test_panel_absent_needs_a_clean_listing(monkeypatch) -> None:
     assert _atspi.ime_panel_absent() is False
     monkeypatch.setattr(_atspi, "desktop_application_roots", listing([], 0))
     assert _atspi.ime_panel_absent() is False
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "timeout",
+        "oserror",
+        (1, "", "Failed to get global engine: GDBus.Error:Timeout was reached\n"),
+        (0, "", ""),
+        (0, "some prose reply\n", ""),
+    ],
+)
+def test_unreadable_engine_refuses_before_any_key(ibus, monkeypatch, reply) -> None:
+    """#1270: a failed engine query must not let ASCII reach a pinyin engine."""
+    ibus.set("libpinyin")
+    real = _linux_ime.subprocess.run
+
+    def run(args, **kw):
+        if len(args) == 2:
+            if reply == "timeout":
+                raise subprocess.TimeoutExpired(args, kw["timeout"])
+            if reply == "oserror":
+                raise OSError("ibus gone")
+            return subprocess.CompletedProcess(args, *reply)
+        return real(args, **kw)
+
+    monkeypatch.setattr(_linux_ime.subprocess, "run", run)
+    sent: list[str] = []
+    with pytest.raises(ComputerUseError) as info:
+        with _linux_ime.ascii_passthrough("hello world 42"):
+            sent.append("keys")
+    assert sent == []
+    assert info.value.detail["reason"] == "ime_unknown"
+    assert info.value.detail["typed"] is False
+    assert ibus.switches == []
+    # Text with no ASCII uses spare keycodes the engine passes through.
+    with _linux_ime.ascii_passthrough("привет"):
+        sent.append("keys")
+    assert sent == ["keys"]
+
+
+@pytest.mark.parametrize("reply", ["No engine is set.\n", "Can't connect to IBus.\n"])
+def test_no_engine_replies_still_type(ibus, monkeypatch, reply) -> None:
+    def run(args, **kw):
+        return subprocess.CompletedProcess(args, 1, reply, "")
+
+    monkeypatch.setattr(_linux_ime.subprocess, "run", run)
+    with _linux_ime.ascii_passthrough("hello"):
+        pass
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        (1, "", "No engine is set.\n"),
+        (1, "", "\n(ibus:4242): IBUS-WARNING **: 06:30:01.000: Unable to connect to IBus: "
+                "Could not connect: No such file or directory\nCan't connect to IBus.\n"),
+        (0, "", "No engine is set.\n"),
+    ],
+)
+def test_no_engine_replies_on_stderr_still_type(ibus, monkeypatch, reply) -> None:
+    """#1271: ibus prints 'No engine is set.' on stderr; that is no engine, not ime_unknown."""
+    def run(args, **kw):
+        return subprocess.CompletedProcess(args, *reply)
+
+    monkeypatch.setattr(_linux_ime.subprocess, "run", run)
+    assert _linux_ime._engine_query() is None
+    sent: list[str] = []
+    with _linux_ime.ascii_passthrough("hello world 42"):
+        sent.append("keys")
+    assert sent == ["keys"]
+    assert ibus.switches == []
