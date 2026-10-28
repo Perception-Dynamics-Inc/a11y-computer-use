@@ -7,6 +7,51 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.80] - 2026-10-28
+
+26 commits since v0.4.79, through #1282. A patch release of Linux fixes: ref `type` now appends to filled GTK 3, GTK 4 and Firefox fields instead of replacing or prepending, clicks on GTK rows, tiles, inline links and default buttons are confirmed from real evidence, and several new refusals stop a click or write that would land on the wrong target.
+
+### Safety
+
+- Ref `type` appends to a filled GTK entry instead of replacing it: the focus select-all is dropped and the caret moved to the end, or the call refuses with `would_replace_text` before writing; a write that lost the prior text is refused `text_mismatch` / `prior_text_lost`, never confirmed. Covers GTK 3 and GTK 4 single-line entries. Refs #1232 (#1234) (de0a617, 2026-10-28).
+- Ref `type` appends to a prefilled Firefox input or textarea instead of inserting at the start, and in Chrome a page handler that wipes or moves the prior text is refused `prior_text_lost` instead of confirmed. Refs #1236, #1269 (#1241) (2a2793a, 2026-10-28).
+- An X11-modal Qt dialog without AT-SPI `MODAL` now blocks `set_value`, ref click and `type` on its parent window (`outside_active_modal`), and the parent's controls are marked `blocked_by_modal`. Refs #745 (#1274) (fce6c1f, 2026-10-28).
+- Linux IME: when the IBus engine cannot be read, typing ASCII refuses with `ime_unknown` before any key is sent, instead of letting an active engine transform it. Refs #1270 (#1271) (70ba7a0, 2026-10-28).
+- A disabled or absent IBus panel is reported `ime_composition_unknown` after the settle window instead of the whole 1.5 s budget. Refs #1220 (#1267) (88740cd, 2026-10-28).
+- Refuse a pointer click whose center lies outside the ref's own window (`outside_window`), for example after a Firefox page zoom leaves stale bounds. Refs #1259 (#1264) (4447976, 2026-10-28); the refusal says no click was sent and that the bounds may be out of date or the control out of view. Refs #1259 (#1275) (73543de, 2026-10-28).
+- The outside-window check judges a ref click from the tree that owns the ref, so a button in a floating Qt dock is no longer refused. Fixes #1272 (#1276) (b727b05, 2026-10-28).
+- Refuse a ref click under the active sibling Qt `QMdiArea` subwindow as `covered`, naming the covering subwindow, with nothing sent. Refs #1273 (#1277) (d968064, 2026-10-28).
+- A ref click on a native default button (GTK Assistant Apply, a dialog's OK) is `confirmed` when its window hides or closes, and `unverifiable` with no retry hints when nothing changes, so an agent is not told to apply twice. Refs #1281 (#1282) (2afc523, 2026-10-28).
+- Reject a reused Firefox combo child drawn outside its combo, so `set_value` on a `<select>` no longer writes into a neighbouring field. Fixes #1245 (#1246) (07cd53d, 2026-10-28).
+
+### Linux drivers
+
+- Focus an unfocused GTK 4 entry by a geometry-checked pointer press for a ref `type` (GTK 4 has no AT-SPI GrabFocus), instead of refusing `focus_lost`. Fixes #1237 (#1261) (283a5d5, 2026-10-28).
+- Confirm a GTK 3 ListBox row or FlowBox tile click from its selection instead of reporting `unverifiable`. Fixes #1238, Fixes #1240 (#1265) (49c44bc, 2026-10-28).
+- List and click links inside GTK 3 label text through AT-SPI Hypertext. Refs #1230 (#1231) (72ca42a, 2026-10-28); a click on such a link is confirmed by its VISITED transition. Refs #1230 (#1260) (43d8aa2, 2026-10-28).
+- Judge a Chrome double-click on page text by the text selection it makes, instead of `suspected_noop`. Refs #1224 (#1228) (2abd852, 2026-10-28).
+- After an in-place GTK `Gtk.Stack` page switch, a fresh snapshot issues a new, working ref for a control behind a refused reused ref. Refs #1235 (#1239) (0ee0a50, 2026-10-28); `find` returns the same re-issued ref. Refs #1235 (#1258) (a5139c0, 2026-10-28).
+- A refusal names the ref the agent passed, not the live tree's renumbered one. Refs #1262 (#1263) (a67d7dd, 2026-10-28).
+- `set_value` on a field inside an Electron `<webview>` guest uses a pointer press to focus it instead of refusing `focus_lost`. Fixes #1266 (#1268) (ce3bdce, 2026-10-28).
+- A Firefox `<input list>` (datalist) field is an editable entry for `find`, `type` and `set_value`, and an empty one no longer reports the next field's label as its value. Refs #1251 (#1254) (88fdf06, 2026-10-28).
+- Chrome frame recovery bypasses native child caching during cache clearing and page selection. Refs #1242 (#1255) (44459b5, 2026-10-28).
+- Do not charge the retry evidence read for CPU time it was denied on a starved host, so a click is not reported `unverifiable` because of the runner. Refs #1231, #1234 (#1244) (5949597, 2026-10-28).
+
+### LibreOffice
+
+- A ref click on a Calc validity list entry commits it and closes the popup, or refuses `popup_not_closed`. Refs #1247 (#1250) (767c31e, 2026-10-28).
+- `type` into a new Calc cell comment reads the comment's paragraph back and is confirmed once, instead of `text_mismatch`. Refs #1249 (#1252) (ce9e813, 2026-10-28).
+- Calc cell comments show in `desktop_snapshot` and `find` as `comment: <text>`, with no hover. Refs #1248 (#1253) (05296dc, 2026-10-28).
+
+### Known issues
+
+- Linux Chrome (#1242): the Chrome scroll live test still fails intermittently in CI; in the latest failure Chrome's accessibility tree read empty for 30 s after a reload. Root cause not yet found.
+- Linux Impress (#1280): `key ctrl+s` in Impress saves the file but returns `unverifiable`.
+- Linux Qt 6 (#1283): Return or Escape that closes a `QWizard` returns `unverifiable`; clicking Finish or Cancel is confirmed.
+- Linux GTK 3 (#1286): a `Gtk.Notebook` tab scrolled out of view is not found by `find` or `scroll_to_find`.
+- Linux Qt 6 (#1287): a checkable list item cannot be checked: `set_value` is refused `not_editable` and a ref click only selects it.
+- Linux Qt 6 (#1288): editable `QListWidget` items are refused `not_editable`.
+
 ## [0.4.79] - 2026-10-27
 
 Four commits since v0.4.78, through #1220. A patch release: Linux fixes for a single non-Latin keyboard layout (for example a lone `ru` layout), for an active IBus input method, and for override-redirect popups.
