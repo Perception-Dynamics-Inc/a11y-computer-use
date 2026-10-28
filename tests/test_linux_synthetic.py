@@ -23115,6 +23115,46 @@ def test_ref_type_never_confirms_a_write_that_lost_the_prior_text(fake_atspi, mo
     assert exc.value.detail["actual"] == " more"
 
 
+def _gecko_stale_caret_entry(monkeypatch):
+    """#1241: a Firefox input whose AT-SPI caret still reads 0 after caret-to-end."""
+    driver, entry, element = _select_all_entry(monkeypatch)
+    entry.caret = 0
+
+    def grab():
+        entry.selection, entry.caret = None, 0
+        return True
+
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: grab())
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda _acc: False)
+    monkeypatch.setattr(_atspi, "gecko_entry_caret_to_end", lambda _acc: False)
+    monkeypatch.setattr(_atspi, "gecko_plain_entry", lambda _acc: True)
+    return driver, entry, element
+
+
+def test_ref_type_judges_a_gecko_append_at_the_end_despite_a_stale_caret(fake_atspi, monkeypatch):
+    """The keys land at the end; a caret read of 0 must not expect ' morekeep me'."""
+    driver, entry, element = _gecko_stale_caret_entry(monkeypatch)
+    monkeypatch.setattr(driver, "_type_confirmed_handle",
+                        lambda handle, text: setattr(handle, "text", handle.text + text) or len(text))
+    assert driver.type_into(element, " more") == 5
+    assert entry.text == "keep me more"
+
+
+@pytest.mark.parametrize("landed", [" more", " morekeep me", "keep more me"])
+def test_ref_type_still_refuses_a_gecko_write_that_lost_or_split_the_prior_text(
+    fake_atspi, monkeypatch, landed,
+):
+    """A Gecko write judged at the end still refuses a loss or a misplaced insert."""
+    driver, entry, element = _gecko_stale_caret_entry(monkeypatch)
+    monkeypatch.setattr(driver, "_type_confirmed_handle",
+                        lambda handle, text: setattr(handle, "text", landed) or len(text))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, " more")
+    assert exc.value.detail["reason"] == "prior_text_lost"
+    assert exc.value.detail["expected"] == "keep me more"
+    assert exc.value.detail["actual"] == landed
+
+
 def test_ref_type_into_an_empty_or_multiline_field_is_untouched(fake_atspi, monkeypatch):
     """Only a single-line entry with text is collapsed; a text view keeps its selection."""
     driver, entry, element = _select_all_entry(monkeypatch)
@@ -23326,6 +23366,58 @@ def test_ref_type_keeps_the_selection_of_a_stateless_text_with_line_breaks(fake_
     entry.text = "one\ntwo"
     assert not _atspi.append_target_entry(entry)
 
+
+def _fake_gecko_entry(monkeypatch, *, text: str, caret: int, selection=None, states=("SINGLE_LINE",),
+                      gecko=True, secure=False):
+    import types
+
+    from a11y_computer_use.drivers import _atspi
+
+    state = {"caret": caret}
+    text_api = types.SimpleNamespace(
+        get_character_count=lambda acc: len(text),
+        get_caret_offset=lambda acc: state["caret"],
+        set_caret_offset=lambda acc, offset: state.__setitem__("caret", offset) or True,
+        get_n_selections=lambda acc: 1 if selection else 0,
+        get_selection=lambda acc, n: selection,
+    )
+    monkeypatch.setattr(_atspi, "_atspi", lambda: types.SimpleNamespace(Text=text_api))
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: gecko)
+    monkeypatch.setattr(_atspi, "_gecko_contenteditable", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in states)
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: secure)
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object())
+    monkeypatch.setattr(_atspi, "_selection_bounds", lambda value: value)
+    return state
+
+
+@pytest.mark.parametrize("states", [("SINGLE_LINE",), ("MULTI_LINE",)])
+def test_gecko_entry_caret_moves_to_the_end_of_a_prefilled_field(monkeypatch, states):
+    """#1236: Firefox focuses a prefilled input or textarea with the caret at 0."""
+    from a11y_computer_use.drivers import _atspi
+
+    state = _fake_gecko_entry(monkeypatch, text="keep me", caret=0, states=states)
+    assert _atspi.gecko_entry_caret_to_end(object()) is True
+    assert state["caret"] == len("keep me")
+
+
+@pytest.mark.parametrize("case", ["selection", "not_gecko", "secure", "not_an_entry", "at_end", "empty"])
+def test_gecko_entry_caret_is_left_alone_when_it_is_not_a_plain_prefilled_entry(monkeypatch, case):
+    from a11y_computer_use.drivers import _atspi
+
+    kwargs = {
+        "selection": {"selection": (0, 7)},
+        "not_gecko": {"gecko": False},
+        "secure": {"secure": True},
+        "not_an_entry": {"states": ()},
+        "at_end": {"caret": 7},
+        "empty": {"text": ""},
+    }[case]
+    params = {"text": "keep me", "caret": 0}
+    params.update(kwargs)
+    state = _fake_gecko_entry(monkeypatch, **params)
+    assert _atspi.gecko_entry_caret_to_end(object()) is False
+    assert state["caret"] == params["caret"]
 
 def test_chromium_snapshot_root_clears_again_when_the_cleared_read_is_empty() -> None:
     """Synthetic AT-SPI nodes, not a live Chrome.

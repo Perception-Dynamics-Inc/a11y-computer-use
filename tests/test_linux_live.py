@@ -14815,6 +14815,72 @@ def test_linux_calc_new_comment_type_is_confirmed_once(tmp_path) -> None:
         _stop_group(proc)
 
 
+_CHROME_PRIOR_PAGE = (
+    "<!doctype html><meta charset=utf-8><title>chprior1269</title>"
+    '<p><label>Name <input id="t" value="keep me"></label></p>'
+    '<p><label>Wipe <input id="w" value="keep me"></label></p>'
+    '<p><label>Front <input id="f" value="keep me"></label></p>'
+    '<p><label>Middle <input id="m" value="keep me"></label></p>'
+    "<script>"
+    'document.getElementById("w").addEventListener("input",function(e){'
+    'e.target.value=e.target.value.replace("keep me","");});'
+    "function mk(id,render){var extra='',el=document.getElementById(id);"
+    "el.addEventListener('input',function(){var cur=render(extra),v=el.value;"
+    "if(v.indexOf(cur)===0){extra+=v.slice(cur.length);}el.value=render(extra);});}"
+    'mk("f",function(x){return x+"keep me";});mk("m",function(x){return "keep"+x+" me";});'
+    "</script>"
+)
+
+
+def test_linux_chrome_ref_type_refuses_a_lost_or_moved_prior_text(tmp_path) -> None:
+    """Live Chrome. Refs #1269. A ref type into a prefilled input.
+
+    Name appends and is confirmed. Wipe drops the prior text, and Front and
+    Middle put the typed text before or inside it: each is refused
+    ``prior_text_lost`` instead of confirmed. Only this test's Chrome stops.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc, _profile = _launch_chrome(tmp_path, _CHROME_PRIOR_PAGE, "chprior1269")
+    try:
+        titles = {"Name", "Wipe", "Front", "Middle"}
+        deadline = time.monotonic() + 40
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if titles <= {el.title for el in shot.elements if el.editable}:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Chrome did not expose the prefilled page"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        for title, refused in (("Name", False), ("Wipe", True), ("Front", True), ("Middle", True)):
+            runtime.find("chrome", text=title)
+            field = next(el for el in runtime._current.elements if el.title == title and el.editable)
+            assert field.value == "keep me", (title, field.value)
+            if refused:
+                with pytest.raises(ComputerUseError) as info:
+                    runtime.type_text(text=" more", ref=field.ref)
+                detail = info.value.detail or {}
+                assert detail.get("reason") == "prior_text_lost", (title, detail)
+                assert detail.get("expected") == "keep me more", (title, detail)
+            else:
+                try:
+                    result = runtime.type_text(text=" more", ref=field.ref)
+                except ComputerUseError as exc:
+                    raise AssertionError((title, exc.detail)) from exc
+                assert result.outcome == "confirmed", (title, result.outcome, result.evidence)
+    finally:
+        _stop_chrome(proc)
+
+
 def test_linux_calc_cell_comments_show_in_snapshot_and_find(tmp_path) -> None:
     """Live Calc. Refs #1248. Cell comments are readable without a hover.
 

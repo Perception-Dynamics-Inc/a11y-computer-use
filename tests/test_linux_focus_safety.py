@@ -453,6 +453,9 @@ def test_chromium_type_has_one_focus_wait_and_no_regrab(focus_driver, monkeypatc
     monkeypatch.setattr(_atspi, "_doc_url", lambda h: "file:///busy.html")
     monkeypatch.setattr(_page_health, "probe", lambda *args: None)
     monkeypatch.setattr(_atspi, "peer_field_texts", lambda h: {})
+    # The fake handle has no AT-SPI Text; keep the #1269 caret read hermetic
+    # so the test does not need PyGObject on macOS and Windows runners.
+    monkeypatch.setattr(_atspi, "entry_text_and_caret", lambda h: None)
     monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda h: pytest.fail("second focus wait"))
     monkeypatch.setattr(_atspi, "grab_focus", lambda h: pytest.fail("pointer must not regrab"))
     monkeypatch.setattr(driver, "click", lambda target: events.append("pointer"))
