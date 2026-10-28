@@ -9148,6 +9148,33 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
         return rounds
 
     capture("root_retries", lambda: driver._run(root_retries))
+
+    # Refs #1242: what libatspi itself says on the empty app root: the
+    # exception (if any) from each getter, _safe's failure flag, and whether
+    # a revive onto the accessibility bus changes the read. Evidence only.
+    def libatspi_root_reads():
+        app = _atspi.find_root("chrome", Scope.APP)
+        out = {"key": _atspi._atspi_wrapper_key(app),
+               "is_application_root": _atspi._is_application_root(app)}
+
+        def raw(label, name):
+            try:
+                out[label] = repr(getattr(app, name)())
+            except Exception as exc:  # noqa: BLE001 - evidence only
+                out[label] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        for label in ("get_child_count", "get_name", "get_role_name", "get_process_id"):
+            raw(label, label)
+        _atspi._raw_child_count(app)
+        out["safe_last_failed"] = bool(getattr(_atspi._reply_local, "last_failed", False))
+        out["safe_last_elapsed"] = getattr(_atspi._reply_local, "last_elapsed", None)
+        out["revive_block"] = dict(_atspi._revive_block_until)
+        out["revived"] = _atspi._revive_application(app)
+        raw("after_revive_child_count", "get_child_count")
+        raw("after_revive_role", "get_role_name")
+        return out
+
+    capture("libatspi_root_reads", lambda: driver._run(libatspi_root_reads))
     return json.dumps(evidence, default=str, ensure_ascii=True)
 
 
