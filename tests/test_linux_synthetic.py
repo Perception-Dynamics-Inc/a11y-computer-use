@@ -23168,6 +23168,128 @@ def test_chromium_frame_recovery_bypasses_repopulated_native_children(
     assert masks == [127, 125, 128]
 
 
+def _calc_comment_tree():
+    """Synthetic Calc document with an open comment callout. Not live Calc."""
+    app = _Acc("application", name="soffice")
+    table = _Acc("table", name="Sheet Data", states={"FOCUSED", "SHOWING"})
+    paragraph = _Acc("paragraph", states={"FOCUSED", "EDITABLE", "SHOWING"})
+    paragraph.text = ""
+    callout = _adopt(_Acc("panel", name="Callout "), paragraph)
+    doc = _adopt(_Acc("document spreadsheet"), table, callout)
+    for node in (table, paragraph, callout, doc):
+        node.get_application = lambda: app
+    return doc, table, callout, paragraph
+
+
+def test_calc_comment_read_back_under_a_focused_root_pane(fake_atspi, monkeypatch) -> None:
+    """Refs #1249. Synthetic tree shaped like Ubuntu's LibreOffice 24.2 build.
+
+    That build leaves FOCUSED on the frame's root pane and puts it on the
+    callout panel rather than its paragraph. The read-back still resolves to
+    the comment paragraph through the focused sheet table.
+    """
+    doc, table, callout, paragraph = _calc_comment_tree()
+    paragraph.states.discard("FOCUSED")
+    callout.states.update({"FOCUSED", "SHOWING"})
+    toolbar = _adopt(_Acc("tool bar"), _Acc("table", states={"FOCUSED", "SHOWING"}))
+    pane = _adopt(_Acc("root pane", name="comment.fods", states={"FOCUSED", "SHOWING"}),
+                  toolbar, _adopt(_Acc("scroll pane"), doc))
+    app = table.get_application()
+    for node in (pane, toolbar):
+        node.get_application = lambda: app
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (pane, False))
+    assert _atspi._calc_focused_sheet_under(pane) is table
+    assert _atspi.focused_text("soffice") == ""
+    paragraph.text = "Added by test"
+    assert _atspi.focused_text("soffice") == "Added by test"
+
+
+def test_calc_root_pane_without_a_unique_focused_sheet_has_no_read_back(fake_atspi, monkeypatch) -> None:
+    """Refs #1249. Synthetic. An unfocused, doubled, or unreadable sheet is None."""
+    doc, table, callout, paragraph = _calc_comment_tree()
+    pane = _adopt(_Acc("root pane", states={"FOCUSED", "SHOWING"}), doc)
+    table.states.discard("FOCUSED")
+    assert _atspi._calc_focused_sheet_under(pane) is None
+    table.states.add("FOCUSED")
+    twin = _Acc("table", states={"FOCUSED", "SHOWING"})
+    _adopt(doc, table, twin, callout)
+    assert _atspi._calc_focused_sheet_under(pane) is None
+    _adopt(doc, table, callout)
+    assert _atspi._calc_focused_sheet_under(pane, max_nodes=1) is None
+
+
+def test_calc_focused_callout_panel_with_two_paragraphs_is_not_a_read_back(fake_atspi) -> None:
+    """Refs #1249. Synthetic. A focused panel stands in only for a lone paragraph."""
+    doc, table, callout, paragraph = _calc_comment_tree()
+    paragraph.states.discard("FOCUSED")
+    callout.states.update({"FOCUSED", "SHOWING"})
+    assert _atspi._calc_drawing_paragraph(table) is paragraph
+    _adopt(callout, paragraph, _Acc("paragraph", states={"SHOWING"}))
+    assert _atspi._calc_drawing_paragraph(table) is None
+    _adopt(callout, paragraph)
+    callout.states.discard("FOCUSED")
+    assert _atspi._calc_drawing_paragraph(table) is None
+
+
+def test_calc_comment_paragraph_is_the_type_read_back(fake_atspi, monkeypatch) -> None:
+    """Refs #1249. Synthetic Calc tree. Not a live Calc window.
+
+    FOCUSED stays on the sheet table and is also on the comment callout's
+    paragraph. The paragraph is the read-back, so the typed comment is
+    confirmed once and not refused as text_mismatch with a retry hint.
+    """
+    doc, table, callout, paragraph = _calc_comment_tree()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *a, **kw: (table, False))
+    assert _atspi.focused_text("soffice") == ""
+    paragraph.text = "Added by test"
+    assert _atspi.focused_text("soffice") == "Added by test"
+
+    # Not focused, two focused paragraphs, or a table outside a
+    # spreadsheet document is not this read-back.
+    paragraph.states.discard("FOCUSED")
+    assert _atspi._calc_drawing_paragraph(table) is None
+    paragraph.states.add("FOCUSED")
+    other = _Acc("paragraph", states={"FOCUSED", "SHOWING"})
+    _adopt(doc, table, _adopt(_Acc("panel"), other), callout)
+    assert _atspi._calc_drawing_paragraph(table) is None
+    _adopt(doc, table, callout)
+    loose = _adopt(_Acc("document text"), table)
+    assert _atspi._calc_drawing_paragraph(table) is None
+    _adopt(doc, table, callout)
+
+    paragraph.text = ""
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: doc)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *a, **kw: None)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda app: "Cherry")
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("soffice", 1))
+    sent: list[str] = []
+
+    def type_string(text):
+        sent.append(text)
+        paragraph.text += text
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    assert driver.type_text("Added by test") == len("Added by test")
+    assert sent == ["Added by test"]
+    assert paragraph.text == "Added by test"
+
+    # Keys that did not land in the comment are still a mismatch.
+    paragraph.text = ""
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("Added by test")
+    assert exc.value.detail["reason"] == "text_mismatch"
+
+
 def test_ref_type_into_a_gtk4_entry_without_a_single_line_state_appends(fake_atspi, monkeypatch):
     """#1232: GTK 4 marks an entry neither SINGLE_LINE nor MULTI_LINE."""
     driver, entry, element = _select_all_entry(monkeypatch)
