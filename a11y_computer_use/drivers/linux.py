@@ -6346,6 +6346,22 @@ class LinuxDriver:
                 detail={"api": "AT-SPI focus walk exhausted", "app": app_id},
             )
 
+    def key_window_probe(self, app: str):
+        """``(window, "showing")`` for the app's focused window, or None (#1283)."""
+        from a11y_computer_use.drivers import _atspi
+
+        top = self._run(lambda: _atspi.key_window_handle(app))
+        return (top, "showing") if top is not None else None
+
+    def key_window_state(self, probe) -> str | None:
+        """``showing``/``hidden``/``closed`` now for a ``key_window_probe`` window."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not isinstance(probe, tuple) or not probe or probe[0] is None:
+            return None
+        found = self._run(lambda: _atspi.key_window_state(probe[0]))
+        return found if found in {"showing", "hidden", "closed"} else None
+
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
         from a11y_computer_use.drivers import _linux_input
