@@ -4274,6 +4274,25 @@ _XML_ROLE = {
 }
 
 
+def _calc_cell_comment(node, role_str: str, attrs: dict) -> str:
+    """A LibreOffice cell's comment (its ``Note`` attribute), or "".
+
+    Calc publishes every cell comment as the cell's ``Note`` object
+    attribute, with no hover. The attributes are the dict this walk
+    already fetched, so no extra round trip is made. Only a LibreOffice
+    table cell is read; another toolkit's ``Note`` key is not a comment.
+    """
+    if role_str != "table cell":
+        return ""
+    note = attrs.get("Note") if isinstance(attrs, dict) else None
+    if not note:
+        return ""
+    text = " ".join(str(note).split())
+    if not text or not _libreoffice_accessible(node):
+        return ""
+    return text
+
+
 def _get_attributes(acc) -> dict:
     """The AT-SPI object attributes as a plain dict (xml-roles, id, tag, class,
     …), fetched ONCE per node so stable-id + web-role both reuse it — one D-Bus
@@ -4954,6 +4973,9 @@ class ATSPIAccessor:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        comment = _calc_cell_comment(node, role_str, attrs)
+        if comment:
+            hint = (hint + "; " if hint else "") + f"comment: {comment}"
         if qt_document and owner_name.casefold() == "kate" and value is not None:
             hint = (hint + "; " if hint else "") + "Native character viewport text"
         if qt_document and value is None:
