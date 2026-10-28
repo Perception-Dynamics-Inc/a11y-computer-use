@@ -23334,3 +23334,54 @@ def test_libreoffice_validity_row_click_is_a_pointer_click_not_select_child(fake
         LinuxDriver().press_element(element)
     assert exc.value.detail["reason"] == "popup_not_closed"
     assert clicks == [element]
+
+
+def _webview_tree(nested: bool):
+    """Electron host page > internal frame > guest document > input (#1266)."""
+    entry = _Acc("entry", name="Guest name", states={"EDITABLE", "SHOWING"})
+    guest = _adopt(_Acc("document web", name="Guest Page"), entry)
+    if nested:
+        host = _adopt(_Acc("document web", name="host"), _adopt(_Acc("internal frame"), guest))
+    else:
+        host = guest
+    _adopt(_Acc("application", name="electron"), _adopt(_Acc("frame", name="w"), host))
+    return entry
+
+
+@pytest.mark.parametrize("nested,chromium,expected", [
+    (True, True, True), (False, True, False), (True, False, False),
+])
+def test_chromium_nested_web_entry_is_a_guest_or_frame_document(monkeypatch, nested, chromium, expected):
+    entry = _webview_tree(nested)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: chromium)
+    assert _atspi.chromium_nested_web_entry(entry) is expected
+
+
+@pytest.mark.parametrize("nested,focused,clicks", [
+    (True, False, 1), (True, True, 0), (False, False, 0),
+])
+def test_set_value_presses_a_webview_guest_field_that_grab_focus_cannot_reach(
+    fake_atspi, monkeypatch, nested, focused, clicks,
+):
+    """#1266: a guest field the host page keeps focus from gets the pointer press."""
+    entry = _webview_tree(nested)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda _acc: focused)
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda _acc: False)
+    monkeypatch.setattr(_atspi, "_capture_text_points", lambda _acc: [])
+    monkeypatch.setattr(_atspi, "_refuse_drawing_multiline_value", lambda *_a: None)
+    monkeypatch.setattr(_atspi, "web_entry_context", lambda _acc: ("entry",))
+    monkeypatch.setattr(_atspi, "set_text", lambda _acc, _v: True)
+    calls = []
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    monkeypatch.setattr(driver, "click", lambda el: calls.append(("click", el.ref)))
+    monkeypatch.setattr(driver, "_focus_web_entry", lambda el, h, *, context=None, request_focus=True:
+                        calls.append(("focus", request_focus)) or h)
+    element = Element("e1", "AXTextField", "Guest name", "keep me", Bounds(0, 0, 0, 100, 20),
+                      "snap-1", editable=True)
+    assert driver._apply_set_value(element, "Astana", entry) is True
+    if clicks:
+        assert calls == [("click", "e1"), ("focus", False)]
+    else:
+        assert calls == [("focus", True)]
