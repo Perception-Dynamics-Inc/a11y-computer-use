@@ -965,6 +965,43 @@ def resolve_app(identifier: str) -> str:
     return by_class or identifier
 
 
+#: Comms of interpreters that host apps. Every identity such a process shows
+#: (WM_CLASS, prgname, AT-SPI name, cmdline, cwd) is its own to set, so no
+#: requested name is ever trusted for it (#1296).
+_INTERPRETER_RE = re.compile(
+    r"^(python|pypy|perl|ruby|node|nodejs|gjs|lua|luajit|tclsh|wish|php|sh|bash|dash|zsh)"
+    r"[0-9.]*(-dbg)?$"
+)
+
+
+def is_interpreter(name: str | None) -> bool:
+    """True for an interpreter comm such as ``python3``, ``python3.12`` or ``gjs``."""
+    return bool(name) and bool(_INTERPRETER_RE.match(os.path.basename(str(name)).casefold()))
+
+
+def interpreter_hosting(identifier: str) -> str | None:
+    """The interpreter comm of a mapped window whose WM_CLASS names ``identifier``.
+
+    None when no such window is mapped or its program is not an interpreter.
+    Read fresh on every call; nothing is cached.
+    """
+    wanted = (identifier or "").strip().casefold()
+    if not wanted:
+        return None
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                identity = _app_id(win, d) or ""
+                if not is_interpreter(identity):
+                    continue
+                instance, klass = _wm_class_strings(win, d)
+                if wanted in {(instance or "").casefold(), (klass or "").casefold()}:
+                    return identity
+    except Exception:  # noqa: BLE001 - no X11 means no window evidence
+        return None
+    return None
+
+
 def class_names_program(identifier: str, identity: str) -> bool:
     """True when a window of ``identity`` has a WM_CLASS ``identifier`` names."""
     want = (identity or "").lower()
