@@ -85,6 +85,18 @@ class RetryEvidence:
     effect_reason: str = "the action-specific effect changed"
 
 
+def commits_action(element: object) -> bool:
+    """Whether a click on ``element`` may commit an action (#1281).
+
+    A native default/submit button (a wizard's Apply on its CONFIRM page, a
+    dialog's OK) runs its action even when nothing in the tree changes, so a
+    quiet tree after it never authorizes a retry. Ordinary buttons keep the
+    existing no-op judgement.
+    """
+    return (element is not None and getattr(element, "role", None) == "AXButton"
+            and getattr(element, "default", False) is True)
+
+
 def retry_verdict(
     verdict: tuple[str, str], before: RetryEvidence | None,
     after: RetryEvidence | None, *, toggle: bool = False, tool: str = "click",

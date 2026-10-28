@@ -2773,9 +2773,13 @@ class Runtime:
                     modal_check(action, app, input_target=input_target)
                 started = time.perf_counter()
                 retry_before = self._retry_probe(action, app, input_target)
+                window_before = self._click_window_probe(action)
                 result = execute()
                 retry_after = self._retry_probe(action, app, input_target)
                 self._retry_reads = (app, action, retry_before, retry_after)
+                self._click_window = (
+                    (action.target, window_before) if window_before == "showing" else None
+                )
             # Linux can discover an unknown focused entry during implicit type.
             # Its private verification returns a count, never the buffer text.
             if isinstance(action, TypeText) and getattr(result, "private_text_verified", False) is True:
@@ -3625,6 +3629,21 @@ class Runtime:
             return None
         return evidence if isinstance(evidence, outcome.RetryEvidence) else None
 
+    def _click_window_probe(self, action) -> str | None:
+        """The clicked button's window state, read before dispatch (#1281)."""
+        self._click_window = None
+        target = getattr(action, "target", None) if isinstance(action, Click) else None
+        if not isinstance(target, Element) or target.role != "AXButton":
+            return None
+        reader = getattr(self.driver, "click_window_state", None)
+        if not callable(reader):
+            return None
+        try:
+            found = reader(target)
+        except Exception:
+            return None
+        return found if isinstance(found, str) else None
+
     def _conclude(
         self,
         text: str,
@@ -3703,6 +3722,34 @@ class Runtime:
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
             )
+        if (
+            tool == "click" and element is not None and not died
+            and judged in {"suspected_noop", "unverifiable"}
+        ):
+            # #1281: the click's own window closing or hiding is the effect,
+            # even though the tree no longer has the control to compare.
+            shown = getattr(self, "_click_window", None)
+            self._click_window = None
+            closed = None
+            reader = getattr(self.driver, "click_window_state", None)
+            if (isinstance(shown, tuple) and shown[1] == "showing"
+                    and isinstance(shown[0], Element)
+                    and (shown[0].snapshot_id, shown[0].ref) == (element.snapshot_id, element.ref)
+                    and callable(reader)):
+                try:
+                    closed = reader(element)
+                except Exception:
+                    closed = None
+            if closed in {"hidden", "closed"}:
+                judged, evidence = "confirmed", f"the target's window was {closed} by the click"
+            elif judged == "suspected_noop" and outcome.commits_action(element):
+                # A commit button can run its action without any change the
+                # tree shows (a wizard that stays open after Apply). A retry
+                # would repeat the action, so never suggest one.
+                judged, evidence = "unverifiable", (
+                    evidence + "; a retry may repeat a committed action; "
+                    "re-observe first (snapshot/screenshot)"
+                )
         no_bridge = False
         if tool in {"type", "key"} and judged == "unverifiable" and not died:
             plugin = self._libreoffice_without_bridge(app)
