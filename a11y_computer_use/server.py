@@ -2485,7 +2485,11 @@ class Runtime:
         if comm_denied or comm_grant is not None:
             return resolved
         name_grant, name_denied, _err, _block = self.store.policy(named)
-        if name_denied or name_grant is not None:
+        if name_denied:
+            return named
+        if name_grant is not None and self.store.has_exact_grant(named):
+            # Only a grant keyed on exactly this name: no case folding or
+            # alias reaches another app's grant on this path (#1296).
             return named
         return resolved
 

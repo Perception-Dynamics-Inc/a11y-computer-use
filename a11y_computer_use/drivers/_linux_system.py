@@ -995,6 +995,8 @@ def grant_app_id(identifier: str, resolved: str | None = None) -> str:
 
     if program_alias(wanted, resolved.lower()):
         return resolved  # another name of the same program (soffice.bin)
+    if _names_installed_program(wanted):
+        return resolved  # a script must not borrow an installed app's grant
     folded = wanted.casefold()
     try:
         with _open_display() as d:
@@ -1008,6 +1010,91 @@ def grant_app_id(identifier: str, resolved: str | None = None) -> str:
     except Exception:  # noqa: BLE001 - no X11 means no prgname evidence
         return resolved
     return resolved
+
+
+def _flatpak_application_dirs() -> list[str]:
+    home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return [
+        os.path.join(home, "flatpak", "exports", "share", "applications"),
+        "/var/lib/flatpak/exports/share/applications",
+    ]
+
+
+def _bin_dirs() -> list[str]:
+    raw = os.environ.get("PATH") or ""
+    dirs = [part for part in raw.split(os.pathsep) if part]
+    for extra in ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+                  "/usr/games", "/snap/bin", "/var/lib/flatpak/exports/bin",
+                  os.path.join(os.path.expanduser("~"), ".local", "share", "flatpak", "exports", "bin")):
+        if extra not in dirs:
+            dirs.append(extra)
+    return dirs
+
+
+def _installed_program_names() -> set[str]:
+    """Casefolded names of installed programs, read fresh.
+
+    Executables in PATH and the standard bin dirs, every desktop id (both the
+    ``foo-bar`` and ``foo/bar`` spellings), and each entry's ``Exec`` basename
+    and ``StartupWMClass``, across the XDG and Flatpak application dirs.
+    """
+    from a11y_computer_use.app_identity import tokens
+
+    names: set[str] = set()
+    for folder in _bin_dirs():
+        try:
+            for entry in os.listdir(folder):
+                names.add(entry.casefold())
+        except OSError:
+            continue
+    for root in [*_application_dirs(), *_flatpak_application_dirs()]:
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                if not name.endswith(".desktop"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                desktop_id = rel.replace(os.sep, "-")
+                names.update(tokens(desktop_id))
+                names.update(tokens(name))
+                try:
+                    with open(os.path.join(dirpath, name), encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            key, sep, value = line.partition("=")
+                            if not sep:
+                                continue
+                            key = key.strip()
+                            value = value.strip()
+                            if key == "StartupWMClass" and value:
+                                names.update(tokens(value))
+                            elif key == "Exec" and value:
+                                first = value.split()[0].strip('"')
+                                names.update(tokens(first))
+                except OSError:
+                    continue
+    return names
+
+
+def _names_installed_program(wanted: str) -> bool:
+    """True when ``wanted`` names, or may name, an installed program.
+
+    Compared the way grants match: case-insensitive, with desktop ids and
+    alias groups. A name in an alias group or shaped like a reverse-DNS
+    desktop id is treated as installed, and so is any read error: when in
+    doubt the requested name is refused (#1296).
+    """
+    from a11y_computer_use.app_identity import identity_keys, tokens
+
+    own = tokens(wanted)
+    keys = identity_keys(wanted)
+    if not own or keys != own:
+        return True  # an alias group names a known app
+    if any("." in key for key in own):
+        return True  # a desktop / flatpak id spelling
+    try:
+        installed = _installed_program_names()
+    except Exception:  # noqa: BLE001 - unreadable means unknown, so refuse
+        return True
+    return bool(keys & installed)
 
 
 def class_names_program(identifier: str, identity: str) -> bool:

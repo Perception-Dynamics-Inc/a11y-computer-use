@@ -2169,6 +2169,7 @@ def _prgname_display(monkeypatch, windows: list, comms: dict) -> None:
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
     monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_linux_system, "_installed_program_names", lambda: {"mousepad"})
 
 
 def _gate_runtime(tmp_path, monkeypatch, tiers: dict, deny: tuple = ()):
@@ -2250,3 +2251,59 @@ def test_grant_key_keeps_the_libreoffice_alias(monkeypatch) -> None:
     _prgname_display(monkeypatch, [_PrgnameWin(0x400, 71, b"libreoffice", b"LibreOffice")], {71: "soffice.bin"})
     assert _linux_system.resolve_app("LibreOffice") == "soffice.bin"
     assert _linux_system.grant_app_id("LibreOffice") == "soffice.bin"
+
+
+@pytest.mark.parametrize("prgname", ["Mousepad", "MOUSEPAD", "mousePad", "org.xfce.mousepad",
+                                     "org.xfce.Mousepad", "mousepad.desktop"])
+def test_grant_key_refuses_a_case_or_desktop_id_spoof_of_an_installed_app(tmp_path, monkeypatch, prgname) -> None:
+    """#1296 safety: only a mousepad grant, python3 window WM_CLASS ``Mousepad`` / desktop id.
+
+    ``which`` is case-sensitive and PATH-only, but grants fold case and
+    follow aliases, so the spoof must be refused the same way.
+    """
+    from a11y_computer_use import safety
+
+    _prgname_display(monkeypatch, [_PrgnameWin(0x500, 81, prgname.encode(), b"P1296app.py")], {81: "python3"})
+    assert _linux_system.grant_app_id(prgname) == "python3"
+    rt = _gate_runtime(tmp_path, monkeypatch, {"mousepad": safety.Tier.FULL})
+    key = rt._resolve_app(prgname)[1]
+    assert key == "python3"
+    assert not safety.check_action(_snapshot_op(), key, store=rt.store).allowed
+
+
+def test_grant_key_refuses_a_name_found_only_in_a_desktop_file(tmp_path, monkeypatch) -> None:
+    """A desktop id, StartupWMClass or Exec name outside PATH is an installed app."""
+    from a11y_computer_use import safety
+
+    apps = tmp_path / "share" / "applications"
+    apps.mkdir(parents=True)
+    (apps / "calcapp.desktop").write_text(
+        "[Desktop Entry]\nName=Calc\nExec=/opt/zz/zzcalc %U\nStartupWMClass=ZzCalcWin\n")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "nohome"))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "share"))
+    monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
+    monkeypatch.setattr(_linux_system, "_bin_dirs", lambda: [str(tmp_path / "nobin")])
+    names = _linux_system._installed_program_names()
+    assert {"calcapp", "zzcalc", "zzcalcwin"} <= names
+    for spoof in ("CalcApp", "zzcalc", "ZZCalcWin"):
+        _prgname_display(monkeypatch, [_PrgnameWin(0x600, 91, spoof.encode(), b"x.py")], {91: "python3"})
+        monkeypatch.setattr(_linux_system, "_installed_program_names", lambda: names)
+        assert _linux_system.grant_app_id(spoof) == "python3", spoof
+
+
+def test_grant_key_refuses_when_installed_programs_cannot_be_read(monkeypatch) -> None:
+    def broken():
+        raise OSError("unreadable")
+
+    _prgname_display(monkeypatch, [_PrgnameWin(0x700, 95, b"cuprobe1296", b"x.py")], {95: "python3"})
+    monkeypatch.setattr(_linux_system, "_installed_program_names", broken)
+    assert _linux_system.grant_app_id("cuprobe1296") == "python3"
+
+
+def test_prgname_key_needs_a_grant_keyed_on_exactly_that_name(tmp_path, monkeypatch) -> None:
+    """A grant reached only by case folding does not move the key off the comm."""
+    from a11y_computer_use import safety
+
+    _prgname_display(monkeypatch, [_PrgnameWin(0x800, 97, b"Cuprobe1296", b"x.py")], {97: "python3"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": safety.Tier.FULL})
+    assert rt._resolve_app("Cuprobe1296")[1] == "python3"

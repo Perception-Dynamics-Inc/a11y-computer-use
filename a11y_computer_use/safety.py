@@ -490,6 +490,12 @@ class PermissionStore:
             ordered.append(bundle_id)
         return ordered
 
+    def has_exact_grant(self, bundle_id: str) -> bool:
+        """True when a grant is stored under exactly ``bundle_id``."""
+        with self._lock:
+            self._refresh()
+            return bundle_id in self._tiers
+
     def get_tier(self, bundle_id: str) -> Tier | None:
         """Granted tier for ``bundle_id``; None means ungranted ("ask")."""
         return self.policy(bundle_id)[0]
