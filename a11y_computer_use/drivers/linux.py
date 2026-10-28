@@ -1321,6 +1321,11 @@ class LinuxDriver:
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
         self._sheet_type_readback: tuple[str, str] | None = None
+        # (snapshot_id, ref, text) after a Qt item-view cell edit read the
+        # live cell back equal to the request (#1278). The outcome judge
+        # reads it once: the cell's text is its title, so the post-edit
+        # snapshot no longer matches the old control by title.
+        self._cell_readback: tuple[str, str, str] | None = None
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
@@ -4219,6 +4224,11 @@ class LinuxDriver:
                 and self._run(lambda: _atspi.qt_checkable_item(handle))):
             self._set_qt_item_checked(element, handle, want)
             return True
+        if (handle is not None and not _accepts_text(element)
+                and self._run(lambda: _atspi.qt_item_view_cell(handle))):
+            # #1278: a Qt 6 item-view cell edits through its delegate editor.
+            self._edit_qt_cell(element, handle, value, replace=True)
+            return True
         if handle is not None:
             kind = self._run(lambda: _atspi.control_kind(handle))
             if kind == "combo":
@@ -5407,6 +5417,10 @@ class LinuxDriver:
             raise self._focus_lost_on(element)
         self._refuse_hidden(element, handle)
         self._raise_handle_window(handle)
+        if not _accepts_text(element) and self._run(lambda: _atspi.qt_item_view_cell(handle)):
+            self._visible_action(element, "Type")
+            self._edit_qt_cell(element, handle, text, replace=False)
+            return len(text)
         if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
             raise _not_editable(element)
         # Ref typing goes through type_into, not type_text; announce here so
@@ -5572,6 +5586,89 @@ class LinuxDriver:
         if live is not handle:
             observe._HANDLES.get(element.snapshot_id, {})[element.ref] = live
         return live
+
+    def opens_cell_editor(self, element: Element) -> bool:
+        """True for a Qt table cell that edits through F2 (#1278)."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if element.role != "AXCell":
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        return handle is not None and bool(self._run(lambda: _atspi.qt_item_view_cell(handle)))
+
+    def _edit_qt_cell(self, element: Element, handle, text: str, *, replace: bool) -> None:
+        """Edit a Qt item-view cell through its delegate editor (#1278).
+
+        Focus the cell, press F2, and require a focused editor in the same
+        process before any text is sent. No editor means the item is read
+        only: nothing was typed and the refusal is ``not_editable``. The
+        editor is committed with Return and the cell itself is read back.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        self._cell_readback = None
+        if _on_wayland():
+            raise _wayland_input_error("edit table cell")
+        from a11y_computer_use.drivers import _linux_input
+
+        before = self._run(lambda: _atspi._node_name(handle)) or ""
+        # Qt 6 refuses AT-SPI grab_focus on a cell, and F2 then edits the
+        # view's *current* index, not this cell. Make the target current
+        # with a click on its centre when grab_focus does not take.
+        if not self._run(lambda: _atspi.grab_focus(handle)):
+            pos, size = self._run(lambda: _atspi._extents(handle))
+            if pos is None or size is None:
+                raise _not_editable(element)
+            _linux_input.click(int(pos[0] + size[0] // 2), int(pos[1] + size[1] // 2))
+            for _ in range(8):
+                if self._run(lambda: _atspi._state_has(handle, "FOCUSED")):
+                    break
+                time.sleep(0.025)
+            else:
+                raise self._focus_lost_on(element)
+        view_focused = bool(self._run(lambda: _atspi.qt_view_focused(handle)))
+        _linux_input.press_chord("F2")
+        editor = None
+        for _ in range(8):
+            if view_focused:
+                # Qt 6 does not expose its delegate editor: it shows only as
+                # the view losing focus. Do not walk for a focused editable
+                # here; that walk closes the open editor on Qt 6.11.
+                if not self._run(lambda: _atspi.qt_view_focused(handle)):
+                    editor = True
+            else:
+                editor = self._run(lambda: _atspi.qt_cell_editor(handle))
+            if editor is not None:
+                break
+            time.sleep(0.025)
+        if editor is None:
+            raise _not_editable(element)
+        try:
+            # Qt's F2 editor opens with its text selected: append from End.
+            _linux_input.press_chord("ctrl+a" if replace else "End")
+            _linux_input.type_string(text)
+        except BaseException:
+            _linux_input.press_chord("Escape")  # never leave the editor open
+            raise
+        _linux_input.press_chord("Return")
+        want = text if replace else before + text
+        got = before
+        for _ in range(10):
+            self._run(lambda: _atspi._drop_cached_properties(handle))
+            got = self._run(lambda: _atspi._node_name(handle)) or ""
+            if got == want:
+                self._cell_readback = (element.snapshot_id, element.ref, got)
+                if not replace:
+                    self._type_expected = got
+                return
+            time.sleep(0.05)
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} reads {got!r} after the edit, not {want!r}",
+            detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch",
+                    "expected": want, "actual": got},
+        )
 
     def _focus_lost_on(self, element: Element) -> ComputerUseError:
         return ComputerUseError(

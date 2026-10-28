@@ -24209,6 +24209,57 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, poi
     return bool(modals)
 
 
+def qt_item_view_cell(acc) -> bool:
+    """A Qt item-view cell with no EditableText of its own (#1278).
+
+    Qt 6 exposes QTableWidget / QTableView cells as ``table cell`` nodes
+    without EDITABLE or EditableText, even when the item is editable: the
+    editor widget exists only after F2 or a double click.
+    """
+    if acc is None or _role_name(acc) != "table cell" or not _qt_app(acc):
+        return False
+    return _editable_iface(acc) is None
+
+
+def qt_item_view_of(cell):
+    """The ``table`` / ``tree table`` / ``list`` node holding a Qt cell, or None."""
+    node = cell
+    for _ in range(3):
+        node = _parent_of(node) if node is not None else None
+        if node is None:
+            return None
+        if _role_name(node) in ("table", "tree table", "tree", "list"):
+            return node
+    return None
+
+
+def qt_view_focused(cell) -> bool:
+    """Whether the item view holding ``cell`` has keyboard focus (#1278).
+
+    Qt 6 does not expose the delegate editor (QLineEdit) it opens over a
+    cell. The only bus signal is that the view itself loses FOCUSED while
+    the editor holds focus, and regains it when the editor closes. A
+    read-only cell leaves the view focused after F2.
+    """
+    view = qt_item_view_of(cell)
+    return view is not None and _state_has(view, "FOCUSED")
+
+
+def qt_cell_editor(cell):
+    """The focused editor Qt opened over ``cell``, or None.
+
+    It must be a focused editable in the same process, and not the cell.
+    """
+    app = _application_name(cell)
+    if not app:
+        return None
+    editor = focused_editable(app)
+    if editor is None or editor is cell or is_secure(editor):
+        return None
+    if pid_of(editor) != pid_of(cell):
+        return None
+    return editor
+
 
 def click_window_state(target) -> str | None:
     """``showing``, ``hidden`` or ``closed`` for a control's window (#1281).
