@@ -5368,6 +5368,13 @@ class LinuxDriver:
                 # Judge the read-back against an append. A write that loses
                 # or splits the prior text still fails this check.
                 append_state = (append_state[0], len(append_state[0]))
+        if append_state is None and context is not None and self._run(
+            lambda: _atspi._chromium_app(handle)
+        ):
+            # Chrome web entries keep the caret the pointer press placed. A
+            # page handler that drops or moves the prior text must not read
+            # back as confirmed (#1269): judge the write at that caret.
+            append_state = self._run(lambda: _atspi.entry_text_and_caret(handle))
         peers: dict = {}
         try:
             peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
