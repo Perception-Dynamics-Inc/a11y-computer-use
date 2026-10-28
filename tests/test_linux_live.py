@@ -9204,9 +9204,24 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
                 budget_s=90,
             )
-            assert "ROW-0300" in found, found
-            assert "not found" not in found, found
-            assert "found after 0" not in found, found
+            if (
+                "ROW-0300" not in found or "not found" in found or "found after 0" in found
+            ):
+                # #1242: the same evidence as wait_at_top, read before the
+                # assertion fails. The conditions below are unchanged.
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError:
+                    shot = None
+                evidence = _chrome_table_failure(
+                    driver, proc, shot, phase=f"scroll_to_find pass {_pass}", samples=[],
+                )
+                found_with_evidence = f"{found}; {evidence}"
+            else:
+                found_with_evidence = found
+            assert "ROW-0300" in found, found_with_evidence
+            assert "not found" not in found, found_with_evidence
+            assert "found after 0" not in found, found_with_evidence
             located = runtime.find("chrome", text="edit 300")
             assert "no elements match" not in located, located
             button = next(
