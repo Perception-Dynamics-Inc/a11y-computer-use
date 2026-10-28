@@ -9106,6 +9106,48 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
         return {"cached": cached, "fresh": fresh, "differs": cached != fresh}
 
     capture("registry_cached_vs_fresh", lambda: driver._run(registry))
+
+    # Refs #1242: per retry, the app's top-level frames (title, role, child
+    # count, D-Bus key, latch sets) and what find_root and
+    # chromium_snapshot_root returned. Evidence only.
+    def root_retries():
+        def node(acc):
+            if acc is None:
+                return None
+            return [_atspi._role_name(acc), _atspi._node_name(acc),
+                    _atspi._child_count(acc), _atspi._atspi_wrapper_key(acc)]
+
+        rounds = []
+        for attempt in range(5):
+            entry = {"attempt": attempt}
+            try:
+                app = _atspi.find_root("chrome", Scope.APP)
+                entry["app"] = node(app)
+                frames = []
+                for index in range(min(max(_atspi._child_count(app), 0), 8)):
+                    frame = _atspi._child_at(app, index)
+                    frames.append(node(frame) + [
+                        _atspi._state_has(frame, "ACTIVE"), _atspi._state_has(frame, "SHOWING"),
+                        [node(_atspi._child_at(frame, i))
+                         for i in range(min(max(_atspi._child_count(frame), 0), 3))],
+                    ] if frame is not None else None)
+                entry["frames"] = frames
+                window = _atspi.find_root("chrome", Scope.WINDOW)
+                entry["find_root_window"] = node(window)
+                entry["latch"] = {
+                    "pids": sorted(_atspi._BROWSER_BAR_PIDS),
+                    "cleared": sorted(_atspi._BROWSER_BAR_CLEARED),
+                    "open": sorted(_atspi._BROWSER_BAR_OPEN),
+                }
+                picked = _atspi.chromium_snapshot_root(window)
+                entry["chromium_snapshot_root"] = node(picked)
+            except Exception as exc:  # noqa: BLE001 - evidence only
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+            rounds.append(entry)
+            time.sleep(0.5)
+        return rounds
+
+    capture("root_retries", lambda: driver._run(root_retries))
     return json.dumps(evidence, default=str, ensure_ascii=True)
 
 
