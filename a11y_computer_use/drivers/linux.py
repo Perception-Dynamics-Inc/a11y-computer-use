@@ -5588,11 +5588,15 @@ class LinuxDriver:
         return live
 
     def opens_cell_editor(self, element: Element) -> bool:
-        """True for a Qt table cell that edits through F2 (#1278)."""
+        """True for a Qt item-view cell or list item that edits through F2.
+
+        Table cells snapshot as AXCell (#1278); QListWidget items as AXRow
+        (#1288).
+        """
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
-        if element.role != "AXCell":
+        if element.role not in ("AXCell", "AXRow"):
             return False
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         return handle is not None and bool(self._run(lambda: _atspi.qt_item_view_cell(handle)))
