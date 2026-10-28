@@ -73,3 +73,25 @@ def test_table_failure_preserves_evidence_when_native_diagnostics_fail(monkeypat
     assert result["exit_status"] == 1
     assert result["native"] == {"error": "RuntimeError: bus gone"}
     assert result["windows"] == {"error": "RuntimeError: bus gone"}
+    assert result["raw_dbus_app_root"] == {"error": "RuntimeError: bus gone"}
+    assert result["registry_cached_vs_fresh"] == {"error": "RuntimeError: bus gone"}
+
+
+def test_table_failure_records_command_lines_of_the_launched_tree_only():
+    import os
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "rowtable-marker"])
+    try:
+        driver = SimpleNamespace(_run=lambda fn: fn(), windows=lambda: [])
+        proc = SimpleNamespace(pid=child.pid, args=[sys.executable], poll=lambda: None)
+        result = json.loads(_chrome_table_failure(
+            driver, proc, None, phase="reload 3", samples=[],
+        ))
+        lines = result["chrome_cmdlines"]
+        assert lines[str(child.pid)][-1] == "rowtable-marker"
+        assert str(os.getpid()) not in lines
+    finally:
+        child.kill()
+        child.wait()
