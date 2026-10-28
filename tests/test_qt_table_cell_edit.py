@@ -47,7 +47,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(_linux_input, "press_chord", chord)
     monkeypatch.setattr(_linux_input, "type_string", type_string)
     monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: cell)
-    monkeypatch.setattr(_atspi, "qt_table_cell", lambda acc: acc is cell)
+    monkeypatch.setattr(_atspi, "qt_item_view_cell", lambda acc: acc is cell)
     monkeypatch.setattr(_atspi, "qt_cell_editor", lambda acc: object() if cell.editing else None)
     monkeypatch.setattr(_atspi, "_node_name", lambda acc: acc.name)
     monkeypatch.setattr(_atspi, "grab_focus", lambda acc: True)

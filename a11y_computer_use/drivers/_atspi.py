@@ -24025,7 +24025,7 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, poi
     return bool(modals)
 
 
-def qt_table_cell(acc) -> bool:
+def qt_item_view_cell(acc) -> bool:
     """A Qt item-view cell with no EditableText of its own (#1278).
 
     Qt 6 exposes QTableWidget / QTableView cells as ``table cell`` nodes

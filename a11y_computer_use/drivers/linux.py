@@ -4113,7 +4113,7 @@ class LinuxDriver:
             self._write_sheet_cell(handle, value)
             return True
         if (handle is not None and not _accepts_text(element)
-                and self._run(lambda: _atspi.qt_table_cell(handle))):
+                and self._run(lambda: _atspi.qt_item_view_cell(handle))):
             # #1278: a Qt 6 item-view cell edits through its delegate editor.
             self._edit_qt_cell(element, handle, value, replace=True)
             return True
@@ -5305,7 +5305,7 @@ class LinuxDriver:
             raise self._focus_lost_on(element)
         self._refuse_hidden(element, handle)
         self._raise_handle_window(handle)
-        if not _accepts_text(element) and self._run(lambda: _atspi.qt_table_cell(handle)):
+        if not _accepts_text(element) and self._run(lambda: _atspi.qt_item_view_cell(handle)):
             self._visible_action(element, "Type")
             self._edit_qt_cell(element, handle, text, replace=False)
             return len(text)
@@ -5461,7 +5461,7 @@ class LinuxDriver:
         if element.role != "AXCell":
             return False
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
-        return handle is not None and bool(self._run(lambda: _atspi.qt_table_cell(handle)))
+        return handle is not None and bool(self._run(lambda: _atspi.qt_item_view_cell(handle)))
 
     def _edit_qt_cell(self, element: Element, handle, text: str, *, replace: bool) -> None:
         """Edit a Qt item-view cell through its delegate editor (#1278).
