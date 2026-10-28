@@ -701,7 +701,11 @@ class ActionRefused(Exception):
     """A safety `Decision` blocked the action (DENY or NEEDS_PERMISSION)."""
 
     def __init__(self, decision: safety.Decision) -> None:
-        super().__init__(decision.reason)
+        reason = decision.reason
+        exe_hint = _EXE_HINTS.get(decision.app or "")
+        if exe_hint:
+            reason = f"{reason} | {exe_hint}"  # says which process failed which check
+        super().__init__(reason)
         self.decision = decision
 
 

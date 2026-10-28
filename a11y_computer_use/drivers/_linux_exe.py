@@ -306,6 +306,7 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     if not pids or interpreter_key(name):
         return name, None
     exes = {pid: exe_of(pid) for pid in pids}
+    raw = dict(exes)
     # A zombie's exe is unreadable because it has exited; it is not a live app.
     exes = {pid: exe for pid, exe in exes.items() if exe is not None or not _gone(pid)}
     if not exes:
@@ -317,15 +318,19 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     if hosts and not natives and len(hosts) == 1:
         return next(iter(hosts)), None
     bad: list[str] = []
+    why: dict[str, str] = {}
     # One verdict per distinct exe: Chrome runs dozens of processes.
     for exe in set(exes.values()):
         if exe is None or interpreter_key(exe):
             bad.append(exe or "(unreadable)")
+            why[exe or "(unreadable)"] = "unreadable exe, not a sandbox helper" if exe is None else "interpreter"
         elif recorded is not None:
             if exe != recorded:
                 bad.append(exe)
+                why[exe] = "not the recorded exe"
         elif not legacy_exe_ok(name, exe):
             bad.append(exe)
+            why[exe] = "legacy grant: not installed or system-owned"
     if not bad:
         return name, None
     if recorded is not None:
@@ -335,4 +340,39 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
         hint = (f"a process named {name!r} runs {bad[0]}, which is not the installed {name}; "
                 f"refused. This grant predates executable binding: re-run "
                 f"`a11y-computer-use grant {name} <tier>` while the real app runs.")
-    return name, hint
+    return name, hint + " [" + _diagnose(bad[0], why.get(bad[0], ""), exes, raw) + "]"
+
+
+def _diagnose(bad: str, why: str, exes: dict[int, str | None], raw: dict[int, str | None]) -> str:
+    """Failure-only detail: which pid failed which check (pids, states, chains)."""
+    parts = [f"check: {why}"]
+    shown = 0
+    for pid in sorted(p for p, e in exes.items() if (e or "(unreadable)") == bad):
+        if shown >= 3:
+            break
+        shown += 1
+        chain = []
+        cur: int | None = pid
+        for _ in range(6):
+            if not cur or cur <= 1:
+                break
+            ppid, nspid = _status(cur)
+            try:
+                with open(f"/proc/{cur}/stat", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                state = text[text.rfind(")") + 2: text.rfind(")") + 3]
+            except OSError as exc:
+                state = f"?{exc.errno}"
+            try:
+                uid = os.stat(f"/proc/{cur}").st_uid
+            except OSError:
+                uid = -1
+            try:
+                link = os.readlink(f"/proc/{cur}/exe")
+            except OSError as exc:
+                link = f"errno {exc.errno}"
+            chain.append(f"{cur}({_comm(cur)!r} {state} uid={uid} ns={list(nspid)} "
+                         f"exe={link!r} named={cur in raw})")
+            cur = ppid
+        parts.append("pid " + " <- ".join(chain))
+    return "; ".join(parts)
