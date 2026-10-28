@@ -14219,7 +14219,10 @@ def test_linux_gtk_icon_view_ref_click_selects_without_activation(tmp_path) -> N
         # This is the native role the old image-only predicate missed.
         assert driver._run(lambda: _atspi._role_name(handle)) == "icon"
         store = safety.PermissionStore(tmp_path / "permissions.json")
-        store.set_tier("cuaiconprobe", safety.Tier.FULL)
+        # The fixture is a python3 GTK app. Its "cuaiconprobe" prgname is set by
+        # the process itself, so the library keys it as python3, the identity
+        # it really resolves (#1296). Granting python3 is the honest grant.
+        store.set_tier("python3", safety.Tier.FULL)
         runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
         runtime._current = shot
         assert "clicked" in runtime.click(cherry.ref)

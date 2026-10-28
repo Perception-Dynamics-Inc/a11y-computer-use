@@ -23656,3 +23656,33 @@ def test_set_value_presses_a_webview_guest_field_that_grab_focus_cannot_reach(
         assert calls == [("click", "e1"), ("focus", False)]
     else:
         assert calls == [("focus", True)]
+
+
+def test_snapshot_keeps_the_requested_label_and_finds_the_interpreter(fake_atspi, monkeypatch) -> None:
+    """#1296: the label stays ``cuaiconprobe`` so a re-observe finds this process.
+
+    Labelling it python3 made the live re-snapshot bind another python3 app
+    (``app_restarted`` in CI run 40717540409). The gate keys it as python3
+    through ``interpreter_host`` and Runtime instead.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    window = _WindowNode("frame", "cuaiconprobe")
+    _PidNode("application", "cuaiconprobe", pid=31, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    _programs_by_pid(monkeypatch, {31: "python3"})
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)
+    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW)[0] == "cuaiconprobe"
+    assert LinuxDriver().interpreter_host("cuaiconprobe") == "python3"
+
+
+def test_snapshot_keeps_a_native_app_name(fake_atspi, monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi_events
+
+    window = _WindowNode("frame", "Untitled")
+    _PidNode("application", "mousepad", pid=32, children=[window])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    _programs_by_pid(monkeypatch, {32: "mousepad"})
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)
+    assert LinuxDriver()._root_for_snapshot("mousepad", Scope.WINDOW)[0] == "mousepad"
+    assert LinuxDriver().interpreter_host("mousepad") is None
