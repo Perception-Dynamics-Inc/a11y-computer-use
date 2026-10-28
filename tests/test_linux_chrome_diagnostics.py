@@ -1,6 +1,9 @@
 """Failure evidence for the live Chromium table regression, without a desktop."""
 import json
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 from tests.test_linux_live import _chrome_table_failure
 from a11y_computer_use.drivers import _atspi
@@ -77,10 +80,11 @@ def test_table_failure_preserves_evidence_when_native_diagnostics_fail(monkeypat
     assert result["registry_cached_vs_fresh"] == {"error": "RuntimeError: bus gone"}
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="reads /proc, which only Linux has; the live Chrome test is Linux-only")
 def test_table_failure_records_command_lines_of_the_launched_tree_only():
     import os
     import subprocess
-    import sys
 
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "rowtable-marker"])
     try:
