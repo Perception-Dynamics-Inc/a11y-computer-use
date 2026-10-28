@@ -1451,11 +1451,9 @@ class LinuxDriver:
 
         root = self._run(lambda name=app: lookup(name))
         if root is not None:
-            host = self._run(lambda: _interpreter_of(root))
-            if host and host.casefold() != app.casefold():
-                # An interpreter-hosted app names itself; it is keyed as its
-                # interpreter, before and after its window maps (#1296).
-                return host, self._pinned(app, root)
+            # The requested name stays the label so a re-observe finds this
+            # process, not another python3 app. Runtime gates every action
+            # on the interpreter key instead (#1296).
             return app, self._pinned(app, root)
         # The second lookup is only for another name of the same program
         # (LibreOffice -> soffice.bin, a WM_CLASS). resolve_app no longer
@@ -1463,14 +1461,7 @@ class LinuxDriver:
         # here as well, so an exited `python` never becomes `python3`
         # (#1191).
         resolved = _resolved_app(app)
-        from a11y_computer_use.drivers import _linux_system
-
-        if resolved != app and (
-            _same_program_name(app, resolved)
-            or (_linux_system.is_interpreter(resolved) and not _linux_system.is_interpreter(app))
-        ):
-            # An interpreter-hosted app is labelled as its interpreter, so the
-            # permission gate keys it as python3, never its self-chosen name.
+        if resolved != app and _same_program_name(app, resolved):
             root = self._run(lambda name=resolved: lookup(name))
             return resolved, (self._pinned(app, root) if root is not None else None)
         # A different program's name is kept only to word the error (VLC's

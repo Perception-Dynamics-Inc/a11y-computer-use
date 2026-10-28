@@ -23658,23 +23658,21 @@ def test_set_value_presses_a_webview_guest_field_that_grab_focus_cannot_reach(
         assert calls == [("focus", True)]
 
 
-def test_snapshot_labels_an_interpreter_hosted_app_as_its_interpreter(fake_atspi, monkeypatch) -> None:
-    """#1296: a python3 app named ``cuaiconprobe`` is labelled python3, found by either name.
+def test_snapshot_keeps_the_requested_label_and_finds_the_interpreter(fake_atspi, monkeypatch) -> None:
+    """#1296: the label stays ``cuaiconprobe`` so a re-observe finds this process.
 
-    CI run 40647502987 saw the by-name lookup miss and the python3 lookup
-    find the app. Neither path may hand the self-chosen name to the gate.
+    Labelling it python3 made the live re-snapshot bind another python3 app
+    (``app_restarted`` in CI run 40717540409). The gate keys it as python3
+    through ``interpreter_host`` and Runtime instead.
     """
-    from a11y_computer_use.drivers import _atspi_events, _linux_system
+    from a11y_computer_use.drivers import _atspi_events
 
     window = _WindowNode("frame", "cuaiconprobe")
     _PidNode("application", "cuaiconprobe", pid=31, children=[window])
     monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
-    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: "python3")
     _programs_by_pid(monkeypatch, {31: "python3"})
-    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window if name == "python3" else None)
-    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW)[0] == "python3"
-    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)  # pre-window, by name
-    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW)[0] == "python3"
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)
+    assert LinuxDriver()._root_for_snapshot("cuaiconprobe", Scope.WINDOW)[0] == "cuaiconprobe"
     assert LinuxDriver().interpreter_host("cuaiconprobe") == "python3"
 
 

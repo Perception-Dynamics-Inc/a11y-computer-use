@@ -2473,6 +2473,45 @@ class Runtime:
             bundle = self._linux_interpreter_key(identifier, bundle)
         return running, bundle
 
+    def _linux_gate_key(self, app: str) -> str:
+        """The permission key for ``app`` at gate time (Linux, #1296).
+
+        A snapshot keeps the requested name so later lookups find the same
+        process, but a ref action on an interpreter-hosted app is still
+        gated as the interpreter. Read fresh per action.
+        """
+        if not app or not sys.platform.startswith("linux") or self._resolves_apps():
+            return app
+        from a11y_computer_use.drivers import _linux_system
+
+        try:
+            key = self._resolve_app(app)[1]
+        except Exception:  # noqa: BLE001 - no evidence keeps the name
+            return app
+        return key if key and _linux_system.is_interpreter(key) else app
+
+    def _linux_recheck_key(self, identifier: str, bundle: str, label: str | None = None) -> None:
+        """Re-gate when the app's key changed under a snapshot (Linux only).
+
+        The gate can key a python3 app on its own name before its window
+        maps; the driver then labels it python3, or misses it and raises
+        app_not_found. A deny or missing grant on the real key is the
+        answer then, not app_not_found (#1296).
+        """
+        if not sys.platform.startswith("linux") or self._resolves_apps():
+            return
+        key = label
+        if not key:
+            try:
+                key = self._resolve_app(identifier)[1]
+            except ComputerUseError:
+                return
+        if not key or key.casefold() == (bundle or "").casefold():
+            return
+        decision = safety.check_action(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=key), key, store=self.store)
+        if not decision.allowed:
+            raise ActionRefused(decision)
+
     def _linux_interpreter_key(self, identifier: str, resolved: str) -> str:
         """The interpreter (``python3``) when one hosts ``identifier``, else ``resolved``.
 
@@ -2776,7 +2815,8 @@ class Runtime:
             self._reject_domain(action, app=app)
         if not no_input:
             self._reject_terminal(action, app, input_target=input_target)
-        decision = self._require_permission(action, app, secure=secure)
+        gate_app = self._linux_gate_key(app)
+        decision = self._require_permission(action, gate_app, secure=secure)
         try:
             if CONFIRMATION_GATE:
                 prompt = self._dialog_confirmation(action, app) or safety.confirmation_prompt(
@@ -2803,7 +2843,7 @@ class Runtime:
                     )
                 if prompt is not None:
                     # The user can revoke a grant while confirmation is open.
-                    decision = self._require_permission(action, app, secure=secure)
+                    decision = self._require_permission(action, gate_app, secure=secure)
             if recheck is not None:
                 recheck(app)
             if CONFIRMATION_GATE:
@@ -5511,7 +5551,13 @@ class Runtime:
 
         def execute() -> str:
             prev = self._current if mode == "diff" else None
-            snap = self.driver.snapshot(Scope(scope), bundle)
+            try:
+                snap = self.driver.snapshot(Scope(scope), bundle)
+            except ComputerUseError as exc:
+                if exc.code is ErrorCode.APP_NOT_FOUND:
+                    self._linux_recheck_key(app, bundle)
+                raise
+            self._linux_recheck_key(app, bundle, getattr(snap, "app", None))
             self._current = snap
             snap = self._current = self._note_issued(snap, preserve_identity=True)
             if mode != "diff":
