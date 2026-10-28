@@ -2142,3 +2142,168 @@ def test_an_unreadable_stack_keeps_the_managed_answer(monkeypatch) -> None:
     root.query_tree = broken
     assert _linux_system.pid_at_point(100, 150) == 200
     assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+class _PrgnameWin(_FakeXWin):
+    """A mapped client whose WM_CLASS the process chose for itself."""
+
+    def __init__(self, wid: int, pid: int, instance: bytes, klass: bytes):
+        super().__init__(wid, 10, 20, 320, 120, pid=pid)
+        self._wm_class = instance + b"\x00" + klass + b"\x00"
+
+    def get_full_property(self, atom, kind):
+        if atom == "_NET_WM_PID":
+            return _NS(value=[self.pid])
+        if atom == "WM_CLASS":
+            return _NS(value=self._wm_class)
+        return None
+
+
+def _prgname_display(monkeypatch, windows: list, comms: dict) -> None:
+    root = _FakeXRoot(windows)
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: next(w for w in root.stacking if w.id == int(wid)),
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
+    monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
+
+
+def _gate_runtime(tmp_path, monkeypatch, tiers: dict, deny: tuple = (), host=None):
+    """A Linux Runtime; ``host`` stands in for the driver's AT-SPI interpreter probe."""
+    from a11y_computer_use import safety, server
+
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    for app, tier in tiers.items():
+        store.set_tier(app, tier)
+    for app in deny:
+        store.add_deny(app)
+    driver = _NS(name="linux", interpreter_host=(host or (lambda app: None)))
+    return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+
+def _check(rt, app):
+    from a11y_computer_use import safety
+    from a11y_computer_use.schema import ObserveOp, ObserveVerb
+
+    key = rt._resolve_app(app)[1]
+    return key, safety.check_action(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=app), key, store=rt.store)
+
+
+_SPOOFS = ["cuprobe1296", "mousepad", "Mousepad", "MOUSEPAD", "org.xfce.mousepad",
+           "mousepad.desktop", "zzimg", "localtool"]
+
+
+@pytest.mark.parametrize("prgname", _SPOOFS)
+def test_a_python3_window_never_inherits_the_requested_name_grant(tmp_path, monkeypatch, prgname) -> None:
+    """#1296: whatever WM_CLASS a python3 process sets, it keys as python3 and is refused."""
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, prgname.encode(), b"App.py")], {41: "python3"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {prgname: "full", "mousepad": "full"})
+    key, decision = _check(rt, prgname)
+    assert key == "python3"
+    assert not decision.allowed
+    from a11y_computer_use import server
+
+    text = server.refusal_text(decision)
+    assert f"this python3 process names itself {prgname!r}" in text
+    assert "grants for interpreter-hosted apps are keyed as python3" in text
+    assert "Grant python3 explicitly if you trust every python3 app" in text
+
+
+@pytest.mark.parametrize("signal", ["relative-cwd", "cmdline-rewrite", "check-hash-based-pycs"])
+def test_no_self_reported_identity_signal_is_consulted(tmp_path, monkeypatch, signal) -> None:
+    """Tester's round-2 holes: cwd, /proc/self/mem cmdline, ``--check-hash-based-pycs``.
+
+    The key never reads cwd or cmdline, so each forgery still keys as python3.
+    """
+    monkeypatch.setattr(_linux_system, "_identity_for_pid", lambda pid, comm: comm)
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, b"cuprobe1296", b"P.py")], {41: "python3"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": "full"})
+    key, decision = _check(rt, "cuprobe1296")
+    assert (key, decision.allowed) == ("python3", False)
+
+
+def test_pre_window_python3_app_keys_as_python3(tmp_path, monkeypatch) -> None:
+    """Before its window maps, only AT-SPI knows the app: still keyed as python3."""
+    _prgname_display(monkeypatch, [], {})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": "full"},
+                       host=lambda app: "python3" if app == "cuprobe1296" else None)
+    key, decision = _check(rt, "cuprobe1296")
+    assert (key, decision.allowed) == ("python3", False)
+    # And over a later map, in the same long-lived Runtime.
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 42, b"cuprobe1296", b"P.py")], {42: "python3"})
+    assert _check(rt, "cuprobe1296")[0] == "python3"
+
+
+def test_a_python3_grant_opens_interpreter_hosted_apps(tmp_path, monkeypatch) -> None:
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, b"cuprobe1296", b"P.py")], {41: "python3"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"python3": "full"})
+    key, decision = _check(rt, "cuprobe1296")
+    assert key == "python3" and decision.allowed, decision.reason
+
+
+@pytest.mark.parametrize("denied", ["cuprobe1296", "python3"])
+def test_a_deny_on_either_name_wins(tmp_path, monkeypatch, denied) -> None:
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, b"cuprobe1296", b"P.py")], {41: "python3"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"python3": "full"}, deny=(denied,))
+    assert not _check(rt, "cuprobe1296")[1].allowed
+
+
+def test_a_native_app_and_the_libreoffice_alias_are_unchanged(tmp_path, monkeypatch) -> None:
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, b"mousepad", b"Mousepad"),
+                                   _PrgnameWin(0x101, 42, b"libreoffice", b"libreoffice-writer")],
+                     {41: "mousepad", 42: "soffice.bin"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"mousepad": "full"})
+    key, decision = _check(rt, "mousepad")
+    assert key == "mousepad" and decision.allowed
+    assert rt._resolve_app("LibreOffice")[1] == "soffice.bin"
+
+
+def test_is_interpreter() -> None:
+    for name in ("python3", "python3.12", "python", "pypy3", "perl", "ruby", "node", "gjs", "/usr/bin/python3"):
+        assert _linux_system.is_interpreter(name), name
+    for name in ("mousepad", "soffice.bin", "chrome", "pythonista-app", "", None):
+        assert not _linux_system.is_interpreter(name), name
+
+
+def test_a_python3_deny_is_reported_as_the_deny_not_app_not_found(tmp_path, monkeypatch) -> None:
+    """#1296 Tester: cuprobe1296 grant + python3 deny reported app_not_found.
+
+    The gate keyed the unmapped app on its own name; the driver then found
+    python3 (or missed it). Either way the answer is the python3 deny.
+    """
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    _prgname_display(monkeypatch, [], {})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": "full"}, deny=("python3",))
+    rt.driver.ensure_trusted = lambda: None
+
+    def mapped_during_snapshot(scope, app):
+        _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, b"cuprobe1296", b"P.py")], {41: "python3"})
+        raise ComputerUseError(ErrorCode.APP_NOT_FOUND, "no running application matches 'cuprobe1296'")
+
+    rt.driver.snapshot = mapped_during_snapshot
+    with pytest.raises(server.ActionRefused) as refused:
+        rt.desktop_snapshot(app="cuprobe1296")
+    assert refused.value.decision.verdict.value == "deny"
+    assert "python3 is on the deny list" in refused.value.decision.reason
+
+    _prgname_display(monkeypatch, [], {})
+    rt.driver.snapshot = lambda scope, app: _NS(app="python3", elements=[])
+    with pytest.raises(server.ActionRefused) as refused:
+        rt.desktop_snapshot(app="cuprobe1296")
+    assert refused.value.decision.verdict.value == "deny"
+
+
+def test_a_ref_action_on_an_interpreter_hosted_snapshot_is_gated_as_python3(tmp_path, monkeypatch) -> None:
+    """Snapshots keep the requested label; every action is still gated as python3."""
+    _prgname_display(monkeypatch, [_PrgnameWin(0x100, 41, b"cuprobe1296", b"P.py")], {41: "python3"})
+    rt = _gate_runtime(tmp_path, monkeypatch, {"cuprobe1296": "full"})
+    assert rt._linux_gate_key("cuprobe1296") == "python3"
+    assert rt._linux_gate_key("python3") == "python3"
+    granted = _gate_runtime(tmp_path / "g", monkeypatch, {"python3": "full"})
+    assert granted._linux_gate_key("cuprobe1296") == "python3"
