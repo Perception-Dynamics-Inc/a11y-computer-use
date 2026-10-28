@@ -114,3 +114,60 @@ def test_linux_driver_hooks(monkeypatch):
     wizard.states = {"DEFUNCT"}
     assert drv.key_window_state(probe) == "closed"
     assert drv.key_window_state(None) is None
+
+
+def _no_app_key(monkeypatch, *, frontmost="wizard", background=None):
+    """Drive Runtime.key with no app down to _conclude; return its kwargs."""
+    rt = server.Runtime.__new__(server.Runtime)
+    pressed, probed, seen = [], [], {}
+
+    def probe(app):
+        probed.append(app)
+        return ("wizard-frame", "showing")
+
+    rt.driver = SimpleNamespace(
+        name="linux", key_window_probe=probe,
+        key_chord=lambda chord, **kw: pressed.append(chord),
+    )
+    for name, value in {
+        "_validate_chord": lambda chord: None,
+        "_linux_addressed_app": lambda app: None,
+        "_background_target": lambda app: background,
+        "_capture": lambda *a, **k: None,
+        "_frontmost": lambda: frontmost,
+        "_open_menu_app": lambda front: None,
+        "_clipboard_key_probe": lambda chord: None,
+        "_writer_key_probe": lambda app, chord: None,
+        "_key_focus_probe": lambda app: None,
+        "_sheet_key_probe": lambda app, chord: None,
+        "_guard_user": lambda *a, **k: None,
+        "_input_pid": lambda pid: pid,
+        "_recheck_pid": lambda *a: None,
+        "_open_mnemonic_menu": lambda target, chord: False,
+        "_run_gated": lambda action, target, execute, **k: execute(),
+        "_conclude": lambda summary, **kw: seen.update(kw) or summary,
+    }.items():
+        monkeypatch.setattr(rt, name, value, raising=False)
+    rt.key("Return")
+    return pressed, probed, seen
+
+
+def test_key_without_app_records_the_focused_apps_window_before_the_key(monkeypatch):
+    pressed, probed, seen = _no_app_key(monkeypatch)
+    assert pressed == ["Return"]
+    assert probed == ["wizard"], "the frontmost app's active top-level is read before the key"
+    assert seen["key_window"] == ("wizard-frame", "showing")
+    assert seen["app"] == "wizard"
+
+
+def test_key_without_app_and_no_frontmost_app_reads_no_window(monkeypatch):
+    pressed, probed, seen = _no_app_key(monkeypatch, frontmost=None)
+    assert pressed == ["Return"]
+    assert probed == []
+    assert seen["key_window"] is None
+
+
+def test_key_addressed_to_a_background_process_records_its_window(monkeypatch):
+    pressed, probed, seen = _no_app_key(monkeypatch, background=("wizard", 42))
+    assert probed == ["wizard"]
+    assert seen["key_window"] == ("wizard-frame", "showing")

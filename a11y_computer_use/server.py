@@ -7484,8 +7484,13 @@ class Runtime:
             focus_before = None if writer_before is not None else self._key_focus_probe(bundle)
             sheet_before = None if writer_before is not None else self._sheet_key_probe(bundle, chord)
 
+            window_bg: list[tuple] = []
+
             def execute_bg() -> None:
                 self._guard_user(bundle, addressed=True)
+                probe = self._key_window_probe(bundle)
+                if probe is not None:
+                    window_bg.append(probe)
                 self.driver.key_chord(chord, pid=self._input_pid(pid))
 
             self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid), confirm=confirm)
@@ -7494,6 +7499,7 @@ class Runtime:
                 tool="key", app=bundle, before=before,
                 key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
                 writer_before=writer_before, clipboard_before=clipboard_before,
+                key_window=window_bg[0] if window_bg else None,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -7507,8 +7513,15 @@ class Runtime:
         focus_before = None if writer_before is not None else self._key_focus_probe(target)
         sheet_before = None if writer_before is not None else self._sheet_key_probe(target, chord)
 
+        window_front: list[tuple] = []
+
         def execute() -> None:
             self._guard_user(target)
+            # No app: record the focused app's active top-level now, so a key
+            # that closes it (QWizard Return/Escape) is judged like app= (#1283).
+            probe = self._key_window_probe(target if front != "unknown" else None)
+            if probe is not None:
+                window_front.append(probe)
             # Alt+letter while a menu is open is the menu bar's mnemonic, not
             # a key for the menu that is already up. Sending it into Edit
             # leaves Edit open. Pressing the matching top-level menu switches
@@ -7523,6 +7536,7 @@ class Runtime:
             tool="key", app=target, before=before,
             key_focus=True, key_chord=chord, focus_before=focus_before, sheet_before=sheet_before,
             writer_before=writer_before, clipboard_before=clipboard_before,
+            key_window=window_front[0] if window_front else None,
         )
 
     @_serialized
