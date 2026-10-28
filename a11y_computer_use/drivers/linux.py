@@ -1258,6 +1258,11 @@ def _accepts_text(element: Element) -> bool:
     return element.role in _EDITABLE_ROLES
 
 
+# set_value strings that ask a checkable item for a check state (#1287).
+_CHECK_VALUES = {"true": True, "checked": True, "on": True, "1": True, "yes": True,
+                 "false": False, "unchecked": False, "off": False, "0": False, "no": False}
+
+
 def _not_editable(element: Element) -> ComputerUseError:
     title = f" {element.title!r}" if element.title else ""
     return ComputerUseError(
@@ -4023,6 +4028,7 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         self._writer_cell_verified = None
+        self._check_readback = None
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None:
@@ -4043,6 +4049,68 @@ class LinuxDriver:
         except ComputerUseError as exc:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
+
+    def take_check_readback(self, element: Element) -> tuple[bool, bool] | None:
+        """``(checked, changed)`` read live by the last item check (#1287).
+
+        Single use, and only for the same snapshot ref.
+        """
+        found = getattr(self, "_check_readback", None)
+        self._check_readback = None
+        if found is None or found[:2] != (element.snapshot_id, element.ref):
+            return None
+        return found[2], found[3]
+
+    def _set_qt_item_checked(self, element: Element, handle, want: bool) -> None:
+        """Check or uncheck a checkable Qt item-view item (#1287).
+
+        The item is made current (focus, or a click on its center, which
+        selects without toggling), then space toggles it. Nothing is sent
+        when the item already reads the requested state. The CHECKED state
+        has to read back as requested, or the call raises.
+        """
+        from a11y_computer_use.drivers import _atspi, _linux_input
+
+        def checked() -> bool:
+            self._run(lambda: _atspi._drop_cached_properties(handle))
+            return bool(self._run(lambda: _atspi._state_has(handle, "CHECKED")))
+
+        self._check_readback = None
+        if checked() is want:
+            self._check_readback = (element.snapshot_id, element.ref, want, False)
+            return
+        current = lambda: bool(self._run(lambda: (
+            _atspi._state_has(handle, "FOCUSED") or _atspi._state_has(handle, "SELECTED"))))
+        if not self._run(lambda: _atspi.grab_focus(handle)) or not current():
+            ext = self._run(lambda: _atspi._extents(handle))
+            if ext:
+                (x, y), (w, h) = ext
+                if w > 0 and h > 0:
+                    # Right of the indicator: the center selects, never toggles.
+                    _linux_input.click(x + w // 2, y + h // 2)
+                    for _ in range(10):
+                        if current():
+                            break
+                        time.sleep(0.05)
+        if not current():
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) could not be made the current item; "
+                "no key was sent",
+                detail={"ref": element.ref, "role": element.role, "reason": "focus_lost"},
+            )
+        _linux_input.press_chord("space")
+        for _ in range(10):
+            if checked() is want:
+                self._check_readback = (element.snapshot_id, element.ref, want, True)
+                return
+            time.sleep(0.05)
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}) did not become "
+            f"{'checked' if want else 'unchecked'} after space",
+            detail={"ref": element.ref, "role": element.role, "reason": "check_unchanged"},
+        )
 
     def _dom_window_title(self, handle) -> str:
         """Chrome window title for a DOM write, or "" when it cannot be read."""
@@ -4111,6 +4179,11 @@ class LinuxDriver:
             # Focus, type (a selected cell replaces), commit with Return, then
             # the cell text or the formula attribute has to match.
             self._write_sheet_cell(handle, value)
+            return True
+        want = _CHECK_VALUES.get(value.strip().lower()) if isinstance(value, str) else None
+        if (want is not None and handle is not None
+                and self._run(lambda: _atspi.qt_checkable_item(handle))):
+            self._set_qt_item_checked(element, handle, want)
             return True
         if handle is not None:
             kind = self._run(lambda: _atspi.control_kind(handle))
