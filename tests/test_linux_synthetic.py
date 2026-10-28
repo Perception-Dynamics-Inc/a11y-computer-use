@@ -23743,3 +23743,42 @@ def test_set_value_presses_a_webview_guest_field_that_grab_focus_cannot_reach(
         assert calls == [("click", "e1"), ("focus", False)]
     else:
         assert calls == [("focus", True)]
+
+
+def test_child_count_revives_an_application_root_whose_private_socket_fails_fast(monkeypatch) -> None:
+    """Refs #1242. Synthetic accessibles, not a live Chrome.
+
+    CI evidence: after Reload, libatspi read Chrome's application root as role
+    '' with 0 children, cached and fresh, while the same root on the
+    accessibility bus answered role 75 with 3 children. The private socket
+    failed at once, so the read raised instead of returning -1, and the
+    wedged-socket revive never ran. A fast failure on the application root
+    must replace the connection. A child that fails fast is not revived.
+    """
+    revived: list[object] = []
+
+    class _Acc:
+        def __init__(self, path):
+            self.path = path
+            self.dead = True
+
+        def get_child_count(self):
+            if self.dead:
+                raise RuntimeError("The connection is closed")
+            return 3
+
+    def revive(acc):
+        revived.append(acc)
+        acc.dead = False
+        return True
+
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda acc: (":1.113", acc.path))
+    monkeypatch.setattr(_atspi, "_revive_application", revive)
+
+    root = _Acc("/org/a11y/atspi/accessible/root")
+    assert _atspi._child_count(root) == 3
+    assert revived == [root]
+
+    child = _Acc("/org/a11y/atspi/accessible/7")
+    assert _atspi._child_count(child) == 0
+    assert revived == [root]

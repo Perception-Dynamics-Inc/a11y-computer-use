@@ -19278,6 +19278,12 @@ def _raw_child_count(acc) -> int:
         return 0
 
 
+def _is_application_root(acc) -> bool:
+    """True when ``acc`` is an application's root object on its bus."""
+    key = _atspi_wrapper_key(acc)
+    return bool(key and key[1] == "/org/a11y/atspi/accessible/root")
+
+
 def _child_count(acc) -> int:
     """Child count, replacing a wedged app bus once when the read returns -1.
 
@@ -19286,7 +19292,14 @@ def _child_count(acc) -> int:
     single disabled group.
     """
     count = _raw_child_count(acc)
-    if count < 0 and _revive_application(acc):
+    failed = bool(getattr(_reply_local, "last_failed", False))
+    # #1242: a closed private socket fails at once. The read raises instead
+    # of returning -1, so ``_safe`` hands back 0 and Chrome's application
+    # root reads as an empty group with no frames after Reload, while the
+    # same root on the accessibility bus answers with its windows. Only the
+    # application root gets this: a removed child also fails fast, and that
+    # is not a dead connection.
+    if (count < 0 or (failed and _is_application_root(acc))) and _revive_application(acc):
         count = _raw_child_count(acc)
         key = _last_revive_key
         if key:
