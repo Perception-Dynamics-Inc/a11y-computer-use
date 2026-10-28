@@ -36,6 +36,10 @@ def test_stale_bounds_above_the_window_are_refused():
     with pytest.raises(ComputerUseError) as err:
         Runtime._refuse_center_outside_window(rt, stale)
     assert err.value.detail["reason"] == "outside_window"
+    # The center is outside the window; whether the bounds are stale is not known.
+    message = str(err.value)
+    assert "no click was sent" in message
+    assert "app reported stale bounds" not in message
     assert err.value.detail["ref"] == "e2"
 
 

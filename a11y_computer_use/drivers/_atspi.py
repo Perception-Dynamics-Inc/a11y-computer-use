@@ -4274,6 +4274,25 @@ _XML_ROLE = {
 }
 
 
+def _calc_cell_comment(node, role_str: str, attrs: dict) -> str:
+    """A LibreOffice cell's comment (its ``Note`` attribute), or "".
+
+    Calc publishes every cell comment as the cell's ``Note`` object
+    attribute, with no hover. The attributes are the dict this walk
+    already fetched, so no extra round trip is made. Only a LibreOffice
+    table cell is read; another toolkit's ``Note`` key is not a comment.
+    """
+    if role_str != "table cell":
+        return ""
+    note = attrs.get("Note") if isinstance(attrs, dict) else None
+    if not note:
+        return ""
+    text = " ".join(str(note).split())
+    if not text or not _libreoffice_accessible(node):
+        return ""
+    return text
+
+
 def _get_attributes(acc) -> dict:
     """The AT-SPI object attributes as a plain dict (xml-roles, id, tag, class,
     …), fetched ONCE per node so stable-id + web-role both reuse it — one D-Bus
@@ -4954,6 +4973,9 @@ class ATSPIAccessor:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        comment = _calc_cell_comment(node, role_str, attrs)
+        if comment:
+            hint = (hint + "; " if hint else "") + f"comment: {comment}"
         if qt_document and owner_name.casefold() == "kate" and value is not None:
             hint = (hint + "; " if hint else "") + "Native character viewport text"
         if qt_document and value is None:
@@ -10085,6 +10107,37 @@ def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
         return True
     head, tail = prior[:caret], prior[caret:]
     return len(now) >= len(prior) and now.startswith(head) and now.endswith(tail)
+
+
+def gecko_plain_entry(acc) -> bool:
+    """A plain, non-secure Firefox input or textarea (not contenteditable)."""
+    if acc is None or not _gecko_app(acc) or _gecko_contenteditable(acc):
+        return False
+    if not (_state_has(acc, "SINGLE_LINE") or _state_has(acc, "MULTI_LINE")):
+        return False
+    return not is_secure(acc) and _editable_iface(acc) is not None
+
+
+def gecko_entry_caret_to_end(acc) -> bool:
+    """Put the caret at the end of a Firefox input or textarea; ``True`` if moved.
+
+    Firefox places the caret at offset 0 of a prefilled field it was just
+    given focus. A ref ``type`` appends, so the caller moves the caret first.
+    A field with a selection, or any node that is not a plain Gecko entry
+    (contenteditable, password, anything without a text interface), is left as
+    it is. The caller reads the caret back before it types.
+    """
+    if not gecko_plain_entry(acc):
+        return False
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    caret, start, end = _caret_and_selection(acc, count)
+    if end > start or caret >= count:
+        return False
+    _move_caret(Atspi, acc, count)
+    return _safe(lambda: Atspi.Text.get_caret_offset(acc)) == count
 
 
 def _text_mismatch(reason: str, message: str, **detail):
@@ -23426,7 +23479,29 @@ def is_modal(acc, *, attrs: dict | None = None) -> bool:
     attrs = _get_attributes(acc) if attrs is None else attrs
     return (_state_has(acc, "MODAL") or
             str(attrs.get("modal", attrs.get("aria-modal", ""))).lower() == "true"
-            or _chromium_modal_parent(acc) is not None)
+            or _chromium_modal_parent(acc) is not None
+            or _x11_modal_dialog(acc))
+
+
+def _x11_modal_dialog(acc) -> bool:
+    """A native dialog the window manager knows is modal, though AT-SPI omits it.
+
+    Qt 6 dialogs carry no AT-SPI ``MODAL`` (#745); their X window has
+    ``_NET_WM_STATE_MODAL`` and a same-process ``WM_TRANSIENT_FOR``. Without
+    this, ``set_value`` wrote into the blocked parent and reported success.
+    Only dialog roles outside Chromium are probed, matched by pid and title.
+    """
+    if _role_name(acc) != "dialog" or _chromium_app(acc):
+        return False
+    key = ("x11_modal_dialog", ())
+    cached = _lookup_read_cache(acc, key)
+    if cached is not _CACHE_MISS:
+        return cached
+    from a11y_computer_use.drivers import _linux_system
+
+    found = _linux_system.x11_modal_dialog(pid=pid_of(acc), title=_node_name(acc))
+    _store_read_cache(acc, key, found)
+    return found
 
 
 def _modal_collection(root, *, split: bool = False):
@@ -24089,3 +24164,30 @@ def qt_cell_editor(cell):
     if pid_of(editor) != pid_of(cell):
         return None
     return editor
+
+
+def click_window_state(target) -> str | None:
+    """``showing``, ``hidden`` or ``closed`` for a control's window (#1281).
+
+    Read once before and once after a button click. A window that was
+    showing before and is DEFUNCT or no longer SHOWING after is the click's
+    own effect (a wizard's Apply, a dialog's OK), even though the tree no
+    longer has the control to compare. None means the state was unreadable.
+    """
+    if target is None:
+        return None
+    try:
+        _drop_cached_properties(target)
+        if _state_has(target, "DEFUNCT"):
+            return "closed"
+        top = _toplevel_of(target)
+        if top is None:
+            return None
+        _drop_cached_properties(top)
+        if _state_has(top, "DEFUNCT"):
+            return "closed"
+        if _state_has(top, "SHOWING"):
+            return "showing"
+        return "hidden"
+    except Exception:
+        return None

@@ -18,7 +18,9 @@ refused as ``ime_composition_open`` before the switch and before any key: the
 preedit is left as it was. The panel is read until it has shown no composition for
 a settle period, so a preedit it has not published yet is not missed. When the panel
 cannot be read at all, the call is refused as ``ime_composition_unknown`` (set
-``A11Y_IME_COMPOSITION_UNKNOWN=proceed`` to type anyway).
+``A11Y_IME_COMPOSITION_UNKNOWN=proceed`` to type anyway). When the engine itself
+cannot be read (the query times out or fails), ASCII text is refused as
+``ime_unknown`` before any key (#1270).
 
 Scope: IBus only. fcitx5 and others are not switched or detected.
 ``A11Y_IME_BYPASS=0`` turns the switch off.
@@ -80,16 +82,54 @@ def _ibus(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
-def _current_engine() -> str | None:
-    """The IBus global engine name, or None (no IBus, no daemon, none set)."""
+# What ``ibus engine`` prints when there is no engine to transform keys: none
+# set, or no daemon to connect to (it then also logs IBUS-CRITICAL on stderr).
+_NO_ENGINE_REPLIES = ("No engine is set.", "Can't connect to IBus.")
+
+
+def _says_no_engine(stream: str | None) -> bool:
+    """True when a line of ``stream`` is one of ``_NO_ENGINE_REPLIES``.
+
+    ibus prints these on stderr (#1271), after any IBUS-WARNING/CRITICAL log
+    lines, so each line is checked, on either stream.
+    """
+    return any(
+        line.strip().endswith(_NO_ENGINE_REPLIES) for line in (stream or "").splitlines()
+    )
+
+
+class _Unreadable:
+    def __repr__(self) -> str:
+        return "UNREADABLE"
+
+
+UNREADABLE = _Unreadable()
+
+
+def _engine_query() -> str | None | _Unreadable:
+    """The IBus global engine name; None when there is none; UNREADABLE otherwise.
+
+    None only for a missing ``ibus`` binary or one of ``_NO_ENGINE_REPLIES``. A
+    query that times out, cannot be run, or answers with anything else leaves the
+    engine unknown (#1270): a pinyin engine behind it would still transform keys.
+    """
+    if _ibus_binary() is None:
+        return None
     done = _ibus("engine")
-    if done is None or done.returncode != 0:
+    if done is None:
+        return UNREADABLE
+    out = (done.stdout or "").strip()
+    if _says_no_engine(done.stdout) or _says_no_engine(done.stderr):
         return None
-    name = done.stdout.strip()
-    # "No engine is set." and other prose are not engine names.
-    if not name or any(ch.isspace() for ch in name):
-        return None
-    return name
+    if done.returncode != 0 or not out or any(ch.isspace() for ch in out):
+        return UNREADABLE
+    return out
+
+
+def _current_engine() -> str | None:
+    """The IBus global engine name, or None (none set, or it could not be read)."""
+    name = _engine_query()
+    return name if isinstance(name, str) else None
 
 
 def active_ime() -> ActiveIme | None:
@@ -99,8 +139,11 @@ def active_ime() -> ActiveIme | None:
     """
     if not _enabled():
         return None
-    name = _current_engine()
-    if name is None or name.startswith("xkb:"):
+    return _ime_from(_current_engine())
+
+
+def _ime_from(name: str | None | _Unreadable) -> ActiveIme | None:
+    if not isinstance(name, str) or name.startswith("xkb:"):
         return None
     return ActiveIme("ibus", name)
 
@@ -126,6 +169,24 @@ def _refuse(ime: ActiveIme):
             "platform": "linux",
             "reason": "ime_active",
             "ime": {"framework": ime.framework, "engine": ime.engine},
+            "typed": False,
+        },
+    )
+
+
+def _refuse_unreadable():
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the IBus input-method engine could not be read, so typed text might be changed "
+        "by it (for example into pinyin); nothing was typed and the field was not "
+        "changed. Check that ibus-daemon is responsive ('ibus engine'), or switch to a "
+        "plain keyboard layout (for example 'ibus engine xkb:us::eng') and retry",
+        detail={
+            "platform": "linux",
+            "reason": "ime_unknown",
+            "ime": {"framework": "ibus", "engine": None},
             "typed": False,
         },
     )
@@ -283,7 +344,12 @@ def ascii_passthrough(text: str | None = None):
         finally:
             _state.depth -= 1
         return
-    ime = active_ime()
+    engine = _engine_query() if _enabled() else None
+    if engine is UNREADABLE and needs_passthrough(text):
+        # Refuse before any key: an engine that cannot be read may be one that
+        # transforms ASCII, and nothing here can switch it (#1270).
+        raise _refuse_unreadable()
+    ime = _ime_from(engine)
     switched = False
     if ime is not None:
         _check_composition(ime)
