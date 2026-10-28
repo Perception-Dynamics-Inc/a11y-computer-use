@@ -5978,6 +5978,82 @@ class Runtime:
             "stale bounds, so take a fresh snapshot before clicking",
         )
 
+    def _refuse_center_under_active_sibling_window(
+        self, element: Element, tree: "Snapshot | None" = None, issued_ref: str | None = None,
+    ) -> None:
+        """Refuse a pointer click whose center lies under the active sibling window (#1273).
+
+        Qt MDI subwindows are child windows inside one X11 top-level, so the
+        X11 cover check cannot see them. The active subwindow is the front
+        one; when it is not the ref's window and contains the ref's center, a
+        synthesized click lands on it, not on the ref. Linux only; the walk
+        reads the tree that owns the ref and fails open without one.
+        """
+        bounds = element.bounds
+        current = getattr(self, "_current", None)
+        if (
+            getattr(self.driver, "name", None) != "linux"
+            or bounds is None or bounds.width < 1 or bounds.height < 1
+        ):
+            return
+        source = next(
+            (c for c in (tree, current) if c is not None
+             and getattr(c, "snapshot_id", element.snapshot_id) == element.snapshot_id),
+            None,
+        )
+        if source is None:
+            return
+        by_ref = {e.ref: e for e in source.elements}
+
+        def chain(node):
+            seen, out, parent = set(), [], node.parent
+            while parent and parent not in seen:
+                seen.add(parent)
+                up = by_ref.get(parent)
+                if up is None:
+                    break
+                out.append(up)
+                parent = up.parent
+            return out
+
+        ancestors = chain(element)
+        windows = [n for n in ancestors if n.role == "AXWindow"]
+        if len(windows) < 2:
+            return  # not a child window inside another window
+        own, frame = windows[0], windows[-1]
+        cx = bounds.x + bounds.width // 2
+        cy = bounds.y + bounds.height // 2
+        focused_refs = {n.ref for n in source.elements if n.focused}
+        if own.focused or any(own in chain(by_ref[r]) for r in focused_refs):
+            return  # the ref's own subwindow is the active (front) one
+        for node in source.elements:
+            box = node.bounds
+            if (
+                node.role != "AXWindow" or node is own or node in ancestors
+                or box is None or box.display_id != bounds.display_id
+                or not (box.x <= cx < box.x + box.width and box.y <= cy < box.y + box.height)
+            ):
+                continue
+            up = chain(node)
+            if frame not in up or own in up:
+                continue  # not a sibling child window of the same top-level
+            if not (node.focused or any(node in chain(by_ref[r]) for r in focused_refs)):
+                continue  # z-order is only known for the active subwindow
+            name = node.title or node.ref
+            ref = issued_ref or element.ref
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{ref} is covered by {name!r}: its center ({cx}, {cy}) lies under the active "
+                f"subwindow {name!r}; no click was sent. Activate {own.title or own.ref!r} "
+                "first (e.g. type into or focus a field in it), then click again",
+                detail={
+                    "ref": ref, "role": element.role,
+                    "reason": "covered", "outcome": "refused",
+                    "next": ["foreground", "ref"],
+                    "evidence": f"the subwindow is covered by {name}",
+                },
+            )
+
     def _display_for_bounds(self, bounds: Bounds):
         found = self._known_displays()
         if found is None:
@@ -6369,6 +6445,11 @@ class Runtime:
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
                 self._refuse_center_outside_window(
+                    act,
+                    resolved_tree if isinstance(resolved_tree, Snapshot) else None,
+                    ref if act is target else None,
+                )
+                self._refuse_center_under_active_sibling_window(
                     act,
                     resolved_tree if isinstance(resolved_tree, Snapshot) else None,
                     ref if act is target else None,
