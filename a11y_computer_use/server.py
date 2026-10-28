@@ -4033,7 +4033,16 @@ class Runtime:
                         # number. Containers and surface roots keep the
                         # refused one: their children's parent links and the
                         # popover-cover check follow those refs.
-                        if (element.clickable or element.editable) and element.role not in self._SURFACE_ROLES:
+                        # A control behind a modal is shown blocked, not
+                        # clickable or editable, yet its ref must still reach
+                        # the outside_active_modal refusal rather than stale_ref
+                        # against the earlier issuance (#1274).
+                        blocked_control = element.blocked_by_modal and (
+                            element.role in observe._CLICKABLE_ROLES
+                            or element.role in observe._EDITABLE_ROLES
+                        )
+                        if ((element.clickable or element.editable or blocked_control)
+                                and element.role not in self._SURFACE_ROLES):
                             reissue[element.ref] = new_identity
                         continue
                 # A reload starts a new epoch, so refs are not compared with

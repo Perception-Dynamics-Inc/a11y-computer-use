@@ -20991,6 +20991,44 @@ def test_modal_single_coordinate_dismiss_boundary(modal_boundary_tree, monkeypat
     assert calls == []
 
 
+
+@pytest.mark.parametrize("wm_modal", [True, False])
+def test_qt_dialog_without_atspi_modal_blocks_set_value_on_its_parent(
+        modal_boundary_tree, monkeypatch, wm_modal):
+    """#745: a Qt 6 QDialog never reports AT-SPI MODAL; X11 marks it modal.
+
+    Next to the #1013 guard: the window manager's ``_NET_WM_STATE_MODAL`` plus a
+    same-process ``WM_TRANSIENT_FOR`` make the dialog a modal boundary, so
+    ``set_value`` on a parent control is refused before any write. A plain
+    transient (no MODAL) is not a boundary.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    modal.states.remove("MODAL")
+    modal.name = "Confirm dialog"
+    asked = []
+
+    def x11_modal(*, pid, title):
+        asked.append(title)
+        return wm_modal and title == "Confirm dialog"
+
+    monkeypatch.setattr(_linux_system, "x11_modal_dialog", x11_modal)
+    writes = []
+    monkeypatch.setattr(driver, "_apply_set_value",
+                        lambda element, value, handle: writes.append(value) or True)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    background = next(el for el in snap.elements if el.title == bg.name)
+    assert "Confirm dialog" in asked
+    if wm_modal:
+        assert background.blocked_by_modal and not background.editable
+        with pytest.raises(ComputerUseError, match="outside_active_modal"):
+            driver.set_value(background, "MAINSET")
+        assert writes == []
+    else:
+        assert not background.blocked_by_modal
+
+
 def test_modal_dismiss_sends_exactly_one_requested_pointer_click(modal_boundary_tree, monkeypatch):
     from a11y_computer_use.drivers import _linux_input, _linux_system
     from a11y_computer_use.schema import Click
