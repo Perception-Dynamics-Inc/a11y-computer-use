@@ -8994,6 +8994,160 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
         return {"cached": cached, "fresh_children": fresh}
 
     capture("native", lambda: driver._run(native))
+
+    # Refs #1242: the app root has read role '' with 0 children for the whole
+    # deadline. Record what D-Bus itself says about that root, which Chrome
+    # processes are registered with what command lines, and whether a fresh
+    # registry read disagrees with the cached one. Evidence only.
+    def raw_dbus():
+        from gi.repository import Gio, GLib
+
+        root = _atspi.find_root("chrome", Scope.WINDOW)
+        key = _atspi._atspi_wrapper_key(root)
+        if key is None:
+            return {"error": "no (bus_name, object_path) for the app root"}
+        bus_name, path = key
+        address = Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress",
+            None, GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE, 3000, None,
+        ).unpack()[0]
+        conn = Gio.DBusConnection.new_for_address_sync(
+            address,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None,
+        )
+        out = {"bus_name": bus_name, "path": path}
+
+        def read(object_path):
+            found = {}
+
+            def call(label, iface, method, args=None):
+                try:
+                    found[label] = conn.call_sync(
+                        bus_name, object_path, iface, method, args, None,
+                        Gio.DBusCallFlags.NONE, 3000, None,
+                    ).unpack()
+                except Exception as exc:
+                    found[label] = {"error": f"{type(exc).__name__}: {exc}"}
+
+            call("role", "org.a11y.atspi.Accessible", "GetRole")
+            call("child_count", "org.freedesktop.DBus.Properties", "Get",
+                 GLib.Variant("(ss)", ("org.a11y.atspi.Accessible", "ChildCount")))
+            call("children", "org.a11y.atspi.Accessible", "GetChildren")
+            call("state", "org.a11y.atspi.Accessible", "GetState")
+            return found
+
+        # find_root's pick, and the registrant's application object itself.
+        out["find_root_node"] = read(path)
+        out["application_root"] = read("/org/a11y/atspi/accessible/root")
+        try:
+            out["owner_pid"] = conn.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+                GLib.Variant("(s)", (bus_name,)), None,
+                Gio.DBusCallFlags.NONE, 3000, None,
+            ).unpack()[0]
+        except Exception as exc:
+            out["owner_pid"] = {"error": f"{type(exc).__name__}: {exc}"}
+        conn.close_sync(None)
+        return out
+
+    capture("raw_dbus_app_root", lambda: driver._run(raw_dbus))
+
+    def chrome_cmdlines():
+        # The launched Chrome and its descendants only, not other browsers.
+        parents = {}
+        for entry in os.listdir("/proc"):
+            if entry.isdigit():
+                try:
+                    with open(f"/proc/{entry}/stat") as fh:
+                        stat = fh.read()
+                    parents[int(entry)] = int(stat.rsplit(")", 1)[1].split()[1])
+                except (OSError, IndexError, ValueError):
+                    continue
+        tree, frontier = {proc.pid}, [proc.pid]
+        while frontier:
+            parent = frontier.pop()
+            for child, ppid in parents.items():
+                if ppid == parent and child not in tree:
+                    tree.add(child)
+                    frontier.append(child)
+        lines = {}
+        for pid in sorted(tree):
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                    lines[pid] = [a.decode(errors="replace") for a in fh.read().split(b"\0") if a]
+            except OSError as exc:
+                lines[pid] = {"error": f"{type(exc).__name__}: {exc}"}
+        return lines
+
+    capture("chrome_cmdlines", chrome_cmdlines)
+
+    def registry():
+        api = _atspi._atspi()
+
+        def read():
+            desktop = api.get_desktop(0)
+            apps = []
+            for index in range(_atspi._child_count(desktop)):
+                app = _atspi._child_at(desktop, index)
+                if app is None:
+                    continue
+                apps.append((_atspi._node_name(app), _atspi._atspi_wrapper_key(app),
+                             _atspi._role_name(app), _atspi._child_count(app),
+                             _atspi.pid_of(app)))
+            return apps
+
+        cached = read()
+        desktop = api.get_desktop(0)
+        _atspi._call_first(desktop, ("clear_cache", "clearCache"))
+        fresh = _atspi._without_child_cache(desktop, read, preserve_properties=False)
+        return {"cached": cached, "fresh": fresh, "differs": cached != fresh}
+
+    capture("registry_cached_vs_fresh", lambda: driver._run(registry))
+
+    # Refs #1242: per retry, the app's top-level frames (title, role, child
+    # count, D-Bus key, latch sets) and what find_root and
+    # chromium_snapshot_root returned. Evidence only.
+    def root_retries():
+        def node(acc):
+            if acc is None:
+                return None
+            return [_atspi._role_name(acc), _atspi._node_name(acc),
+                    _atspi._child_count(acc), _atspi._atspi_wrapper_key(acc)]
+
+        rounds = []
+        for attempt in range(5):
+            entry = {"attempt": attempt}
+            try:
+                app = _atspi.find_root("chrome", Scope.APP)
+                entry["app"] = node(app)
+                frames = []
+                for index in range(min(max(_atspi._child_count(app), 0), 8)):
+                    frame = _atspi._child_at(app, index)
+                    frames.append(node(frame) + [
+                        _atspi._state_has(frame, "ACTIVE"), _atspi._state_has(frame, "SHOWING"),
+                        [node(_atspi._child_at(frame, i))
+                         for i in range(min(max(_atspi._child_count(frame), 0), 3))],
+                    ] if frame is not None else None)
+                entry["frames"] = frames
+                window = _atspi.find_root("chrome", Scope.WINDOW)
+                entry["find_root_window"] = node(window)
+                entry["latch"] = {
+                    "pids": sorted(_atspi._BROWSER_BAR_PIDS),
+                    "cleared": sorted(_atspi._BROWSER_BAR_CLEARED),
+                    "open": sorted(_atspi._BROWSER_BAR_OPEN),
+                }
+                picked = _atspi.chromium_snapshot_root(window)
+                entry["chromium_snapshot_root"] = node(picked)
+            except Exception as exc:  # noqa: BLE001 - evidence only
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+            rounds.append(entry)
+            time.sleep(0.5)
+        return rounds
+
+    capture("root_retries", lambda: driver._run(root_retries))
     return json.dumps(evidence, default=str, ensure_ascii=True)
 
 
@@ -9092,9 +9246,24 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
                 budget_s=90,
             )
-            assert "ROW-0300" in found, found
-            assert "not found" not in found, found
-            assert "found after 0" not in found, found
+            if (
+                "ROW-0300" not in found or "not found" in found or "found after 0" in found
+            ):
+                # #1242: the same evidence as wait_at_top, read before the
+                # assertion fails. The conditions below are unchanged.
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError:
+                    shot = None
+                evidence = _chrome_table_failure(
+                    driver, proc, shot, phase=f"scroll_to_find pass {_pass}", samples=[],
+                )
+                found_with_evidence = f"{found}; {evidence}"
+            else:
+                found_with_evidence = found
+            assert "ROW-0300" in found, found_with_evidence
+            assert "not found" not in found, found_with_evidence
+            assert "found after 0" not in found, found_with_evidence
             located = runtime.find("chrome", text="edit 300")
             assert "no elements match" not in located, located
             button = next(
