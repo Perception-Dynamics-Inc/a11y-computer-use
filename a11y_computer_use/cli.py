@@ -562,7 +562,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         except ComputerUseError as exc:
             print(server.error_text(exc), file=sys.stderr)
             return 1
-        runtime.store.set_tier(target, safety.Tier(args.grant))
+        runtime.store.set_tier(target, safety.Tier(args.grant), exe=server._linux_grant_exe(target))
         print(f"granted {target} tier {args.grant}", file=sys.stderr)
 
     def on_step(step: agent.Step) -> None:
@@ -620,7 +620,7 @@ def _cmd_voice(args: argparse.Namespace) -> int:
             except ComputerUseError as exc:
                 print(server.error_text(exc), file=sys.stderr)
                 return 1
-            runtime.store.set_tier(target, safety.Tier(args.grant))
+            runtime.store.set_tier(target, safety.Tier(args.grant), exe=server._linux_grant_exe(target))
             print(f"granted {target} tier {args.grant}", file=sys.stderr)
     try:
         router = reflex.get_router(args.router)
@@ -745,7 +745,7 @@ def _cmd_grant(args: argparse.Namespace) -> int:
     if not args.app.strip():
         print("app identifier must be a non-empty string", file=sys.stderr)
         return 2
-    from a11y_computer_use.server import _permission_app_id
+    from a11y_computer_use.server import _linux_grant_exe, _permission_app_id
 
     bundle = _permission_app_id(args.app)
     try:
@@ -758,7 +758,7 @@ def _cmd_grant(args: argparse.Namespace) -> int:
         if not args.tier:
             print("tier required: read, click, or full", file=sys.stderr)
             return 2
-        store.set_tier(bundle, safety.Tier(args.tier))
+        store.set_tier(bundle, safety.Tier(args.tier), exe=_linux_grant_exe(bundle))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

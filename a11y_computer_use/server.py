@@ -738,12 +738,19 @@ def error_text(exc: ComputerUseError) -> str:
     return " | ".join(parts)
 
 
+#: Ungrantable key -> why its executable failed the grant binding.
+_EXE_HINTS: dict[str, str] = {}
+
+
 def refusal_text(decision: safety.Decision) -> str:
     """Render a non-ALLOW safety decision as one tool-error line, with the
     one-step way to get the grant when the app is merely ungranted."""
     text = f"{decision.verdict.value}: {decision.reason}"
     if decision.verdict is safety.Verdict.NEEDS_PERMISSION and decision.app:
         need = decision.required.value if decision.required else "click"
+        exe_hint = _EXE_HINTS.get(decision.app)
+        if exe_hint:
+            return f"{text} | hint: {exe_hint}"
         text += (f" | hint: grant_app(app='{decision.app}', tier='{need}') "
                  f"records the grant in this host, or run "
                  f"`a11y-computer-use grant {decision.app} {need}`.")
@@ -1012,6 +1019,15 @@ def _running_app(identifier: str) -> tuple[object, str]:
         )
     running, bundle = match
     return running, bundle or identifier
+
+
+def _linux_grant_exe(bundle: str) -> str | None:
+    """The executable realpath a new Linux grant is bound to; None elsewhere."""
+    if not sys.platform.startswith("linux"):
+        return None
+    from a11y_computer_use.drivers import _linux_exe
+
+    return _linux_exe.grant_exe(bundle)
 
 
 def _permission_app_id(identifier: str) -> str:
@@ -2457,7 +2473,30 @@ class Runtime:
     def _resolve_app(self, identifier: str) -> tuple[object, str]:
         if self._resolves_apps():
             return None, identifier  # the driver validates/binds at snapshot time
-        return _running_app(identifier)
+        running, bundle = _running_app(identifier)
+        if sys.platform.startswith("linux"):
+            bundle = self._linux_exe_key(bundle)
+        return running, bundle
+
+    def _linux_exe_key(self, bundle: str) -> str:
+        """The grant key after checking the live ``/proc/<pid>/exe`` (Linux).
+
+        comm and prctl names are never trusted: a process running an
+        interpreter is keyed as the interpreter, and one whose exe is not
+        the granted (or, for an old grant, the installed) executable gets an
+        ungrantable key whose refusal explains why. A deny on the name wins.
+        """
+        from a11y_computer_use.drivers import _linux_exe
+
+        store = getattr(self, "store", None)
+        if not bundle or (store is not None and store.policy(bundle)[1]):
+            return bundle
+        key, hint = _linux_exe.check(bundle, store.recorded_exe(bundle) if store is not None else None)
+        if hint is None:
+            return key
+        refused = f"{bundle} (unverified executable)"
+        _EXE_HINTS[refused] = hint
+        return refused
 
     def _recheck_frontmost_app(self, app: str) -> None:
         front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
@@ -12242,7 +12281,7 @@ def build_server(
             if outcome == "declined":
                 return (f"not granted: the user declined {bundle} at '{wanted.value}' in the "
                         f"{channel}. Do not retry unless they ask; they can run `{cmd}` later.")
-            runtime.store.set_tier(bundle, wanted)
+            runtime.store.set_tier(bundle, wanted, exe=_linux_grant_exe(bundle))
             runtime.audit.record({"action": "grant_app", "app": bundle, "tier": wanted.value,
                                   "via": channel})
             return f"granted: {bundle} at tier '{wanted.value}' (user confirmed in the {channel})"
