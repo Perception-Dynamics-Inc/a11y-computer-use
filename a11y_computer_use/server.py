@@ -2469,9 +2469,63 @@ class Runtime:
         if self._resolves_apps():
             return None, identifier  # the driver validates/binds at snapshot time
         running, bundle = _running_app(identifier)
-        if sys.platform.startswith("linux"):
+        if self._denied_alias(identifier, bundle):
+            # #1312: once an interpreter-hosted app's window maps it resolves
+            # to its interpreter (python3); a deny on the requested name must
+            # still win over a grant on that key.
+            return running, identifier
+        if sys.platform.startswith("linux") and not self._requested_denied(identifier):
+            # A denied requested name is refused as itself; no interpreter probe.
             bundle = self._linux_interpreter_key(identifier, bundle)
         return running, bundle
+
+    def _requested_denied(self, requested: str | None) -> bool:
+        """True when the requested name itself is on the deny list."""
+        store = getattr(self, "store", None)
+        if store is None or not (requested or "").strip():
+            return False
+        try:
+            return bool(store.is_denied(requested.strip()))
+        except Exception:  # noqa: BLE001 - an unreadable store refuses elsewhere
+            return False
+
+    def _denied_alias(self, requested: str | None, key: str | None) -> bool:
+        """True when ``requested`` names another key than ``key`` and is denied."""
+        if not sys.platform.startswith("linux"):
+            return False
+        store = getattr(self, "store", None)
+        if store is None or not requested or not key:
+            return False
+        if requested.strip().casefold() == key.strip().casefold():
+            return False
+        try:
+            return bool(store.is_denied(requested))
+        except Exception:  # noqa: BLE001 - an unreadable store refuses elsewhere
+            return False
+
+    def _gate_app(self, app: str) -> str:
+        """``app``, or the denied name the current snapshot was requested as (#1312).
+
+        A snapshot of ``cuicon1296`` is labelled ``python3`` once its window
+        maps, so its refs act on ``python3``. A deny added on the requested
+        name (before or after the snapshot) is read here, fresh per action.
+        """
+        snap = getattr(self, "_current", None)
+        if snap is None or snap.app != app:
+            return app
+        requested = getattr(self, "_requested_names", {}).get(snap.snapshot_id)
+        return requested if self._denied_alias(requested, app) else app
+
+    def _action_gate_key(self, app: str) -> str:
+        """The key an action on ``app`` is gated as, read fresh per call.
+
+        A deny on the name the snapshot was requested as wins (#1312);
+        otherwise an interpreter-hosted app is gated as its interpreter (#1296).
+        """
+        denied = self._gate_app(app)
+        if denied != app:
+            return denied
+        return self._linux_gate_key(app)
 
     def _linux_gate_key(self, app: str) -> str:
         """The permission key for ``app`` at gate time (Linux, #1296).
@@ -2815,7 +2869,7 @@ class Runtime:
             self._reject_domain(action, app=app)
         if not no_input:
             self._reject_terminal(action, app, input_target=input_target)
-        gate_app = self._linux_gate_key(app)
+        gate_app = self._action_gate_key(app)
         decision = self._require_permission(action, gate_app, secure=secure)
         try:
             if CONFIRMATION_GATE:
@@ -2843,7 +2897,7 @@ class Runtime:
                     )
                 if prompt is not None:
                     # The user can revoke a grant while confirmation is open.
-                    decision = self._require_permission(action, gate_app, secure=secure)
+                    decision = self._require_permission(action, self._action_gate_key(app), secure=secure)
             if recheck is not None:
                 recheck(app)
             if CONFIRMATION_GATE:
@@ -5603,6 +5657,10 @@ class Runtime:
             self._linux_recheck_key(app, bundle, getattr(snap, "app", None))
             self._current = snap
             snap = self._current = self._note_issued(snap, preserve_identity=True)
+            if snap.app and snap.app.casefold() != app.strip().casefold():
+                if not hasattr(self, "_requested_names"):
+                    self._requested_names = {}
+                self._requested_names[snap.snapshot_id] = app.strip()
             if mode != "diff":
                 self._view = mode  # diffs and Effect Receipts follow the view last asked for
             # diff only against a prior snapshot of the SAME app (else the agent
