@@ -103,3 +103,35 @@ def test_live_old_ref_after_focus_or_other_snapshot_never_acts_in_the_other_app(
     assert caught.value.detail["reason"] == "other_app_focused"
     time.sleep(0.5)
     assert _labels(rt) == {_A: False, _B: False}
+
+
+@requires_desktop
+def test_live_unrecorded_switch_refuses_and_switch_back_acts(two_apps) -> None:
+    """T3 live: B raised by window(focus) (like alt+tab or a coordinate
+    click, nothing records an app switch), not by app(focus): A's refs are refused until A is
+    frontmost again, then the same ref presses A's own button."""
+    from a11y_computer_use.schema import ComputerUseError
+
+    rt = two_apps
+    rt.desktop_snapshot(_B)
+    ref_a = _ref(rt.desktop_snapshot(_A), "Save " + _A)
+    def focus(name: str) -> None:
+        wid = next(int(r["window_id"]) for r in rt.driver.windows() if r.get("title") == name)
+        rt.window("focus", window_id=wid)  # gap 2: not app(focus)
+
+    focus(_A)
+    rt.desktop_snapshot(_A)  # A frontmost when its refs are issued; no #836 ambiguity
+    for name in (_B, _A):
+        focus(name)
+        if name == _B:
+            with pytest.raises(ComputerUseError) as caught:
+                rt.click(ref=ref_a)
+            assert caught.value.detail["reason"] == "other_app_focused"
+            assert caught.value.detail["focused_app"] == _B
+            time.sleep(0.5)
+            assert _labels(rt) == {_A: False, _B: False}
+    rt.desktop_snapshot(_A)
+    rt.desktop_snapshot(_A)  # _labels observed B last; re-observe A twice (#836)
+    rt.click(ref=ref_a)
+    time.sleep(0.5)
+    assert _labels(rt) == {_A: True, _B: False}

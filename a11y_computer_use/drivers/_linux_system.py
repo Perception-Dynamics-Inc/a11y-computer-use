@@ -433,6 +433,24 @@ def _geometry_on_root(win, d):
 # ---------------------------------------------------------------------------
 
 
+def frontmost_app_identity() -> tuple[str, int | None]:
+    """(app id, owner pid) of the active window; ("", None) if undetectable.
+
+    The pid comes from the X server (XRes) when it can, else _NET_WM_PID.
+    Used to notice that focus left the app a snapshot's refs belong to.
+    """
+    try:
+        with _open_display() as d:
+            active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+            if not active:
+                return "", None
+            win = d.create_resource_object("window", int(active[0]))
+            pid = _xres_pid(win, d) or _pid_of(win, d) or None
+            return _app_id(win, d), pid
+    except Exception:  # noqa: BLE001 - unknown is not a change
+        return "", None
+
+
 def frontmost_app_id() -> str:
     """App id of the active window's owner; "" if undetectable.
 
