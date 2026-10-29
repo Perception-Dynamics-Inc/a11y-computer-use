@@ -36,13 +36,24 @@ def _wait_named(name, proc, timeout=5.0):
 
 
 @pytest.fixture
-def spawn():
-    procs = []
+def spawn(monkeypatch):
+    """Spawn a process that owns the target, as a spoof with a window would.
 
-    def run(argv, name=NAME, **kw):
+    Since #1322 only processes that own a window or an AT-SPI app named
+    after the grant are checked; these headless stand-ins are registered as
+    AT-SPI owners (``windowless=True`` leaves one owning nothing).
+    """
+    procs = []
+    owners: set[int] = set()
+    monkeypatch.setattr(_linux_exe, "_x11_owner_pids", lambda name: set())
+    monkeypatch.setattr(_linux_exe, "_atspi_owner_pids", lambda: set(owners))
+
+    def run(argv, name=NAME, windowless=False, **kw):
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, **kw)
         procs.append(proc)
         _wait_named(name, proc)
+        if not windowless:
+            owners.add(proc.pid)
         return proc
 
     yield run
@@ -290,12 +301,20 @@ CHROME = "/opt/google/chrome/chrome"
 
 
 def _procs(monkeypatch, table: dict[int, tuple[str | None, int, tuple[int, ...]]], named=None,
-           zombies=None):
-    """Fake /proc: pid -> (readable exe or None, PPid, NSpid)."""
+           zombies=None, owners=None, uids=None):
+    """Fake /proc: pid -> (readable exe or None, PPid, NSpid).
+
+    ``owners`` are the pids owning a window/AT-SPI app (default: every named
+    pid, the pre-#1322 worst case); ``uids`` maps pids to another user.
+    """
     from a11y_computer_use.drivers import _linux_exe as m
 
     names = set(table) if named is None else set(named)
+    owning = set(names) if owners is None else set(owners)
     monkeypatch.setattr(m, "pids_named", lambda n: set(names))
+    monkeypatch.setattr(m, "_x11_owner_pids", lambda n: set())
+    monkeypatch.setattr(m, "_atspi_owner_pids", lambda: set(owning))
+    monkeypatch.setattr(m, "_uid", lambda pid: (uids or {}).get(pid, os.getuid()))
     monkeypatch.setattr(m, "exe_of", lambda pid: table[pid][0] if pid in table else None)
     monkeypatch.setattr(m, "_status", lambda pid: (table[pid][1], table[pid][2]) if pid in table else (None, ()))
     monkeypatch.setattr(m, "_gone", lambda pid: pid in (zombies or ()))
@@ -432,3 +451,68 @@ def test_gone_reads_the_kernel_state() -> None:
     assert m.exe_of(child.pid) is None
     child.wait()
     assert m._gone(child.pid) is True      # reaped: /proc entry gone
+
+
+# --- #1322: only the processes that own the target are checked ---------------
+
+MOUSEPAD = "/usr/bin/mousepad"
+
+
+def test_unrelated_same_named_binary_without_a_window_does_not_block(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 20: ("/home/u/bin/mousepad", 1, (20,))},
+               owners={10})
+    assert m.check("mousepad", MOUSEPAD) == ("mousepad", None)
+
+
+def test_unrelated_same_named_binary_does_not_grant_either(monkeypatch) -> None:
+    """With the real app closed, a windowless same-named process is no target."""
+    m = _procs(monkeypatch, {20: ("/home/u/bin/mousepad", 1, (20,))}, owners=set())
+    assert m.check("mousepad", MOUSEPAD) == ("mousepad", None)
+    monkeypatch.setattr(m, "installed_exes", lambda name: set())
+    assert m.grant_exe("mousepad") is None  # its exe is never recorded
+
+
+def test_another_users_real_mousepad_does_not_block(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 30: (None, 1, (30,))},
+               owners={10}, uids={30: os.getuid() + 1})
+    assert m.check("mousepad", MOUSEPAD) == ("mousepad", None)
+
+
+def test_another_users_process_owning_the_target_is_refused(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 30: (MOUSEPAD, 1, (30,))},
+               uids={30: os.getuid() + 1})
+    key, hint = m.check("mousepad", MOUSEPAD)
+    assert key == "mousepad" and hint and "another user" in hint
+
+
+def test_a_spoof_owning_a_window_still_refuses_beside_the_real_app(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 20: ("/tmp/x/mousepad", 1, (20,))})
+    assert m.check("mousepad", MOUSEPAD)[1]
+
+
+def test_x11_window_owner_is_checked_without_atspi(monkeypatch) -> None:
+    m = _procs(monkeypatch, {20: ("/tmp/x/mousepad", 1, (20,))}, owners=set())
+    monkeypatch.setattr(m, "_x11_owner_pids", lambda n: {20})
+    assert m.check("mousepad", MOUSEPAD)[1]
+
+
+def test_an_unreadable_window_owner_under_chrome_is_still_refused(monkeypatch) -> None:
+    """Tester's launch-flag child (#1310) owning a11y: same-ns child, refused."""
+    m = _procs(monkeypatch, {10: (CHROME, 1, (10,)), 20: (None, 10, (20,))}, owners={10, 20})
+    assert m.check("chrome", CHROME)[1]
+
+
+def test_sandboxed_renderers_need_no_window(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (CHROME, 1, (10,)), 11: (None, 10, (11, 1)), 13: (None, 11, (13, 4, 1))},
+               owners={10})
+    assert m.check("chrome", CHROME) == ("chrome", None)
+
+
+def test_live_windowless_unrelated_binary_does_not_block(spawn, tmp_path) -> None:
+    native = _native(tmp_path)
+    spawn([native, "60"])
+    other = tmp_path / "o"
+    other.mkdir()
+    shutil.copy2(native, other / NAME)
+    spawn([str(other / NAME), "60"], windowless=True)
+    assert _linux_exe.check(NAME, native) == (NAME, None)
