@@ -188,8 +188,7 @@ def grant_exe(name: str) -> str | None:
     """
     if interpreter_key(name):
         return None
-    me = os.getuid()
-    exes = {exe_of(pid) for pid in target_pids(name) if _uid(pid) == me}
+    exes = {exe_of(pid) for pid in target_pids(name) if _uid(pid) == _me()}
     exes.discard(None)
     exes = {e for e in exes if not interpreter_key(e)}
     if len(exes) == 1:
@@ -299,6 +298,12 @@ def _verified_ancestor_exe(pid: int, exes: dict[int, str | None]) -> str | None:
     return None
 
 
+def _me() -> int | None:
+    """This process's uid (None off POSIX, where no /proc process matches)."""
+    getuid = getattr(os, "getuid", None)
+    return getuid() if getuid else None
+
+
 def _uid(pid: int) -> int | None:
     try:
         return os.stat(f"/proc/{int(pid)}").st_uid
@@ -355,7 +360,7 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     targets = target_pids(name, named)
     if not targets:
         return name, None  # nothing named this owns a window or a11y app (#1322)
-    me = os.getuid()
+    me = _me()
     foreign = sorted(pid for pid in targets if _uid(pid) not in (me, None))
     if foreign:
         pid = foreign[0]
