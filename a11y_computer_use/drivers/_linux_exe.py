@@ -9,7 +9,11 @@ the realpath of ``/proc/<pid>/exe``, which the kernel sets at exec time:
 * At grant time the app's executable realpath is recorded: a running
   process's exe, or the installed binary resolved through PATH or a
   ``.desktop`` ``Exec=`` line.
-* At check time every live process behind the key must have that exe.
+* At check time every process that owns the target (an X11 window whose
+  program is the name, or an AT-SPI application registered by a process
+  of that name) must have that exe. A same-named process that owns no
+  window or a11y app cannot be acted on, so it neither blocks nor grants
+  (#1322); one owned by another user is refused.
 * A process whose exe is an interpreter (python3, perl, gjs, sh...) is
   keyed as that interpreter, so a shebang script named ``mousepad`` needs
   a python3 grant.
@@ -184,7 +188,8 @@ def grant_exe(name: str) -> str | None:
     """
     if interpreter_key(name):
         return None
-    exes = {exe_of(pid) for pid in pids_named(name)}
+    me = os.getuid()
+    exes = {exe_of(pid) for pid in target_pids(name) if _uid(pid) == me}
     exes.discard(None)
     exes = {e for e in exes if not interpreter_key(e)}
     if len(exes) == 1:
@@ -294,6 +299,46 @@ def _verified_ancestor_exe(pid: int, exes: dict[int, str | None]) -> str | None:
     return None
 
 
+def _uid(pid: int) -> int | None:
+    try:
+        return os.stat(f"/proc/{int(pid)}").st_uid
+    except OSError:
+        return None
+
+
+def _x11_owner_pids(name: str) -> set[int]:
+    try:
+        from a11y_computer_use.drivers import _linux_system
+
+        return set(_linux_system.pids_matching(name))
+    except Exception:  # noqa: BLE001 - no X11: the a11y bus still names owners
+        return set()
+
+
+def _atspi_owner_pids() -> set[int]:
+    """Pids registered on the AT-SPI bus (from D-Bus credentials, not self-reported)."""
+    try:
+        from a11y_computer_use.drivers import _atspi
+
+        return set(_atspi._registered_pids() or ())
+    except Exception:  # noqa: BLE001 - no bus: X11 still names owners
+        return set()
+
+
+def target_pids(name: str, named: set[int] | None = None) -> set[int]:
+    """Pids that own what an action on ``name`` reaches (#1322).
+
+    The X11 windows whose program is ``name`` and the AT-SPI applications
+    registered by a process named ``name``. A process with neither is not a
+    target, whatever it is called.
+    """
+    named = pids_named(name) if named is None else named
+    owners = _x11_owner_pids(name)
+    if named - owners:
+        owners |= _atspi_owner_pids() & named
+    return owners
+
+
 def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     """(key, refusal hint) for the live processes behind ``name``.
 
@@ -302,17 +347,29 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     hint when the exe does not match (the caller refuses). With no live
     process the name is returned unchanged; a later check sees the process.
     """
-    pids = pids_named(name)
-    if not pids or interpreter_key(name):
+    if interpreter_key(name):
         return name, None
-    exes = {pid: exe_of(pid) for pid in pids}
-    raw = dict(exes)
+    named = pids_named(name)
+    if not named:
+        return name, None
+    targets = target_pids(name, named)
+    if not targets:
+        return name, None  # nothing named this owns a window or a11y app (#1322)
+    me = os.getuid()
+    foreign = sorted(pid for pid in targets if _uid(pid) not in (me, None))
+    if foreign:
+        pid = foreign[0]
+        return name, (f"a window or a11y app named {name!r} belongs to pid {pid} of another "
+                      f"user (uid {_uid(pid)}); refused.")
+    # Ancestors for the Chrome sandbox rule come from this user's named processes.
+    context = {pid: exe_of(pid) for pid in named | targets if _uid(pid) in (me, None)}
+    raw = {pid: context.get(pid) for pid in targets}
     # A zombie's exe is unreadable because it has exited; it is not a live app.
-    exes = {pid: exe for pid, exe in exes.items() if exe is not None or not _gone(pid)}
-    if not exes:
+    live = {pid: exe for pid, exe in raw.items() if exe is not None or not _gone(pid)}
+    if not live:
         return name, None
-    exes = {pid: (exe if exe is not None else _verified_ancestor_exe(pid, exes))
-            for pid, exe in exes.items()}
+    exes = {pid: (exe if exe is not None else _verified_ancestor_exe(pid, context))
+            for pid, exe in live.items()}
     hosts = {interpreter_key(e) for e in exes.values() if interpreter_key(e)}
     natives = {e for e in exes.values() if e and not interpreter_key(e)}
     if hosts and not natives and len(hosts) == 1:
