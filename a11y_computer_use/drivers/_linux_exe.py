@@ -13,7 +13,10 @@ the realpath of ``/proc/<pid>/exe``, which the kernel sets at exec time:
   program is the name, or an AT-SPI application registered by a process
   of that name) must have that exe. A same-named process that owns no
   window or a11y app cannot be acted on, so it neither blocks nor grants
-  (#1322); one owned by another user is refused.
+  (#1322); one owned by another user is refused. A window's owner is the
+  pid the X server reports for its client (X-Resource), never the
+  client-written ``_NET_WM_PID``: a window whose two pids disagree, or
+  whose owner the server cannot report, is refused (#1327).
 * A process whose exe is an interpreter (python3, perl, gjs, sh...) is
   keyed as that interpreter, so a shebang script named ``mousepad`` needs
   a python3 grant.
@@ -188,7 +191,13 @@ def grant_exe(name: str) -> str | None:
     """
     if interpreter_key(name):
         return None
-    exes = {exe_of(pid) for pid in target_pids(name) if _uid(pid) == _me()}
+    try:
+        owners = target_pids(name)
+    except Exception as exc:  # a spoofed window grants nothing; fall back to PATH (#1327)
+        if type(exc).__name__ != "WindowOwnerMismatch":
+            raise
+        owners = set()
+    exes = {exe_of(pid) for pid in owners if _uid(pid) == _me()}
     exes.discard(None)
     exes = {e for e in exes if not interpreter_key(e)}
     if len(exes) == 1:
@@ -315,8 +324,10 @@ def _x11_owner_pids(name: str) -> set[int]:
     try:
         from a11y_computer_use.drivers import _linux_system
 
-        return set(_linux_system.pids_matching(name))
-    except Exception:  # noqa: BLE001 - no X11: the a11y bus still names owners
+        return set(_linux_system.verified_pids_matching(name))
+    except Exception as exc:  # noqa: BLE001 - no X11: the a11y bus still names owners
+        if type(exc).__name__ == "WindowOwnerMismatch":
+            raise  # a window the X server disowns is refused, not skipped (#1327)
         return set()
 
 
@@ -357,7 +368,12 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     named = pids_named(name)
     if not named:
         return name, None
-    targets = target_pids(name, named)
+    try:
+        targets = target_pids(name, named)
+    except Exception as exc:  # WindowOwnerMismatch: the X server disowns the claim (#1327)
+        if type(exc).__name__ != "WindowOwnerMismatch":
+            raise
+        return name, str(exc)
     if not targets:
         return name, None  # nothing named this owns a window or a11y app (#1322)
     me = _me()

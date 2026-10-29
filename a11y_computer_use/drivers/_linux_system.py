@@ -1068,6 +1068,73 @@ def pids_matching(identifier: str) -> set[int]:
     return pids
 
 
+class WindowOwnerMismatch(Exception):
+    """A matching window whose owner the X server cannot confirm (#1327)."""
+
+
+def _xres_pid(win, d) -> int | None:
+    """The pid of the client that created ``win``, from the X server (XRes).
+
+    ``_NET_WM_PID`` is written by the client and can name any pid. The
+    X-Resource extension's LocalClientPID comes from the server's own view
+    of the connection. None when the extension is missing or the client is
+    not local (no pid known).
+    """
+    try:
+        from Xlib.ext import res
+
+        if not d.has_extension("X-Resource"):
+            return None
+        reply = d.res_query_client_ids([{"client": int(win.id), "mask": res.LocalClientPIDMask}])
+        for cid in reply.ids:
+            if cid.spec.mask & res.LocalClientPIDMask and cid.value:
+                return int(cid.value[0]) or None
+    except Exception:  # noqa: BLE001 - unknown is refused by the caller
+        return None
+    return None
+
+
+def _names(identifier: str, pid: int) -> bool:
+    comm = _comm_for_pid(pid) or ""
+    identity = (_identity_for_pid(pid, comm) or comm).lower()
+    return bool(identity) and _identifier_matches_process(identifier, identity)
+
+
+def verified_pids_matching(identifier: str) -> set[int]:
+    """`pids_matching`, with each window's owner taken from the X server.
+
+    A window is considered when its ``_NET_WM_PID`` or its XRes client pid
+    names ``identifier``. Its owner is the XRes pid. When XRes gives no pid,
+    or the pid disagrees with ``_NET_WM_PID``, ``WindowOwnerMismatch`` is
+    raised: a self-reported pid is never trusted (#1327).
+    """
+    needle = (identifier or "").lower()
+    pids: set[int] = set()
+    if not needle:
+        return pids
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                claimed = _pid_of(win, d)
+                real = _xres_pid(win, d)
+                if not ((claimed and _names(identifier, claimed)) or (real and _names(identifier, real))):
+                    continue
+                if real is None:
+                    raise WindowOwnerMismatch(
+                        f"window 0x{int(win.id):x} for {identifier!r} has no owner pid from the "
+                        f"X server (X-Resource unavailable or remote client); refused.")
+                if claimed and claimed != real:
+                    raise WindowOwnerMismatch(
+                        f"window 0x{int(win.id):x} claims pid {claimed} (_NET_WM_PID) but the X "
+                        f"server says pid {real} owns it; refused.")
+                pids.add(real)
+    except (ComputerUseError, WindowOwnerMismatch):
+        raise
+    except Exception:
+        pass
+    return pids
+
+
 def running_apps() -> list[dict]:
     """Distinct apps with managed windows: {name, pid, frontmost}.
 
