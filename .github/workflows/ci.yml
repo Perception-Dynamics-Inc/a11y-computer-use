@@ -364,6 +364,14 @@ jobs:
           cat /proc/loadavg || true
           free -m || true
           echo "::endgroup::"
+          # The runner image runs `chmod -R 777 /opt` (actions/runner-images
+          # configure-system.sh), so /opt/google/chrome/chrome is world-writable
+          # there and the Linux exe check rightly refuses it as replaceable. A
+          # real .deb install is root-owned 0755; restore that so the live tests
+          # see the shape users have. Only /opt and the Chrome tree change.
+          sudo chmod go-w /opt
+          sudo chmod -R go-w /opt/google
+          ls -ld /opt /opt/google /opt/google/chrome /opt/google/chrome/chrome || true
           # Quoted heredoc at this block's indent. YAML strips that indent, so
           # the delimiter is column 0 for the shell. It stays outside the
           # single-quoted bash -c below; single-quoted echoes there are a
