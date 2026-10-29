@@ -23,6 +23,7 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Li
 from a11y_computer_use.drivers import _linux_exe  # noqa: E402
 
 PY = os.path.realpath(sys.executable)
+_REAL_X11_OWNERS = _linux_exe._x11_owner_pids
 NAME = "zzgrant1296"  # unique, so no other process on the box shares it
 
 
@@ -516,3 +517,124 @@ def test_live_windowless_unrelated_binary_does_not_block(spawn, tmp_path) -> Non
     shutil.copy2(native, other / NAME)
     spawn([str(other / NAME), "60"], windowless=True)
     assert _linux_exe.check(NAME, native) == (NAME, None)
+
+
+# --- #1327: a window's owner comes from the X server (XRes), not _NET_WM_PID ---
+
+
+def _xwindows(monkeypatch, m, windows, idents):
+    """Fake managed windows: [(_NET_WM_PID, XRes pid or None)]; idents: pid -> program."""
+    from contextlib import contextmanager
+
+    from a11y_computer_use.drivers import _linux_system as ls
+
+    wins = [_NS(id=0x100 + i, claimed=c, real=r) for i, (c, r) in enumerate(windows)]
+
+    @contextmanager
+    def disp():
+        yield object()
+
+    monkeypatch.setattr(ls, "_open_display", disp)
+    monkeypatch.setattr(ls, "_managed_windows", lambda d: wins)
+    monkeypatch.setattr(ls, "_pid_of", lambda w, d: w.claimed)
+    monkeypatch.setattr(ls, "_xres_pid", lambda w, d: w.real)
+    monkeypatch.setattr(ls, "_comm_for_pid", lambda pid: idents.get(pid))
+    monkeypatch.setattr(ls, "_identity_for_pid", lambda pid, comm: idents.get(pid))
+    monkeypatch.setattr(m, "_x11_owner_pids", _REAL_X11_OWNERS)
+    return ls
+
+
+def test_spoofed_net_wm_pid_pointing_at_the_real_app_is_refused(monkeypatch) -> None:
+    """Tester's #1327: a foreign client's window claims the real mousepad's pid."""
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 66: ("/tmp/x/evil", 1, (66,))},
+               named={10}, owners=set())
+    _xwindows(monkeypatch, m, [(10, 10), (10, 66)], {10: "mousepad", 66: "evil"})
+    key, hint = m.check("mousepad", MOUSEPAD)
+    assert key == "mousepad" and hint and "X server says pid 66" in hint
+
+
+def test_spoofed_window_alone_is_refused(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,))}, owners=set())
+    _xwindows(monkeypatch, m, [(10, 66)], {10: "mousepad", 66: "evil"})
+    assert m.check("mousepad", MOUSEPAD)[1]
+
+
+def test_window_with_no_server_pid_is_refused(monkeypatch) -> None:
+    """XRes missing (or a remote client): the self-reported pid is not trusted."""
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,))}, owners=set())
+    _xwindows(monkeypatch, m, [(10, None)], {10: "mousepad"})
+    key, hint = m.check("mousepad", MOUSEPAD)
+    assert hint and "X-Resource unavailable" in hint
+
+
+def test_window_without_net_wm_pid_is_owned_by_its_server_pid(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 20: ("/tmp/x/mousepad", 1, (20,))},
+               owners=set())
+    _xwindows(monkeypatch, m, [(10, 10), (0, 20)], {10: "mousepad", 20: "mousepad"})
+    assert m.check("mousepad", MOUSEPAD)[1]
+
+
+def test_agreeing_pids_pass_and_unrelated_windows_are_ignored(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,))}, owners=set())
+    ls = _xwindows(monkeypatch, m, [(10, 10), (77, 78), (0, None)], {10: "mousepad", 77: "xterm", 78: "xterm"})
+    assert ls.verified_pids_matching("mousepad") == {10}
+    assert m.check("mousepad", MOUSEPAD) == ("mousepad", None)
+
+
+def test_spoofed_window_grants_nothing(monkeypatch) -> None:
+    m = _procs(monkeypatch, {10: ("/tmp/x/mousepad", 1, (10,))}, owners=set())
+    _xwindows(monkeypatch, m, [(10, 66)], {10: "mousepad", 66: "evil"})
+    monkeypatch.setattr(m, "installed_exes", lambda n: set())
+    assert m.grant_exe("mousepad") is None
+
+
+def test_xres_pid_is_none_without_the_extension() -> None:
+    from a11y_computer_use.drivers import _linux_system as ls
+
+    d = _NS(has_extension=lambda name: False)
+    assert ls._xres_pid(_NS(id=1), d) is None
+
+
+def _live_display():
+    if not os.environ.get("DISPLAY"):
+        pytest.skip("no X display")
+    try:
+        from Xlib import display
+    except ImportError:
+        pytest.skip("python-xlib missing")
+    from a11y_computer_use.drivers import _linux_system as ls
+
+    d = display.Display()
+    if not ls._prop(d.screen().root, d, "_NET_CLIENT_LIST"):
+        d.close()
+        pytest.skip("no EWMH window manager")
+    return d, ls
+
+
+def test_live_window_spoofing_net_wm_pid_is_refused(spawn, tmp_path, monkeypatch) -> None:
+    """A real X client claims a genuine NAME process's pid; the server disowns it."""
+    from Xlib import X, Xatom
+
+    d, ls = _live_display()
+    native = _native(tmp_path)
+    victim = spawn([native, "60"], windowless=True)
+    monkeypatch.setattr(_linux_exe, "_x11_owner_pids", _REAL_X11_OWNERS)
+    win = d.screen().root.create_window(0, 0, 50, 50, 0, d.screen().root_depth)
+    try:
+        win.change_property(d.intern_atom("_NET_WM_PID"), Xatom.CARDINAL, 32, [victim.pid])
+        win.set_wm_class(NAME, NAME)
+        win.map()
+        d.sync()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if int(win.id) in (ls._prop(d.screen().root, d, "_NET_CLIENT_LIST") or ()):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.skip("window manager never listed the window")
+        key, hint = _linux_exe.check(NAME, native)
+        assert key == NAME and hint and f"claims pid {victim.pid}" in hint
+    finally:
+        win.destroy()
+        d.sync()
+        d.close()
