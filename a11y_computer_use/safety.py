@@ -334,6 +334,7 @@ class PermissionStore:
         mark old permissions as current. Invalid edits never retain grants.
         """
         self._tiers: dict[str, Tier] = {}
+        self._exes: dict[str, str] = {}
         self._deny: set[str] = set()
         self._allow: set[str] = set()
         self._stamp: tuple[int, ...] | None = None
@@ -352,11 +353,17 @@ class PermissionStore:
             if not isinstance(data, dict) or not isinstance(data.get("apps", {}), dict):
                 raise ValueError("expected a JSON object with an apps object")
             tiers: dict[str, Tier] = {}
+            exes: dict[str, str] = {}
             for app, entry in data.get("apps", {}).items():
                 self._validate_app(app)
                 if not isinstance(entry, dict) or "tier" not in entry:
                     raise ValueError("each app must contain a tier")
                 tiers[app] = Tier(entry["tier"])
+                exe = entry.get("exe")
+                if exe is not None:
+                    if not isinstance(exe, str) or not exe.startswith("/"):
+                        raise ValueError("exe must be an absolute path")
+                    exes[app] = exe
             lists: dict[str, set[str]] = {}
             for name in ("deny", "allow"):
                 values = data.get(name, [])
@@ -366,6 +373,7 @@ class PermissionStore:
                     self._validate_app(app)
                 lists[name] = set(values)
             self._tiers, self._deny, self._allow = tiers, lists["deny"], lists["allow"]
+            self._exes = exes
             self._stamp = stamp
         except (OSError, ValueError, TypeError, RecursionError):
             self._stamp = before
@@ -524,15 +532,40 @@ class PermissionStore:
                 rows.append((app, tier, note))
             return rows
 
-    def set_tier(self, bundle_id: str, tier: Tier) -> None:
-        """Record a human-approved grant and persist it."""
+    def set_tier(self, bundle_id: str, tier: Tier, *, exe: str | None | object = ...) -> None:
+        """Record a human-approved grant and persist it.
+
+        ``exe`` (Linux) binds the grant to that executable realpath. Omitted
+        keeps any existing binding; None records a name-only grant.
+        """
         self._validate_app(bundle_id)
         tier = Tier(tier)
+        if exe is not ... and exe is not None and (not isinstance(exe, str) or not exe.startswith("/")):
+            raise ValueError("exe must be an absolute path")
 
         def grant() -> None:
             self._tiers[bundle_id] = tier
+            if exe is None:
+                self._exes.pop(bundle_id, None)
+            elif exe is not ...:
+                self._exes[bundle_id] = exe
 
         self._mutate(grant)
+
+    def recorded_exe(self, bundle_id: str) -> str | None:
+        """The executable realpath the grant on ``bundle_id`` is bound to, if any.
+
+        Matched case-insensitively like the grant itself.
+        """
+        with self._lock:
+            self._refresh()
+            if bundle_id in self._exes:
+                return self._exes[bundle_id]
+            folded = bundle_id.casefold()
+            for app, exe in self._exes.items():
+                if app.casefold() == folded:
+                    return exe
+            return None
 
     def revoke(self, bundle_id: str) -> bool:
         """Remove a grant for ``bundle_id``. False when it had none.
@@ -547,6 +580,7 @@ class PermissionStore:
             removed = bundle_id in self._tiers
             if removed:
                 del self._tiers[bundle_id]
+                self._exes.pop(bundle_id, None)
 
         self._mutate(remove)
         return removed
@@ -582,7 +616,10 @@ class PermissionStore:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {
-            "apps": {app: {"tier": tier.value} for app, tier in sorted(self._tiers.items())},
+            "apps": {
+                app: ({"tier": tier.value, "exe": self._exes[app]} if app in self._exes else {"tier": tier.value})
+                for app, tier in sorted(self._tiers.items())
+            },
             "deny": sorted(self._deny),
             "allow": sorted(self._allow),
         }
