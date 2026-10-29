@@ -322,15 +322,30 @@ _PORTAL_BACKENDS = frozenset({
 })
 
 
-def _app_id(win, d, *, settle: bool = False) -> str:
+def _owner_pid(win, d) -> int:
+    """Owner pid for a per-action recheck: the X server's (XRes), else ``_NET_WM_PID``.
+
+    ``_NET_WM_PID`` is written by the client, so any X client can name a
+    granted app's pid on its own window (#1327). XRes names the process that
+    really holds the connection. Without the extension (a remote client, an
+    old server) the property is all there is, as before.
+    """
+    return _xres_pid(win, d) or _pid_of(win, d)
+
+
+def _app_id(win, d, *, settle: bool = False, pid: int | None = None) -> str:
     """Permission-keying app id: full program name, else comm, else WM_CLASS.
+
+    ``pid`` replaces the window's ``_NET_WM_PID`` when the caller already
+    has the owner from the X server (``_owner_pid``).
 
     The full name comes from ``/proc/<pid>/cmdline`` or the exe when the
     kernel comm is that name's 15-byte cut. A short comm is the id, which is
     how ``chrome`` stays ``chrome``. A recognized portal backend dialog
     uses its managed transient parent's process identity.
     """
-    pid = _settled_pid(win, d) if settle else _pid_of(win, d)
+    if pid is None:
+        pid = _settled_pid(win, d) if settle else _pid_of(win, d)
     comm = _comm_for_pid(pid)
     if comm:
         identity = _identity_for_pid(pid, comm) or comm
@@ -450,11 +465,11 @@ def frontmost_app_id() -> str:
             if not active:
                 return ""
             win = d.create_resource_object("window", int(active[0]))
-            pid = _pid_of(win, d)
+            pid = _owner_pid(win, d)
             comm = _comm_for_pid(pid)
             if not comm:
                 return ""
-            return _app_id(win, d)
+            return _app_id(win, d, pid=pid)
     except ComputerUseError:
         raise
     except Exception:
@@ -554,9 +569,11 @@ def _popup_windows(d, managed) -> list[tuple[int, object, tuple[int, int, int, i
     candidate window (#1227) is not in ``_NET_CLIENT_LIST_STACKING``, so the
     managed list cannot say it covers a point. The window manager's own frames
     (the parent of each managed client) and its edge windows are not popups:
-    a frame is excluded by identity, and a window with no ``_NET_WM_PID`` has no
-    owner to name. Any read failure gives no popups, which is the managed-only
-    answer the callers had before.
+    a frame is excluded by identity; its edge windows are InputOnly. A
+    window with neither ``_NET_WM_PID`` nor an XRes owner is still a popup:
+    input at its point goes to it, so it must not leave the window below as
+    the answer (#1327). Any read failure gives no popups, which is the
+    managed-only answer the callers had before.
     """
     try:
         from Xlib import X
@@ -581,7 +598,7 @@ def _popup_windows(d, managed) -> list[tuple[int, object, tuple[int, int, int, i
                         or not attrs.override_redirect):
                     continue
                 geom = _geometry_on_root(win, d)
-                if geom is None or geom[2] <= 1 or geom[3] <= 1 or not _pid_of(win, d):
+                if geom is None or geom[2] <= 1 or geom[3] <= 1:
                     continue
                 # The window manager parks helper windows off screen.
                 if (geom[0] + geom[2] <= 0 or geom[1] + geom[3] <= 0
@@ -642,7 +659,7 @@ def _top_window_pid(x: float, y: float) -> int | None:
             win = _window_at_point(d, x, y, popups=True)
             if win is None:
                 return None
-            pid = _pid_of(win, d)
+            pid = _owner_pid(win, d)
             return int(pid) if pid else None
     except ComputerUseError:
         raise
@@ -664,7 +681,7 @@ def popup_pid_at_point(x: float, y: float) -> int | None:
             top = _window_at_point(d, x, y, popups=True)
             if top is None or top.id == getattr(_window_at_point(d, x, y), "id", None):
                 return None
-            pid = _pid_of(top, d)
+            pid = _owner_pid(top, d)
             return int(pid) if pid else None
     except Exception:
         return None
@@ -720,17 +737,27 @@ def drag_overlay_at_point(x: float, y: float) -> tuple[int, str] | None:
 def app_at_point_id(x: float, y: float) -> str | None:
     """App id of the topmost window containing a screen point.
 
-    The process comm when the window has a pid. A Tk or Xt window has no
-    ``_NET_WM_PID``; the hit-test then uses its WM_CLASS instance, the same
-    key ``window focus`` gates on. None when the point hits no window, or
-    the window has neither a comm nor a class.
+    The process comm of the window's owner: the X server's (XRes) when it
+    can say, else ``_NET_WM_PID``, which any client can set to a granted
+    app's pid (#1327). A Tk or Xt window with neither uses its WM_CLASS
+    instance, the same key ``window focus`` gates on. An override-redirect
+    window over the point with no owner at all is "unknown", never the
+    window under it: it is what receives the input. None when the point hits
+    no window, or a managed window has neither a comm nor a class.
     """
     try:
         with _open_display() as d:
             win = _window_at_point(d, x, y, popups=True)
             if win is None:
                 return None
-            return _app_id(win, d) or None
+            xres = _xres_pid(win, d)
+            if xres:
+                return _app_id(win, d, pid=xres) or None
+            name = _app_id(win, d)
+            if name:
+                return name
+            under = _window_at_point(d, x, y)
+            return "unknown" if under is None or under.id != win.id else None
     except ComputerUseError:
         raise
     except Exception:

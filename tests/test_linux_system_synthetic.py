@@ -2018,7 +2018,7 @@ class _PopupWin(_FakeXWin):
         return _NS(parent=self.parent, children=[])
 
 
-def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800)):
+def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800), xres=None):
     """Root children bottom -> top; ``managed`` are the EWMH clients."""
     import sys
     monkeypatch.setitem(sys.modules, "Xlib", _NS(X=_NS(IsViewable=2, InputOutput=1)))
@@ -2047,6 +2047,7 @@ def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(int(pid or 0)))
     monkeypatch.setattr(_linux_system, "_win_title", lambda win, d: "")
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: (xres or {}).get(win.id, 0))
 
 
 def _framed(client_id, x, y, w, h, pid, *, frame_id):
@@ -2090,14 +2091,13 @@ def test_a_popup_below_a_managed_window_does_not_cover_it(monkeypatch) -> None:
     assert _linux_system.app_at_point_id(100, 150) == "chrome"
 
 
-@pytest.mark.parametrize("kind", ["unmapped", "input_only", "not_override_redirect", "no_pid", "off_screen", "tiny"])
+@pytest.mark.parametrize("kind", ["unmapped", "input_only", "not_override_redirect", "off_screen", "tiny"])
 def test_only_a_mapped_owned_visible_popup_counts(monkeypatch, kind) -> None:
     chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
     popup = {
         "unmapped": _PopupWin(0x30, 52, 124, 327, 66, 300, mapped=False),
         "input_only": _PopupWin(0x30, 52, 124, 327, 66, 300, input_output=False),
         "not_override_redirect": _PopupWin(0x30, 52, 124, 327, 66, 300, override=False),
-        "no_pid": _PopupWin(0x30, 52, 124, 327, 66, 0),
         "off_screen": _PopupWin(0x30, -1000, -1000, 327, 66, 300),
         "tiny": _PopupWin(0x30, 52, 124, 1, 1, 300),
     }[kind]
@@ -2106,6 +2106,56 @@ def test_only_a_mapped_owned_visible_popup_counts(monkeypatch, kind) -> None:
     expect = None if kind == "off_screen" else 200
     assert _linux_system.pid_at_point(*point) == expect
     assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+def test_an_ownerless_popup_covers_the_point_as_unknown(monkeypatch) -> None:
+    """#1327: an override-redirect window with no _NET_WM_PID and no XRes owner
+    still takes the click; the hit-test must not answer with the app under it."""
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 0)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome"})
+    assert _linux_system.app_at_point_id(60, 130) == "unknown"
+    assert _linux_system.pid_at_point(60, 130) is None
+    assert _linux_system.app_at_point_id(600, 300) == "chrome"
+    assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+def test_a_pidless_popup_is_named_by_its_xres_owner(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 0)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "python3"},
+                   xres={0x30: 300})
+    assert _linux_system.app_at_point_id(60, 130) == "python3"
+    assert _linux_system.pid_at_point(60, 130) == 300
+
+
+def test_a_spoofed_net_wm_pid_does_not_name_the_point(monkeypatch) -> None:
+    """#1327: _NET_WM_PID is client-written; a popup claiming a granted app's pid
+    is named by the process the X server says owns it."""
+    mousepad, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 200)  # claims mousepad's pid
+    _popup_display(monkeypatch, [mousepad], [frame, popup], {200: "mousepad", 300: "python3"},
+                   xres={0x20: 200, 0x30: 300})
+    assert _linux_system.app_at_point_id(60, 130) == "python3"
+    assert _linux_system.pid_at_point(60, 130) == 300
+    assert _linux_system.popup_pid_at_point(60, 130) == 300
+    assert _linux_system.app_at_point_id(600, 300) == "mousepad"
+
+
+def test_frontmost_is_named_by_the_xres_owner(monkeypatch) -> None:
+    impostor, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    _popup_display(monkeypatch, [impostor], [frame], {200: "mousepad", 300: "python3"},
+                   active=0x20, xres={0x20: 300})
+    assert _linux_system.frontmost_app_id() == "python3"
+
+
+def test_without_xres_the_net_wm_pid_still_names_the_point(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "ibus-ui-gtk3"},
+                   active=0x20)
+    assert _linux_system.app_at_point_id(60, 130) == "ibus-ui-gtk3"
+    assert _linux_system.frontmost_app_id() == "chrome"
 
 
 def test_a_window_manager_frame_is_not_a_popup(monkeypatch) -> None:
