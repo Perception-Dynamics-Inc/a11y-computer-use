@@ -8994,7 +8994,51 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
         return {"cached": cached, "fresh_children": fresh}
 
     capture("native", lambda: driver._run(native))
+    capture("registry", lambda: driver._run(_chrome_registry_evidence))
+    capture("chrome_procs", lambda: subprocess.check_output(
+        ["ps", "-o", "pid,ppid,stat,etimes,rss,args", "--ppid", str(proc.pid), "-p", str(proc.pid)],
+        text=True, timeout=3)[:4000])
     return json.dumps(evidence, default=str, ensure_ascii=True)
+
+
+def _chrome_registry_evidence():
+    """#1242 evidence: raw AT-SPI desktop reads with their errors, unswallowed.
+
+    For each registered application: bus/path key, pid, name, role, child
+    count, and its first children, each read's exception kept as text.
+    Read-only; used only to describe a failure.
+    """
+    from a11y_computer_use.drivers import _atspi
+    Atspi = _atspi._atspi()
+    desktop = Atspi.get_desktop(0)
+    out = []
+
+    def raw(obj, meth, *a):
+        try:
+            return getattr(obj, meth)(*a)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERR {type(exc).__name__}: {exc}"[:300]
+    n = raw(desktop, "get_child_count")
+    out.append(("desktop_count", n))
+    for i in range(n if isinstance(n, int) else 0):
+        app = raw(desktop, "get_child_at_index", i)
+        if isinstance(app, str) or app is None:
+            out.append((i, app))
+            continue
+        row = {k: raw(app, k) for k in ("get_process_id", "get_name",
+                                         "get_role_name", "get_child_count", "get_id")}
+        try:
+            row["bus_key"] = _atspi._atspi_wrapper_key(app)
+        except Exception as exc:  # noqa: BLE001
+            row["bus_key"] = f"ERR {type(exc).__name__}: {exc}"[:300]
+        kids = []
+        for j in range(min(row["get_child_count"], 4) if isinstance(row["get_child_count"], int) else 0):
+            k = raw(app, "get_child_at_index", j)
+            kids.append(k if isinstance(k, str) or k is None else
+                        (raw(k, "get_role_name"), raw(k, "get_name"), raw(k, "get_child_count")))
+        row["kids"] = kids
+        out.append((i, row))
+    return out
 
 
 def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_path) -> None:
@@ -9070,6 +9114,11 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                         title.startswith("ROW-0300") for title in titles
                     ):
                         return
+                if not shown and len(samples) in (0, 5, 20, 60):
+                    try:
+                        samples.append({"registry": driver._run(_chrome_registry_evidence)})
+                    except Exception as exc:  # noqa: BLE001
+                        samples.append({"registry_err": str(exc)})
                 samples.append({"elapsed": round(time.monotonic() - started, 3),
                                 "pid": shot.pid if shot is not None else None,
                                 "rows": shown})
@@ -9096,7 +9145,16 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
             assert "not found" not in found, found
             assert "found after 0" not in found, found
             located = runtime.find("chrome", text="edit 300")
-            assert "no elements match" not in located, located
+            if "no elements match" in located:
+                try:
+                    reg = driver._run(_chrome_registry_evidence)
+                except Exception as exc:  # noqa: BLE001
+                    reg = repr(exc)
+                try:
+                    nat = _chrome_table_failure(driver, proc, None, phase="find", samples=[])
+                except Exception as exc:  # noqa: BLE001
+                    nat = repr(exc)
+                raise AssertionError(f"{located}; registry {reg}; evidence {nat}")
             button = next(
                 (
                     el for el in runtime._current.elements
