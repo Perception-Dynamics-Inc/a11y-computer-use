@@ -754,6 +754,73 @@ def _raise_identity_stale(
     )
 
 
+def _disclosures_over(snap: Snapshot, anchor: Element) -> list[Element]:
+    """Expanded disclosures that owned ``anchor`` when ``snap`` was taken.
+
+    Nearest first. An ancestor that was itself expanded counts (a tree row, a
+    disclosure group). So does the first child of an ancestor when it was an
+    expanded control, the ancestor is a group, and the control is not on the
+    anchor's chain: Chrome exposes a
+    ``<details>`` as a group whose first child is the ``<summary>`` toggle and
+    whose content follows it (#1369).
+    """
+    by_ref = {el.ref: el for el in snap.elements}
+    children: dict[str, list[Element]] = {}
+    for el in snap.elements:
+        if el.parent is not None:
+            children.setdefault(el.parent, []).append(el)
+    found: list[Element] = []
+    child, parent = anchor, by_ref.get(anchor.parent)
+    while parent is not None:
+        if parent.expanded is True:
+            found.append(parent)
+        kids = children.get(parent.ref, [])
+        if (parent.role == "AXGroup" and kids and kids[0] is not child
+                and kids[0].expanded is True):
+            found.append(kids[0])
+        child, parent = parent, by_ref.get(parent.parent)
+    return found
+
+
+def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
+                                 live: Snapshot, reason: str) -> None:
+    """Refuse with ``collapsed_ancestor`` when the ref's disclosure collapsed.
+
+    A collapsed ``<details>`` drops its content from the tree, so the slot
+    the ref used is held by a control from another section. Naming that
+    control, or suggesting find() for content that is not rendered, is wrong
+    advice (#1369). Nothing is redirected: there are no candidates, and the
+    only suggestion is to expand the disclosure that is now collapsed.
+    """
+    for disclosure in _disclosures_over(snap, anchor):
+        now, _ = _match_anchor(disclosure, live)
+        if now is None or now.expanded is not False:
+            continue
+        name = disclosure.title or disclosure.role
+        raise ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{ref} ({anchor.role} {anchor.title!r}) is inside {name!r}, which is now "
+            f"collapsed, so its content is not in the tree. Expand it (click "
+            f"{name!r}, ref {now.ref}) and take a new snapshot before acting; "
+            "find() and scroll_to_find cannot reach collapsed content.",
+            detail={
+                "ref": ref,
+                "snapshot_id": snap.snapshot_id,
+                "live_snapshot_id": live.snapshot_id,
+                "reason": "collapsed_ancestor",
+                "match_reason": reason,
+                "anchor": {
+                    "role": anchor.role,
+                    "title": anchor.title,
+                    "path": list(anchor.path),
+                },
+                "collapsed": {"ref": now.ref, "role": now.role, "title": now.title},
+                "candidates": [],
+                "next": ["ref"],
+            },
+        )
+
+
 def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     """Re-resolve ``ref`` (issued by ``snap``) against an already-captured
     ``live`` snapshot via the shared anchor matcher — the backend-agnostic core
@@ -796,6 +863,8 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
                 )
         parent = ancestors.get(parent.parent)
     match, reason = _match_anchor(anchor, live)
+    if match is None and reason in {"not_found", "title_changed"}:
+        _raise_if_collapsed_ancestor(snap, ref, anchor, live, reason)
     if match is None:
         message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
         candidates = stale_ref_candidates(anchor, live)
