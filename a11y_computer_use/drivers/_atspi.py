@@ -5577,18 +5577,13 @@ def _screen_size() -> tuple[int, int]:
     A too-small guess would make the engine drop real nodes as "offscreen", so
     err large; the value only bounds the projected coordinate space."""
     try:
-        from Xlib import display as _xd
+        from a11y_computer_use.drivers import _linux_system
 
-        d = _xd.Display()
-        try:
+        # The action's X connection when one is open (#1347), else a one-shot one.
+        with _linux_system._open_display() as d:
             screen = d.screen()
             w = int(screen.width_in_pixels)
             h = int(screen.height_in_pixels)
-        finally:
-            try:
-                d.close()
-            except Exception:
-                pass
         if w > 0 and h > 0:
             return w, h
     except Exception:

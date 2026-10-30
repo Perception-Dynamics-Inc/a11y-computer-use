@@ -98,6 +98,7 @@ def _comm(pid: int) -> str:
 _SCOPE_LOCK = threading.Lock()
 _SCOPE_DEPTH = 0
 _SCOPE_INDEX: tuple[dict[str, set[int]], dict[str, set[int]]] | None = None
+_SCOPE_MEMO: dict = {}
 
 # Count of full /proc walks, for the regression test (#1347).
 PROC_SCANS = 0
@@ -133,10 +134,11 @@ def proc_scope() -> Iterator[None]:
     Each entry starts a fresh walk, nested ones included (every batch step
     is its own action), and the last exit drops it.
     """
-    global _SCOPE_DEPTH, _SCOPE_INDEX
+    global _SCOPE_DEPTH, _SCOPE_INDEX, _SCOPE_MEMO
     with _SCOPE_LOCK:
         _SCOPE_DEPTH += 1
         _SCOPE_INDEX = None  # built lazily by the first lookup
+        _SCOPE_MEMO = {}
     try:
         yield
     finally:
@@ -144,6 +146,28 @@ def proc_scope() -> Iterator[None]:
             _SCOPE_DEPTH -= 1
             # Never resume an older walk: the outer action re-walks if it looks again.
             _SCOPE_INDEX = None
+            _SCOPE_MEMO = {}
+
+
+def scope_memo(key, compute):
+    """``compute()`` once per action for ``key`` (#1347); fresh outside an action.
+
+    Dropped at every action entry and exit, like the /proc walk, so a result
+    is never carried from one action into another.
+    """
+    with _SCOPE_LOCK:
+        if _SCOPE_DEPTH == 0:
+            memo = None
+        else:
+            memo = _SCOPE_MEMO
+            if key in memo:
+                return memo[key]
+    value = compute()
+    if memo is not None:
+        with _SCOPE_LOCK:
+            if memo is _SCOPE_MEMO:  # same action still open
+                memo[key] = value
+    return value
 
 
 def pids_named(name: str) -> set[int]:

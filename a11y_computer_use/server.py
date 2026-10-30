@@ -2665,10 +2665,11 @@ class Runtime:
         Every name an interpreter-hosted app shows (WM_CLASS, prgname, AT-SPI
         name, cmdline) is set by that process, so a grant on the requested
         name is never inherited by it, before or after its window maps
-        (#1296). A deny on the requested name still wins. Read fresh on
-        every call; nothing is cached.
+        (#1296). A deny on the requested name still wins. The AT-SPI
+        lookup is shared within one action and taken fresh by every action
+        (#1347); the grant and deny reads are never cached.
         """
-        from a11y_computer_use.drivers import _linux_system
+        from a11y_computer_use.drivers import _linux_exe, _linux_system
 
         _PRGNAME_HINTS.pop(resolved, None)
         wanted = (identifier or "").strip()
@@ -2684,10 +2685,15 @@ class Runtime:
             if host is None:
                 probe = getattr(self.driver, "interpreter_host", None)
                 if callable(probe):
-                    try:
-                        host = probe(wanted)
-                    except Exception:  # noqa: BLE001 - no evidence keeps the name
-                        host = None
+
+                    def ask() -> str | None:
+                        try:
+                            return probe(wanted)
+                        except Exception:  # noqa: BLE001 - no evidence keeps the name
+                            return None
+
+                    # One AT-SPI D-Bus lookup per name per action (#1347).
+                    host = _linux_exe.scope_memo(("interpreter_host", id(self.driver), wanted), ask)
         if not host:
             return resolved
         if self.store.policy(wanted)[1]:
