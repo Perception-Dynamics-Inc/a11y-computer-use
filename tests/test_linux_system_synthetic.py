@@ -2170,15 +2170,23 @@ def _prgname_display(monkeypatch, windows: list, comms: dict) -> None:
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
     monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
     # #1340: an interpreter key binds on /proc/<pid>/exe, so model each
-    # window pid as the user's process running an installed python3 rather
+    # window pid as the user's process running its installed binary rather
     # than reading whatever real pid happens to share the number.
     from a11y_computer_use.drivers import _linux_exe
 
     py = "/usr/bin/python3.12"
-    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: py if pid in comms else None)
-    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path == py)
+    exes = {pid: py if _linux_system.is_interpreter(comm) else f"/usr/bin/{comm}" for pid, comm in comms.items()}
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: exes.get(pid))
+    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path in exes.values())
     monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1000)
     monkeypatch.setattr(_linux_exe, "_me", lambda: 1000)
+    # The modelled display is the whole world: no real /proc process or
+    # AT-SPI registrant on the runner (the live job's python3 apps) counts.
+    monkeypatch.setattr(_linux_exe, "pids_named", lambda name: {p for p, c in comms.items() if c == name})
+    monkeypatch.setattr(_linux_exe, "_atspi_named_pids", lambda name: set())
+    monkeypatch.setattr(_linux_exe, "_atspi_owner_pids", lambda: set())
+    # The fake display has no X-Resource; its windows are owned by the pids they claim.
+    monkeypatch.setattr(_linux_exe, "_x11_owner_pids", lambda name: {p for p, c in comms.items() if c == name})
 
 
 def _gate_runtime(tmp_path, monkeypatch, tiers: dict, deny: tuple = (), host=None):
