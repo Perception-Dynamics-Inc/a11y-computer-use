@@ -322,16 +322,55 @@ _PORTAL_BACKENDS = frozenset({
 })
 
 
-def _app_id(win, d, *, settle: bool = False) -> str:
+def _owner_pid(win, d) -> int:
+    """Owner pid of ``win`` from the X server (XRes), else 0.
+
+    ``_NET_WM_PID`` is written by the client, so any X client can name a
+    granted app's pid on its own window (#1327). XRes names the process that
+    really holds the connection. When XRes cannot say (no extension, a
+    remote client, a server-owned window) there is no owner: 0, never the
+    self-reported property, so every caller fails closed.
+    """
+    return _xres_pid(win, d) or 0
+
+
+def _window_manager_pid(d) -> int:
+    """XRes owner of the EWMH ``_NET_SUPPORTING_WM_CHECK`` window, else 0."""
+    try:
+        check = _prop(d.screen().root, d, "_NET_SUPPORTING_WM_CHECK")
+        if not check or not int(check[0]):
+            return 0
+        return _owner_pid(d.create_resource_object("window", int(check[0])), d)
+    except Exception:  # noqa: BLE001 - no WM check window: nothing to exclude
+        return 0
+
+
+def _wm_owned(pid: int, d) -> bool:
+    """True when ``pid`` is the window manager's own process.
+
+    With show-desktop on, openbox makes one of its own windows active. It
+    has no ``_NET_WM_PID``, so it used to read as no app; XRes now names
+    openbox. The window manager is not an application the user focused.
+    """
+    return bool(pid) and pid == _window_manager_pid(d)
+
+
+def _app_id(win, d, *, settle: bool = False, pid: int | None = None) -> str:
     """Permission-keying app id: full program name, else comm, else WM_CLASS.
+
+    ``pid`` replaces the window's ``_NET_WM_PID`` when the caller already
+    has the owner from the X server (``_owner_pid``). Such a caller gets ""
+    when that owner has no comm: the WM_CLASS fallback is client-written too.
 
     The full name comes from ``/proc/<pid>/cmdline`` or the exe when the
     kernel comm is that name's 15-byte cut. A short comm is the id, which is
     how ``chrome`` stays ``chrome``. A recognized portal backend dialog
     uses its managed transient parent's process identity.
     """
-    pid = _settled_pid(win, d) if settle else _pid_of(win, d)
-    comm = _comm_for_pid(pid)
+    verified = pid is not None
+    if pid is None:
+        pid = _settled_pid(win, d) if settle else _pid_of(win, d)
+    comm = _comm_for_pid(pid) if pid else None
     if comm:
         identity = _identity_for_pid(pid, comm) or comm
         # Portal backends serve many apps. Only a managed transient dialog
@@ -341,12 +380,14 @@ def _app_id(win, d, *, settle: bool = False) -> str:
             if parent and int(parent[0]) != int(win.id):
                 owner = _window_by_id(d, int(parent[0]))
                 if owner is not None:
-                    owner_pid = _pid_of(owner, d)
+                    owner_pid = _owner_pid(owner, d) if verified else _pid_of(owner, d)
                     owner_comm = _comm_for_pid(owner_pid)
                     owner_id = _identity_for_pid(owner_pid, owner_comm)
                     if owner_id and not owner_id.startswith("xdg-desktop-portal"):
                         return owner_id
         return identity
+    if verified:
+        return ""
     return _wm_class_instance(win, d)
 
 
@@ -447,14 +488,18 @@ def frontmost_app_id() -> str:
     try:
         with _open_display() as d:
             active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
-            if not active:
+            # A window id of 0 (or none) is how the WM reports nothing active.
+            # Never look up its owner: XRes would name the root's or the WM's.
+            if not active or not int(active[0]):
                 return ""
             win = d.create_resource_object("window", int(active[0]))
-            pid = _pid_of(win, d)
+            pid = _owner_pid(win, d)
+            if _wm_owned(pid, d):
+                return ""
             comm = _comm_for_pid(pid)
             if not comm:
                 return ""
-            return _app_id(win, d)
+            return _app_id(win, d, pid=pid)
     except ComputerUseError:
         raise
     except Exception:
@@ -475,10 +520,12 @@ def active_window() -> dict | None:
             if not active or not int(active[0]):
                 return None
             win = d.create_resource_object("window", int(active[0]))
-            pid = _pid_of(win, d)
+            pid = _owner_pid(win, d)
+            if _wm_owned(pid, d):
+                return None
             return {
                 "window_id": int(win.id),
-                "app": _app_id(win, d),
+                "app": _app_id(win, d, pid=pid),
                 "pid": pid,
                 "title": _win_title(win, d),
             }
@@ -554,9 +601,11 @@ def _popup_windows(d, managed) -> list[tuple[int, object, tuple[int, int, int, i
     candidate window (#1227) is not in ``_NET_CLIENT_LIST_STACKING``, so the
     managed list cannot say it covers a point. The window manager's own frames
     (the parent of each managed client) and its edge windows are not popups:
-    a frame is excluded by identity, and a window with no ``_NET_WM_PID`` has no
-    owner to name. Any read failure gives no popups, which is the managed-only
-    answer the callers had before.
+    a frame is excluded by identity; its edge windows are InputOnly. A
+    window with neither ``_NET_WM_PID`` nor an XRes owner is still a popup:
+    input at its point goes to it, so it must not leave the window below as
+    the answer (#1327). Any read failure gives no popups, which is the
+    managed-only answer the callers had before.
     """
     try:
         from Xlib import X
@@ -581,7 +630,7 @@ def _popup_windows(d, managed) -> list[tuple[int, object, tuple[int, int, int, i
                         or not attrs.override_redirect):
                     continue
                 geom = _geometry_on_root(win, d)
-                if geom is None or geom[2] <= 1 or geom[3] <= 1 or not _pid_of(win, d):
+                if geom is None or geom[2] <= 1 or geom[3] <= 1:
                     continue
                 # The window manager parks helper windows off screen.
                 if (geom[0] + geom[2] <= 0 or geom[1] + geom[3] <= 0
@@ -642,7 +691,7 @@ def _top_window_pid(x: float, y: float) -> int | None:
             win = _window_at_point(d, x, y, popups=True)
             if win is None:
                 return None
-            pid = _pid_of(win, d)
+            pid = _owner_pid(win, d)
             return int(pid) if pid else None
     except ComputerUseError:
         raise
@@ -664,7 +713,7 @@ def popup_pid_at_point(x: float, y: float) -> int | None:
             top = _window_at_point(d, x, y, popups=True)
             if top is None or top.id == getattr(_window_at_point(d, x, y), "id", None):
                 return None
-            pid = _pid_of(top, d)
+            pid = _owner_pid(top, d)
             return int(pid) if pid else None
     except Exception:
         return None
@@ -703,7 +752,7 @@ def drag_overlay_at_point(x: float, y: float) -> tuple[int, str] | None:
                     continue
                 # Missing ownership must not fall through to a granted app
                 # underneath the overlay.
-                return int(win.id), _app_id(win, d) or "unknown"
+                return int(win.id), _app_id(win, d, pid=_owner_pid(win, d)) or "unknown"
             except Exception as exc:
                 # Never replace unreadable ownership with the granted app
                 # underneath it.
@@ -720,17 +769,23 @@ def drag_overlay_at_point(x: float, y: float) -> tuple[int, str] | None:
 def app_at_point_id(x: float, y: float) -> str | None:
     """App id of the topmost window containing a screen point.
 
-    The process comm when the window has a pid. A Tk or Xt window has no
-    ``_NET_WM_PID``; the hit-test then uses its WM_CLASS instance, the same
-    key ``window focus`` gates on. None when the point hits no window, or
-    the window has neither a comm nor a class.
+    The process comm of the window's owner: the X server's (XRes) when it
+    can say, else ``_NET_WM_PID``, which any client can set to a granted
+    app's pid (#1327). A Tk or Xt window with neither uses its WM_CLASS
+    instance, the same key ``window focus`` gates on. An override-redirect
+    window over the point with no owner at all is "unknown", never the
+    window under it: it is what receives the input. None when the point hits
+    no window, or a managed window has neither a comm nor a class.
     """
     try:
         with _open_display() as d:
             win = _window_at_point(d, x, y, popups=True)
             if win is None:
                 return None
-            return _app_id(win, d) or None
+            # No XRes owner, or an owner with no comm, is "unknown": the
+            # recheck refuses it. _NET_WM_PID and WM_CLASS are client-written
+            # and never name the point (#1327).
+            return _app_id(win, d, pid=_owner_pid(win, d)) or "unknown"
     except ComputerUseError:
         raise
     except Exception:
@@ -1077,8 +1132,8 @@ def _xres_pid(win, d) -> int | None:
 
     ``_NET_WM_PID`` is written by the client and can name any pid. The
     X-Resource extension's LocalClientPID comes from the server's own view
-    of the connection. None when the extension is missing or the client is
-    not local (no pid known).
+    of the connection. None when the extension is missing, the client is
+    not local (no pid known), or the window belongs to the X server itself.
     """
     try:
         from Xlib.ext import res
@@ -1087,6 +1142,12 @@ def _xres_pid(win, d) -> int | None:
             return None
         reply = d.res_query_client_ids([{"client": int(win.id), "mask": res.LocalClientPIDMask}])
         for cid in reply.ids:
+            # Client base 0 is the X server itself: the root window and other
+            # server-owned resources report the server's pid (Xvfb, Xorg).
+            # That is no app, so it names nothing and the caller falls back
+            # to _NET_WM_PID, as before XRes was used.
+            if not int(getattr(cid.spec, "client", 0) or 0):
+                continue
             if cid.spec.mask & res.LocalClientPIDMask and cid.value:
                 return int(cid.value[0]) or None
     except Exception:  # noqa: BLE001 - unknown is refused by the caller
@@ -1264,7 +1325,7 @@ def transient_parent_title(*, pid: int, title: str) -> str | None:
         return None
     try:
         with _open_display() as d:
-            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            owned = [win for win in _managed_windows(d) if _owner_pid(win, d) == pid]
             children = [win for win in owned if _win_title(win, d) == title]
             if len(children) != 1:
                 return None
@@ -1294,7 +1355,7 @@ def active_transient_dialog(*, pid: int, title: str, parent_title: str) -> bool:
         return False
     try:
         with _open_display() as d:
-            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            owned = [win for win in _managed_windows(d) if _owner_pid(win, d) == pid]
             children = [win for win in owned if _win_title(win, d) == title]
             parents = [win for win in owned if _win_title(win, d) == parent_title]
             if len(children) != 1 or len(parents) != 1:
@@ -1330,7 +1391,7 @@ def x11_modal_dialog(*, pid: int, title: str) -> bool:
         return False
     try:
         with _open_display() as d:
-            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            owned = [win for win in _managed_windows(d) if _owner_pid(win, d) == pid]
             children = [win for win in owned if _win_title(win, d) == title]
             if len(children) != 1:
                 return False
@@ -1364,7 +1425,7 @@ def transient_modal_windows(*, pid: int, parent_title: str) -> list[dict]:
         return []
     try:
         with _open_display() as d:
-            owned = [win for win in _managed_windows(d) if _pid_of(win, d) == pid]
+            owned = [win for win in _managed_windows(d) if _owner_pid(win, d) == pid]
             if len(owned) < 2:
                 return []
             parents = [win for win in owned if _win_title(win, d) == parent_title]
@@ -1849,7 +1910,7 @@ def _client_rows_for_pid(d, pid: int) -> list[tuple]:
     for win in _managed_windows(d):
         if _is_hidden(win, d):
             continue
-        owner = _pid_of(win, d)
+        owner = _owner_pid(win, d)
         if not owner or int(owner) != int(pid):
             continue
         geom = _geometry_on_root(win, d)

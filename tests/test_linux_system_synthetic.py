@@ -19,6 +19,16 @@ import pytest
 from a11y_computer_use.drivers import _linux_system
 from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
+_REAL_XRES_PID = _linux_system._xres_pid
+
+
+@pytest.fixture(autouse=True)
+def _honest_x_server(monkeypatch):
+    """The fake displays model a local X server with X-Resource whose clients
+    set an honest ``_NET_WM_PID``: XRes names the same pid. Spoof and
+    no-owner cases override ``_xres_pid`` explicitly (#1327)."""
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: _linux_system._pid_of(win, d) or None)
+
 
 class _FakeXWin:
     def __init__(self, wid: int, x: int, y: int, w: int, h: int, pid: int):
@@ -90,15 +100,16 @@ def test_app_at_point_prefers_the_window_that_contains_the_point(fake_ewmh) -> N
     assert _linux_system.app_at_point_id(3000, 3000) is None
 
 
-def test_app_at_point_uses_wm_class_when_the_window_has_no_pid(monkeypatch) -> None:
-    """A Tk or Xt window has no comm. The hit-test names its WM_CLASS."""
+def test_app_at_point_without_an_xres_owner_is_unknown(monkeypatch) -> None:
+    """#1327: a window the X server names no owner for is "unknown", which the
+    recheck refuses. WM_CLASS is client-written and never names the point."""
     win = _ClassWin(0x21, pid=0, instance="xmessage", klass="Xmessage", title="note")
     _active_display(monkeypatch, [win], 0x21)
-    assert _linux_system.app_at_point_id(20, 20) == "xmessage"
+    assert _linux_system.app_at_point_id(20, 20) == "unknown"
     assert _linux_system.pid_at_point(20, 20) is None
     blank = _ClassWin(0x22, pid=0, instance="", klass="", title="blank")
     _active_display(monkeypatch, [blank], 0x22)
-    assert _linux_system.app_at_point_id(20, 20) is None
+    assert _linux_system.app_at_point_id(20, 20) == "unknown"
 
 
 def test_topmost_window_wins_when_windows_overlap(monkeypatch) -> None:
@@ -279,12 +290,12 @@ def test_active_window_names_the_ewmh_window_and_its_comm(monkeypatch) -> None:
     assert _linux_system.frontmost_app_id() == "python3"
 
 
-def test_active_window_uses_wm_class_when_the_window_has_no_pid(monkeypatch) -> None:
-    """``frontmost_app_id`` stays empty: permission identity is the comm only."""
+def test_active_window_without_an_xres_owner_names_no_app(monkeypatch) -> None:
+    """#1327: no XRes owner means no app and pid 0, not the WM_CLASS."""
     win = _ClassWin(0x21, pid=0, instance="xmessage", klass="Xmessage", title="note")
     _active_display(monkeypatch, [win], 0x21)
     assert _linux_system.active_window() == {
-        "window_id": 0x21, "app": "xmessage", "pid": 0, "title": "note",
+        "window_id": 0x21, "app": "", "pid": 0, "title": "note",
     }
     assert _linux_system.frontmost_app_id() == ""
 
@@ -1762,7 +1773,7 @@ def test_drag_overlay_uses_root_stacking_not_managed_clients(monkeypatch, cover)
     root.query_tree = lambda: _NS(children=children)
     display = _NS(screen=lambda: _NS(root=root))
     monkeypatch.setattr(_linux_system, '_display', lambda: display)
-    monkeypatch.setattr(_linux_system, '_app_id', lambda win, d:
+    monkeypatch.setattr(_linux_system, '_app_id', lambda win, d, **kw:
                         '' if cover == 'unknown' else 'screenshooter')
     expected = (2, 'unknown' if cover == 'unknown' else 'screenshooter')
     assert _linux_system.drag_overlay_at_point(200, 150) == (
@@ -2018,7 +2029,8 @@ class _PopupWin(_FakeXWin):
         return _NS(parent=self.parent, children=[])
 
 
-def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800)):
+def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800), xres=None,
+                   wm_check=0, zero_active=False):
     """Root children bottom -> top; ``managed`` are the EWMH clients."""
     import sys
     monkeypatch.setitem(sys.modules, "Xlib", _NS(X=_NS(IsViewable=2, InputOutput=1)))
@@ -2028,7 +2040,11 @@ def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1
 
         def get_full_property(self, atom, kind):
             if atom == "_NET_ACTIVE_WINDOW":
-                return _NS(value=[active]) if active else None
+                if active is None:
+                    return None
+                return _NS(value=[active]) if active or zero_active else None
+            if atom == "_NET_SUPPORTING_WM_CHECK":
+                return _NS(value=[wm_check]) if wm_check else None
             return super().get_full_property(atom, kind)
 
         def get_geometry(self):
@@ -2047,6 +2063,8 @@ def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(int(pid or 0)))
     monkeypatch.setattr(_linux_system, "_win_title", lambda win, d: "")
+    if xres is not None:
+        monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: xres.get(win.id, 0))
 
 
 def _framed(client_id, x, y, w, h, pid, *, frame_id):
@@ -2090,14 +2108,13 @@ def test_a_popup_below_a_managed_window_does_not_cover_it(monkeypatch) -> None:
     assert _linux_system.app_at_point_id(100, 150) == "chrome"
 
 
-@pytest.mark.parametrize("kind", ["unmapped", "input_only", "not_override_redirect", "no_pid", "off_screen", "tiny"])
+@pytest.mark.parametrize("kind", ["unmapped", "input_only", "not_override_redirect", "off_screen", "tiny"])
 def test_only_a_mapped_owned_visible_popup_counts(monkeypatch, kind) -> None:
     chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
     popup = {
         "unmapped": _PopupWin(0x30, 52, 124, 327, 66, 300, mapped=False),
         "input_only": _PopupWin(0x30, 52, 124, 327, 66, 300, input_output=False),
         "not_override_redirect": _PopupWin(0x30, 52, 124, 327, 66, 300, override=False),
-        "no_pid": _PopupWin(0x30, 52, 124, 327, 66, 0),
         "off_screen": _PopupWin(0x30, -1000, -1000, 327, 66, 300),
         "tiny": _PopupWin(0x30, 52, 124, 1, 1, 300),
     }[kind]
@@ -2106,6 +2123,97 @@ def test_only_a_mapped_owned_visible_popup_counts(monkeypatch, kind) -> None:
     expect = None if kind == "off_screen" else 200
     assert _linux_system.pid_at_point(*point) == expect
     assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+def test_an_ownerless_popup_covers_the_point_as_unknown(monkeypatch) -> None:
+    """#1327: an override-redirect window with no _NET_WM_PID and no XRes owner
+    still takes the click; the hit-test must not answer with the app under it."""
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 0)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome"})
+    assert _linux_system.app_at_point_id(60, 130) == "unknown"
+    assert _linux_system.pid_at_point(60, 130) is None
+    assert _linux_system.app_at_point_id(600, 300) == "chrome"
+    assert [row["name"] for row in _linux_system.running_apps()] == ["chrome"]
+
+
+def test_a_pidless_popup_is_named_by_its_xres_owner(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 0)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "python3"},
+                   xres={0x30: 300})
+    assert _linux_system.app_at_point_id(60, 130) == "python3"
+    assert _linux_system.pid_at_point(60, 130) == 300
+
+
+def test_a_spoofed_net_wm_pid_does_not_name_the_point(monkeypatch) -> None:
+    """#1327: _NET_WM_PID is client-written; a popup claiming a granted app's pid
+    is named by the process the X server says owns it."""
+    mousepad, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 200)  # claims mousepad's pid
+    _popup_display(monkeypatch, [mousepad], [frame, popup], {200: "mousepad", 300: "python3"},
+                   xres={0x20: 200, 0x30: 300})
+    assert _linux_system.app_at_point_id(60, 130) == "python3"
+    assert _linux_system.pid_at_point(60, 130) == 300
+    assert _linux_system.popup_pid_at_point(60, 130) == 300
+    assert _linux_system.app_at_point_id(600, 300) == "mousepad"
+
+
+def test_frontmost_is_named_by_the_xres_owner(monkeypatch) -> None:
+    impostor, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    _popup_display(monkeypatch, [impostor], [frame], {200: "mousepad", 300: "python3"},
+                   active=0x20, xres={0x20: 300})
+    assert _linux_system.frontmost_app_id() == "python3"
+
+
+def test_the_window_managers_own_active_window_is_no_frontmost_app(monkeypatch) -> None:
+    """#1332 CI: with show-desktop on, openbox makes its own window active. It
+    has no _NET_WM_PID and used to read as no app; XRes names openbox. The
+    window manager is not a focused application."""
+    client, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    wm_window = _PopupWin(0x40, 0, 0, 1, 1, 0, override=False)
+    check = _PopupWin(0x41, -1, -1, 1, 1, 0, override=False)
+    _popup_display(monkeypatch, [client], [frame, wm_window, check],
+                   {200: "mousepad", 77: "openbox"}, active=0x40,
+                   xres={0x20: 200, 0x40: 77, 0x41: 77}, wm_check=0x41)
+    assert _linux_system.frontmost_app_id() == ""
+    assert _linux_system.active_window() is None
+
+
+@pytest.mark.parametrize("value", ["zero", "absent"])
+def test_no_active_window_is_no_frontmost_app_never_the_root_owner(monkeypatch, value) -> None:
+    """Tester on #1332 (1d6a51f5): _NET_ACTIVE_WINDOW = 0 on an empty or
+    shown desktop returned 'xfwm4' (the root/WM owner via XRes); main gives ''."""
+    client, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: 77)  # root and WM: xfwm4
+    _popup_display(monkeypatch, [client], [frame], {200: "mousepad", 77: "xfwm4"},
+                   active=0, zero_active=(value == "zero"))
+    display = _linux_system._display()
+    lookup = display.create_resource_object
+    # Window 0 resolves like the X server's root: owned by the WM process.
+    display.create_resource_object = lambda kind, wid: (
+        _PopupWin(0, 0, 0, 1280, 800, 0, override=False) if int(wid) == 0 else lookup(kind, wid))
+    assert _linux_system.frontmost_app_id() == ""
+    assert _linux_system.active_window() is None
+
+
+def test_a_client_is_still_frontmost_beside_the_window_manager(monkeypatch) -> None:
+    client, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    check = _PopupWin(0x41, -1, -1, 1, 1, 0, override=False)
+    _popup_display(monkeypatch, [client], [frame, check],
+                   {200: "mousepad", 77: "openbox"}, active=0x20,
+                   xres={0x20: 200, 0x41: 77}, wm_check=0x41)
+    assert _linux_system.frontmost_app_id() == "mousepad"
+    assert _linux_system.active_window()["pid"] == 200
+
+
+def test_without_xres_the_net_wm_pid_still_names_the_point(monkeypatch) -> None:
+    chrome, chrome_frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 300)
+    _popup_display(monkeypatch, [chrome], [chrome_frame, popup], {200: "chrome", 300: "ibus-ui-gtk3"},
+                   active=0x20)
+    assert _linux_system.app_at_point_id(60, 130) == "ibus-ui-gtk3"
+    assert _linux_system.frontmost_app_id() == "chrome"
 
 
 def test_a_window_manager_frame_is_not_a_popup(monkeypatch) -> None:
@@ -2325,3 +2433,105 @@ def test_a_ref_action_on_an_interpreter_hosted_snapshot_is_gated_as_python3(tmp_
     assert rt._linux_gate_key("python3") == "python3"
     granted = _gate_runtime(tmp_path / "g", monkeypatch, {"python3": "full"})
     assert granted._linux_gate_key("cuprobe1296") == "python3"
+
+
+def _xres_display(client, pid):
+    import types
+    spec = types.SimpleNamespace(client=client, mask=2)
+    reply = types.SimpleNamespace(ids=[types.SimpleNamespace(spec=spec, value=[pid])])
+    return types.SimpleNamespace(
+        has_extension=lambda name: True,
+        res_query_client_ids=lambda specs: reply,
+    )
+
+
+def test_xres_never_names_the_x_server_as_a_window_owner(monkeypatch) -> None:
+    """A server-owned window (the root, which openbox's show-desktop leaves
+    active) reports client base 0 and the X server's pid. Naming that pid made
+    frontmost read "Xvfb" with no app focused (#1332 CI)."""
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "Xlib.ext", types.SimpleNamespace(res=types.SimpleNamespace(LocalClientPIDMask=2)))
+    monkeypatch.setitem(sys.modules, "Xlib.ext.res", types.SimpleNamespace(LocalClientPIDMask=2))
+    win = types.SimpleNamespace(id=0x21F)
+    assert _REAL_XRES_PID(win, _xres_display(0, 4242)) is None
+    assert _REAL_XRES_PID(types.SimpleNamespace(id=0x200000), _xres_display(0x200000, 4343)) == 4343
+
+
+def test_the_hit_test_never_falls_back_to_the_net_wm_pid(monkeypatch) -> None:
+    """#1327 gap 1: XRes gives no pid for a popup claiming Mousepad's pid and
+    class; the point is "unknown", not mousepad."""
+    mousepad, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    popup = _PopupWin(0x30, 52, 124, 327, 66, 200)
+    _popup_display(monkeypatch, [mousepad], [frame, popup], {200: "mousepad"},
+                   xres={0x20: 200})
+    assert _linux_system.app_at_point_id(60, 130) == "unknown"
+    assert _linux_system.pid_at_point(60, 130) is None
+    assert _linux_system.app_at_point_id(600, 300) == "mousepad"
+
+
+def test_active_window_is_named_by_the_xres_owner(monkeypatch) -> None:
+    """#1327 gap 3: a window claiming Mousepad's pid is reported as its real owner."""
+    impostor, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    _popup_display(monkeypatch, [impostor], [frame], {200: "mousepad", 300: "python3"},
+                   active=0x20, xres={0x20: 300})
+    row = _linux_system.active_window()
+    assert row["pid"] == 300 and row["app"] == "python3"
+
+
+@pytest.mark.parametrize("owner", ["xres", "none"])
+def test_drag_overlay_is_named_by_the_xres_owner(monkeypatch, owner) -> None:
+    """#1327 gap 2: a full-screen override-redirect claiming Mousepad's pid."""
+    import sys
+    monkeypatch.setitem(sys.modules, 'Xlib', _NS(X=_NS(IsViewable=2, InputOutput=1)))
+    background = _FakeXWin(1, 0, 0, 1280, 800, 200)
+    overlay = _FakeXWin(2, 0, 0, 1280, 800, 200)
+    background.get_attributes = lambda: _NS(map_state=2, win_class=1, override_redirect=False)
+    overlay.get_attributes = lambda: _NS(map_state=2, win_class=1, override_redirect=True)
+    root = _FakeXRoot([background])
+    root.get_geometry = lambda: _NS(width=1280, height=800)
+    root.query_tree = lambda: _NS(children=[background, overlay])
+    monkeypatch.setattr(_linux_system, '_display', lambda: _NS(screen=lambda: _NS(root=root)))
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {200: "mousepad", 300: "python3"}.get(pid))
+    real = {1: 200, 2: 300 if owner == "xres" else 0}
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: real.get(win.id, 0))
+    assert _linux_system.drag_overlay_at_point(200, 150) == (
+        2, "python3" if owner == "xres" else "unknown")
+
+
+def test_window_by_pid_helpers_skip_a_window_that_only_claims_the_pid(monkeypatch) -> None:
+    """#1327 gap 4: a foreign window with _NET_WM_PID = Mousepad's pid is not
+    one of Mousepad's windows."""
+    mousepad = _FakeXWin(0x20, 0, 0, 800, 600, 200)
+    impostor = _FakeXWin(0x30, 100, 100, 400, 300, 200)
+    root = _FakeXRoot([mousepad, impostor])
+    by_id = {w.id: w for w in (mousepad, impostor)}
+    display = _NS(screen=lambda: _NS(root=root), intern_atom=lambda name: name,
+                  create_resource_object=lambda kind, wid: by_id[int(wid)])
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_is_hidden", lambda win, d: False)
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: {0x20: 200, 0x30: 300}[win.id])
+    rows = _linux_system._client_rows_for_pid(display, 200)
+    assert [row[0].id for row in rows] == [0x20]
+
+
+def test_portal_parent_is_named_by_its_xres_owner(monkeypatch) -> None:
+    """#1327 gap 3: a portal dialog's parent that only claims Chrome's pid
+    does not lend the dialog Chrome's grant."""
+    class Portal(_ClassWin):
+        def get_full_property(self, atom, kind):
+            if atom == "WM_TRANSIENT_FOR":
+                return _NS(value=[0x20])
+            return super().get_full_property(atom, kind)
+
+    parent = _ClassWin(0x20, pid=200, title="Browser")
+    portal = Portal(0x30, pid=300, title="Open File")
+    _active_display(monkeypatch, [parent, portal], 0x30)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid",
+                        lambda pid: {200: "chrome", 300: "xdg-desktop-por", 400: "python3"}.get(pid))
+    monkeypatch.setattr(_linux_system, "_cmdline_basename", lambda pid: "xdg-desktop-portal-gtk" if pid == 300 else None)
+    monkeypatch.setattr(_linux_system, "_exe_basename", lambda pid: "xdg-desktop-portal-gtk" if pid == 300 else None)
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: {0x20: 400, 0x30: 300}[win.id])
+    assert _linux_system.frontmost_app_id() == "python3"
+    assert _linux_system.active_window()["app"] == "python3"
+    assert _linux_system.app_at_point_id(20, 20) == "python3"
