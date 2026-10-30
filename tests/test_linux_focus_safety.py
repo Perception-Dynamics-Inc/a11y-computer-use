@@ -117,6 +117,7 @@ def test_readable_empty_text_is_still_a_mismatch(focus_driver, monkeypatch) -> N
     assert typed == ["hello"] and inserted == []
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_runtime_cannot_use_another_apps_full_grant_for_a_cached_editable(
     focus_driver, monkeypatch, tmp_path
 ) -> None:
@@ -233,6 +234,7 @@ def test_navigation_and_shortcuts_still_reach_a_focused_password_field(
     assert pressed == [chord]
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_key_and_act_key_refuse_and_redact_a_printable_chord(
     focus_driver, monkeypatch, tmp_path
 ) -> None:
@@ -276,6 +278,7 @@ def test_key_and_act_key_refuse_and_redact_a_printable_chord(
     assert '"chord": "a"' not in next((tmp_path / "audit").glob("*.jsonl")).read_text()
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_act_key_modifiers_fold_and_keep_the_password_refusal(
     focus_driver, monkeypatch, tmp_path
 ) -> None:

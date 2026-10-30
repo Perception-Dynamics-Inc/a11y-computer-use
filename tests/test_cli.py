@@ -139,6 +139,7 @@ def test_run_once_rejects_unknown_tool(capsys, home) -> None:
     assert "unknown tool" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_run_once_accepts_hover_and_does_not_click(capsys, home, fake_front, monkeypatch) -> None:
     """Fake driver only. run-once used to reject the name before any pointer move."""
     from a11y_computer_use.drivers import linux as linux_driver
