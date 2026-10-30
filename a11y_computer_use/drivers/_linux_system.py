@@ -1104,8 +1104,8 @@ def _xres_pid(win, d) -> int | None:
 
     ``_NET_WM_PID`` is written by the client and can name any pid. The
     X-Resource extension's LocalClientPID comes from the server's own view
-    of the connection. None when the extension is missing or the client is
-    not local (no pid known).
+    of the connection. None when the extension is missing, the client is
+    not local (no pid known), or the window belongs to the X server itself.
     """
     try:
         from Xlib.ext import res
@@ -1114,6 +1114,12 @@ def _xres_pid(win, d) -> int | None:
             return None
         reply = d.res_query_client_ids([{"client": int(win.id), "mask": res.LocalClientPIDMask}])
         for cid in reply.ids:
+            # Client base 0 is the X server itself: the root window and other
+            # server-owned resources report the server's pid (Xvfb, Xorg).
+            # That is no app, so it names nothing and the caller falls back
+            # to _NET_WM_PID, as before XRes was used.
+            if not int(getattr(cid.spec, "client", 0) or 0):
+                continue
             if cid.spec.mask & res.LocalClientPIDMask and cid.value:
                 return int(cid.value[0]) or None
     except Exception:  # noqa: BLE001 - unknown is refused by the caller

@@ -2357,3 +2357,26 @@ def test_a_ref_action_on_an_interpreter_hosted_snapshot_is_gated_as_python3(tmp_
     assert rt._linux_gate_key("python3") == "python3"
     granted = _gate_runtime(tmp_path / "g", monkeypatch, {"python3": "full"})
     assert granted._linux_gate_key("cuprobe1296") == "python3"
+
+
+def _xres_display(client, pid):
+    import types
+    spec = types.SimpleNamespace(client=client, mask=2)
+    reply = types.SimpleNamespace(ids=[types.SimpleNamespace(spec=spec, value=[pid])])
+    return types.SimpleNamespace(
+        has_extension=lambda name: True,
+        res_query_client_ids=lambda specs: reply,
+    )
+
+
+def test_xres_never_names_the_x_server_as_a_window_owner(monkeypatch) -> None:
+    """A server-owned window (the root, which openbox's show-desktop leaves
+    active) reports client base 0 and the X server's pid. Naming that pid made
+    frontmost read "Xvfb" with no app focused (#1332 CI)."""
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "Xlib.ext", types.SimpleNamespace(res=types.SimpleNamespace(LocalClientPIDMask=2)))
+    monkeypatch.setitem(sys.modules, "Xlib.ext.res", types.SimpleNamespace(LocalClientPIDMask=2))
+    win = types.SimpleNamespace(id=0x21F)
+    assert _linux_system._xres_pid(win, _xres_display(0, 4242)) is None
+    assert _linux_system._xres_pid(types.SimpleNamespace(id=0x200000), _xres_display(0x200000, 4343)) == 4343
