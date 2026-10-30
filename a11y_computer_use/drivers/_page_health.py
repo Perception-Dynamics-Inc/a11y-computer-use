@@ -31,7 +31,7 @@ def probe(pid: int | None, title: str, url: str | None = None) -> bool | None:
 
     if type(pid) is not int or pid <= 0:
         return None
-    deadline = time.monotonic() + BUDGET
+    started = time.monotonic()
     session = None
     transport = None
     try:
@@ -39,7 +39,9 @@ def probe(pid: int | None, title: str, url: str | None = None) -> bool | None:
         if port is None:
             return None
         def remaining():
-            left = deadline - time.monotonic()
+            # BUDGET minus elapsed, not (start + BUDGET) - now: the latter can
+            # round above BUDGET when a coarse clock (Windows) has not ticked.
+            left = BUDGET - max(0.0, time.monotonic() - started)
             if left <= 0:
                 raise TimeoutError
             return left

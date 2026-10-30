@@ -200,7 +200,9 @@ class CDPSession:
         except OSError as exc:
             raise self._connection_error(method, str(exc)) from exc
         while True:
-            remaining = deadline - time.monotonic()
+            # Clamp to the caller's timeout: on a clock that has not ticked
+            # (coarse on Windows), (start + timeout) - now can round above it.
+            remaining = min(timeout, deadline - time.monotonic())
             if remaining <= 0:
                 raise self._timeout(method, timeout, sent=True)
             try:
