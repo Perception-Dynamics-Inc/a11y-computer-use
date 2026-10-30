@@ -23767,8 +23767,14 @@ def _modal_collection(root, *, split: bool = False):
     reports a retryable ``busy`` error (re-observe and retry) rather than
     ``modal_boundary_unavailable``: a slow app is not an unsupported one.
     """
+    cached = _structural_collection_lookup(root, split)
+    if cached is not None:
+        return cached
+    generation = _structural_generation()
     result = _modal_collection_once(root, split=split)
     if result is not _COLLECTION_TIMEOUT:
+        if result is not None:
+            _structural_collection_store(root, split, result, generation)
         return result
     _ping_answers(root)
     _modal_collection_state.busy = True
@@ -23776,6 +23782,158 @@ def _modal_collection(root, *, split: bool = False):
 
 
 _COLLECTION_TIMEOUT = object()
+
+# Complete role-query results per subtree, valid while no event could have
+# added or removed a dialog-role node (#1368). Re-querying a 5,000-row page
+# on every key and wheel notch made the boundary miss its per-call wait under
+# load. Only complete replies are kept; candidates are re-checked live by
+# ``is_modal``. Without a working listener nothing is retained.
+_structural_collections: dict = {}
+_structural_collections_generation: int | None = None
+_structural_collections_lock = threading.Lock()
+
+
+def _structural_generation():
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.modal_cache_ready():
+        return None
+    return _atspi_events.structure_epoch()
+
+
+def _structural_collection_lookup(root, split: bool):
+    generation = _structural_generation()
+    if generation is None:
+        return None
+    with _structural_collections_lock:
+        if _structural_collections_generation != generation:
+            return None
+        hit = _structural_collections.get((_ancestor_key(root), bool(split)))
+    return list(hit[1]) if hit is not None else None
+
+
+def _structural_collection_store(root, split: bool, result, generation) -> None:
+    _structural_store_key(_ancestor_key(root), split, root, result, generation)
+
+
+def _structural_store_key(key, split: bool, root, result, generation) -> bool:
+    global _structural_collections_generation
+    if generation is None or generation != _structural_generation():
+        return False  # An event arrived mid-query; the reply may be stale.
+    with _structural_collections_lock:
+        if _structural_collections_generation != generation:
+            _structural_collections.clear()
+            _structural_collections_generation = generation
+        if len(_structural_collections) >= 64:
+            _structural_collections.clear()
+        _structural_collections[(key, bool(split))] = (root, list(result))
+    return True
+
+
+# A freshly loaded Chromium page is asked for its dialog roles off the input
+# path (#1368). The first key after a reload of a 5,000-row table otherwise
+# pays the whole-document query inside the 300ms input wait and is refused
+# under load. The prefetch runs on its own connection and thread; inputs
+# still use the same per-call wait. Only an empty, complete reply under an
+# unchanged structural epoch is stored, so a page with any dialog-role node,
+# or one that changed while the query ran, is discovered on the input path
+# exactly as before.
+_PREFETCH_ATTEMPTS = 4
+_prefetch_queue = None
+_prefetch_lock = threading.Lock()
+_prefetch_connection = None
+
+
+def prefetch_document_roles(key) -> None:
+    """Queue a background dialog-role query for one loaded document."""
+    global _prefetch_queue
+    if not (isinstance(key, tuple) and len(key) == 2
+            and str(key[0]).startswith(":") and str(key[1]).startswith("/")):
+        return
+    with _prefetch_lock:
+        if _prefetch_queue is None:
+            import queue
+
+            _prefetch_queue = queue.Queue(maxsize=8)
+            threading.Thread(target=_prefetch_worker, name="a11y-modal-prefetch",
+                             daemon=True).start()
+        try:
+            _prefetch_queue.put_nowait(key)
+        except Exception:
+            pass
+
+
+def _prefetch_bus():
+    global _prefetch_connection
+    if _prefetch_connection is not None:
+        return _prefetch_connection
+    address = _a11y_bus_address()
+    if not address:
+        return None
+    from gi.repository import Gio
+
+    _prefetch_connection = Gio.DBusConnection.new_for_address_sync(
+        address,
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+        | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None, None,
+    )
+    return _prefetch_connection
+
+
+def _dialog_role_rule():
+    """The modal Collection rule as a D-Bus ``MatchRule`` struct."""
+    from gi.repository import GLib
+
+    Atspi = _atspi()
+    mt = Atspi.CollectionMatchType
+    words = [0, 0, 0, 0]
+    for name in ("DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER"):
+        role = getattr(Atspi.Role, name, None)
+        if role is not None:
+            value = int(role)
+            words[value // 32] |= 1 << (value % 32)
+    words = [w - (1 << 32) if w >= 1 << 31 else w for w in words]
+    return GLib.Variant(
+        "((aiia{ss}iaiiasib)uib)",
+        (([], int(mt.NONE), {}, int(mt.NONE), words, int(mt.ANY), [], int(mt.NONE), False),
+         int(Atspi.CollectionSortOrder.CANONICAL), 0, True),
+    )
+
+
+def _prefetch_worker() -> None:
+    from gi.repository import Gio, GLib
+
+    while True:
+        key = _prefetch_queue.get()
+        try:
+            bus = _prefetch_bus()
+            if bus is None:
+                continue
+            bus_name, path = key
+            toolkit = bus.call_sync(
+                bus_name, "/org/a11y/atspi/accessible/root",
+                "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", ("org.a11y.atspi.Application", "ToolkitName")),
+                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 2000, None,
+            ).get_child_value(0).get_variant().get_string()
+            if "chrom" not in toolkit.lower():
+                continue
+            for _attempt in range(_PREFETCH_ATTEMPTS):
+                generation = _structural_generation()
+                if generation is None:
+                    break
+                reply = bus.call_sync(
+                    bus_name, path, "org.a11y.atspi.Collection", "GetMatches",
+                    _dialog_role_rule(), GLib.VariantType.new("(a(so))"),
+                    Gio.DBusCallFlags.NONE, 10000, None,
+                )
+                if reply.get_child_value(0).n_children():
+                    break  # Dialog roles exist: the input path decides.
+                if _structural_store_key(key, False, None, [], generation):
+                    break
+        except Exception:
+            continue
 
 
 def _modal_collection_once(root, *, split: bool = False):
@@ -23898,6 +24056,56 @@ def snapshot_top_level_modals(root) -> list:
     return [node for node in candidates if is_modal(node) and _modal_in_window(node, root)]
 
 
+_SCOPED_MODAL_WALK_MAX = 1024
+_SCOPED_MODAL_ROLES = frozenset({"dialog", "alert", "window", "frame", "file chooser"})
+
+
+def _chromium_scoped_modal_candidates(root):
+    """Dialog-role candidates of a Chromium window, page documents queried alone.
+
+    The browser chrome around the page is a few hundred nodes and is walked
+    directly. Each web document is one Collection query (cached per
+    structural epoch). None when a document query did not complete, a child
+    count failed, or the walk exceeds its bound: the caller then runs the
+    original whole-window query, so this never reports fewer candidates
+    than that query would.
+    """
+    candidates = []
+    queue = deque([root])
+    seen = set()
+    while queue:
+        node = queue.popleft()
+        key = _ancestor_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(seen) > _SCOPED_MODAL_WALK_MAX:
+            return None
+        role = _role_name(node)
+        if not role and call_went_unanswered():
+            return None
+        if role in _SCOPED_MODAL_ROLES:
+            # The same roles the Collection rule matches.
+            candidates.append(node)
+        if role in {"document web", "document frame"}:
+            descendants = _modal_collection(node)
+            if descendants is None:
+                return None
+            candidates.extend(descendants)
+            continue
+        count = _child_count(node)
+        if count < 0 or call_went_unanswered():
+            return None
+        for index in range(count):
+            child = _child_at(node, index)
+            if child is None:
+                if call_went_unanswered():
+                    return None
+                continue
+            queue.append(child)
+    return candidates
+
+
 def active_modals(root, *, fallback: bool = True, point=None) -> list:
     """Fresh modal descendants before pruning, including native modal windows.
 
@@ -23920,7 +24128,16 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
     elif fallback:
         candidates = _cached_modal_collection(root)
     else:
-        candidates = _modal_collection(root)
+        # A whole-window query on a Chromium frame walks the page too. On a
+        # 5,000-row table it outlives the per-call wait, and Chromium keeps
+        # answering it after the timeout, so the snapshot walk that follows
+        # reads defaults and the window comes back empty (#1368). Walk the
+        # browser chrome and ask each page document on its own; a document
+        # query is answered from the structural cache when nothing changed.
+        candidates = (_chromium_scoped_modal_candidates(root)
+                      if _chromium_app(root) else None)
+        if candidates is None:
+            candidates = _modal_collection(root)
     if candidates is None and not fallback and not libreoffice:
         candidates = []
     if candidates is None:

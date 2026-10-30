@@ -4347,7 +4347,12 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
     monkeypatch.setattr(
         "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
     )
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+    sleeps = {"n": 0}
+
+    def sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
 
     class _Handle:
         __gpointer__ = 1
@@ -4377,23 +4382,11 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
     assert len(presses) == 7, len(presses)
 
 
-def test_chromium_document_scroll_keeps_a_viewport_burst(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    """A viewport burst that clears the on-screen names is pulled back, not extended.
-
-    Synthetic names, not a live Chrome. The burst is four notches down.
-    The fifth forward notch is not sent. When that burst leaves the old
-    sample, reverse notches follow until one old row is back, or the
-    burst count is spent. This mock stays parted, so all four reverse
-    notches are sent. Stopping at the first forward notch, and waiting
-    for the tree after it, is the four-row two-second regression.
-    """
-    events, _display = xtest_recorder
-    sleeps = {"n": 0}
+def _viewport_burst_setup(monkeypatch):
     monkeypatch.setattr(
         "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
     )
+    sleeps = {"n": 0}
 
     def sleep(_seconds: float) -> None:
         sleeps["n"] += 1
@@ -4407,9 +4400,53 @@ def test_chromium_document_scroll_keeps_a_viewport_burst(
     monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
     monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
     monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    return sleeps
+
+
+def test_chromium_document_scroll_keeps_a_viewport_burst(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A viewport burst that clears the on-screen names is pulled back, not extended.
+
+    Synthetic names, not a live Chrome. The burst is four notches down.
+    The fifth forward notch is not sent. When that burst leaves the old
+    viewport, reverse notches follow, each one seen to land, until one old
+    row is back on screen.
+    """
+    events, _display = xtest_recorder
+    _viewport_burst_setup(monkeypatch)
+
+    def names(_handle, limit=6, bottom=None):
+        down = sum(1 for e in events if e[0] == _X_BPRESS and e[1] == 5)
+        up = sum(1 for e in events if e[0] == _X_BPRESS and e[1] == 4)
+        head = 1 + 5 * (down - up) if down >= 4 else 1
+        return tuple(f"ITEM-{i:03d}" for i in range(head, head + 6))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    down = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    up = [event for event in events if event[0] == _X_BPRESS and event[1] == 4]
+    assert len(down) == 4, len(down)
+    # 21 -> 16 -> 11 -> 6: the third reverse notch brings ITEM-006 back.
+    assert len(up) == 3, len(up)
+
+
+def test_chromium_document_scroll_stale_names_do_not_undo_the_burst(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Regression for #1368: reverse notches wait for the tree to move.
+
+    Chrome publishes the moved rows late under load. The back-off read the
+    same stale parted rows after every reverse notch, sent all four, and
+    undid the whole burst while the step reported success: the search sat
+    on the first rows until its budget ran out. A reverse notch that is not
+    seen to land ends the back-off, so the step keeps net forward progress.
+    """
+    events, _display = xtest_recorder
+    _viewport_burst_setup(monkeypatch)
     reads = {"n": 0}
 
-    def names(_handle, limit=6):
+    def names(_handle, limit=6, bottom=None):
         reads["n"] += 1
         if reads["n"] == 1:
             return tuple(f"ITEM-{i:03d}" for i in range(1, 7))
@@ -4420,9 +4457,38 @@ def test_chromium_document_scroll_keeps_a_viewport_burst(
     down = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
     up = [event for event in events if event[0] == _X_BPRESS and event[1] == 4]
     assert len(down) == 4, len(down)
-    assert len(up) == 4, len(up)
-    # One read of the old sample, one of the parted sample, then one per reverse notch.
-    assert reads["n"] == 6
+    assert len(up) == 1, len(up)
+    assert len(down) - len(up) >= 3
+
+
+def test_chromium_document_scroll_compares_the_whole_viewport(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Regression for #1368: a burst that stays inside the old viewport is kept.
+
+    The six-row head is not the viewport. A burst from ITEM-001 to ITEM-017
+    on a 26-row viewport skips nothing, so no reverse notch is sent.
+    """
+    events, _display = xtest_recorder
+    sleeps = _viewport_burst_setup(monkeypatch)
+    reads = {"n": 0}
+
+    def names(_handle, limit=6, bottom=None):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return tuple(f"ITEM-{i:03d}" for i in range(1, 7))
+        return tuple(f"ITEM-{i:03d}" for i in range(17, 23))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._viewport_names",
+        lambda _source: tuple(f"ITEM-{i:03d}" for i in range(1, 27)),
+    )
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    down = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    up = [event for event in events if event[0] == _X_BPRESS and event[1] == 4]
+    assert len(down) == 4, len(down)
+    assert up == []
     assert sleeps["n"] == 0
 
 
@@ -19325,6 +19391,63 @@ def test_scale_description_filter_preserves_labels(
     assert float(target.value) == 75
 
 
+@pytest.mark.parametrize("reads, refused", [
+    (("degraded", "same"), False),
+    (("degraded", "degraded"), True),
+    (("recycled", "recycled"), True),
+    (("recycled", "same"), False),
+])
+def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
+    monkeypatch, reads, refused,
+):
+    """#1368: a timed-out read in the identity walk must not refuse a live row.
+
+    Each failed AT-SPI read in the walk becomes a default (empty role), so
+    one slow reply looks like a recycled row. The check reads again and
+    refuses only when the second read also disagrees; it never trusts the
+    snapshot without a fresh read that matches.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    identity = (("push button", "", (), "k1"), ("table row", "", (), "k2"))
+    values = {"same": identity,
+              "degraded": (("", "", (), "k1"),),
+              "recycled": (("push button", "", (), "k1"), ("table row", "", (), "k9"))}
+    calls = []
+
+    def fake_identity(handle, *, fresh=False, cache=None):
+        assert fresh
+        calls.append(handle)
+        return values[reads[len(calls) - 1]]
+
+    monkeypatch.setattr(_atspi, "chromium_row_identity", fake_identity)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e1", "AXButton", "edit 300", None, None, "snap",
+                      row_identity=identity)
+    if refused:
+        with pytest.raises(ComputerUseError) as exc:
+            driver._verify_chromium_row_target(element, object())
+        assert exc.value.code is ErrorCode.STALE_REF
+    else:
+        driver._verify_chromium_row_target(element, object())
+    assert len(calls) == 2
+
+
+def test_chromium_row_identity_match_reads_once(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    identity = (("push button", "", (), "k1"),)
+    calls = []
+    monkeypatch.setattr(_atspi, "chromium_row_identity",
+                        lambda h, *, fresh=False, cache=None: calls.append(h) or identity)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    driver._verify_chromium_row_target(
+        Element("e1", "AXButton", "edit 300", None, None, "snap", row_identity=identity), object())
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("action", ["resolve", "click", "press"])
 @pytest.mark.parametrize("change", ["name", "index", "parent", "role", "unchanged", "value"])
 def test_chromium_pooled_row_ref_identity(fake_atspi, monkeypatch, change, action):
@@ -23999,3 +24122,176 @@ def test_retry_evidence_reads_state_names_from_intenum_flags():
     assert "FOCUSED" in _atspi._state_flag_name(NewStyle.FOCUSED)
     assert "SELECTED" in _atspi._state_flag_name(OldStyle())
     assert _atspi._state_flag_name(7) == "7"
+
+
+def _structural_cache(monkeypatch, *, ready=True):
+    from a11y_computer_use.drivers import _atspi_events
+
+    monkeypatch.setattr(_atspi, "_structural_collections", {})
+    monkeypatch.setattr(_atspi, "_structural_collections_generation", None)
+    monkeypatch.setattr(_atspi_events, "_structure_epoch", 0)
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: ready)
+    monkeypatch.setattr(_atspi, "_ping_answers", lambda _root: True)
+    return _atspi_events
+
+
+def test_modal_role_query_survives_focus_and_name_events(monkeypatch):
+    """#1368: a 5,000-row page is not re-queried on every key and wheel notch.
+
+    Focus, enabled, name, and text events cannot add a dialog-role node, so
+    the complete role query stays valid. Tree, role, and window events make
+    the next input ask again.
+    """
+    events = _structural_cache(monkeypatch)
+    root = _Acc("document web")
+    dialog = _Acc("dialog", states=("SHOWING", "MODAL"))
+    calls = []
+
+    def once(node, *, split=False):
+        calls.append(split)
+        return [dialog]
+
+    monkeypatch.setattr(_atspi, "_modal_collection_once", once)
+    assert _atspi._modal_collection(root) == [dialog]
+    for kind in ("object:state-changed:focused", "object:state-changed:enabled",
+                 "object:state-changed:sensitive", "object:state-changed:read-only",
+                 "object:property-change:accessible-name", "object:text-changed:insert"):
+        events._on_event(_NS(type=kind, detail1=0))
+    assert _atspi._modal_collection(root) == [dialog]
+    assert calls == [False]
+    # A split query is a different, separately cached question.
+    assert _atspi._modal_collection(root, split=True) == [dialog]
+    assert calls == [False, True]
+    for kind in ("object:children-changed:add", "object:property-change:accessible-role",
+                 "object:attributes-changed", "window:activate", "document:load-complete",
+                 "object:state-changed:defunct"):
+        before = len(calls)
+        events._on_event(_NS(type=kind, detail1=0))
+        assert _atspi._modal_collection(root) == [dialog]
+        assert len(calls) == before + 1, kind
+
+
+def test_modal_role_query_cache_fails_closed(monkeypatch):
+    """#1368: only a complete reply under a working listener is reused."""
+    events = _structural_cache(monkeypatch)
+    root = _Acc("document web")
+    replies = [_atspi._COLLECTION_TIMEOUT, None, []]
+    calls = []
+
+    def once(node, *, split=False):
+        calls.append(split)
+        return replies.pop(0)
+
+    monkeypatch.setattr(_atspi, "_modal_collection_once", once)
+    _atspi._modal_collection_state.busy = False
+    assert _atspi._modal_collection(root) is None
+    assert _atspi._modal_collection_busy()
+    with pytest.raises(ComputerUseError) as raised:
+        _atspi._refuse_modal_boundary()
+    assert raised.value.detail["reason"] == "modal_boundary_busy"
+    # Neither a timeout nor an unsupported reply is remembered.
+    assert _atspi._modal_collection(root) is None
+    assert _atspi._modal_collection(root) == []
+    assert len(calls) == 3
+
+    # An event that lands while the query is in flight discards its reply.
+    def racing(node, *, split=False):
+        calls.append(split)
+        events._on_event(_NS(type="object:children-changed:add", detail1=0))
+        return []
+
+    monkeypatch.setattr(_atspi, "_modal_collection_once", racing)
+    events._on_event(_NS(type="window:activate", detail1=0))
+    assert _atspi._modal_collection(root) == []
+    assert _atspi._modal_collection(root) == []
+    assert len(calls) == 5
+
+    # Without the event listener, nothing is retained across inputs.
+    _structural_cache(monkeypatch, ready=False)
+    monkeypatch.setattr(_atspi, "_modal_collection_once", lambda node, *, split=False: calls.append(split) or [])
+    _atspi._modal_collection(root)
+    _atspi._modal_collection(root)
+    assert len(calls) == 7
+
+
+def test_loaded_page_role_prefetch_is_stored_only_when_empty_and_unchanged(monkeypatch):
+    """#1368: the first input after a reload reads a prefetched empty reply.
+
+    The prefetch never stores a page with dialog roles, a reply raced by a
+    tree event, or anything without a working listener.
+    """
+    events = _structural_cache(monkeypatch)
+    key = (":1.42", "/org/a11y/atspi/accessible/7")
+    root = _NS()
+    monkeypatch.setattr(_atspi, "_ancestor_key", lambda node: key if node is root else id(node))
+    gen = _atspi._structural_generation()
+    events._on_event(_NS(type="object:children-changed:add", detail1=0))
+    assert not _atspi._structural_store_key(key, False, None, [], gen)
+    assert _atspi._structural_collection_lookup(root, False) is None
+    gen = _atspi._structural_generation()
+    assert _atspi._structural_store_key(key, False, None, [], gen)
+    assert _atspi._structural_collection_lookup(root, False) == []
+    events._on_event(_NS(type="document:load-complete", detail1=0, source=None))
+    assert _atspi._structural_collection_lookup(root, False) is None
+    _structural_cache(monkeypatch, ready=False)
+    assert not _atspi._structural_store_key(key, False, None, [], _atspi._structural_generation())
+
+
+def test_prefetch_rule_matches_the_input_rule():
+    pytest.importorskip("gi")
+    try:
+        rule = _atspi._dialog_role_rule()
+    except Exception as exc:  # no Atspi typelib
+        pytest.skip(str(exc))
+    assert rule.get_type_string() == "((aiia{ss}iaiiasib)uib)"
+    Atspi = _atspi._atspi()
+    words = rule.get_child_value(0).get_child_value(4).unpack()
+    for name in ("DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER"):
+        value = int(getattr(Atspi.Role, name))
+        assert (words[value // 32] & 0xFFFFFFFF) >> (value % 32) & 1, name
+    value = int(Atspi.Role.PUSH_BUTTON)
+    assert not (words[value // 32] & 0xFFFFFFFF) >> (value % 32) & 1
+
+
+@pytest.mark.parametrize("document_reply", ["answered", "unanswered"])
+def test_chromium_find_modal_discovery_does_not_query_the_whole_window(
+    fake_atspi, monkeypatch, document_reply,
+):
+    """#1368: a find on a 5,000-row page must not ask the frame for dialogs.
+
+    The whole-window Collection walks the page, outlives the per-call wait,
+    and Chromium keeps answering it, so the snapshot walk after it reads
+    defaults and the window comes back empty. Discovery walks the browser
+    chrome and queries the page document alone. When the document query does
+    not complete, the original whole-window query still runs.
+    """
+    frame = _Acc("frame", name="rowtable - Google Chrome", states=("SHOWING",))
+    panel = _Acc("panel")
+    bubble = _Acc("dialog", name="Allow?", states=("SHOWING", "MODAL"))
+    document = _Acc("document web", name="rowtable")
+    table = _Acc("table")
+    page_modal = _Acc("dialog", name="Confirm", states=("SHOWING", "MODAL"))
+    _adopt(frame, panel)
+    _adopt(panel, _Acc("push button", name="Reload"), bubble, document)
+    _adopt(document, table)
+    table.get_child_count = lambda: pytest.fail("page content is the document query's job")
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: [frame])
+    monkeypatch.setattr(_atspi, "_modal_in_window", lambda modal, root: True)
+    queried = []
+
+    def collection(root, *, split=False):
+        queried.append(root)
+        if root is document:
+            return [page_modal] if document_reply == "answered" else None
+        assert root is frame
+        return [bubble, page_modal]
+
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    found = _atspi.active_modals(frame, fallback=False)
+    assert {id(node) for node in found} == {id(bubble), id(page_modal)}
+    if document_reply == "answered":
+        assert queried == [document]
+    else:
+        assert queried == [document, frame]
