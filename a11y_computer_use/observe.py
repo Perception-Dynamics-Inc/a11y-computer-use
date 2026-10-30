@@ -782,6 +782,22 @@ def _disclosures_over(snap: Snapshot, anchor: Element) -> list[Element]:
     return found
 
 
+def _caller_disclosure_ref(snap: Snapshot, disclosure: Element) -> str | None:
+    """``disclosure``'s ref in the caller's snapshot, or None when unreliable.
+
+    Reliable means titled, present in ``snap`` under that ref, and the only
+    element there with its role and title, so the ref cannot name another
+    control.
+    """
+    if not disclosure.title:
+        return None
+    same = [el for el in snap.elements
+            if el.role == disclosure.role and el.title == disclosure.title]
+    if len(same) != 1 or same[0].ref != disclosure.ref:
+        return None
+    return disclosure.ref
+
+
 def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
                                  live: Snapshot, reason: str) -> None:
     """Refuse with ``collapsed_ancestor`` when the ref's disclosure collapsed.
@@ -796,12 +812,23 @@ def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
         now, _ = _match_anchor(disclosure, live)
         if now is None or now.expanded is not False:
             continue
+        # The hint's ref must come from the caller's snapshot (``snap``, the
+        # epoch the caller's refs are valid against), never from the internal
+        # ``live`` re-snapshot, whose numbering differs (#1370 review). Use it
+        # only when it is unambiguous in that snapshot; otherwise name the
+        # control and ask for a new snapshot.
+        caller_ref = _caller_disclosure_ref(snap, disclosure)
         name = disclosure.title or disclosure.role
+        if caller_ref is not None:
+            advice = (f"Expand it (click {name!r}, ref {caller_ref} in your current "
+                      "snapshot), then take a new snapshot before acting")
+        else:
+            advice = (f"Expand it (click {name!r}); snapshot again to get its ref, "
+                      "then snapshot again after expanding before acting")
         raise ComputerUseError(
             ErrorCode.STALE_REF,
             f"{ref} ({anchor.role} {anchor.title!r}) is inside {name!r}, which is now "
-            f"collapsed, so its content is not in the tree. Expand it (click "
-            f"{name!r}, ref {now.ref}) and take a new snapshot before acting; "
+            f"collapsed, so its content is not in the tree. {advice}; "
             "find() and scroll_to_find cannot reach collapsed content.",
             detail={
                 "ref": ref,
@@ -814,7 +841,8 @@ def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
                     "title": anchor.title,
                     "path": list(anchor.path),
                 },
-                "collapsed": {"ref": now.ref, "role": now.role, "title": now.title},
+                "collapsed": {"ref": caller_ref, "role": disclosure.role,
+                              "title": disclosure.title},
                 "candidates": [],
                 "next": ["ref"],
             },

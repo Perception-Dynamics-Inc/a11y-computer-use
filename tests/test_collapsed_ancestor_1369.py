@@ -4,6 +4,8 @@ The refusal must say the target is inside a collapsed section and suggest
 expanding it. It must not name a control from another section, suggest
 find()/scroll_to_find, or offer any redirect candidate.
 """
+import re
+
 import pytest
 
 from a11y_computer_use import observe
@@ -56,7 +58,7 @@ def test_ref_in_collapsed_details_names_the_collapsed_section(title, role):
     assert err.detail["reason"] == "collapsed_ancestor"
     assert err.detail["candidates"] == []
     assert err.detail["collapsed"]["title"] == "Billing info"
-    assert err.detail["collapsed"]["ref"] == by_title(live, "Billing info").ref
+    assert err.detail["collapsed"]["ref"] == by_title(old, "Billing info").ref
     assert "Billing info" in message and "collapsed" in message and "Expand" in message
     for wrong in ("Express Ship", "Ship note", "Shipping options", "reordered"):
         assert wrong not in message
@@ -99,3 +101,48 @@ def test_unrelated_window_level_disclosure_is_not_blamed():
     with pytest.raises(ComputerUseError) as caught:
         observe.rematch_ref(old, by_title(old, "Pay Now").ref, live)
     assert caught.value.detail["reason"] != "collapsed_ancestor"
+
+
+def test_hinted_ref_is_the_callers_summary_and_opens_the_section():
+    """#1370 review: the hint ref is from the caller's snapshot, not the re-snapshot."""
+    old = snap_of(details_lab(False, True))       # the caller's latest snapshot
+    live = snap_of(details_lab(True, False))
+    with pytest.raises(ComputerUseError) as caught:
+        observe.rematch_ref(old, by_title(old, "Pay Now").ref, live)
+    hinted = caught.value.detail["collapsed"]["ref"]
+    assert f"ref {hinted}" in str(caught.value)
+    # In the caller's snapshot the hinted ref is the summary, not its group.
+    in_caller = old.element(hinted)
+    assert (in_caller.role, in_caller.title) == ("AXButton", "Billing info")
+    # The internal re-snapshot numbers differently; its ref must not leak.
+    internal = by_title(live, "Billing info").ref
+    assert internal != hinted
+    assert f"ref {internal} " not in str(caught.value)
+    # Clicking the hinted ref resolves to the live summary, which is collapsed.
+    target = observe.rematch_ref(old, hinted, live)
+    assert (target.role, target.title, target.expanded) == ("AXButton", "Billing info", False)
+    # Activating that summary opens the <details>; its content is back.
+    opened = snap_of(details_lab(True, True))
+    assert by_title(opened, "Billing info").expanded is True
+    assert by_title(opened, "Pay Now").role == "AXButton"
+
+
+def test_no_reliable_caller_ref_falls_back_to_title_only():
+    """Two summaries share the title: name it, ask to snapshot again, no ref."""
+    def tree(open_second):
+        page = details_lab(False, open_second)
+        page["children"].append(ax("AXGroup", at=(110.0, 400.0), size=(600.0, 60.0),
+                                   children=[summary("Billing info", (120.0, 400.0), False),
+                                             button("Elsewhere", (120.0, 430.0)),
+                                             button("Elsewhere 2", (220.0, 430.0))]))
+        return page
+    old = snap_of(tree(True))
+    live = snap_of(tree(False))
+    with pytest.raises(ComputerUseError) as caught:
+        observe.rematch_ref(old, by_title(old, "Pay Now").ref, live)
+    err = caught.value
+    message = str(err)
+    assert err.detail["reason"] == "collapsed_ancestor"
+    assert err.detail["collapsed"]["ref"] is None
+    assert "Billing info" in message and "snapshot again" in message
+    assert re.search(r"\be\d+\b", message.replace(err.detail["ref"], "")) is None
