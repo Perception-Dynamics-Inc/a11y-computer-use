@@ -2501,6 +2501,20 @@ class Runtime:
         store = getattr(self, "store", None)
         if store is not None and store.policy(front)[1]:
             return front
+        owner = None
+        if store is not None and store.has_deny_list():
+            # #1358: the active window's own names (AT-SPI, WM_CLASS) are
+            # checked against the deny list, whatever ``front`` resolved to.
+            owner = _linux_system.active_window_owner()
+            if owner is not None:
+                denied = self._linux_target_deny(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=front),
+                                                 front, {owner})
+                if denied is not None:
+                    if store.policy(denied.app)[3] == "deny":
+                        return denied.app  # gated as the denied name: the gate refuses it
+                    refused = f"{front} (unreadable identity)"
+                    _EXE_HINTS[refused] = denied.reason
+                    return refused
         key = self._resolve_app(front)[1]
         if key in _EXE_HINTS:
             return key
@@ -2516,6 +2530,82 @@ class Runtime:
                                    f"executable or user is not the granted {key}; refused.")
             return refused
         return front
+
+    def _linux_target_deny(self, action, app: str, pids: set[int] | None = None) -> safety.Decision | None:
+        """A DENY when the process ``app`` reaches is itself on the deny list (#1358).
+
+        The deny list is keyed on names, and an interpreter-hosted app answers
+        to several: ``python3`` (comm, exe, and the grant key since #1296),
+        its prgname / AT-SPI application name, and its WM_CLASS. A call that
+        names ``python3``, or no app at all, must not slip past a deny on the
+        app's own name. Every name the target pids present (AT-SPI name from
+        the bus pid, WM_CLASS of the windows they own, comm, exe and
+        interpreter binding) is checked; any denied name denies. When an
+        interpreter-hosted target's identity cannot be read, the action is
+        denied (fail closed). Only runs when the deny list is non-empty, so
+        configurations without a deny list are unchanged. Read fresh per call.
+        """
+        if (not sys.platform.startswith("linux") or self._resolves_apps()
+                or getattr(self.driver, "name", None) != "linux" or not app):
+            return None
+        store = getattr(self, "store", None)
+        if store is None or app in _EXE_HINTS:
+            return None
+        try:
+            if not store.has_deny_list():
+                return None
+        except Exception:  # noqa: BLE001 - check_action already refused a broken store
+            return None
+        from a11y_computer_use.drivers import _atspi, _linux_exe, _linux_system
+
+        required = safety.required_tier(action)
+
+        def refuse(name: str, reason: str) -> safety.Decision:
+            return safety.Decision(verdict=safety.Verdict.DENY, app=name, required=required,
+                                   granted=None, reason=reason)
+
+        interpreter_key = _linux_exe.interpreter_key(app) or (app if _linux_system.is_interpreter(app) else None)
+        if pids is None:
+            try:
+                pids = set(_linux_exe.target_pids(app))
+            except Exception:  # noqa: BLE001 - a disowned window: no identity
+                if interpreter_key:
+                    return refuse(app, f"the identity of the {app!r} target cannot be read, and the "
+                                       f"deny list may name it; refused (fail closed, #1358)")
+                return None
+        if not pids:
+            return None
+        exes = {pid: _linux_exe.exe_of(pid) for pid in pids}
+        hosted = bool(interpreter_key) or any(_linux_exe.interpreter_key(exe) for exe in exes.values())
+        names: set[str] = set()
+        for pid in pids:
+            comm = _linux_system._comm_for_pid(pid)
+            if comm:
+                names.add(comm)
+            exe = exes.get(pid)
+            if exe:
+                names.add(os.path.basename(exe))
+                bound = _linux_exe.interpreter_key(exe)
+                if bound:
+                    names.add(bound)
+        atspi_names = _atspi.registered_names_by_pid()
+        x_names = _linux_system.window_names_by_pid()
+        for source in (atspi_names, x_names):
+            for pid in pids:
+                names.update((source or {}).get(pid, ()))
+        for name in sorted(n for n in names if n and n.strip()):
+            try:
+                denied = store.policy(name)[3] == "deny"
+            except Exception:  # noqa: BLE001
+                denied = True
+            if denied:
+                return refuse(name, f"{name} is on the deny list; no actions are permitted "
+                                    f"(the {app!r} target is {name})")
+        if hosted and (atspi_names is None or x_names is None):
+            return refuse(app, f"the {app!r} target runs in an interpreter and its application "
+                               f"name cannot be read (AT-SPI or X11 unavailable), while a deny "
+                               f"list is set; refused (fail closed, #1358)")
+        return None
 
     def _resolve_app(self, identifier: str) -> tuple[object, str]:
         if self._resolves_apps():
@@ -2839,6 +2929,8 @@ class Runtime:
     def _require_permission(self, action, app: str, *, secure: bool = False) -> safety.Decision:
         """Read the current grant and audit a refusal before any input."""
         decision = safety.check_action(action, app, store=self.store)
+        if decision.allowed:
+            decision = self._linux_target_deny(action, app) or decision
         if not decision.allowed:
             self.audit.record_action(
                 action, app=app, decision=decision, result=decision.verdict.value, secure=secure

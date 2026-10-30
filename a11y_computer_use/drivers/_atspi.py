@@ -12867,6 +12867,34 @@ def _registered_pids() -> set[int] | None:
     return pids
 
 
+def registered_names_by_pid() -> dict[int, set[str]] | None:
+    """AT-SPI application names keyed by bus pid, or None when unreadable (#1358).
+
+    The pid comes from D-Bus credentials; the name is the app's own
+    (prgname for GTK). Used to apply the deny list to the process an action
+    reaches, whatever name the caller used.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    names: dict[int, set[str]] = {}
+    for app in _fresh_application_children(desktop)[:200]:
+        if app is None:
+            continue
+        pid = _call_first(app, ("get_process_id",))
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        label = (_call_first(app, ("get_name",), default="") or "").strip()
+        bucket = names.setdefault(pid, set())
+        if label:
+            bucket.add(label)
+    return names
+
+
 def _registered_pids_named(name: str) -> set[int] | None:
     """Bus pids of AT-SPI applications ``find_root`` would match by name (#1327)."""
     from a11y_computer_use.drivers import _linux_system
