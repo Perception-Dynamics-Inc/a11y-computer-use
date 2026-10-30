@@ -23731,8 +23731,14 @@ def test_find_root_binds_an_interpreter_app_under_its_interpreter_key(fake_atspi
     impostor, real = _impostor_and_real(fake_atspi, monkeypatch)
     tree = _PidNode("application", "python", pid=23, children=[_WindowNode("frame", "Big Tree")])
     fake_atspi.desktop = _WindowNode("desktop", children=[tree])
-    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: "/usr/bin/python3.13")
+    py = "/usr/bin/python3.13"
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: py)
+    # Model an installed (root-owned) interpreter; the runner's own python
+    # may be another version or absent (#1340 binds on the real path).
+    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path == py)
     monkeypatch.setattr(_linux_exe, "_GATED", {"python": None})
+    assert _atspi.find_root("python", Scope.APP) is tree
+    monkeypatch.setattr(_linux_exe, "_GATED", {"python": py})
     assert _atspi.find_root("python", Scope.APP) is tree
     monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1001)
     assert _atspi.find_root("python", Scope.APP) is None

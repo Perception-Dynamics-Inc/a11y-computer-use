@@ -2169,6 +2169,16 @@ def _prgname_display(monkeypatch, windows: list, comms: dict) -> None:
     monkeypatch.setattr(_linux_system, "_display", lambda: display)
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
     monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
+    # #1340: an interpreter key binds on /proc/<pid>/exe, so model each
+    # window pid as the user's process running an installed python3 rather
+    # than reading whatever real pid happens to share the number.
+    from a11y_computer_use.drivers import _linux_exe
+
+    py = "/usr/bin/python3.12"
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: py if pid in comms else None)
+    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path == py)
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1000)
+    monkeypatch.setattr(_linux_exe, "_me", lambda: 1000)
 
 
 def _gate_runtime(tmp_path, monkeypatch, tiers: dict, deny: tuple = (), host=None):
