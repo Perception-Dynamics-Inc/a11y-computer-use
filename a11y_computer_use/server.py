@@ -45,7 +45,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from functools import partial, wraps
 from threading import RLock
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
@@ -422,12 +422,19 @@ _R = TypeVar("_R")
 
 
 def _proc_scope():
-    """One shared /proc walk per action on Linux (#1347); a no-op elsewhere."""
+    """One shared /proc walk and X connection per action on Linux (#1347); a no-op elsewhere."""
     if sys.platform.startswith("linux"):
-        from a11y_computer_use.drivers import _linux_exe
-
-        return _linux_exe.proc_scope()
+        return _linux_action_scope()
     return nullcontext()
+
+
+@contextmanager
+def _linux_action_scope():
+    """One /proc walk and one X connection per thread for one action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe, _linux_system
+
+    with _linux_exe.proc_scope(), _linux_system.x_scope():
+        yield
 
 
 def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Concatenate["Runtime", _P], _R]:
