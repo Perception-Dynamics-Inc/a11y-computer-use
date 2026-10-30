@@ -23767,8 +23767,14 @@ def _modal_collection(root, *, split: bool = False):
     reports a retryable ``busy`` error (re-observe and retry) rather than
     ``modal_boundary_unavailable``: a slow app is not an unsupported one.
     """
+    cached = _structural_collection_lookup(root, split)
+    if cached is not None:
+        return cached
+    generation = _structural_generation()
     result = _modal_collection_once(root, split=split)
     if result is not _COLLECTION_TIMEOUT:
+        if result is not None:
+            _structural_collection_store(root, split, result, generation)
         return result
     _ping_answers(root)
     _modal_collection_state.busy = True
@@ -23776,6 +23782,47 @@ def _modal_collection(root, *, split: bool = False):
 
 
 _COLLECTION_TIMEOUT = object()
+
+# Complete role-query results per subtree, valid while no event could have
+# added or removed a dialog-role node (#1368). Re-querying a 5,000-row page
+# on every key and wheel notch made the boundary miss its per-call wait under
+# load. Only complete replies are kept; candidates are re-checked live by
+# ``is_modal``. Without a working listener nothing is retained.
+_structural_collections: dict = {}
+_structural_collections_generation: int | None = None
+_structural_collections_lock = threading.Lock()
+
+
+def _structural_generation():
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.modal_cache_ready():
+        return None
+    return _atspi_events.structure_epoch()
+
+
+def _structural_collection_lookup(root, split: bool):
+    generation = _structural_generation()
+    if generation is None:
+        return None
+    with _structural_collections_lock:
+        if _structural_collections_generation != generation:
+            return None
+        hit = _structural_collections.get((_ancestor_key(root), bool(split)))
+    return list(hit[1]) if hit is not None else None
+
+
+def _structural_collection_store(root, split: bool, result, generation) -> None:
+    global _structural_collections_generation
+    if generation is None or generation != _structural_generation():
+        return  # An event arrived mid-query; the reply may be stale.
+    with _structural_collections_lock:
+        if _structural_collections_generation != generation:
+            _structural_collections.clear()
+            _structural_collections_generation = generation
+        if len(_structural_collections) >= 64:
+            _structural_collections.clear()
+        _structural_collections[(_ancestor_key(root), bool(split))] = (root, list(result))
 
 
 def _modal_collection_once(root, *, split: bool = False):

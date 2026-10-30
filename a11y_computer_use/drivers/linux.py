@@ -815,7 +815,7 @@ def _scan_row_children(node, role: str, name: str, count: int, depth: int, walk,
         index += 1
 
 
-def _showing_names(handle, limit: int = 6) -> tuple[str, ...]:
+def _showing_names(handle, limit: int = 6, bottom: int | None = None) -> tuple[str, ...]:
     """On-screen row names under ``handle``.
 
     Chrome's document keeps the old static texts for a fraction of a second
@@ -830,12 +830,19 @@ def _showing_names(handle, limit: int = 6) -> tuple[str, ...]:
     from a11y_computer_use.drivers import _atspi
 
     found: list[str] = []
+    below = [False]
 
     def walk(node, depth: int) -> None:
-        if node is None or len(found) >= limit or depth > 8:
+        if node is None or len(found) >= limit or depth > 8 or below[0]:
             return
         role = _atspi._role_name(node)
         if role in _ROW_ROLES:
+            if bottom is not None:
+                _name, pos, _size = None, *_atspi._extents(node)
+                if pos is None or int(pos[1]) >= bottom:
+                    # Rows past the viewport bottom are not on screen.
+                    below[0] = True
+                    return
             label = _row_label(node)
             if label:
                 found.append(label)
@@ -971,6 +978,53 @@ def _row_marker(names: tuple[str, ...]) -> bool:
     moved.
     """
     return any(any(ch.isdigit() for ch in name) for name in names)
+
+
+_VIEWPORT_ROWS = 64
+
+
+def _viewport_names(source) -> tuple[str, ...]:
+    """Every row name from the viewport's head down to its bottom edge.
+
+    The bottom is the enclosing web document's box. Without one, only the
+    six-row head is known, which makes the back-off stricter, never looser.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    document = next((node for node in _atspi._ancestor_chain(source)
+                     if _atspi._role_name(node) in {"document web", "document frame"}), None)
+    if document is None:
+        return ()
+    _name, pos, size = None, *_atspi._extents(document)
+    if pos is None or size is None or int(size[1]) <= 0:
+        return ()
+    return _showing_names(source, limit=_VIEWPORT_ROWS, bottom=int(pos[1]) + int(size[1]))
+
+
+def _back_off_to_viewport(run, source, x, y, sign, burst, shown, after, deadline) -> None:
+    """Wheel back, one observed notch at a time, until the old tail shows.
+
+    A reverse notch whose rows have not been published by ``deadline``
+    ends the back-off: the next snapshot re-reads the viewport, and the
+    burst is never undone on stale names.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    for _back in range(burst):
+        if not _names_parted(shown, after):
+            return
+        _linux_input.scroll(x, y, dy=-sign)
+        previous = after
+        while True:
+            try:
+                after = _refresh_shown_names(run, source)
+            except Exception:
+                return
+            if after != previous:
+                break
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.03)
 
 
 def _names_parted(before: tuple[str, ...], after: tuple[str, ...]) -> bool:
@@ -1115,6 +1169,15 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
         before_offset = run(lambda node=source: _atspi.scroll_offset(node))
     except Exception:
         before_offset = None
+    # ``before`` is the head of the viewport, six rows. Whether a burst
+    # skipped rows depends on the viewport's tail, so the back-off below
+    # compares against every row on screen (#1368).
+    try:
+        shown = run(lambda node=source: _viewport_names(node))
+    except Exception:
+        shown = before
+    if len(shown) < len(before) or tuple(shown[:len(before)]) != tuple(before):
+        shown = before
 
     def measure() -> tuple[tuple[str, ...], int]:
         after = _refresh_shown_names(run, source)
@@ -1149,23 +1212,18 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
                 pass
             else:
                 if (
-                    _names_parted(before, after)
+                    _names_parted(shown, after)
                     and _row_marker(before)
                     and _row_marker(after)
                 ):
-                    # The burst cleared the sample. One notch back brings
-                    # the previous tail on screen, so the next snapshot
-                    # still contains the row this step would have skipped.
-                    # A sample that stays apart stops after ``burst``
-                    # reverse notches.
-                    for _back in range(burst):
-                        _linux_input.scroll(x, y, dy=-sign)
-                        try:
-                            after = _refresh_shown_names(run, source)
-                        except Exception:
-                            return
-                        if not _names_parted(before, after):
-                            return
+                    # The burst cleared the whole old viewport. One notch
+                    # back brings the previous tail on screen, so the next
+                    # snapshot still contains the row this step would have
+                    # skipped. Each reverse notch must be seen to land
+                    # before another is sent: Chrome publishes the moved
+                    # rows late, and stale reads used to send every
+                    # reverse notch and undo the whole burst (#1368).
+                    _back_off_to_viewport(run, source, x, y, sign, burst, shown, after, deadline)
                 return
         moved = nxt
         if after != before:

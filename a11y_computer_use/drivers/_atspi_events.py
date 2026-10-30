@@ -61,6 +61,9 @@ _events: deque = deque(maxlen=4096)
 _events_cv = threading.Condition()
 _seq = 0
 _modal_epoch = 0
+# Bumped only by events that can change which nodes carry a dialog role:
+# tree, window, document, role, parent, attribute and defunct events.
+_structure_epoch = 0
 _modal_events_ready = False
 
 
@@ -194,6 +197,26 @@ def modal_epoch() -> int:
         return _modal_epoch
 
 
+def structure_epoch() -> int:
+    """Generation for the dialog-role node set under a subtree (#1368).
+
+    Focus, enabled, name, and text events do not add or remove a dialog-role
+    node, so a cached role query stays complete across them. Whether a
+    candidate is a showing modal is still read live on every input.
+    """
+    with _events_cv:
+        return _structure_epoch
+
+
+def _changes_structure(kind: str) -> bool:
+    return (kind.startswith(("window:", "document:", "object:children-changed",
+                             "object:attributes-changed",
+                             "object:property-change:accessible-role",
+                             "object:property-change:accessible-parent",
+                             "object:state-changed:defunct"))
+            or kind == "object:property-change")
+
+
 def current_seq() -> int:
     with _events_cv:
         return _seq
@@ -262,9 +285,11 @@ def wait_for_structural(since_seq: int = 0, timeout: float = 0.5):
 
 
 def _on_event(event) -> bool:
-    global _seq, _modal_epoch
+    global _seq, _modal_epoch, _structure_epoch
     with _events_cv:
         kind = getattr(event, "type", "")
+        if _changes_structure(str(kind)):
+            _structure_epoch += 1
         if kind.startswith(("window:", "document:", "object:children-changed",
                             "object:state-changed",
                             "object:property-change", "object:attributes-changed")):
