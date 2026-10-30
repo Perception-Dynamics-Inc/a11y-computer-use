@@ -44,3 +44,42 @@ def test_scope_memo_is_dropped_at_every_entry(monkeypatch) -> None:
             assert _linux_exe.scope_memo("k", compute) == 2
     assert _linux_exe.scope_memo("k", compute) == 3  # outside an action: fresh
     assert _linux_exe.scope_memo("k", compute) == 4
+
+
+def test_exe_check_and_registry_reads_once_per_action_never_across(monkeypatch) -> None:
+    """#1347: a screenshot gates the frontmost app twice; the exe verdict and the
+    AT-SPI registry reads behind it are taken once per action, fresh in the next."""
+    from a11y_computer_use.drivers import _atspi, _atspi_events, _linux_exe
+
+    calls = {"verdict": 0, "named": 0, "owners": 0, "run": 0}
+
+    def verdict(name, recorded):
+        calls["verdict"] += 1
+        return name, None
+
+    def run(fn):
+        calls["run"] += 1
+        return fn()
+
+    def named(name):
+        calls["named"] += 1
+        return {7}
+
+    def owners():
+        calls["owners"] += 1
+        return {7}
+
+    monkeypatch.setattr(_linux_exe, "_check_verdict", verdict)
+    monkeypatch.setattr(_atspi_events, "run", run)
+    monkeypatch.setattr(_atspi, "_registered_pids_named", named)
+    monkeypatch.setattr(_atspi, "_registered_pids", owners)
+    for action in (1, 2):
+        with _linux_exe.proc_scope():
+            for _ in range(2):
+                assert _linux_exe.check("mousepad", None) == ("mousepad", None)
+                assert _linux_exe._atspi_named_pids("mousepad") == {7}
+                assert _linux_exe._atspi_owner_pids() == {7}
+        assert calls == {"verdict": action, "named": action, "owners": action, "run": 2 * action}
+    _linux_exe.check("mousepad", None)  # outside an action: never memoized
+    _linux_exe.check("mousepad", None)
+    assert calls["verdict"] == 4

@@ -93,18 +93,21 @@ def _close_display(d) -> None:
         pass
 
 
-# Per-action X connection reuse (#1347). Inside ``x_scope`` each thread
-# opens at most one connection and reuses it for every probe of the action
-# (python-xlib connections are not shared between threads). All of them are
-# closed when the outermost scope exits. A probe that raises drops its
-# thread's connection, so the next probe reconnects. Outside a scope every
+# Per-action X connection reuse (#1347). Inside ``x_scope`` the action opens
+# one connection and every probe of the action reuses it, on any thread (the
+# server thread and the AT-SPI event thread alike). Probes on it are
+# serialized by ``_X_USE``, held for the whole probe, so two threads never
+# interleave requests on the socket. It is closed when the outermost scope
+# exits. A probe that raises drops the connection, so the next probe
+# reconnects. Outside a scope every
 # probe opens and closes its own connection, as before. Every request still
 # reads the live server state; only the socket is reused.
 _X_LOCK = threading.Lock()
 _X_DEPTH = 0
 _X_GEN = 0
 _X_OPEN: list = []
-_X_LOCAL = threading.local()
+_X_SHARED = None  # (generation, display, opener)
+_X_USE = threading.RLock()
 
 
 @contextmanager
@@ -129,7 +132,7 @@ def x_scope():
 
 
 def _scoped_display():
-    """This thread's connection for the open action, or None outside one."""
+    """The open action's connection, or None outside one. Call with ``_X_USE`` held."""
     with _X_LOCK:
         if _X_DEPTH == 0:
             return None
@@ -137,7 +140,8 @@ def _scoped_display():
     # Keyed on the opener too, so a swapped ``_display`` (another server or a
     # synthetic one in tests) is never answered from the old connection.
     opener = _display
-    cached = getattr(_X_LOCAL, "conn", None)
+    global _X_SHARED
+    cached = _X_SHARED
     if cached is not None and cached[0] == gen and cached[2] is opener:
         return cached[1]
     d = opener()
@@ -148,7 +152,7 @@ def _scoped_display():
     if stale:  # the action ended while connecting: use a one-shot connection
         _close_display(d)
         return None
-    _X_LOCAL.conn = (gen, d, opener)
+    _X_SHARED = (gen, d, opener)
     return d
 
 
@@ -156,22 +160,27 @@ def _drop_scoped(d) -> None:
     with _X_LOCK:
         if d in _X_OPEN:
             _X_OPEN.remove(d)
-    cached = getattr(_X_LOCAL, "conn", None)
+    global _X_SHARED
+    cached = _X_SHARED
     if cached is not None and cached[1] is d:
-        _X_LOCAL.conn = None
+        _X_SHARED = None
     _close_display(d)
 
 
 @contextmanager
 def _open_display():
-    d = _scoped_display()
-    if d is not None:
-        try:
-            yield d
-        except BaseException:
-            _drop_scoped(d)  # a failed probe may leave the connection unusable
-            raise
-        return
+    with _X_LOCK:
+        scoped = _X_DEPTH > 0
+    if scoped:
+        with _X_USE:
+            d = _scoped_display()
+            if d is not None:
+                try:
+                    yield d
+                except BaseException:
+                    _drop_scoped(d)  # a failed probe may leave the connection unusable
+                    raise
+                return
     d = _display()
     try:
         yield d

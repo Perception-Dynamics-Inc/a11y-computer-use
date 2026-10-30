@@ -32,7 +32,7 @@ def _probe(n: int = 6) -> None:
             pass
 
 
-def test_screenshot_opens_one_display_per_thread(tmp_path, monkeypatch, xlog) -> None:
+def test_screenshot_opens_one_display_for_all_threads(tmp_path, monkeypatch, xlog) -> None:
     _world(monkeypatch, {52: ("mousepad", REAL, ME)}, 52)
     # A fake X server with no managed windows; resolve_app still opens a display.
     monkeypatch.setattr(_linux_system, "_managed_windows", lambda d: [])
@@ -48,10 +48,10 @@ def test_screenshot_opens_one_display_per_thread(tmp_path, monkeypatch, xlog) ->
 
     rt.driver.screenshot = screenshot
     rt.screenshot()
-    assert len(xlog) == 2  # was one per probe (13 per screenshot on a live desktop)
+    assert len(xlog) == 1  # shared by both threads; was one per probe (13 on a live desktop)
     assert all(d.closed for d in xlog)  # nothing outlives the action
     rt.screenshot()
-    assert len(xlog) == 4  # never carried into the next action
+    assert len(xlog) == 2  # never carried into the next action
     assert all(d.closed for d in xlog)
 
 

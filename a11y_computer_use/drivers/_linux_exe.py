@@ -66,7 +66,17 @@ def exe_of(pid: int) -> str | None:
         return None
     if target.endswith(" (deleted)"):
         return None
-    return os.path.realpath(target)
+    memo = getattr(_WALK, "realpaths", None)
+    if memo is None:
+        return os.path.realpath(target)
+    resolved = memo.get(target)
+    if resolved is None:
+        resolved = memo[target] = os.path.realpath(target)
+    return resolved
+
+
+# Set only for the duration of one ``_scan_proc`` walk on this thread.
+_WALK = threading.local()
 
 
 def interpreter_key(exe: str | None) -> str | None:
@@ -83,10 +93,16 @@ def interpreter_key(exe: str | None) -> str | None:
 
 def _comm(pid: int) -> str:
     try:
-        with open(f"/proc/{int(pid)}/comm", encoding="utf-8", errors="replace") as fh:
-            return fh.read().strip()
+        fd = os.open(f"/proc/{int(pid)}/comm", os.O_RDONLY)
     except OSError:
         return ""
+    try:
+        raw = os.read(fd, 4096)  # comm is at most 16 bytes
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    return raw.decode("utf-8", errors="replace").strip()
 
 
 # Per-action /proc index (#1347). While any action is open (``proc_scope``),
@@ -114,16 +130,22 @@ def _scan_proc() -> tuple[dict[str, set[int]], dict[str, set[int]]]:
         entries = os.listdir("/proc")
     except OSError:
         return by_comm, by_exe
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        comm = _comm(pid)
-        if comm:
-            by_comm.setdefault(comm, set()).add(pid)
-        exe = exe_of(pid)
-        if exe:
-            by_exe.setdefault(os.path.basename(exe), set()).add(pid)
+    # Most processes share a handful of executables: each distinct readlink
+    # target is resolved once per walk (``exe_of`` still readlinks every pid).
+    _WALK.realpaths = {}
+    try:
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            comm = _comm(pid)
+            if comm:
+                by_comm.setdefault(comm, set()).add(pid)
+            exe = exe_of(pid)
+            if exe:
+                by_exe.setdefault(os.path.basename(exe), set()).add(pid)
+    finally:
+        _WALK.realpaths = None
     return by_comm, by_exe
 
 
@@ -449,9 +471,12 @@ def _x11_owner_pids(name: str) -> set[int]:
 def _atspi_owner_pids() -> set[int]:
     """Pids registered on the AT-SPI bus (from D-Bus credentials, not self-reported)."""
     try:
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _atspi, _atspi_events
 
-        return set(_atspi._registered_pids() or ())
+        # One trip to the AT-SPI thread for the whole registry read, and one
+        # read per action (#1347); every action reads the registry afresh.
+        pids = scope_memo(("atspi_owner_pids",), lambda: _atspi_events.run(_atspi._registered_pids))
+        return set(pids or ())
     except Exception:  # noqa: BLE001 - no bus: X11 still names owners
         return set()
 
@@ -475,9 +500,13 @@ def target_pids(name: str, named: set[int] | None = None) -> set[int]:
 def _atspi_named_pids(name: str) -> set[int]:
     """Bus pids of AT-SPI applications whose name is ``name`` (#1327)."""
     try:
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _atspi, _atspi_events
 
-        return set(_atspi._registered_pids_named(name) or ())
+        pids = scope_memo(
+            ("atspi_named_pids", name),
+            lambda: _atspi_events.run(lambda: _atspi._registered_pids_named(name)),
+        )
+        return set(pids or ())
     except Exception:  # noqa: BLE001 - no bus: nothing registers under the name
         return set()
 
@@ -564,6 +593,13 @@ def check(name: str, recorded: str | None,
     if recorded_for is not None:
         _RECORDED_FOR = recorded_for
     _GATED[(name or "").casefold()] = recorded
+    # One verdict per action for the same inputs (#1347): a screenshot gates
+    # the frontmost app twice. Dropped at every action entry and exit.
+    return scope_memo(("check", name, recorded, _RECORDED_FOR),
+                      lambda: _check_verdict(name, recorded))
+
+
+def _check_verdict(name: str, recorded: str | None) -> tuple[str, str | None]:
     if interpreter_key(name):
         return _interpreter_verdict(name, recorded)
     registrants = _atspi_named_pids(name)
