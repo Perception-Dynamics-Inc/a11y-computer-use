@@ -21133,6 +21133,113 @@ def test_model_editor_guard_preserves_plain_control_paths(
     _atspi._refuse_model_editor_replace(field)
 
 
+class _BlockChild:
+    def __init__(self, role):
+        self._role = role
+
+    def get_role_name(self):
+        return self._role
+
+
+def _prosemirror_like(original, *, classes="", children=(), xml_roles=None,
+                      extra=None, count=None):
+    """#1364: a Chrome contenteditable group with no ARIA textbox role."""
+    field = _chrome_contenteditable(_KeyClearedWebField(original))
+    field.attrs.pop("xml-roles", None)
+    if xml_roles:
+        field.attrs["xml-roles"] = xml_roles
+    field.attrs["class"] = classes
+    field.attrs.update(extra or {})
+    field.get_role_name = lambda: "section"
+    kids = [_BlockChild(role) for role in children]
+    field.get_child_count = lambda: len(kids) if count is None else count
+    field.get_child_at_index = lambda i: kids[i]
+    return field
+
+
+@pytest.mark.parametrize("make", [
+    # ProseMirror demo (#1080 data): class token, paragraphs as embedded objects.
+    lambda: _prosemirror_like("\ufffc\ufffc\ufffc", classes="ProseMirror",
+                              children=("heading", "paragraph", "paragraph")),
+    # ProseMirror/Tiptap single paragraph, read as plain text.
+    lambda: _prosemirror_like("Hello world", classes="tiptap ProseMirror",
+                              children=("paragraph",)),
+    # CodeMirror 6 sets role=textbox on .cm-content: the class must still win.
+    lambda: _prosemirror_like("const x = 1;", classes="cm-content",
+                              xml_roles="textbox", children=("section",)),
+    lambda: _prosemirror_like("draft", classes="notranslate public-DraftEditor-content"),
+    lambda: _prosemirror_like("lexical", extra={"data-lexical-editor": "true"}),
+    lambda: _prosemirror_like("slate", extra={"data-slate-editor": "true"}),
+    # Unknown framework: a non-textbox contenteditable with block children.
+    lambda: _prosemirror_like("Some text", classes="my-editor",
+                              children=("paragraph", "list")),
+    lambda: _prosemirror_like("\ufffc", classes="my-editor"),
+    # Unreadable structure fails safe.
+    lambda: _prosemirror_like("text", classes="my-editor", count=-1),
+])
+@pytest.mark.parametrize("replacement", ["Replaced by agent", ""])
+def test_generic_rich_editor_replace_refuses_before_any_mutation(
+    fake_atspi, monkeypatch, make, replacement,
+) -> None:
+    """#1364: set_value never clears a model editor it cannot verify."""
+    field = make()
+    original = field.text
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("unsafe replacement reached a mutating or restoration path")
+
+    for name in ("_replace_editable_text", "_set_text_body", "_capture_text_points",
+                 "_restore_text_points", "_select_range", "grab_focus",
+                 "_clear_contenteditable", "_type_into_target"):
+        monkeypatch.setattr(_atspi, name, unexpected)
+    monkeypatch.setattr(_linux_input, "press_chord", unexpected)
+    monkeypatch.setattr(_linux_input, "type_string", unexpected)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(field, replacement)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail == {"reason": "rich_text_replace_unsafe", "unchanged": True}
+    assert field.text == original
+
+
+def test_prosemirror_driver_refuses_before_dom_or_native_write(fake_atspi, monkeypatch) -> None:
+    """#1364: the Linux set_value path cannot reach any writer for ProseMirror."""
+    from a11y_computer_use.drivers import _cdp_forms
+
+    field = _prosemirror_like("\ufffc\ufffc", classes="ProseMirror",
+                              children=("paragraph", "paragraph"))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("model editor reached a writer")
+
+    monkeypatch.setattr(_cdp_forms, "write_element", unexpected)
+    monkeypatch.setattr(_atspi, "set_text", unexpected)
+    element = Element("e1", "AXGroup", "", None, Bounds(0, 0, 0, 200, 40),
+                      "snap-1", editable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver()._apply_set_value(element, "replacement", field)
+    assert exc.value.detail["reason"] == "rich_text_replace_unsafe"
+    assert field.text == "\ufffc\ufffc"
+
+
+@pytest.mark.parametrize("make", [
+    # Plain ARIA textbox contenteditable keeps the verified clear-and-type path.
+    lambda: _chrome_contenteditable(_KeyClearedWebField("\ufffc\ufffc")),
+    # A plain non-textbox contenteditable with only inline text.
+    lambda: _prosemirror_like("plain words", classes="note"),
+    lambda: _prosemirror_like("x", classes="ProseMirror-menubar cm-content-wrapper",
+                              children=("text",)),
+])
+def test_generic_rich_editor_guard_preserves_plain_paths(fake_atspi, make) -> None:
+    """#1364: only model-editor signals refuse; prefixed tokens do not."""
+    _atspi._refuse_model_editor_replace(make())
+
+
+def test_generic_rich_editor_guard_ignores_non_chromium(fake_atspi) -> None:
+    field = _prosemirror_like("\ufffc", classes="ProseMirror", children=("paragraph",))
+    field.attrs["tag"] = "input"
+    _atspi._refuse_model_editor_replace(field)
+
+
 @pytest.mark.parametrize("signal", ["native", "aria-modal"])
 @pytest.mark.parametrize("iframe", [False, True])
 def test_page_modal_preserves_browser_chrome(modal_boundary_tree, signal, iframe):
