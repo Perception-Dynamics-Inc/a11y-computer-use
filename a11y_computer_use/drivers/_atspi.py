@@ -14466,6 +14466,18 @@ class _ReadBudget:
         return elapsed - credit >= self.limit
 
 
+def _state_flag_name(flag) -> str:
+    """Name of an Atspi.StateType from StateSet.get_states().
+
+    PyGObject 3.52+ makes GEnums IntEnums, so ``str(flag)`` is the number
+    ("12"), not "<enum ATSPI_STATE_FOCUSED ...>". Matching "FOCUSED" in that
+    string never succeeded, so a focused owner read as unresolved and the
+    retry verdict was unverifiable (#1362). ``value_name`` exists on both.
+    """
+    name = getattr(flag, "value_name", None) or getattr(flag, "name", None)
+    return name if isinstance(name, str) else str(flag)
+
+
 def _retry_evidence(action, target, focus):
     """Scoped evidence for formatting and inert labels; unknown elsewhere.
 
@@ -14508,7 +14520,7 @@ def _retry_evidence(action, target, focus):
             flags = _call_first(states, ("get_states",))
             if flags is None:
                 return None
-            selected = any("SELECTED" in str(flag) for flag in flags)
+            selected = any("SELECTED" in _state_flag_name(flag) for flag in flags)
             return RetryEvidence(effect=(target, "outline_selection", selected))
         if formatting:
             if not _state_has(target, "FOCUSED"):
@@ -14552,7 +14564,7 @@ def _retry_evidence(action, target, focus):
                 raise ValueError("unreadable identity/state")
             if role in {"canvas", "drawing area"} or role == "image" and not name:
                 raise ValueError("opaque signal")
-            return node, role, name, tuple(str(flag) for flag in flags)
+            return node, role, name, tuple(_state_flag_name(flag) for flag in flags)
 
         @cache
         def child_count(node):

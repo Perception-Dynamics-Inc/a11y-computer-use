@@ -23864,3 +23864,31 @@ def test_modal_collection_classifies_dbind_timeouts():
     assert _atspi._collection_timed_out(Exception("atspi_error: timeout from dbind (1)"))
     assert _atspi._collection_timed_out(Exception("atspi_error: The process appears to be hung. (1)"))
     assert not _atspi._collection_timed_out(Exception("Method GetMatches not supported"))
+
+
+def test_retry_evidence_reads_state_names_from_intenum_flags():
+    """#1362: PyGObject 3.52+ StateType is an IntEnum whose str() is "12".
+
+    The retry probe matched "FOCUSED" in str(flag), so a focused owner never
+    resolved and every repeat click read unverifiable. Names come from
+    value_name, which old GEnum flags carry too.
+    """
+    import enum
+
+    class NewStyle(enum.IntEnum):
+        FOCUSED = 12
+
+        @property
+        def value_name(self):
+            return f"ATSPI_STATE_{self.name}"
+
+    class OldStyle:
+        value_name = "ATSPI_STATE_SELECTED"
+
+        def __str__(self):
+            return "<enum ATSPI_STATE_SELECTED of type Atspi.StateType>"
+
+    assert str(NewStyle.FOCUSED) == "12"
+    assert "FOCUSED" in _atspi._state_flag_name(NewStyle.FOCUSED)
+    assert "SELECTED" in _atspi._state_flag_name(OldStyle())
+    assert _atspi._state_flag_name(7) == "7"
