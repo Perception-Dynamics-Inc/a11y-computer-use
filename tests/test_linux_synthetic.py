@@ -19391,6 +19391,63 @@ def test_scale_description_filter_preserves_labels(
     assert float(target.value) == 75
 
 
+@pytest.mark.parametrize("reads, refused", [
+    (("degraded", "same"), False),
+    (("degraded", "degraded"), True),
+    (("recycled", "recycled"), True),
+    (("recycled", "same"), False),
+])
+def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
+    monkeypatch, reads, refused,
+):
+    """#1368: a timed-out read in the identity walk must not refuse a live row.
+
+    Each failed AT-SPI read in the walk becomes a default (empty role), so
+    one slow reply looks like a recycled row. The check reads again and
+    refuses only when the second read also disagrees; it never trusts the
+    snapshot without a fresh read that matches.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    identity = (("push button", "", (), "k1"), ("table row", "", (), "k2"))
+    values = {"same": identity,
+              "degraded": (("", "", (), "k1"),),
+              "recycled": (("push button", "", (), "k1"), ("table row", "", (), "k9"))}
+    calls = []
+
+    def fake_identity(handle, *, fresh=False, cache=None):
+        assert fresh
+        calls.append(handle)
+        return values[reads[len(calls) - 1]]
+
+    monkeypatch.setattr(_atspi, "chromium_row_identity", fake_identity)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e1", "AXButton", "edit 300", None, None, "snap",
+                      row_identity=identity)
+    if refused:
+        with pytest.raises(ComputerUseError) as exc:
+            driver._verify_chromium_row_target(element, object())
+        assert exc.value.code is ErrorCode.STALE_REF
+    else:
+        driver._verify_chromium_row_target(element, object())
+    assert len(calls) == 2
+
+
+def test_chromium_row_identity_match_reads_once(monkeypatch):
+    from a11y_computer_use.drivers import _atspi
+
+    identity = (("push button", "", (), "k1"),)
+    calls = []
+    monkeypatch.setattr(_atspi, "chromium_row_identity",
+                        lambda h, *, fresh=False, cache=None: calls.append(h) or identity)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    driver._verify_chromium_row_target(
+        Element("e1", "AXButton", "edit 300", None, None, "snap", row_identity=identity), object())
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("action", ["resolve", "click", "press"])
 @pytest.mark.parametrize("change", ["name", "index", "parent", "role", "unchanged", "value"])
 def test_chromium_pooled_row_ref_identity(fake_atspi, monkeypatch, change, action):

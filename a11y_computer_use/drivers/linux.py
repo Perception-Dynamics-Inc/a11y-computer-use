@@ -3636,11 +3636,20 @@ class LinuxDriver:
             return
         from a11y_computer_use.drivers import _atspi
 
-        if current is None:
+        def fresh() -> tuple:
             try:
-                current = self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
+                return self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
             except Exception:
-                current = ()
+                return ()
+
+        if current is None:
+            current = fresh()
+            # Every read in the identity walk maps a slow or failed D-Bus reply
+            # to a default ("" role, no parent), so one degraded read under
+            # load looks like a recycled row (#1368). A recycled row reads
+            # differently every time; refuse unless a second read agrees.
+            if current != element.row_identity:
+                current = fresh()
         if current != element.row_identity:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
