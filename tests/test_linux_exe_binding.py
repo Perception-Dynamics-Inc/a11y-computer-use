@@ -638,3 +638,68 @@ def test_live_window_spoofing_net_wm_pid_is_refused(spawn, tmp_path, monkeypatch
         win.destroy()
         d.sync()
         d.close()
+
+
+def _registered_as(monkeypatch, pids):
+    """AT-SPI registrants named NAME at these bus pids (HIGH 1, #1327)."""
+    monkeypatch.setattr(_linux_exe, "_atspi_named_pids", lambda name: set(pids))
+
+
+def test_a_registrant_named_like_the_app_from_another_exe_is_refused_alone(spawn, tmp_path, monkeypatch) -> None:
+    """HIGH 1: no process is named the app, but an AT-SPI registrant is."""
+    genuine = _native(tmp_path)
+    impostor = tmp_path / "w"
+    shutil.copy2(shutil.which("sleep"), impostor)
+    proc = subprocess.Popen([str(impostor), "60"], stdin=subprocess.DEVNULL)
+    try:
+        _registered_as(monkeypatch, {proc.pid})
+        assert not (_linux_exe.pids_named(NAME) & {proc.pid})
+        key, hint = _linux_exe.check(NAME, genuine)
+        assert key == NAME and hint is not None and str(impostor) in hint
+        assert _linux_exe.binds(NAME, proc.pid) is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_a_registrant_named_like_the_app_beside_the_genuine_one_is_refused(spawn, tmp_path, monkeypatch) -> None:
+    genuine = _native(tmp_path)
+    real = spawn([genuine, "60"])
+    impostor = tmp_path / "w"
+    shutil.copy2(shutil.which("sleep"), impostor)
+    proc = subprocess.Popen([str(impostor), "60"], stdin=subprocess.DEVNULL)
+    try:
+        _registered_as(monkeypatch, {proc.pid, real.pid})
+        assert _linux_exe.check(NAME, genuine)[1] is not None
+        assert _linux_exe.binds(NAME, real.pid) is True
+        assert _linux_exe.binds(NAME, proc.pid) is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_the_genuine_registrant_is_bound(spawn, tmp_path, monkeypatch) -> None:
+    """Control: only the real app registered under its name."""
+    genuine = _native(tmp_path)
+    real = spawn([genuine, "60"])
+    _registered_as(monkeypatch, {real.pid})
+    assert _linux_exe.check(NAME, genuine) == (NAME, None)
+    assert _linux_exe.binds(NAME, real.pid) is True
+    assert _linux_exe.binds(NAME, 0) is False
+
+
+def test_binds_only_restricts_names_the_gate_decided() -> None:
+    assert _linux_exe.binds("zz-never-gated", 0) is True
+
+
+def test_an_interpreter_grant_binds_only_that_interpreter(spawn, tmp_path, monkeypatch) -> None:
+    py = spawn([PY, "-c", _sleeper_code(NAME)])
+    other = subprocess.Popen([shutil.which("sleep"), "60"], stdin=subprocess.DEVNULL)
+    try:
+        host = _linux_exe.interpreter_key(PY)
+        _linux_exe.check(host, None)
+        assert _linux_exe.binds(host, py.pid) is True
+        assert _linux_exe.binds(host, other.pid) is False
+    finally:
+        other.kill()
+        other.wait()

@@ -352,7 +352,49 @@ def target_pids(name: str, named: set[int] | None = None) -> set[int]:
     owners = _x11_owner_pids(name)
     if named - owners:
         owners |= _atspi_owner_pids() & named
-    return owners
+    # An AT-SPI registrant that calls itself ``name`` is what find_root binds
+    # by name, whatever its comm or exe; its bus pid is a target (#1327).
+    return owners | _atspi_named_pids(name)
+
+
+def _atspi_named_pids(name: str) -> set[int]:
+    """Bus pids of AT-SPI applications whose name is ``name`` (#1327)."""
+    try:
+        from a11y_computer_use.drivers import _atspi
+
+        return set(_atspi._registered_pids_named(name) or ())
+    except Exception:  # noqa: BLE001 - no bus: nothing registers under the name
+        return set()
+
+
+# name.casefold() -> recorded exe, for every name ``check`` decided on in this
+# process. ``binds`` re-applies that decision to the one pid find_root binds.
+_GATED: dict[str, str | None] = {}
+
+
+def binds(name: str, pid: int | None) -> bool:
+    """True when the AT-SPI registrant at bus ``pid`` may be bound as ``name``.
+
+    The name match in find_root only nominates; the bus pid (D-Bus
+    credentials, not self-reported) must pass the same exe, uid and
+    interpreter checks as the grant gate (#1327). Names the gate never
+    decided on in this process are not restricted here.
+    """
+    key = (name or "").casefold()
+    if key not in _GATED:
+        return True
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    me = _me()
+    if me is None or _uid(pid) != me:
+        return False
+    host = interpreter_key(name)
+    if host:
+        exe = exe_of(pid)
+        return exe is not None and interpreter_key(exe) == host
+    named = pids_named(name) | {pid}
+    _key, hint = _verdict(name, _GATED[key], {pid}, named)
+    return hint is None and not _gone(pid)
 
 
 def check(name: str, recorded: str | None) -> tuple[str, str | None]:
@@ -363,9 +405,11 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     hint when the exe does not match (the caller refuses). With no live
     process the name is returned unchanged; a later check sees the process.
     """
+    _GATED[(name or "").casefold()] = recorded
     if interpreter_key(name):
         return name, None
-    named = pids_named(name)
+    registrants = _atspi_named_pids(name)
+    named = pids_named(name) | registrants
     if not named:
         return name, None
     try:
@@ -376,6 +420,12 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
         return name, str(exc)
     if not targets:
         return name, None  # nothing named this owns a window or a11y app (#1322)
+    return _verdict(name, recorded, targets, named)
+
+
+def _verdict(name: str, recorded: str | None, targets: set[int],
+             named: set[int]) -> tuple[str, str | None]:
+    """``check``'s exe verdict for ``targets``; ``named`` supplies ancestors."""
     me = _me()
     foreign = sorted(pid for pid in targets if _uid(pid) not in (me, None))
     if foreign:

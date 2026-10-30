@@ -23686,3 +23686,45 @@ def test_snapshot_keeps_a_native_app_name(fake_atspi, monkeypatch) -> None:
     monkeypatch.setattr(_atspi, "find_root", lambda name, scope: window)
     assert LinuxDriver()._root_for_snapshot("mousepad", Scope.WINDOW)[0] == "mousepad"
     assert LinuxDriver().interpreter_host("mousepad") is None
+
+
+def _impostor_and_real(fake_atspi, monkeypatch, *, real_running=True):
+    """HIGH 1 (#1327): a registrant calling itself mousepad from another exe."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_exe, _linux_system
+
+    impostor = _PidNode("application", "mousepad", pid=21,
+                        children=[_WindowNode("frame", "Untitled", states={"active"})])
+    real = _PidNode("application", "Mousepad", pid=22, children=[_WindowNode("frame", "Notes")])
+    fake_atspi.desktop = _WindowNode("desktop", children=[impostor, real] if real_running else [impostor])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    exes = {21: "/tmp/w", 22: "/usr/bin/mousepad"}
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: exes.get(pid))
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1000)
+    monkeypatch.setattr(_linux_exe, "_me", lambda: 1000)
+    monkeypatch.setattr(_linux_exe, "_gone", lambda pid: False)
+    monkeypatch.setattr(_linux_exe, "pids_named", lambda name: set())
+    monkeypatch.setattr(_linux_exe, "_GATED", {"mousepad": "/usr/bin/mousepad"})
+    return impostor, real
+
+
+def test_find_root_binds_the_real_app_not_a_registrant_that_only_shares_its_name(fake_atspi, monkeypatch) -> None:
+    """HIGH 1 (#1327): the name nominates; the bus pid's exe decides. The
+    impostor is dropped before ranking, so it cannot even make it ambiguous."""
+    impostor, real = _impostor_and_real(fake_atspi, monkeypatch)
+    assert _atspi.find_root("mousepad", Scope.APP) is real
+
+
+def test_find_root_binds_nothing_when_only_the_impostor_runs(fake_atspi, monkeypatch) -> None:
+    """HIGH 1 (#1327): real Mousepad not running; the impostor is not bound."""
+    _impostor_and_real(fake_atspi, monkeypatch, real_running=False)
+    assert _atspi.find_root("mousepad", Scope.APP) is None
+
+
+def test_find_root_binds_a_registrant_of_another_user_never(fake_atspi, monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_exe
+
+    _impostor_and_real(fake_atspi, monkeypatch)
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1001)
+    assert _atspi.find_root("mousepad", Scope.APP) is None

@@ -7005,7 +7005,7 @@ def find_root(app: str, scope) -> object | None:
     # "cuatestapp"), while the Linux app id used for permissions is the window
     # owner's comm (e.g. "python3"); match by PID as well as by name so an id
     # resolved from X11 finds the same application on the a11y bus.
-    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers import _linux_exe, _linux_system
     from a11y_computer_use.schema import ComputerUseError
 
     try:
@@ -7064,6 +7064,11 @@ def find_root(app: str, scope) -> object | None:
                 watch.pid = pid
             frames = _frames(candidate)
             rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
+        # The name only nominates. The bus pid must pass the grant's exe,
+        # uid and interpreter checks, so an impostor is dropped before it
+        # can be bound or make the real app ambiguous (#1327).
+        if sys.platform.startswith("linux") and not _linux_exe.binds(app, pid):
+            continue
         matched.append((candidate, rank, _program_of(candidate, name), name))
     best = _pick_one_program(app, needle, matched)
     app_acc = best
@@ -12857,6 +12862,31 @@ def _registered_pids() -> set[int] | None:
     for index in range(min(count, 200)):
         app = _child_at(desktop, index)
         pid = _call_first(app, ("get_process_id",)) if app is not None else None
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            pids.add(pid)
+    return pids
+
+
+def _registered_pids_named(name: str) -> set[int] | None:
+    """Bus pids of AT-SPI applications ``find_root`` would match by name (#1327)."""
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    needle = (name or "").lower()
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None or not needle:
+        return None
+    pids = set()
+    for app in _fresh_application_children(desktop)[:200]:
+        if app is None:
+            continue
+        label = (_call_first(app, ("get_name",), default="") or "").lower()
+        if not _linux_system._names_program(needle, label):
+            continue
+        pid = _call_first(app, ("get_process_id",))
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             pids.add(pid)
     return pids
