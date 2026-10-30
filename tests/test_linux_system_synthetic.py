@@ -2188,7 +2188,11 @@ def test_no_active_window_is_no_frontmost_app_never_the_root_owner(monkeypatch, 
     monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: 77)  # root and WM: xfwm4
     _popup_display(monkeypatch, [client], [frame], {200: "mousepad", 77: "xfwm4"},
                    active=0, zero_active=(value == "zero"))
-    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: 77)
+    display = _linux_system._display()
+    lookup = display.create_resource_object
+    # Window 0 resolves like the X server's root: owned by the WM process.
+    display.create_resource_object = lambda kind, wid: (
+        _PopupWin(0, 0, 0, 1280, 800, 0, override=False) if int(wid) == 0 else lookup(kind, wid))
     assert _linux_system.frontmost_app_id() == ""
     assert _linux_system.active_window() is None
 
