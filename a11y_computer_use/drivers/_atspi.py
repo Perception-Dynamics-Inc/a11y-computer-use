@@ -23613,8 +23613,40 @@ def _x11_modal_dialog(acc) -> bool:
     return found
 
 
+_modal_collection_state = threading.local()
+
+
+def _collection_timed_out(exc: BaseException) -> bool:
+    """True when a Collection call failed because the app did not answer in time."""
+    text = str(exc).lower()
+    return "timeout" in text or "timed out" in text or "hung" in text
+
+
+def _modal_collection_busy() -> bool:
+    return bool(getattr(_modal_collection_state, "busy", False))
+
+
 def _modal_collection(root, *, split: bool = False):
-    """Reported dialog descendants, or None when this Collection cannot reply."""
+    """Reported dialog descendants, or None when this Collection cannot reply.
+
+    A timed-out query is not retried here: the app is still working on it
+    (#1169), so it must answer a ping before any later read, at the same
+    300ms per-call wait. The walk is marked busy instead, so a budget refusal
+    reports a retryable ``busy`` error (re-observe and retry) rather than
+    ``modal_boundary_unavailable``: a slow app is not an unsupported one.
+    """
+    result = _modal_collection_once(root, split=split)
+    if result is not _COLLECTION_TIMEOUT:
+        return result
+    _ping_answers(root)
+    _modal_collection_state.busy = True
+    return None
+
+
+_COLLECTION_TIMEOUT = object()
+
+
+def _modal_collection_once(root, *, split: bool = False):
     coll = _call_first(root, ("get_collection_iface", "get_collection"))
     if coll is not None:
         try:
@@ -23646,10 +23678,25 @@ def _modal_collection(root, *, split: bool = False):
                 tree.RESTRICT_SIBLING, 0, True,
             )
             return [*before, pivot, *after]
-        except Exception:
-            _await_collection_drain(root)
+        except Exception as exc:
+            _drop_cached_properties(root)
+            if _collection_timed_out(exc):
+                return _COLLECTION_TIMEOUT
+            _ping_answers(root)
             return None
     return None
+
+
+def _refuse_modal_boundary():
+    """Fail closed; a timed-out Collection makes the refusal retryable."""
+    if _modal_collection_busy():
+        raise ComputerUseError(ErrorCode.BUSY,
+            "The application did not answer the modal-boundary query in time; "
+            "no input was sent. Re-observe and retry.",
+            detail={"reason": "modal_boundary_busy", "retryable": True})
+    raise ComputerUseError(ErrorCode.UNSUPPORTED,
+        "Cannot establish the active modal boundary; no input was sent",
+        detail={"reason": "modal_boundary_unavailable"})
 
 
 def _native_modal_parent(modal):
@@ -23732,6 +23779,7 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
     # Calc's Collection materializes its virtual sheet and wedges later reads.
     # Native dialogs are structural descendants/siblings, never sheet cells.
     libreoffice = _libreoffice_accessible(root)
+    _modal_collection_state.busy = False
     # At input time, inspect structural containers first. A recursive window
     # query can overload Chromium on a wide page before its reply times out.
     # Delegate wide subtrees to two complete native queries instead.
@@ -23756,9 +23804,7 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
             seen.add(key)
             pinned.append(node)
             if len(seen) > 4096:
-                raise ComputerUseError(ErrorCode.UNSUPPORTED,
-                    "Cannot establish the active modal boundary; no input was sent",
-                    detail={"reason": "modal_boundary_unavailable"})
+                _refuse_modal_boundary()
             candidates.append(node)
             if (_role_name(node) in {"tool bar", "menu bar", "status bar"}
                     and not any(_role_name(parent) in {"document web", "document frame"}
@@ -23819,9 +23865,7 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
                     candidates.extend(descendants)
                     continue
             if count < 0 or count > 4096 - len(seen) - len(queue):
-                raise ComputerUseError(ErrorCode.UNSUPPORTED,
-                    "Cannot establish the active modal boundary; no input was sent",
-                    detail={"reason": "modal_boundary_unavailable"})
+                _refuse_modal_boundary()
             queue.extend(child for i in range(max(0, count))
                          if (child := _child_at(node, i)) is not None)
     if (application is not None
