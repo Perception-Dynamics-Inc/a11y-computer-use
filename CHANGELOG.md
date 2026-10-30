@@ -40,6 +40,7 @@ Within a group, lines are ordered by theme, then by date.
 - Linux Chrome (#1343): `click(ref)` on short static text clicks the centre of its parent paragraph's box.
 - Linux: with X-Resource unavailable, a no-app action is refused with a misleading "has no permission grant" message. A wording fix will follow.
 - Linux: a window started as `python3.13` is keyed as `python3.13`, so a `python3` grant does not cover it. This behaviour predates this release.
+- Linux Chrome: while an impostor process is running, a legacy name-only `chrome` grant also blocks `find` on the real Chrome. It fails closed, and the user must re-grant. This follows from the executable binding in #1334.
 
 ## [0.4.80] - 2026-10-28
 
