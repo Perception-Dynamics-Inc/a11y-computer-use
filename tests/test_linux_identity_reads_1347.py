@@ -242,3 +242,59 @@ def test_registry_name_and_pid_read_once_per_gate(monkeypatch) -> None:
         _atspi._registered_pids_named("mousepad")
         assert gedit.asked["get_process_id"] == before["get_process_id"] + 2
         assert gedit.asked["get_name"] == before["get_name"] + 2
+
+
+def _host_bus(monkeypatch, apps, comms) -> dict:
+    bus = _bus(monkeypatch)
+    bus["desktop"].children[:] = apps
+    calls = {"find_root": 0}
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: comms.get(pid))
+    real = _atspi.find_root
+
+    def find_root(app, scope):
+        calls["find_root"] += 1
+        return real(app, scope)
+
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    bus["calls"] = calls
+    return bus
+
+
+def _driver():
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    d = LinuxDriver.__new__(LinuxDriver)
+    d._run = lambda fn: fn()
+    return d
+
+
+def test_native_frontmost_skips_the_interpreter_root_walk(monkeypatch) -> None:
+    """#1347: no candidate runs an interpreter, so no frame/state walk per action."""
+    bus = _host_bus(monkeypatch, [_Acc("xfce4-terminal", 41), _Acc("python3", 42)],
+                    {41: "xfce4-terminal", 42: "python3"})
+    assert _atspi.may_host_interpreter("xfce4-terminal") is False
+    assert _driver().interpreter_host("xfce4-terminal") is None
+    assert bus["calls"]["find_root"] == 0
+
+
+def test_interpreter_hosted_app_still_takes_the_full_lookup(monkeypatch) -> None:
+    """#1296 kept: a python3-hosted registrant named like the app is still found."""
+    _host_bus(monkeypatch, [_Acc("cuatestapp", 51)], {51: "python3"})
+    assert _atspi.may_host_interpreter("cuatestapp") is True
+
+
+def test_unreadable_registrant_takes_the_full_lookup(monkeypatch) -> None:
+    """An unnamed registrant, an unread pid or an unknown comm is never a 'no'."""
+    _host_bus(monkeypatch, [_Acc("", 61)], {61: "gedit"})
+    assert _atspi.may_host_interpreter("gedit") is True
+    _host_bus(monkeypatch, [_Acc("gedit", 0)], {})
+    assert _atspi.may_host_interpreter("gedit") is True
+    _host_bus(monkeypatch, [_Acc("gedit", 62)], {})
+    assert _atspi.may_host_interpreter("gedit") is True
+
+
+def test_pid_matched_interpreter_registrant_takes_the_full_lookup(monkeypatch) -> None:
+    """A registrant matched by X11 pid (prgname differs) still counts."""
+    bus = _host_bus(monkeypatch, [_Acc("someprg", 71)], {71: "python3"})
+    monkeypatch.setattr(_linux_system, "_pids_matching", lambda identifier: {71})
+    assert bus and _atspi.may_host_interpreter("python3app") is True

@@ -1435,6 +1435,10 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         try:
+            # No candidate runs an interpreter: find_root's frame and state
+            # reads cannot turn that into a host (#1347).
+            if not self._run(lambda: _atspi.may_host_interpreter(app)):
+                return None
             root = self._run(lambda: _atspi.find_root(app, Scope.APP))
             if root is None:
                 return None

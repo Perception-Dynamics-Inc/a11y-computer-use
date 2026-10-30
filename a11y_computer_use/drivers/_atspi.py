@@ -7155,6 +7155,54 @@ def _toplevel_of(node):
     return None
 
 
+def may_host_interpreter(app: str) -> bool:
+    """False only when no registrant ``find_root(app)`` could pick runs an interpreter.
+
+    ``interpreter_host`` reports an interpreter only when the root it finds
+    belongs to a process whose comm is an interpreter (#1296). This reads the
+    registry the way ``find_root`` filters it (name, X11 pid, an active portal
+    window's pid) using the per-gate registry reads, and answers False only
+    when every such registrant has a readable pid whose comm is not an
+    interpreter. Anything unread, unnamed or unanswered answers True, so the
+    full lookup runs; the frame and state reads it skips cannot change a
+    None verdict (#1347).
+    """
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import ComputerUseError
+
+    Atspi = _atspi()
+    needle = (app or "").lower()
+    if not needle:
+        return True
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return True
+    try:
+        pids = set(_linux_system.pids_matching(app))
+        row = _linux_system.active_window()
+        if row and str(row.get("app", "")).lower() == needle:
+            pids.add(int(row.get("pid") or 0))
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - no X11 evidence: take the full lookup
+        return True
+    for candidate in _desktop_applications(desktop):
+        if candidate is None:
+            continue
+        name = (_registry_read(candidate, "get_name") or "").lower()
+        pid = _registry_read(candidate, "get_process_id")
+        if not name:
+            return True
+        if not _linux_system._names_program(needle, name) and pid not in pids:
+            continue
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return True
+        comm = _linux_system._comm_for_pid(pid)
+        if not comm or _linux_system.is_interpreter(comm):
+            return True
+    return False
+
+
 def _desktop_applications(desktop) -> list:
     """The registry's applications, read fresh once per gate of an action (#1347).
 
