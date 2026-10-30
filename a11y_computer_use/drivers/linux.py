@@ -411,27 +411,18 @@ def _cdp_socket_for_window(pages: list, window_title: str) -> str | None:
     A shared profile has other tabs. Scrolling the first one moves a page
     the user is not looking at. The window title is the page title plus the
     browser suffix, so the page title has to be that prefix. One tab is used
-    as itself.
+    as itself. Two pages that tie for the title (two same-titled windows)
+    are not a choice: None, so neither is scrolled (#1372).
     """
+    from a11y_computer_use.drivers._cdp_forms import title_matches
+
     sockets = [str(page["webSocketDebuggerUrl"]) for page in pages if page.get("webSocketDebuggerUrl")]
     if not sockets:
         return None
     if len(sockets) == 1:
         return sockets[0]
-    best: tuple[int, str] | None = None
-    for page in pages:
-        ws = page.get("webSocketDebuggerUrl")
-        title = str(page.get("title") or "")
-        if not ws or not title or not window_title:
-            continue
-        if window_title != title and not (
-            window_title.startswith(title) and window_title[len(title):len(title) + 1] in " -—–"
-        ):
-            continue
-        choice = (len(title), str(ws))
-        if best is None or choice[0] >= best[0]:
-            best = choice
-    return None if best is None else best[1]
+    matches = title_matches(pages, window_title)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _cdp_scroll_pixels(x: int, y: int, *, dx: int, dy: int) -> bool:
@@ -4240,13 +4231,19 @@ class LinuxDriver:
         # in the DOM. None keeps the AT-SPI writer, including GTK and a
         # Chrome that was not started with a debugging port. The window
         # title selects the tab when more than one page target is open.
+        window_title = self._dom_window_title(handle)
         dom = _cdp_forms.write_element(
             element, value,
-            window_title=self._dom_window_title(handle),
+            window_title=window_title,
             pids=self._dom_pids(handle),
         )
         if dom is not None:
             return dom
+        if (handle is None or not window_title) and _cdp_forms.write_was_ambiguous():
+            # Twin pages and no live handle whose window can be read: nothing
+            # binds this ref to its window. Refuse before any write, never
+            # act and report unverifiable (#1372).
+            raise _cdp_forms.ambiguous_window_error(element)
         if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
             # A Writer table cell is named like a Calc address, but typing
             # into it inserts a paragraph and the cell node reads back empty.

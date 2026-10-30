@@ -94,3 +94,49 @@ def test_set_value_in_window_one_writes_only_the_refs_own_handle(twin_chrome, mo
     assert evaluated == []
     assert values["ws://w2"] == "BRAVO text in window B"
     assert written == [(window1_handle, "30-w1")]
+
+
+def test_twin_write_flags_the_window_as_ambiguous(twin_chrome) -> None:
+    """The DOM path reports the tie so the driver can refuse (review item 3)."""
+    evaluated, values = twin_chrome
+    assert _cdp_forms.write_element(_textarea(), "30-w1", window_title=TITLE, pids=(9,)) is None
+    assert _cdp_forms.write_was_ambiguous() is True
+    assert evaluated == []
+    assert values == {"ws://w1": "T-inactive", "ws://w2": "BRAVO text in window B"}
+    pages = [dict(TWINS[0]), dict(TWINS[1], title="Lab Two")]
+    import a11y_computer_use.drivers._cdp as cdp
+    cdp_targets = cdp.page_targets
+    try:
+        cdp.page_targets = lambda endpoint: pages
+        assert _cdp_forms.write_element(_textarea(), "30-w1", window_title=TITLE, pids=(9,)) is True
+        assert _cdp_forms.write_was_ambiguous() is False
+    finally:
+        cdp.page_targets = cdp_targets
+
+
+def test_driver_refuses_when_window_title_unreadable(twin_chrome, monkeypatch) -> None:
+    from a11y_computer_use.schema import ComputerUseError
+
+    evaluated, values = twin_chrome
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn(), raising=False)
+    monkeypatch.setattr(driver, "_dom_window_title", lambda handle: "")
+    monkeypatch.setattr(driver, "_dom_pids", lambda handle: (9,))
+    monkeypatch.setattr(_atspi, "_refuse_model_editor_replace", lambda *a, **k: None)
+    written: list[object] = []
+    monkeypatch.setattr(_atspi, "set_text", lambda handle, value: written.append(handle) or True)
+    with pytest.raises(ComputerUseError) as info:
+        driver._apply_set_value(_textarea(), "30-w1", object())
+    assert info.value.detail["reason"] == "ambiguous_window"
+    assert evaluated == [] and written == []
+    assert values["ws://w2"] == "BRAVO text in window B"
+
+
+def test_dom_scroll_socket_refuses_twin_windows() -> None:
+    """linux._cdp_socket_for_window had the same last-tie-wins copy (review item 1)."""
+    from a11y_computer_use.drivers.linux import _cdp_socket_for_window
+
+    assert _cdp_socket_for_window([dict(p) for p in TWINS], TITLE) is None
+    unique = [dict(TWINS[0]), dict(TWINS[1], title="Lab Two")]
+    assert _cdp_socket_for_window(unique, TITLE) == "ws://w1"
+    assert _cdp_socket_for_window([dict(TWINS[1])], TITLE) == "ws://w2"

@@ -15,6 +15,7 @@ already contain is not added.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import os
@@ -629,6 +630,29 @@ def fetch_form_controls(port: object, window_title: object) -> tuple[FormControl
     return tuple(found)
 
 
+# Set when the last DOM write saw several pages it could not tell apart, so
+# the caller can refuse instead of guessing when the ref's own handle does
+# not bind the window either (#1372). Per context, reset on every write.
+_AMBIGUOUS_WINDOW: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "cdp_forms_ambiguous_window", default=False,
+)
+
+
+def write_was_ambiguous() -> bool:
+    """True when the last ``write_element`` found same-titled twin pages."""
+    return _AMBIGUOUS_WINDOW.get()
+
+
+def ambiguous_window_error(element: Element) -> ComputerUseError:
+    """The refusal for a write whose window cannot be confirmed. Nothing changed."""
+    return ComputerUseError(
+        ErrorCode.STALE_REF,
+        f"{element.ref}: its window cannot be told apart from another window "
+        "with the same title, so nothing was changed; snapshot again",
+        detail={"ref": element.ref, "reason": "ambiguous_window"},
+    )
+
+
 def write_element(
     element: Element, value: object, window_title: str = "", pids: tuple[int, ...] = (),
 ) -> bool | None:
@@ -644,6 +668,7 @@ def write_element(
         raise TypeError("element must be an Element")
     if isinstance(value, bool) or not isinstance(value, str):
         raise TypeError("value must be a string")
+    _AMBIGUOUS_WINDOW.set(False)
     if element.role not in _FORM_ROLES or element.secure is True or element.enabled is not True:
         return None
     return _commit(element, _write_spec(element, value), window_title, pids)
@@ -803,6 +828,7 @@ def _evaluate(port: int, window_title: str, expression: str) -> object:
         # window the ref belongs to. Do not evaluate in any of them, not even
         # the "only page with this control" fallback, which finds the same
         # control in a twin window (#1372). None keeps the AT-SPI handle path.
+        _AMBIGUOUS_WINDOW.set(True)
         return None
     socket = choose_socket(pages, window_title)
     reply = None
