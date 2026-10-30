@@ -23813,16 +23813,127 @@ def _structural_collection_lookup(root, split: bool):
 
 
 def _structural_collection_store(root, split: bool, result, generation) -> None:
+    _structural_store_key(_ancestor_key(root), split, root, result, generation)
+
+
+def _structural_store_key(key, split: bool, root, result, generation) -> bool:
     global _structural_collections_generation
     if generation is None or generation != _structural_generation():
-        return  # An event arrived mid-query; the reply may be stale.
+        return False  # An event arrived mid-query; the reply may be stale.
     with _structural_collections_lock:
         if _structural_collections_generation != generation:
             _structural_collections.clear()
             _structural_collections_generation = generation
         if len(_structural_collections) >= 64:
             _structural_collections.clear()
-        _structural_collections[(_ancestor_key(root), bool(split))] = (root, list(result))
+        _structural_collections[(key, bool(split))] = (root, list(result))
+    return True
+
+
+# A freshly loaded Chromium page is asked for its dialog roles off the input
+# path (#1368). The first key after a reload of a 5,000-row table otherwise
+# pays the whole-document query inside the 300ms input wait and is refused
+# under load. The prefetch runs on its own connection and thread; inputs
+# still use the same per-call wait. Only an empty, complete reply under an
+# unchanged structural epoch is stored, so a page with any dialog-role node,
+# or one that changed while the query ran, is discovered on the input path
+# exactly as before.
+_PREFETCH_ATTEMPTS = 4
+_prefetch_queue = None
+_prefetch_lock = threading.Lock()
+_prefetch_connection = None
+
+
+def prefetch_document_roles(key) -> None:
+    """Queue a background dialog-role query for one loaded document."""
+    global _prefetch_queue
+    if not (isinstance(key, tuple) and len(key) == 2
+            and str(key[0]).startswith(":") and str(key[1]).startswith("/")):
+        return
+    with _prefetch_lock:
+        if _prefetch_queue is None:
+            import queue
+
+            _prefetch_queue = queue.Queue(maxsize=8)
+            threading.Thread(target=_prefetch_worker, name="a11y-modal-prefetch",
+                             daemon=True).start()
+        try:
+            _prefetch_queue.put_nowait(key)
+        except Exception:
+            pass
+
+
+def _prefetch_bus():
+    global _prefetch_connection
+    if _prefetch_connection is not None:
+        return _prefetch_connection
+    address = _a11y_bus_address()
+    if not address:
+        return None
+    from gi.repository import Gio
+
+    _prefetch_connection = Gio.DBusConnection.new_for_address_sync(
+        address,
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+        | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None, None,
+    )
+    return _prefetch_connection
+
+
+def _dialog_role_rule():
+    """The modal Collection rule as a D-Bus ``MatchRule`` struct."""
+    from gi.repository import GLib
+
+    Atspi = _atspi()
+    mt = Atspi.CollectionMatchType
+    words = [0, 0, 0, 0]
+    for name in ("DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER"):
+        role = getattr(Atspi.Role, name, None)
+        if role is not None:
+            value = int(role)
+            words[value // 32] |= 1 << (value % 32)
+    words = [w - (1 << 32) if w >= 1 << 31 else w for w in words]
+    return GLib.Variant(
+        "((aiia{ss}iaiiasib)uib)",
+        (([], int(mt.NONE), {}, int(mt.NONE), words, int(mt.ANY), [], int(mt.NONE), False),
+         int(Atspi.CollectionSortOrder.CANONICAL), 0, True),
+    )
+
+
+def _prefetch_worker() -> None:
+    from gi.repository import Gio, GLib
+
+    while True:
+        key = _prefetch_queue.get()
+        try:
+            bus = _prefetch_bus()
+            if bus is None:
+                continue
+            bus_name, path = key
+            toolkit = bus.call_sync(
+                bus_name, "/org/a11y/atspi/accessible/root",
+                "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", ("org.a11y.atspi.Application", "ToolkitName")),
+                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 2000, None,
+            ).get_child_value(0).get_variant().get_string()
+            if "chrom" not in toolkit.lower():
+                continue
+            for _attempt in range(_PREFETCH_ATTEMPTS):
+                generation = _structural_generation()
+                if generation is None:
+                    break
+                reply = bus.call_sync(
+                    bus_name, path, "org.a11y.atspi.Collection", "GetMatches",
+                    _dialog_role_rule(), GLib.VariantType.new("(a(so))"),
+                    Gio.DBusCallFlags.NONE, 10000, None,
+                )
+                if reply.get_child_value(0).n_children():
+                    break  # Dialog roles exist: the input path decides.
+                if _structural_store_key(key, False, None, [], generation):
+                    break
+        except Exception:
+            continue
 
 
 def _modal_collection_once(root, *, split: bool = False):

@@ -24155,3 +24155,42 @@ def test_modal_role_query_cache_fails_closed(monkeypatch):
     _atspi._modal_collection(root)
     _atspi._modal_collection(root)
     assert len(calls) == 7
+
+
+def test_loaded_page_role_prefetch_is_stored_only_when_empty_and_unchanged(monkeypatch):
+    """#1368: the first input after a reload reads a prefetched empty reply.
+
+    The prefetch never stores a page with dialog roles, a reply raced by a
+    tree event, or anything without a working listener.
+    """
+    events = _structural_cache(monkeypatch)
+    key = (":1.42", "/org/a11y/atspi/accessible/7")
+    root = _NS()
+    monkeypatch.setattr(_atspi, "_ancestor_key", lambda node: key if node is root else id(node))
+    gen = _atspi._structural_generation()
+    events._on_event(_NS(type="object:children-changed:add", detail1=0))
+    assert not _atspi._structural_store_key(key, False, None, [], gen)
+    assert _atspi._structural_collection_lookup(root, False) is None
+    gen = _atspi._structural_generation()
+    assert _atspi._structural_store_key(key, False, None, [], gen)
+    assert _atspi._structural_collection_lookup(root, False) == []
+    events._on_event(_NS(type="document:load-complete", detail1=0, source=None))
+    assert _atspi._structural_collection_lookup(root, False) is None
+    _structural_cache(monkeypatch, ready=False)
+    assert not _atspi._structural_store_key(key, False, None, [], _atspi._structural_generation())
+
+
+def test_prefetch_rule_matches_the_input_rule():
+    pytest.importorskip("gi")
+    try:
+        rule = _atspi._dialog_role_rule()
+    except Exception as exc:  # no Atspi typelib
+        pytest.skip(str(exc))
+    assert rule.get_type_string() == "((aiia{ss}iaiiasib)uib)"
+    Atspi = _atspi._atspi()
+    words = rule.get_child_value(0).get_child_value(4).unpack()
+    for name in ("DIALOG", "ALERT", "WINDOW", "FRAME", "FILE_CHOOSER"):
+        value = int(getattr(Atspi.Role, name))
+        assert (words[value // 32] & 0xFFFFFFFF) >> (value % 32) & 1, name
+    value = int(Atspi.Role.PUSH_BUTTON)
+    assert not (words[value // 32] & 0xFFFFFFFF) >> (value % 32) & 1

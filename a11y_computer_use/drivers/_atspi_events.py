@@ -298,7 +298,21 @@ def _on_event(event) -> bool:
         _events.append((_seq, getattr(event, "type", ""),
                         getattr(event, "detail1", 0)))
         _events_cv.notify_all()
+    if str(kind) == "document:load-complete":
+        _prefetch_loaded_document(event)
     return False
+
+
+def _prefetch_loaded_document(event) -> None:
+    """Ask a loaded page for its dialog roles before the next input (#1368)."""
+    try:
+        from a11y_computer_use.drivers import _atspi
+
+        key = _atspi._atspi_wrapper_key(getattr(event, "source", None))
+        if key is not None:
+            _atspi.prefetch_document_roles(key)
+    except Exception:
+        pass
 
 
 def _run() -> None:
