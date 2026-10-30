@@ -23722,6 +23722,22 @@ def test_find_root_binds_nothing_when_only_the_impostor_runs(fake_atspi, monkeyp
     assert _atspi.find_root("mousepad", Scope.APP) is None
 
 
+def test_find_root_binds_an_interpreter_app_under_its_interpreter_key(fake_atspi, monkeypatch) -> None:
+    """latency-bench R5 on #1334: bigtree.py (exe python3.13) is gated as
+    ``python``; binds must mirror check, which accepts an interpreter name as
+    itself, not demand ``python`` == ``python3``. Platform-independent."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    impostor, real = _impostor_and_real(fake_atspi, monkeypatch)
+    tree = _PidNode("application", "python", pid=23, children=[_WindowNode("frame", "Big Tree")])
+    fake_atspi.desktop = _WindowNode("desktop", children=[tree])
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: "/usr/bin/python3.13")
+    monkeypatch.setattr(_linux_exe, "_GATED", {"python": None})
+    assert _atspi.find_root("python", Scope.APP) is tree
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1001)
+    assert _atspi.find_root("python", Scope.APP) is None
+
+
 def test_find_root_binds_a_registrant_of_another_user_never(fake_atspi, monkeypatch) -> None:
     from a11y_computer_use.drivers import _linux_exe
 

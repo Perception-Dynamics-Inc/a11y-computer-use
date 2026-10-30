@@ -388,10 +388,15 @@ def binds(name: str, pid: int | None) -> bool:
     me = _me()
     if me is None or _uid(pid) != me:
         return False
-    host = interpreter_key(name)
-    if host:
+    if interpreter_key(name):
+        # An interpreter grant binds only a process running that interpreter
+        # family: ``python`` (how a python3.13 app is keyed and granted)
+        # binds /usr/bin/python3.13, never ``sleep``. Exact family+major
+        # equality wrongly refused ``python`` for python3 (latency-bench R5).
         exe = exe_of(pid)
-        return exe is not None and interpreter_key(exe) == host
+        return (exe is not None and interpreter_key(exe) is not None
+                and _INTERPRETER_RE.match(os.path.basename(exe)).group(1)
+                == _INTERPRETER_RE.match(os.path.basename(name)).group(1))
     named = pids_named(name) | {pid}
     _key, hint = _verdict(name, _GATED[key], {pid}, named)
     return hint is None and not _gone(pid)

@@ -7067,7 +7067,7 @@ def find_root(app: str, scope) -> object | None:
         # The name only nominates. The bus pid must pass the grant's exe,
         # uid and interpreter checks, so an impostor is dropped before it
         # can be bound or make the real app ambiguous (#1327).
-        if sys.platform.startswith("linux") and not _linux_exe.binds(app, pid):
+        if not _linux_exe.binds(app, pid):
             continue
         matched.append((candidate, rank, _program_of(candidate, name), name))
     best = _pick_one_program(app, needle, matched)
