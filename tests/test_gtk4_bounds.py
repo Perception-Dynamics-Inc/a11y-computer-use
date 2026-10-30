@@ -18,6 +18,13 @@ from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode, MouseButton
 
 
+@pytest.fixture(autouse=True)
+def _honest_x_server(monkeypatch):
+    """The fake X windows model an honest local server: X-Resource names the
+    same owner the client claims in ``_NET_WM_PID`` (#1327)."""
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: _linux_system._pid_of(win, d) or None)
+
+
 class _App:
     def __init__(self, toolkit: str, version: str, pid: int = 77):
         self.toolkit = toolkit
