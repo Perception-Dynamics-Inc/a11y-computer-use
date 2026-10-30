@@ -421,6 +421,15 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 
+def _proc_scope():
+    """One shared /proc walk per action on Linux (#1347); a no-op elsewhere."""
+    if sys.platform.startswith("linux"):
+        from a11y_computer_use.drivers import _linux_exe
+
+        return _linux_exe.proc_scope()
+    return nullcontext()
+
+
 def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Concatenate["Runtime", _P], _R]:
     """Keep an entire tool's resolve/gate/act/audit sequence on one ref epoch.
 
@@ -442,7 +451,8 @@ def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Co
             depth = getattr(self, "_tool_depth", 0)
             self._tool_depth = depth + 1
             try:
-                result = method(self, *args, **kwargs)
+                with _proc_scope():
+                    result = method(self, *args, **kwargs)
             finally:
                 self._tool_depth = depth
             if depth == 0:

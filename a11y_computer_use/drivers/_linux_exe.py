@@ -37,7 +37,9 @@ import re
 import shlex
 import shutil
 import stat
-from typing import Callable
+import threading
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
 #: Interpreter executables. A process running one of these hosts code whose
 #: every self-reported name is its own choice, so it is keyed as the
@@ -87,31 +89,85 @@ def _comm(pid: int) -> str:
         return ""
 
 
-def pids_named(name: str) -> set[int]:
-    """Live pids whose comm or exe basename is ``name`` (or its 15-byte cut).
+# Per-action /proc index (#1347). While any action is open (``proc_scope``),
+# the first ``pids_named`` walks /proc once and later lookups read that walk,
+# on whichever thread the action's work runs (find_root runs on the AT-SPI
+# thread). Every action entry drops the walk, so a lookup never reads a walk
+# taken before the newest action began. With no action open every call walks
+# /proc afresh, as before.
+_SCOPE_LOCK = threading.Lock()
+_SCOPE_DEPTH = 0
+_SCOPE_INDEX: tuple[dict[str, set[int]], dict[str, set[int]]] | None = None
 
-    Includes processes with no window yet, so a pre-window spoof is seen.
-    """
-    wanted = (name or "").strip()
-    if not wanted:
-        return set()
-    cut = wanted[:15]
-    found: set[int] = set()
+# Count of full /proc walks, for the regression test (#1347).
+PROC_SCANS = 0
+
+
+def _scan_proc() -> tuple[dict[str, set[int]], dict[str, set[int]]]:
+    """One walk of /proc: (comm -> pids, exe realpath basename -> pids)."""
+    global PROC_SCANS
+    PROC_SCANS += 1
+    by_comm: dict[str, set[int]] = {}
+    by_exe: dict[str, set[int]] = {}
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return found
+        return by_comm, by_exe
     for entry in entries:
         if not entry.isdigit():
             continue
         pid = int(entry)
-        if _comm(pid) == cut:
-            found.add(pid)
-            continue
+        comm = _comm(pid)
+        if comm:
+            by_comm.setdefault(comm, set()).add(pid)
         exe = exe_of(pid)
-        if exe and os.path.basename(exe) == wanted:
-            found.add(pid)
-    return found
+        if exe:
+            by_exe.setdefault(os.path.basename(exe), set()).add(pid)
+    return by_comm, by_exe
+
+
+@contextmanager
+def proc_scope() -> Iterator[None]:
+    """Share one /proc walk among every ``pids_named`` call in one action (#1347).
+
+    Each entry starts a fresh walk, nested ones included (every batch step
+    is its own action), and the last exit drops it.
+    """
+    global _SCOPE_DEPTH, _SCOPE_INDEX
+    with _SCOPE_LOCK:
+        _SCOPE_DEPTH += 1
+        _SCOPE_INDEX = None  # built lazily by the first lookup
+    try:
+        yield
+    finally:
+        with _SCOPE_LOCK:
+            _SCOPE_DEPTH -= 1
+            # Never resume an older walk: the outer action re-walks if it looks again.
+            _SCOPE_INDEX = None
+
+
+def pids_named(name: str) -> set[int]:
+    """Live pids whose comm or exe basename is ``name`` (or its 15-byte cut).
+
+    Includes processes with no window yet, so a pre-window spoof is seen.
+    The whole of /proc is always considered; inside ``proc_scope`` the walk
+    is taken once per action and shared (#1347).
+    """
+    wanted = (name or "").strip()
+    if not wanted:
+        return set()
+    global _SCOPE_INDEX
+    with _SCOPE_LOCK:
+        if _SCOPE_DEPTH > 0:
+            if _SCOPE_INDEX is None:
+                _SCOPE_INDEX = _scan_proc()
+            index = _SCOPE_INDEX
+        else:
+            index = None
+    if index is None:
+        index = _scan_proc()
+    by_comm, by_exe = index
+    return set(by_comm.get(wanted[:15], ())) | set(by_exe.get(wanted, ()))
 
 
 def _desktop_exec_paths(name: str) -> list[str]:
