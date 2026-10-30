@@ -295,7 +295,8 @@ def test_grant_records_the_installed_binary(monkeypatch) -> None:
     monkeypatch.setattr(_linux_exe, "pids_named", lambda name: set())
     monkeypatch.setattr(_linux_exe, "installed_exes", lambda name: {"/usr/bin/" + name})
     assert _linux_exe.grant_exe("mousepad") == "/usr/bin/mousepad"
-    assert _linux_exe.grant_exe("python3") is None
+    # An interpreter grant is bound to the interpreter's realpath (#1340).
+    assert _linux_exe.grant_exe("python3") == os.path.realpath(shutil.which("python3"))
 
 
 CHROME = "/opt/google/chrome/chrome"
@@ -638,3 +639,166 @@ def test_live_window_spoofing_net_wm_pid_is_refused(spawn, tmp_path, monkeypatch
         win.destroy()
         d.sync()
         d.close()
+
+
+def _registered_as(monkeypatch, pids):
+    """AT-SPI registrants named NAME at these bus pids (HIGH 1, #1327)."""
+    monkeypatch.setattr(_linux_exe, "_atspi_named_pids", lambda name: set(pids))
+
+
+def test_a_registrant_named_like_the_app_from_another_exe_is_refused_alone(spawn, tmp_path, monkeypatch) -> None:
+    """HIGH 1: no process is named the app, but an AT-SPI registrant is."""
+    genuine = _native(tmp_path)
+    impostor = tmp_path / "w"
+    shutil.copy2(shutil.which("sleep"), impostor)
+    proc = subprocess.Popen([str(impostor), "60"], stdin=subprocess.DEVNULL)
+    try:
+        _registered_as(monkeypatch, {proc.pid})
+        assert not (_linux_exe.pids_named(NAME) & {proc.pid})
+        key, hint = _linux_exe.check(NAME, genuine)
+        assert key == NAME and hint is not None and str(impostor) in hint
+        assert _linux_exe.binds(NAME, proc.pid) is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_a_registrant_named_like_the_app_beside_the_genuine_one_is_refused(spawn, tmp_path, monkeypatch) -> None:
+    genuine = _native(tmp_path)
+    real = spawn([genuine, "60"])
+    impostor = tmp_path / "w"
+    shutil.copy2(shutil.which("sleep"), impostor)
+    proc = subprocess.Popen([str(impostor), "60"], stdin=subprocess.DEVNULL)
+    try:
+        _registered_as(monkeypatch, {proc.pid, real.pid})
+        assert _linux_exe.check(NAME, genuine)[1] is not None
+        assert _linux_exe.binds(NAME, real.pid) is True
+        assert _linux_exe.binds(NAME, proc.pid) is False
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_the_genuine_registrant_is_bound(spawn, tmp_path, monkeypatch) -> None:
+    """Control: only the real app registered under its name."""
+    genuine = _native(tmp_path)
+    real = spawn([genuine, "60"])
+    _registered_as(monkeypatch, {real.pid})
+    assert _linux_exe.check(NAME, genuine) == (NAME, None)
+    assert _linux_exe.binds(NAME, real.pid) is True
+    assert _linux_exe.binds(NAME, 0) is False
+
+
+def test_binds_only_restricts_names_the_gate_decided() -> None:
+    assert _linux_exe.binds("zz-never-gated", 0) is True
+
+
+def test_an_interpreter_grant_binds_only_that_interpreter(spawn, tmp_path, monkeypatch) -> None:
+    py = spawn([PY, "-c", _sleeper_code(NAME)])
+    other = subprocess.Popen([shutil.which("sleep"), "60"], stdin=subprocess.DEVNULL)
+    try:
+        host = _linux_exe.interpreter_key(PY)
+        _linux_exe.check(host, None)
+        assert _linux_exe.binds(host, py.pid) is True
+        assert _linux_exe.binds(host, other.pid) is False
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_legacy_grant_covers_only_the_installed_launchers_own_bin(monkeypatch) -> None:
+    """LibreOffice's AT-SPI app 'soffice' runs program/soffice.bin, which the
+    installed launcher program/soffice execs. A legacy 'soffice' grant covers
+    exactly that root-owned sibling and nothing else (#1327, Calc regression)."""
+    launcher = "/usr/lib/libreoffice/program/soffice"
+    owned = {launcher, launcher + ".bin", "/usr/bin/sleep"}
+    monkeypatch.setattr(_linux_exe, "installed_exes", lambda name: {launcher} if name == "soffice" else set())
+    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path in owned)
+    assert _linux_exe.legacy_exe_ok("soffice", launcher + ".bin")
+    assert not _linux_exe.legacy_exe_ok("soffice", "/usr/bin/sleep")
+    assert not _linux_exe.legacy_exe_ok("soffice", "/home/u/soffice.bin")
+    assert not _linux_exe.legacy_exe_ok("mousepad", launcher + ".bin")
+    owned.discard(launcher + ".bin")  # a user-planted .bin is not covered
+    assert not _linux_exe.legacy_exe_ok("soffice", launcher + ".bin")
+
+
+def _impostor_named_python3(tmp_path):
+    """#1340: a non-interpreter binary (sleep standing in for Mousepad) named python3."""
+    d = tmp_path / "imp"
+    d.mkdir()
+    shutil.copy2(shutil.which("sleep"), d / "python3")
+    return d / "python3"
+
+
+def test_1340_a_binary_named_python3_is_not_the_bound_interpreter(spawn, tmp_path) -> None:
+    """Repro of #1340: python3 granted on /usr/bin/python3.13 never covers a copy named python3."""
+    imp = _impostor_named_python3(tmp_path)
+    proc = spawn([str(imp), "60"], name="python3")
+    key, hint = _linux_exe.check("python3", PY)
+    assert key == "python3" and hint and str(imp) in hint and "not the granted interpreter" in hint
+    assert _linux_exe.binds("python3", proc.pid) is False
+    for name in ("python", "python3.13"):  # every interpreter name the repro granted
+        _linux_exe.check(name, PY)
+        assert _linux_exe.binds(name, proc.pid) is False
+    _linux_exe.check("python3", None)  # a name-only grant: the copy is not root-owned
+    assert _linux_exe.binds("python3", proc.pid) is False
+
+
+def test_1340_gate_refuses_typing_into_a_binary_named_python3(spawn, tmp_path, monkeypatch) -> None:
+    rt = _runtime(tmp_path, monkeypatch, {"python": "full", "python3": "full", "python3.13": "full"},
+                  {"python": PY, "python3": PY, "python3.13": PY})
+    spawn([str(_impostor_named_python3(tmp_path)), "60"], name="python3")
+    key, decision, text = _gate(rt, "python3")
+    assert not decision.allowed, (key, text)
+
+
+def test_1340_an_app_whose_exe_is_a_fake_python3_is_not_keyed_as_the_interpreter(spawn, tmp_path, monkeypatch) -> None:
+    """A process named NAME running the fake python3 is held to python3's bound grant."""
+    imp = _impostor_named_python3(tmp_path)
+    (tmp_path / NAME).symlink_to(imp)
+    spawn([str(tmp_path / NAME), "60"])
+    key, hint = _linux_exe.check(NAME, _native(tmp_path), {"python3": PY}.get)
+    assert hint and str(imp) in hint, (key, hint)
+    rt = _runtime(tmp_path, monkeypatch, {"python3": "full"}, {"python3": PY})
+    key, decision, text = _gate(rt, NAME)
+    assert not decision.allowed, (key, text)
+
+
+def test_1340_the_real_interpreter_still_binds(spawn, tmp_path) -> None:
+    proc = spawn([PY, "-c", _sleeper_code()], name=os.path.basename(PY)[:15])
+    for name in ("python", "python3", os.path.basename(PY)):
+        assert _linux_exe.check(name, PY)[1] is None
+        assert _linux_exe.binds(name, proc.pid) is True, name
+    _linux_exe.check("python", "/usr/bin/python3.99")  # bound to another interpreter
+    assert _linux_exe.binds("python", proc.pid) is False
+
+
+def _managed_interpreter(root):
+    """A user-owned interpreter like uv's or pyenv's (a real python, not root-owned)."""
+    root.mkdir(parents=True)
+    real = root / os.path.basename(PY)
+    shutil.copy2(PY, real)
+    return os.path.realpath(real)
+
+
+@pytest.mark.parametrize("kind", ["venv", "uv", "pyenv"])
+def test_1340_venv_uv_and_pyenv_interpreters_bind_by_their_realpath(spawn, tmp_path, kind) -> None:
+    if kind == "venv":  # python -m venv: bin/python3 -> the base interpreter
+        base = PY
+    elif kind == "uv":
+        base = _managed_interpreter(tmp_path / "uv/python/cpython-3-linux-x86_64-gnu/bin")
+    else:
+        base = _managed_interpreter(tmp_path / ".pyenv/versions/3.x/bin")
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python3").symlink_to(base)
+    (venv / "python").symlink_to("python3")
+    proc = spawn([str(venv / "python"), "-c", _sleeper_code()], name=os.path.basename(base)[:15])
+    assert _linux_exe.exe_of(proc.pid) == base
+    assert _linux_exe.check("python3", base)[1] is None
+    assert _linux_exe.binds("python3", proc.pid) is True
+    _linux_exe.check("python", base)
+    assert _linux_exe.binds("python", proc.pid) is True
+    if base != PY:  # bound to the distro python, a uv/pyenv interpreter is another exe
+        _linux_exe.check("python3", PY)
+        assert _linux_exe.binds("python3", proc.pid) is False

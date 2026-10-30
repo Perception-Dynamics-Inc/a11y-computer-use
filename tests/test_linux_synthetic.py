@@ -23689,6 +23689,70 @@ def test_snapshot_keeps_a_native_app_name(fake_atspi, monkeypatch) -> None:
     assert LinuxDriver().interpreter_host("mousepad") is None
 
 
+def _impostor_and_real(fake_atspi, monkeypatch, *, real_running=True):
+    """HIGH 1 (#1327): a registrant calling itself mousepad from another exe."""
+    from a11y_computer_use.drivers import _atspi_events, _linux_exe, _linux_system
+
+    impostor = _PidNode("application", "mousepad", pid=21,
+                        children=[_WindowNode("frame", "Untitled", states={"active"})])
+    real = _PidNode("application", "Mousepad", pid=22, children=[_WindowNode("frame", "Notes")])
+    fake_atspi.desktop = _WindowNode("desktop", children=[impostor, real] if real_running else [impostor])
+    monkeypatch.setattr(_atspi_events, "run", lambda fn: fn())
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "active_window", lambda: None)
+    exes = {21: "/tmp/w", 22: "/usr/bin/mousepad"}
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: exes.get(pid))
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1000)
+    monkeypatch.setattr(_linux_exe, "_me", lambda: 1000)
+    monkeypatch.setattr(_linux_exe, "_gone", lambda pid: False)
+    monkeypatch.setattr(_linux_exe, "pids_named", lambda name: set())
+    monkeypatch.setattr(_linux_exe, "_GATED", {"mousepad": "/usr/bin/mousepad"})
+    return impostor, real
+
+
+def test_find_root_binds_the_real_app_not_a_registrant_that_only_shares_its_name(fake_atspi, monkeypatch) -> None:
+    """HIGH 1 (#1327): the name nominates; the bus pid's exe decides. The
+    impostor is dropped before ranking, so it cannot even make it ambiguous."""
+    impostor, real = _impostor_and_real(fake_atspi, monkeypatch)
+    assert _atspi.find_root("mousepad", Scope.APP) is real
+
+
+def test_find_root_binds_nothing_when_only_the_impostor_runs(fake_atspi, monkeypatch) -> None:
+    """HIGH 1 (#1327): real Mousepad not running; the impostor is not bound."""
+    _impostor_and_real(fake_atspi, monkeypatch, real_running=False)
+    assert _atspi.find_root("mousepad", Scope.APP) is None
+
+
+def test_find_root_binds_an_interpreter_app_under_its_interpreter_key(fake_atspi, monkeypatch) -> None:
+    """latency-bench R5 on #1334: bigtree.py (exe python3.13) is gated as
+    ``python``; binds must mirror check, which accepts an interpreter name as
+    itself, not demand ``python`` == ``python3``. Platform-independent."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    impostor, real = _impostor_and_real(fake_atspi, monkeypatch)
+    tree = _PidNode("application", "python", pid=23, children=[_WindowNode("frame", "Big Tree")])
+    fake_atspi.desktop = _WindowNode("desktop", children=[tree])
+    py = "/usr/bin/python3.13"
+    monkeypatch.setattr(_linux_exe, "exe_of", lambda pid: py)
+    # Model an installed (root-owned) interpreter; the runner's own python
+    # may be another version or absent (#1340 binds on the real path).
+    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path == py)
+    monkeypatch.setattr(_linux_exe, "_GATED", {"python": None})
+    assert _atspi.find_root("python", Scope.APP) is tree
+    monkeypatch.setattr(_linux_exe, "_GATED", {"python": py})
+    assert _atspi.find_root("python", Scope.APP) is tree
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1001)
+    assert _atspi.find_root("python", Scope.APP) is None
+
+
+def test_find_root_binds_a_registrant_of_another_user_never(fake_atspi, monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_exe
+
+    _impostor_and_real(fake_atspi, monkeypatch)
+    monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1001)
+    assert _atspi.find_root("mousepad", Scope.APP) is None
+
+
 def _chromium_table_under_timeout(monkeypatch, replies):
     """A Chromium document holding a 5000-row table whose Collection replies come from ``replies``."""
     document = _Acc("document web")

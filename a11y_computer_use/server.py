@@ -2511,7 +2511,8 @@ class Runtime:
         store = getattr(self, "store", None)
         if not bundle or (store is not None and store.policy(bundle)[1]):
             return bundle
-        key, hint = _linux_exe.check(bundle, store.recorded_exe(bundle) if store is not None else None)
+        key, hint = _linux_exe.check(bundle, store.recorded_exe(bundle) if store is not None else None,
+                                     store.recorded_exe if store is not None else None)
         if hint is None:
             return key
         refused = f"{bundle} (unverified executable)"
