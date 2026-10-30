@@ -481,20 +481,35 @@ def choose_socket(pages: object, window_title: object) -> str | None:
         return None
     if len(pages) == 1:
         return sockets[0]
-    best: tuple[int, str] | None = None
+    matches = title_matches(pages, window_title)
+    # Two pages that equally match the window title are two windows (or tabs)
+    # showing the same title. Picking one wrote into the wrong window (#1372):
+    # no guess, the caller keeps the ref's own accessibility handle.
+    return matches[0] if len(matches) == 1 else None
+
+
+def title_matches(pages: list, window_title: str) -> list[str]:
+    """Sockets of the pages whose title best matches ``window_title``.
+
+    The longest matching title wins; every page at that length is returned
+    so a caller can tell a unique match from an ambiguous one.
+    """
+    best_len = -1
+    best: list[str] = []
     for page in pages:
-        ws = page.get("webSocketDebuggerUrl")
-        title = page.get("title")
+        ws = page.get("webSocketDebuggerUrl") if isinstance(page, dict) else None
+        title = page.get("title") if isinstance(page, dict) else None
         if not isinstance(ws, str) or not ws or not isinstance(title, str) or not title or not window_title:
             continue
         if window_title != title and not (
             window_title.startswith(title) and window_title[len(title):len(title) + 1] in " -—–"
         ):
             continue
-        choice = (len(title), ws)
-        if best is None or choice[0] >= best[0]:
-            best = choice
-    return None if best is None else best[1]
+        if len(title) > best_len:
+            best_len, best = len(title), [ws]
+        elif len(title) == best_len and ws not in best:
+            best.append(ws)
+    return best
 
 
 def parse_control(raw: object) -> FormControl | None:
@@ -781,6 +796,14 @@ def _evaluate(port: int, window_title: str, expression: str) -> object:
 
     pages = page_targets(f"http://127.0.0.1:{port}")
     locate = _locate_expression(expression)
+    if isinstance(pages, list) and len(pages) > 1 and (
+        not window_title or len(title_matches(pages, window_title)) > 1
+    ):
+        # Several pages and no unique title match: the DOM cannot tell which
+        # window the ref belongs to. Do not evaluate in any of them, not even
+        # the "only page with this control" fallback, which finds the same
+        # control in a twin window (#1372). None keeps the AT-SPI handle path.
+        return None
     socket = choose_socket(pages, window_title)
     reply = None
     if socket is not None:
