@@ -223,6 +223,7 @@ def test_linux_file_dialog_for_an_app_that_is_not_frontmost_is_unsupported(tmp_p
     assert "re-observe" not in exc.value.message
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_linux_file_dialog_without_an_app_stays_unsupported(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "mousepad")
     monkeypatch.setattr(server, "_running_app", lambda identifier: (None, identifier))
@@ -233,6 +234,7 @@ def test_linux_file_dialog_without_an_app_stays_unsupported(tmp_path, monkeypatc
     assert exc.value.detail["reason"] == "no_file_dialog"
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_linux_key_still_rechecks_frontmost(tmp_path, monkeypatch) -> None:
     """The file_dialog skip does not drop the guard on other Linux actions."""
     calls = {"n": 0}

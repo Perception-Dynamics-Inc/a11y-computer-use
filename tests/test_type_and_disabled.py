@@ -570,6 +570,7 @@ def test_disabled_refs_refuse_input_verbs_before_any_call(tmp_path, monkeypatch)
     assert driver.calls == ["click"]
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_type_reports_the_count_the_driver_inserted(tmp_path, monkeypatch) -> None:
     driver = _Input([_element("e1", "AXTextField", "Name")])
     rt = _runtime(tmp_path, driver, monkeypatch)

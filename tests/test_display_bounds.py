@@ -133,6 +133,7 @@ def test_act_step_rejects_an_offscreen_point_before_any_step_runs(desktop, x, y)
     assert driver.calls["hover"] == []
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_last_pixel_is_inside_and_the_far_corner_is_not(desktop) -> None:
     runtime, driver = desktop
     assert runtime.click(x=1279, y=799) == "clicked (1279, 799) on display 0"
@@ -155,6 +156,7 @@ def test_unknown_display_id_names_the_valid_ids(desktop) -> None:
     assert driver.calls["zoom"] == []
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_zoom_rejects_a_region_that_misses_the_display_and_clips_a_partial_one(desktop) -> None:
     runtime, driver = desktop
     with pytest.raises(ValueError, match="entirely outside"):
@@ -170,6 +172,7 @@ def test_zoom_rejects_a_region_that_misses_the_display_and_clips_a_partial_one(d
     assert full == Bounds(0, 0, 0, 1280, 20)
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_local_origin_stays_valid_on_a_monitor_with_a_negative_global_origin(tmp_path, monkeypatch) -> None:
     """A monitor at virtual left -1920 is still addressed as local (0, 0)."""
     found = displays_from_monitors([

@@ -1100,6 +1100,30 @@ def _names(identifier: str, pid: int) -> bool:
     return bool(identity) and _identifier_matches_process(identifier, identity)
 
 
+def active_window_owner() -> int | None:
+    """The pid that owns the EWMH active window, from the X server (XRes, #1341).
+
+    ``_NET_WM_PID`` is self-reported, so it is not the answer. None when
+    nothing is active, XRes is unavailable or the client is remote, or the
+    claimed pid disagrees with the server's: the caller refuses then.
+    """
+    try:
+        with _open_display() as d:
+            active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+            if not active or not int(active[0]):
+                return None
+            win = d.create_resource_object("window", int(active[0]))
+            real = _xres_pid(win, d)
+            claimed = _pid_of(win, d)
+            if real is None or (claimed and claimed != real):
+                return None
+            return real
+    except ComputerUseError:
+        raise
+    except Exception:
+        return None
+
+
 def verified_pids_matching(identifier: str) -> set[int]:
     """`pids_matching`, with each window's owner taken from the X server.
 
