@@ -798,6 +798,37 @@ def _caller_disclosure_ref(snap: Snapshot, disclosure: Element) -> str | None:
     return disclosure.ref
 
 
+def _live_disclosure(snap: Snapshot, disclosure: Element,
+                     live: Snapshot) -> tuple[Element | None, list[Element]]:
+    """The live element of ``disclosure``, identified structurally, not by title.
+
+    Returns ``(element, [])`` when identified, else ``(None, same)`` where
+    ``same`` are the live same-role, same-title elements it could be. A
+    developer/DOM ``stable_id`` decides first. A title shared with other
+    elements in ``snap`` uses document order: the k-th such element in the
+    caller's snapshot is the k-th in the live tree when both trees have the
+    same number of them (collapsing a ``<details>`` keeps its summary).
+    Only a unique title falls back to the anchor matcher.
+    """
+    same_live = [el for el in live.elements
+                 if el.role == disclosure.role and el.title == disclosure.title]
+    if disclosure.stable_id:
+        by_id = [el for el in live.elements
+                 if el.stable_id == disclosure.stable_id and el.role == disclosure.role]
+        if len(by_id) == 1:
+            return by_id[0], []
+    same_old = [el for el in snap.elements
+                if el.role == disclosure.role and el.title == disclosure.title]
+    if len(same_old) > 1:
+        if len(same_live) == len(same_old) and all(el.path == disclosure.path
+                                                   for el in same_live):
+            index = next(i for i, el in enumerate(same_old) if el.ref == disclosure.ref)
+            return same_live[index], []
+        return None, same_live
+    match, _ = _match_anchor(disclosure, live)
+    return (match, []) if match is not None else (None, same_live)
+
+
 def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
                                  live: Snapshot, reason: str) -> None:
     """Refuse with ``collapsed_ancestor`` when the ref's disclosure collapsed.
@@ -809,15 +840,21 @@ def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
     only suggestion is to expand the disclosure that is now collapsed.
     """
     for disclosure in _disclosures_over(snap, anchor):
-        now, _ = _match_anchor(disclosure, live)
-        if now is None or now.expanded is not False:
+        now, unsure = _live_disclosure(snap, disclosure, live)
+        if now is None:
+            # Which same-titled section held the ref is unknown. If one of
+            # them is collapsed, fail safe: refuse with the title only, never
+            # a ref, candidate or control from a sibling section (#1370).
+            if not any(el.expanded is False for el in unsure):
+                continue
+        elif now.expanded is not False:
             continue
         # The hint's ref must come from the caller's snapshot (``snap``, the
         # epoch the caller's refs are valid against), never from the internal
         # ``live`` re-snapshot, whose numbering differs (#1370 review). Use it
         # only when it is unambiguous in that snapshot; otherwise name the
         # control and ask for a new snapshot.
-        caller_ref = _caller_disclosure_ref(snap, disclosure)
+        caller_ref = _caller_disclosure_ref(snap, disclosure) if now is not None else None
         name = disclosure.title or disclosure.role
         if caller_ref is not None:
             advice = (f"Expand it (click {name!r}, ref {caller_ref} in your current "

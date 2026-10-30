@@ -146,3 +146,58 @@ def test_no_reliable_caller_ref_falls_back_to_title_only():
     assert err.detail["collapsed"]["ref"] is None
     assert "Billing info" in message and "snapshot again" in message
     assert re.search(r"\be\d+\b", message.replace(err.detail["ref"], "")) is None
+
+
+def gift_page(first_open, *, extra_first=False):
+    """Tester's #1370 page: two <details>, both summarised 'Gift options'."""
+    y = 100.0
+    groups = []
+    for name, is_open in (("A", first_open), ("B", True)):
+        kids = [summary("Gift options", (120.0, y), is_open)]
+        y += 30
+        if is_open:
+            kids += [button(f"Wrap {name}", (120.0, y)), field(f"Note {name}", (220.0, y))]
+            y += 30
+        groups.append(ax("AXGroup", at=(110.0, y - 60), size=(600.0, 60.0), children=kids))
+    if extra_first:
+        groups.insert(0, ax("AXGroup", at=(110.0, 20.0), size=(600.0, 30.0), children=[
+            summary("Gift options", (120.0, 20.0), False), button("Spare", (120.0, 40.0))]))
+    return ax("AXWindow", title="Gift Lab", at=(100.0, 10.0), size=(1000.0, 700.0),
+              children=groups)
+
+
+def _assert_title_only_collapsed(err, title):
+    message = str(err)
+    assert err.code is ErrorCode.STALE_REF
+    assert err.detail["reason"] == "collapsed_ancestor"
+    assert err.detail["candidates"] == []
+    assert err.detail["collapsed"]["ref"] is None
+    assert title in message and "snapshot again" in message
+    for wrong in ("Wrap B", "Note B", "reordered", "use find"):
+        assert wrong not in message
+    assert re.search(r"\be\d+\b", message.replace(err.detail["ref"], "")) is None
+
+
+@pytest.mark.parametrize("title", ["Wrap A", "Note A"])
+def test_duplicate_titled_collapsed_section_refuses_title_only(title):
+    """#1370 re-gate: the first of two 'Gift options' collapses."""
+    old = snap_of(gift_page(True))
+    live = snap_of(gift_page(False))
+    with pytest.raises(ComputerUseError) as caught:
+        observe.rematch_ref(old, by_title(old, title).ref, live)
+    _assert_title_only_collapsed(caught.value, "Gift options")
+
+
+def test_duplicate_titled_open_section_still_resolves():
+    old = snap_of(gift_page(True))
+    live = snap_of(gift_page(True))
+    assert observe.rematch_ref(old, by_title(old, "Wrap B").ref, live).title == "Wrap B"
+
+
+def test_unidentifiable_same_titled_section_fails_safe():
+    """A third 'Gift options' appears: which one held the ref is unknown."""
+    old = snap_of(gift_page(True))
+    live = snap_of(gift_page(False, extra_first=True))
+    with pytest.raises(ComputerUseError) as caught:
+        observe.rematch_ref(old, by_title(old, "Wrap A").ref, live)
+    _assert_title_only_collapsed(caught.value, "Gift options")
