@@ -7,6 +7,40 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.81] - 2026-10-30
+
+14 commits since v0.4.80, through #1342. A patch release of Linux safety fixes: app grants are now bound to the real executable, user and AT-SPI bus owner of the target process, and to the X server's owner of a window, never to a name the app chose for itself. It also brings Qt 6 editing, GTK notebook and window-closing key fixes.
+
+### Safety
+
+- Key interpreter-hosted apps as their interpreter, never their self-chosen name. (#1296) (b56769c, 2026-10-28)
+- A deny on the requested app name wins over an interpreter grant. Fixes #1312 (#1313) (62f2e10, 2026-10-29)
+- Bind app grants to the executable's real path. Refs #1309 (#1310) (7c442d2, 2026-10-29)
+- Verify only the processes that own the target app. Refs #1322 (#1324) (c54c4cc, 2026-10-29)
+- Take a window's owner pid from the X server (XRes), not `_NET_WM_PID`. Refs #1327 (#1328) (865fe4a, 2026-10-29)
+- Per-action hit-test and frontmost owner come from XRes, and ownerless popups refuse. Refs #1327 (#1332) (2062503, 2026-10-30)
+- Bind AT-SPI apps by their bus pid and executable, not by name. Refs #1327 (#1334) (67de509, 2026-10-30)
+- A `type`, `key` or click with no app and no ref binds the frontmost app to its executable, user and interpreter, the same as a named app. A frontmost impostor (for example a second process named `mousepad`) is refused as `<name> (unverified executable)`. Fixes #1341 (#1342) (3c37cba, 2026-10-30)
+
+### Linux drivers
+
+- Confirm key presses that close the focused window. Refs #1283 (#1284) (962afdc, 2026-10-28)
+- A GTK notebook tab scrolled out of the tab bar can be reached by `find`, click and `scroll_to_find`. Refs #1286 (#1289) (dace9f7, 2026-10-28)
+- `set_value` true/false checks a checkable Qt item, verified from `CHECKED`. Refs #1287 (#1290) (edb7402, 2026-10-28)
+- Edit Qt 6 table cells through F2 for `set_value` and `type`. (#1279) (e0f008c, 2026-10-28)
+- Editable Qt `QListWidget` items edit through the F2 cell-editor path. Refs #1288 (#1291) (f80f51a, 2026-10-28)
+- A modal Collection that times out is reported as retryable `busy`, not `unsupported`. (#1337) (a3c3807, 2026-10-30)
+
+### Known issues
+
+- Linux Chrome (#1333): `type(ref)` and checkbox `click(ref)` inside a CSS-transformed cross-site iframe are refused `hit_test_unverified`, although the bounds are correct.
+- Linux GTK 3 (#1335): `scroll_to_find` in an open combo popup moves only 2–3 rows per step and is slow.
+- Linux GTK 3 (#1336): `find` names an entry combo by its first value instead of its label.
+- Linux Qt 6 (#1339): `QCalendarWidget` days after the first week are not visible to `find` or `desktop_snapshot`, and `scroll_to_find` on a visible day scrolls the calendar 30 months ahead.
+- Linux Chrome (#1343): `click(ref)` on short static text clicks the centre of its parent paragraph's box.
+- Linux: with X-Resource unavailable, a no-app action is refused with a misleading "has no permission grant" message. A wording fix will follow.
+- Linux: a window started as `python3.13` is keyed as `python3.13`, so a `python3` grant does not cover it. This behaviour predates this release.
+
 ## [0.4.80] - 2026-10-28
 
 26 commits since v0.4.79, through #1282. A patch release of Linux fixes: ref `type` now appends to filled GTK 3, GTK 4 and Firefox fields instead of replacing or prepending, clicks on GTK rows, tiles, inline links and default buttons are confirmed from real evidence, and several new refusals stop a click or write that would land on the wrong target.
