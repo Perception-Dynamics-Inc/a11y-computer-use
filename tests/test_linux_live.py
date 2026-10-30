@@ -3006,6 +3006,61 @@ def _launch_para_browser(tmp_path, kind: str, log_file=None) -> tuple[subprocess
     return proc, "firefox"
 
 
+def _para_frames_report(app: str) -> str:
+    """Failure-only diagnostics: every AT-SPI top-level frame of ``app``.
+
+    Lists role, states, size, title and child count for each frame, and the
+    frame the library picks for ``Scope.WINDOW``. Read-only; it never changes
+    the result of the wait it decorates.
+    """
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+
+        from a11y_computer_use.drivers import _atspi
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        return f"frames: unavailable ({exc!r})"
+
+    def describe(acc) -> str:
+        try:
+            ss = acc.get_state_set()
+            states = sorted(
+                str(st.value_nick)
+                for st in Atspi.StateType.__enum_values__.values()
+                if st != Atspi.StateType.LAST_DEFINED and ss.contains(st)
+            )
+            ext = acc.get_extents(Atspi.CoordType.SCREEN)
+            return (
+                f"role={acc.get_role_name()!r} title={acc.get_name()!r} "
+                f"size={ext.width}x{ext.height}@{ext.x},{ext.y} "
+                f"children={acc.get_child_count()} states={','.join(states)}"
+            )
+        except Exception as exc:
+            return f"unreadable ({exc!r})"
+
+    lines = ["frames:"]
+    try:
+        desk = Atspi.get_desktop(0)
+        for i in range(desk.get_child_count()):
+            proc_acc = desk.get_child_at_index(i)
+            name = (proc_acc.get_name() or "") if proc_acc is not None else ""
+            if app.lower() not in name.lower():
+                continue
+            lines.append(f"  app {name!r} pid={proc_acc.get_process_id()}")
+            for j in range(proc_acc.get_child_count()):
+                lines.append(f"    [{j}] {describe(proc_acc.get_child_at_index(j))}")
+    except Exception as exc:
+        lines.append(f"  listing failed ({exc!r})")
+    try:
+        chosen = _atspi.find_root(app, Scope.WINDOW)
+        lines.append(f"  chosen: {describe(chosen) if chosen is not None else None}")
+    except Exception as exc:
+        lines.append(f"  chosen: error ({exc!r})")
+    return "\n".join(lines)
+
+
 def _wait_para_snapshot(driver, app: str, proc: subprocess.Popen | None = None):
     from a11y_computer_use import observe
 
@@ -3036,6 +3091,7 @@ def _wait_para_snapshot(driver, app: str, proc: subprocess.Popen | None = None):
         exited = f" exit={proc.poll()}"
     raise AssertionError(
         f"{app} did not expose the paragraph page through AT-SPI; missing {missing}; {seen}{exited}\n{last}"
+        f"\n{_para_frames_report(app)}"
     )
 
 
