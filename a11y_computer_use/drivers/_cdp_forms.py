@@ -15,6 +15,7 @@ already contain is not added.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import os
@@ -481,20 +482,35 @@ def choose_socket(pages: object, window_title: object) -> str | None:
         return None
     if len(pages) == 1:
         return sockets[0]
-    best: tuple[int, str] | None = None
+    matches = title_matches(pages, window_title)
+    # Two pages that equally match the window title are two windows (or tabs)
+    # showing the same title. Picking one wrote into the wrong window (#1372):
+    # no guess, the caller keeps the ref's own accessibility handle.
+    return matches[0] if len(matches) == 1 else None
+
+
+def title_matches(pages: list, window_title: str) -> list[str]:
+    """Sockets of the pages whose title best matches ``window_title``.
+
+    The longest matching title wins; every page at that length is returned
+    so a caller can tell a unique match from an ambiguous one.
+    """
+    best_len = -1
+    best: list[str] = []
     for page in pages:
-        ws = page.get("webSocketDebuggerUrl")
-        title = page.get("title")
+        ws = page.get("webSocketDebuggerUrl") if isinstance(page, dict) else None
+        title = page.get("title") if isinstance(page, dict) else None
         if not isinstance(ws, str) or not ws or not isinstance(title, str) or not title or not window_title:
             continue
         if window_title != title and not (
             window_title.startswith(title) and window_title[len(title):len(title) + 1] in " -—–"
         ):
             continue
-        choice = (len(title), ws)
-        if best is None or choice[0] >= best[0]:
-            best = choice
-    return None if best is None else best[1]
+        if len(title) > best_len:
+            best_len, best = len(title), [ws]
+        elif len(title) == best_len and ws not in best:
+            best.append(ws)
+    return best
 
 
 def parse_control(raw: object) -> FormControl | None:
@@ -614,6 +630,29 @@ def fetch_form_controls(port: object, window_title: object) -> tuple[FormControl
     return tuple(found)
 
 
+# Set when the last DOM write saw several pages it could not tell apart, so
+# the caller can refuse instead of guessing when the ref's own handle does
+# not bind the window either (#1372). Per context, reset on every write.
+_AMBIGUOUS_WINDOW: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "cdp_forms_ambiguous_window", default=False,
+)
+
+
+def write_was_ambiguous() -> bool:
+    """True when the last ``write_element`` found same-titled twin pages."""
+    return _AMBIGUOUS_WINDOW.get()
+
+
+def ambiguous_window_error(element: Element) -> ComputerUseError:
+    """The refusal for a write whose window cannot be confirmed. Nothing changed."""
+    return ComputerUseError(
+        ErrorCode.STALE_REF,
+        f"{element.ref}: its window cannot be told apart from another window "
+        "with the same title, so nothing was changed; snapshot again",
+        detail={"ref": element.ref, "reason": "ambiguous_window"},
+    )
+
+
 def write_element(
     element: Element, value: object, window_title: str = "", pids: tuple[int, ...] = (),
 ) -> bool | None:
@@ -629,6 +668,7 @@ def write_element(
         raise TypeError("element must be an Element")
     if isinstance(value, bool) or not isinstance(value, str):
         raise TypeError("value must be a string")
+    _AMBIGUOUS_WINDOW.set(False)
     if element.role not in _FORM_ROLES or element.secure is True or element.enabled is not True:
         return None
     return _commit(element, _write_spec(element, value), window_title, pids)
@@ -781,6 +821,15 @@ def _evaluate(port: int, window_title: str, expression: str) -> object:
 
     pages = page_targets(f"http://127.0.0.1:{port}")
     locate = _locate_expression(expression)
+    if isinstance(pages, list) and len(pages) > 1 and (
+        not window_title or len(title_matches(pages, window_title)) > 1
+    ):
+        # Several pages and no unique title match: the DOM cannot tell which
+        # window the ref belongs to. Do not evaluate in any of them, not even
+        # the "only page with this control" fallback, which finds the same
+        # control in a twin window (#1372). None keeps the AT-SPI handle path.
+        _AMBIGUOUS_WINDOW.set(True)
+        return None
     socket = choose_socket(pages, window_title)
     reply = None
     if socket is not None:

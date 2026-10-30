@@ -14946,3 +14946,125 @@ def test_linux_calc_cell_comments_show_in_snapshot_and_find(tmp_path) -> None:
         assert "1 match" in second and 'cell "C3"' in second, second
     finally:
         _stop_group(proc)
+
+
+def test_linux_chrome_two_same_titled_windows_stay_apart(tmp_path) -> None:
+    """#1372: two Chrome windows with one title; window 2 is never touched.
+
+    Live Chrome, one profile, two windows showing the same page title. The
+    refs come from window 1's snapshot. set_value, a snapshot read and a DOM
+    scroll on window 1 must either act on window 1 or refuse with nothing
+    changed. Window 2's textarea and scroll position are read straight from
+    its own DevTools page and must not move. A set_value on window 1 must
+    never come back merely unverifiable. Skips without Chrome or the bus.
+    """
+    import json as _json
+    import socket as _socket
+
+    from a11y_computer_use.drivers import _cdp_forms
+    from a11y_computer_use.drivers._cdp import page_targets
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ScrollUnit
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the twin-window test")
+    pytest.importorskip("websocket", reason="websocket-client reads each window's own page")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    with _socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    rows = "".join(f"<p>row {i}</p>" for i in range(120))
+    page = tmp_path / "twin.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuatwin1372</title>"
+        "<style>body{margin:24px;font:18px sans-serif}</style>"
+        "<label>Paste box <textarea id=box aria-label='Paste box'></textarea></label>"
+        "<script>document.getElementById('box').value = "
+        "location.search.includes('w=2') ? 'BRAVO text in window B' : 'T-inactive';</script>"
+        f"{rows}"
+    )
+    profile = tmp_path / "chrome-twin-profile"
+    profile.mkdir()
+    base = [
+        binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+        "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+        f"--user-data-dir={profile}", "--window-size=900,650",
+        f"--remote-debugging-port={port}",
+    ]
+    uri = page.resolve().as_uri()
+
+    def state(which: str) -> tuple[str, float]:
+        for target in page_targets(f"http://127.0.0.1:{port}") or []:
+            if isinstance(target, dict) and str(target.get("url", "")).endswith(f"?w={which}"):
+                raw = _cdp_forms._eval_socket(
+                    str(target["webSocketDebuggerUrl"]),
+                    "JSON.stringify([document.getElementById('box').value, scrollY])",
+                )
+                value, scrolled = _json.loads(raw)
+                return value, scrolled
+        raise AssertionError(f"no page target for window {which}")
+
+    def wait_snapshot(expected: str):
+        deadline = time.monotonic() + 45
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                box = next((el for el in shot.elements if el.title == "Paste box"), None)
+                last = "" if box is None else str(box.value)
+                if box is not None and box.value == expected:
+                    return shot, box
+            time.sleep(0.4)
+        raise AssertionError(f"Chrome did not show {expected!r}; last {last!r}")
+
+    # Window 2 opens first, window 1 second: Chrome lists the newest page
+    # first, so a last-tie-wins title match lands in window 2 (the report).
+    first = subprocess.Popen(
+        [*base, "--new-window", f"{uri}?w=2"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    second = None
+    try:
+        _, box2 = wait_snapshot("BRAVO text in window B")
+        second = subprocess.Popen(
+            [*base, "--new-window", f"{uri}?w=1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        snap1, box1 = wait_snapshot("T-inactive")
+        anchor = next(el for el in snap1.elements if el.title == "row 0")
+        assert state("2") == ("BRAVO text in window B", 0)
+        # Read: each window's snapshot carries its own value, not its twin's.
+        assert box2.value == "BRAVO text in window B"
+        assert box1.value == "T-inactive"
+
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = snap1
+        try:
+            result = str(runtime.set_value(box1.ref, "30-w1"))
+        except ComputerUseError as exc:
+            result = f"refused {exc.code} {exc.detail}"
+            assert state("1")[0] == "T-inactive", result
+        else:
+            assert "unverifiable" not in result, result
+            assert result.startswith("set "), result
+            assert state("1")[0] == "30-w1", result
+        assert state("2") == ("BRAVO text in window B", 0), result
+
+        try:
+            driver.scroll(anchor, dy=400, unit=ScrollUnit.PIXELS)
+        except ComputerUseError:
+            pass
+        time.sleep(0.5)
+        assert state("2")[1] == 0, "window 2 scrolled"
+        assert state("2")[0] == "BRAVO text in window B"
+    finally:
+        if second is not None:
+            _stop_group(second)
+        _stop_group(first)
