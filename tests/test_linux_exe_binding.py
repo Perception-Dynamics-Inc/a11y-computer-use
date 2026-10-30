@@ -703,3 +703,19 @@ def test_an_interpreter_grant_binds_only_that_interpreter(spawn, tmp_path, monke
     finally:
         other.kill()
         other.wait()
+
+
+def test_legacy_grant_covers_only_the_installed_launchers_own_bin(monkeypatch) -> None:
+    """LibreOffice's AT-SPI app 'soffice' runs program/soffice.bin, which the
+    installed launcher program/soffice execs. A legacy 'soffice' grant covers
+    exactly that root-owned sibling and nothing else (#1327, Calc regression)."""
+    launcher = "/usr/lib/libreoffice/program/soffice"
+    owned = {launcher, launcher + ".bin", "/usr/bin/sleep"}
+    monkeypatch.setattr(_linux_exe, "installed_exes", lambda name: {launcher} if name == "soffice" else set())
+    monkeypatch.setattr(_linux_exe, "_system_owned", lambda path: path in owned)
+    assert _linux_exe.legacy_exe_ok("soffice", launcher + ".bin")
+    assert not _linux_exe.legacy_exe_ok("soffice", "/usr/bin/sleep")
+    assert not _linux_exe.legacy_exe_ok("soffice", "/home/u/soffice.bin")
+    assert not _linux_exe.legacy_exe_ok("mousepad", launcher + ".bin")
+    owned.discard(launcher + ".bin")  # a user-planted .bin is not covered
+    assert not _linux_exe.legacy_exe_ok("soffice", launcher + ".bin")

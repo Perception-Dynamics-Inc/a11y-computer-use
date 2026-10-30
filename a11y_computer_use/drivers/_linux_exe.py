@@ -178,7 +178,15 @@ def legacy_exe_ok(name: str, exe: str) -> bool:
     # Cheap test first; the .desktop scan runs only when it fails.
     if os.path.basename(exe) == name and _system_owned(exe):
         return True
-    return exe in installed_exes(name)
+    installed = installed_exes(name)
+    if exe in installed:
+        return True
+    # An installed launcher script that execs its sibling ``<launcher>.bin``
+    # (LibreOffice: /usr/bin/soffice -> program/soffice -> program/soffice.bin).
+    # Only that exact root-owned sibling of an installed launcher qualifies;
+    # its AT-SPI app calls itself ``name`` (#1327).
+    return _system_owned(exe) and any(
+        exe == path + ".bin" and _system_owned(path) for path in installed)
 
 
 def grant_exe(name: str) -> str | None:
