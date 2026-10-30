@@ -488,7 +488,9 @@ def frontmost_app_id() -> str:
     try:
         with _open_display() as d:
             active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
-            if not active:
+            # A window id of 0 (or none) is how the WM reports nothing active.
+            # Never look up its owner: XRes would name the root's or the WM's.
+            if not active or not int(active[0]):
                 return ""
             win = d.create_resource_object("window", int(active[0]))
             pid = _owner_pid(win, d)

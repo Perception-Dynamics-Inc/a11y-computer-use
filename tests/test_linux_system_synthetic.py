@@ -2030,7 +2030,7 @@ class _PopupWin(_FakeXWin):
 
 
 def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800), xres=None,
-                   wm_check=0):
+                   wm_check=0, zero_active=False):
     """Root children bottom -> top; ``managed`` are the EWMH clients."""
     import sys
     monkeypatch.setitem(sys.modules, "Xlib", _NS(X=_NS(IsViewable=2, InputOutput=1)))
@@ -2040,7 +2040,9 @@ def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1
 
         def get_full_property(self, atom, kind):
             if atom == "_NET_ACTIVE_WINDOW":
-                return _NS(value=[active]) if active else None
+                if active is None:
+                    return None
+                return _NS(value=[active]) if active or zero_active else None
             if atom == "_NET_SUPPORTING_WM_CHECK":
                 return _NS(value=[wm_check]) if wm_check else None
             return super().get_full_property(atom, kind)
@@ -2174,6 +2176,19 @@ def test_the_window_managers_own_active_window_is_no_frontmost_app(monkeypatch) 
     _popup_display(monkeypatch, [client], [frame, wm_window, check],
                    {200: "mousepad", 77: "openbox"}, active=0x40,
                    xres={0x20: 200, 0x40: 77, 0x41: 77}, wm_check=0x41)
+    assert _linux_system.frontmost_app_id() == ""
+    assert _linux_system.active_window() is None
+
+
+@pytest.mark.parametrize("value", ["zero", "absent"])
+def test_no_active_window_is_no_frontmost_app_never_the_root_owner(monkeypatch, value) -> None:
+    """Tester on #1332 (1d6a51f5): _NET_ACTIVE_WINDOW = 0 on an empty or
+    shown desktop returned 'xfwm4' (the root/WM owner via XRes); main gives ''."""
+    client, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: 77)  # root and WM: xfwm4
+    _popup_display(monkeypatch, [client], [frame], {200: "mousepad", 77: "xfwm4"},
+                   active=0, zero_active=(value == "zero"))
+    monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: 77)
     assert _linux_system.frontmost_app_id() == ""
     assert _linux_system.active_window() is None
 
