@@ -1324,7 +1324,12 @@ normal outcome verification still determines whether it dismissed anything.
 Modal refusals offer no automatic recovery strategies. The agent
 does not retry a modal refusal through another input method. If the bounded
 native fallback cannot establish the modal boundary, input is refused with
-`modal_boundary_unavailable`.
+`modal_boundary_unavailable`. When a Chromium or Gecko Collection query times out
+(the app did not answer within the 300ms per-call wait) and the bounded walk
+cannot fit what is left, the refusal is a retryable `busy` error with reason
+`modal_boundary_busy` instead: no input is sent, and the caller re-observes
+and retries. The walk never descends a subtree that cannot fit the 4096-node
+budget, and neither the timeout nor the budget is raised.
 
 Snapshots and GTK table finds inspect application top-level children and collect modal
 candidates from nodes the pruned walk already reads. They apply background
