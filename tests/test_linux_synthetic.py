@@ -19871,7 +19871,8 @@ def test_modal_collection_splits_without_omitting_pivot_descendants(fake_atspi, 
     root.get_child_at_index = lambda index: pivot if index == 2500 else pytest.fail("must not enumerate rows")
     with pytest.raises(ComputerUseError) as caught:
         _atspi.active_modals(root)
-    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+    # Both queries timed out: still fail closed, but as retryable busy.
+    assert caught.value.detail == {"reason": "modal_boundary_busy", "retryable": True}
 def test_drag_evidence_reads_only_windows_and_endpoints(monkeypatch):
     """A large app must not add another full AT-SPI walk per stroke."""
     from dataclasses import replace
@@ -23750,3 +23751,65 @@ def test_find_root_binds_a_registrant_of_another_user_never(fake_atspi, monkeypa
     _impostor_and_real(fake_atspi, monkeypatch)
     monkeypatch.setattr(_linux_exe, "_uid", lambda pid: 1001)
     assert _atspi.find_root("mousepad", Scope.APP) is None
+
+
+def _chromium_table_under_timeout(monkeypatch, replies):
+    """A Chromium document holding a 5000-row table whose Collection replies come from ``replies``."""
+    document = _Acc("document web")
+    table = _Acc("table")
+    table.get_child_count = lambda: 5000
+    table.get_child_at_index = lambda i: pytest.fail("must not walk a table that cannot fit")
+    _adopt(document, table)
+    frame = _adopt(_Acc("frame"), document)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda node: False)
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_ping_answers", lambda node: True)
+    calls = []
+    def once(node, *, split=False):
+        calls.append((_atspi._role_name(node), split))
+        return replies(node, split)
+    monkeypatch.setattr(_atspi, "_modal_collection_once", once)
+    return frame, calls
+
+
+def test_modal_collection_timeout_on_wide_chromium_table_is_retryable_busy(fake_atspi, monkeypatch):
+    """Main flake behind #1331's Linux failure: every Collection query timed out
+    under load, the walk reached a 5000-row table and reported the boundary as
+    unsupported. A timeout is busy, not unsupported, and the table is never walked."""
+    frame, calls = _chromium_table_under_timeout(
+        monkeypatch, lambda node, split: _atspi._COLLECTION_TIMEOUT)
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.active_modals(frame)
+    assert caught.value.code is ErrorCode.BUSY
+    assert caught.value.detail == {"reason": "modal_boundary_busy", "retryable": True}
+    # No query is repeated within one walk (#1169): the caller re-observes.
+    assert len(calls) == len(set(calls)), calls
+
+
+def test_modal_busy_flag_does_not_leak_into_next_walk(fake_atspi, monkeypatch):
+    """After a busy refusal, the re-observed walk that gets replies succeeds."""
+    dialog = _Acc("dialog", states=("SHOWING", "MODAL"))
+    state = {"timeout": True}
+    def replies(node, split):
+        if state["timeout"]:
+            return _atspi._COLLECTION_TIMEOUT
+        return [dialog] if _atspi._role_name(node) == "document web" else []
+    frame, _ = _chromium_table_under_timeout(monkeypatch, replies)
+    with pytest.raises(ComputerUseError):
+        _atspi.active_modals(frame)
+    state["timeout"] = False
+    assert dialog in _atspi.active_modals(frame)
+
+
+def test_modal_collection_non_timeout_failure_stays_unsupported(fake_atspi, monkeypatch):
+    frame, _ = _chromium_table_under_timeout(monkeypatch, lambda node, split: None)
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.active_modals(frame)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+
+
+def test_modal_collection_classifies_dbind_timeouts():
+    assert _atspi._collection_timed_out(Exception("atspi_error: timeout from dbind (1)"))
+    assert _atspi._collection_timed_out(Exception("atspi_error: The process appears to be hung. (1)"))
+    assert not _atspi._collection_timed_out(Exception("Method GetMatches not supported"))
