@@ -2481,7 +2481,41 @@ class Runtime:
         if self._resolves_apps():
             app_id, _pid = self.driver.frontmost_app()
             return app_id or "unknown"
-        return _frontmost_bundle()
+        front = _frontmost_bundle()
+        if (sys.platform.startswith("linux") and getattr(self.driver, "name", None) == "linux"
+                and front and front != "unknown"):
+            return self._linux_frontmost_key(front)
+        return front
+
+    def _linux_frontmost_key(self, front: str) -> str:
+        """``front``, or an ungrantable key when the active window's owner is not it (#1341).
+
+        Every no-app route (type, key, scroll, screenshot, OCR, ...) is gated
+        on the frontmost app. Its name is self-reported, so the process that
+        owns the active window (XRes pid, not ``_NET_WM_PID``) must pass the
+        same exe, uid and interpreter binding a named app does, or the route
+        is refused. A deny on the name still wins in the gate.
+        """
+        from a11y_computer_use.drivers import _linux_exe, _linux_system
+
+        store = getattr(self, "store", None)
+        if store is not None and store.policy(front)[1]:
+            return front
+        key = self._resolve_app(front)[1]
+        if key in _EXE_HINTS:
+            return key
+        refused = f"{front} (unverified executable)"
+        pid = _linux_system.active_window_owner()
+        if pid is None:
+            _EXE_HINTS[refused] = (f"the X server does not name the owner of the active "
+                                   f"{front!r} window (X-Resource unavailable, a remote client, "
+                                   f"or a _NET_WM_PID that disagrees); refused.")
+            return refused
+        if not _linux_exe.binds(key, pid):
+            _EXE_HINTS[refused] = (f"the active {front!r} window belongs to pid {pid}, whose "
+                                   f"executable or user is not the granted {key}; refused.")
+            return refused
+        return front
 
     def _resolve_app(self, identifier: str) -> tuple[object, str]:
         if self._resolves_apps():
@@ -2582,6 +2616,8 @@ class Runtime:
             key = self._resolve_app(app)[1]
         except Exception:  # noqa: BLE001 - no evidence keeps the name
             return app
+        if key and key in _EXE_HINTS:
+            return key  # the exe check refused it: never fall back to the bare name (#1341)
         return key if key and _linux_system.is_interpreter(key) else app
 
     def _linux_recheck_key(self, identifier: str, bundle: str, label: str | None = None) -> None:

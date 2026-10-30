@@ -247,3 +247,17 @@ def _no_gate_decisions_carry_over():
     yield
     _linux_exe._GATED.clear()
     _linux_exe._GATED.update(saved)
+
+
+@pytest.fixture
+def front_named_only(monkeypatch):
+    """Model the frontmost app by name alone, as these tests did before #1341.
+
+    Tests that fake ``server._frontmost_bundle`` with a Linux driver are about
+    other behaviour (bounds, receipts, redaction), not about who owns the
+    active window. The #1341 exe/uid/interpreter binding of the frontmost app
+    is covered hermetically in ``tests/test_linux_frontmost_exe_1341.py``.
+    """
+    from a11y_computer_use import server
+
+    monkeypatch.setattr(server.Runtime, "_linux_frontmost_key", lambda self, front: front)

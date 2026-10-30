@@ -4103,6 +4103,7 @@ def _hover_runtime(tmp_path, driver: _HoverDriver) -> server.Runtime:
     return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_linux_hover_tool_act_step_and_run_once_move_without_a_click(tmp_path, monkeypatch) -> None:
     """Fake driver only. Not a live tooltip. The three names that rejected hover
     call the existing Runtime.hover and do not click."""
@@ -4125,6 +4126,7 @@ def test_linux_hover_tool_act_step_and_run_once_move_without_a_click(tmp_path, m
     assert driver.clicked == []
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_hover_onto_another_apps_point_does_not_move_the_pointer(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
     monkeypatch.setattr(server, "_app_at_point", lambda point: "com.other.overlay")
@@ -4155,6 +4157,7 @@ def test_hover_off_linux_is_unsupported_and_does_not_move(tmp_path, monkeypatch)
     assert driver.hovered == []
 
 
+@pytest.mark.usefixtures("front_named_only")
 def test_click_point_is_not_rewritten_to_the_element_under_it(tmp_path, monkeypatch) -> None:
     """A raw x/y click stays that point. Save's box contains it and is not the target.
 
@@ -4193,6 +4196,7 @@ def test_click_point_is_not_rewritten_to_the_element_under_it(tmp_path, monkeypa
     assert all(not isinstance(target, Element) for target, _kwargs in clicked)
 
 
+@pytest.mark.usefixtures("front_named_only")
 async def test_mcp_click_point_is_not_rewritten_to_save(store, audit_dir, monkeypatch) -> None:
     """The MCP click tool sends the caller's point, not the Save ref under it."""
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
@@ -4217,6 +4221,7 @@ async def test_mcp_click_point_is_not_rewritten_to_save(store, audit_dir, monkey
     assert not isinstance(target, Element)
 
 
+@pytest.mark.usefixtures("front_named_only")
 async def test_mcp_hover_on_linux_moves_and_off_linux_is_unsupported(
     store, audit_dir, monkeypatch
 ) -> None:
@@ -5346,6 +5351,7 @@ def test_palette_search_finds_later_swatch_without_input(monkeypatch, tool) -> N
         assert "found after 0 scroll(s)" in out
 
 
+@pytest.mark.usefixtures("front_named_only")
 @pytest.mark.parametrize("role", ["AXCalendar", "opaque_region", "AXButton"])
 @pytest.mark.parametrize("inside", [True, False])
 def test_opaque_coordinate_click_unchanged_tree_is_unknown(tmp_path, monkeypatch, role, inside):
@@ -6792,6 +6798,7 @@ def test_opaque_toolbar_type_has_no_retry_hint(tmp_path, monkeypatch):
     assert driver._opaque_toolbar_type is None
 
 
+@pytest.mark.usefixtures("front_named_only")
 @pytest.mark.parametrize("verify", [False, True])
 @pytest.mark.parametrize("changed", [False, True])
 @pytest.mark.parametrize("location", ["inside", "outside", "other_display"])
