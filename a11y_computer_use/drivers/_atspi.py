@@ -4630,6 +4630,10 @@ class ATSPIAccessor:
         # ``(cache key, start index, page size)`` set for one snapshot so
         # expand lists that node's next children instead of the visible band.
         self._expand_page: tuple | None = None
+        # Set by LinuxDriver.snapshot for ``find`` / ``scroll_to_find``: a
+        # direct child past the fetch window whose name contains this text
+        # is still listed (#1375). None on a plain snapshot.
+        self.child_seek: str | None = None
         # Children a list or table did not publish. ``take_unlisted`` moves
         # the count onto the prune elision for ``… N more``.
         self._unlisted: dict[object, int] = {}
@@ -5402,12 +5406,18 @@ class ATSPIAccessor:
             cells = _sheet_window_cells(node)
             _share_parent_application(node, cells)
             return _publish_sheet_cells(cells)
+        total = count
         count = min(count, _MAX_CHILDREN_FETCH)
         kids = []
         for i in range(count):
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
             if child is not None:
                 kids.append(child)
+        if total > count:
+            kids.extend(_seek_children_past_fetch(node, count, total, self.child_seek))
+            # ``… N more`` counts the children never fetched, not only the
+            # fetched ones the pruner dropped (#1375).
+            self._note_unlisted(node, total - count)
         # Toolkit/visibility guards below also ask for the child's owner.
         # Share proven ownership before those checks, not after they have
         # already climbed the same native ancestry for every child.
@@ -19798,6 +19808,28 @@ def _child_label(node) -> str:
         if label:
             return label
     return ""
+
+
+def _seek_children_past_fetch(node, start: int, total: int, seek) -> list:
+    """Direct children at ``start``.. whose name contains ``seek``.
+
+    Only ``find`` / ``scroll_to_find`` arm ``seek``; a plain snapshot reads
+    nothing here. The scan reads names only and stops at the seek window.
+    """
+    if not isinstance(seek, str) or not seek.strip():
+        return []
+    needle = seek.replace("\u00a0", " ").strip().casefold()
+    hits = []
+    for index in range(start, min(int(total), _GTK_SEEK_MAX_ROWS)):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        name = (_node_name(child) or "").replace("\u00a0", " ").casefold()
+        if needle in name:
+            hits.append(child)
+            if len(hits) >= 8:
+                break
+    return hits
 
 
 def child_labels(node, limit: int | None = None) -> list[str]:

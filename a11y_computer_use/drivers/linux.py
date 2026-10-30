@@ -1416,6 +1416,9 @@ class LinuxDriver:
         # that node lists its next page of children instead of the band the
         # last snapshot already showed. Cleared after the snapshot.
         self._expand_page: tuple | None = None
+        #: Text armed by find / scroll_to_find so a named child past the
+        #: per-parent caps is still walked (#1375). None on a plain snapshot.
+        self._child_seek: str | None = None
         # How far expand has already paged each node, keyed by AT-SPI path.
         self._expand_cursors: dict[object, int] = {}
 
@@ -1951,6 +1954,7 @@ class LinuxDriver:
                 seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
                 accessor._table_seek = self._table_seek
                 accessor._expand_page = self._expand_page
+                accessor.child_seek = getattr(self, "_child_seek", None)
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:

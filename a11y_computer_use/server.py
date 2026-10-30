@@ -45,7 +45,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from functools import partial, wraps
 from threading import RLock
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
@@ -5978,11 +5978,12 @@ class Runtime:
             previous = getattr(self.driver, "_table_seek", None) if armed else None
             if armed:
                 self.driver._table_seek = seek
-            try:
-                snap = self.driver.snapshot(Scope(scope), bundle)
-            finally:
-                if armed:
-                    self.driver._table_seek = previous
+            with self._child_seek(seek):
+                try:
+                    snap = self.driver.snapshot(Scope(scope), bundle)
+                finally:
+                    if armed:
+                        self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
             matches = observe.prefer_exact_targets(
                 observe.find_elements(
@@ -6025,6 +6026,25 @@ class Runtime:
             return rendered
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
+
+    @contextmanager
+    def _child_seek(self, text: str | None):
+        """Arm the driver's per-parent child search for one find (#1375).
+
+        A parent's children past the fan-out caps are folded into ``… N
+        more``. While armed, a child named ``text`` is kept, so find and
+        scroll_to_find see it. Drivers without the attribute are untouched.
+        """
+        driver = self.driver
+        if not hasattr(driver, "_child_seek"):
+            yield
+            return
+        previous = driver._child_seek
+        driver._child_seek = text
+        try:
+            yield
+        finally:
+            driver._child_seek = previous
 
     def expanded_children(self, app: str, ref: str) -> str:
         """The next page of ``ref``'s own children, contiguous with the last page.
@@ -9947,7 +9967,9 @@ class Runtime:
 
         # Each injected scroll has its own receipt, including those that
         # complete before a later iteration fails; the outer row is observation.
-        return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
+        seek_text = text.strip() if isinstance(text, str) and text.strip() else None
+        with self._child_seek(seek_text):
+            return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
     #: How long `app launch` waits for the app's first window, and `app focus`
     #: for the app to become frontmost, before reporting what it saw.

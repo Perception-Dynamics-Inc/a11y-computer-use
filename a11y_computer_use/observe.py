@@ -2559,6 +2559,14 @@ def _prune_inner(
         elided = len(raw_children)
     else:
         walked = raw_children[:_MAX_WALK_CHILDREN]
+        needle = _child_seek_needle(accessor)
+        if needle and len(raw_children) > _MAX_WALK_CHILDREN:
+            # find / scroll_to_find: a named child past the walk window is
+            # still read, so the search is not limited to the first 200.
+            walked = walked + tuple(
+                child for child in raw_children[_MAX_WALK_CHILDREN:]
+                if _seek_hit_raw(accessor.read(child), needle)
+            )
         elided = len(raw_children) - len(walked)
         # Read the children first: a child is kept iff it has bounds and is not
         # decorative (the only None return below), so the collapse decision --
@@ -2603,7 +2611,7 @@ def _prune_inner(
         else:
             cap = MAX_CHILDREN
         if len(kept) > cap:
-            kept, dropped = _cap_children(kept, cap)
+            kept, dropped = _cap_children(kept, cap, _child_seek_needle(accessor))
             elided += dropped
 
     # A table can publish only the on-screen band. The rest are still its
@@ -2835,24 +2843,55 @@ def _union_bounds(rects: list[Bounds]) -> Bounds:
     return Bounds(display_id=first.display_id, x=x1, y=y1, width=x2 - x1, height=y2 - y1)
 
 
+#: Leaf control roles whose uniform, titled runs get the sheet allowance.
+_UNIFORM_LEAF_ROLES = frozenset({"AXRadioButton", "AXButton", "AXCheckBox"})
+
+
 def _named_radio_group(raw: RawNode, kept: list[_PNode]) -> bool:
     """Keep compact named choices, including GTK colour chooser swatches.
 
-    Reuse the sheet allowance only for groups of leaf radio buttons. Mixed
-    containers and controls with nested content retain the ordinary cap.
-    The raw walk and snapshot token budgets still apply.
+    Reuse the sheet allowance only for groups or toolbars whose children are
+    all titled leaf controls of one role (radio buttons, buttons, or check
+    boxes), e.g. a div of 60 buttons (#1375). Mixed containers and controls
+    with nested content retain the ordinary cap. The raw walk and snapshot
+    token budgets still apply.
     """
-    return (
-        raw.role in {"AXGroup", "AXRadioGroup"}
-        and bool(kept)
-        and all(
-            child.raw.role == "AXRadioButton"
-            and bool(child.raw.title.strip())
-            and not child.children
-            and not child.elided
-            for child in kept
-        )
+    if raw.role not in {"AXGroup", "AXRadioGroup", "AXToolbar"} or not kept:
+        return False
+    role = kept[0].raw.role
+    if role not in _UNIFORM_LEAF_ROLES:
+        return False
+    if role != "AXRadioButton" and raw.role == "AXRadioGroup":
+        return False
+    return all(
+        child.raw.role == role
+        and bool(child.raw.title.strip())
+        and not child.children
+        and not child.elided
+        for child in kept
     )
+
+
+def _child_seek_needle(accessor: object) -> str | None:
+    """The folded text a find / scroll_to_find is looking for, if armed."""
+    seek = getattr(accessor, "child_seek", None)
+    if not isinstance(seek, str):
+        return None
+    folded = seek.replace("\u00a0", " ").strip().casefold()
+    return folded or None
+
+
+def _seek_hit_raw(raw: RawNode, needle: str) -> bool:
+    text = f"{raw.title or ''} {raw.description or ''}"
+    if raw.value is not None:
+        text += f" {raw.value}"
+    return needle in text.replace("\u00a0", " ").casefold()
+
+
+def _seek_hit_tree(node: _PNode, needle: str) -> bool:
+    if _seek_hit_raw(node.raw, needle):
+        return True
+    return any(_seek_hit_tree(child, needle) for child in node.children)
 
 
 def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
@@ -2872,9 +2911,20 @@ def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
     return False
 
 
-def _cap_children(kept: list[_PNode], cap: int) -> tuple[list[_PNode], int]:
-    """Keep the ``cap`` highest-priority children, in document order."""
-    ranked = sorted(range(len(kept)), key=lambda i: (-_keep_priority(kept[i]), i))
+def _cap_children(
+    kept: list[_PNode], cap: int, needle: str | None = None,
+) -> tuple[list[_PNode], int]:
+    """Keep the ``cap`` highest-priority children, in document order.
+
+    While find / scroll_to_find is armed with ``needle``, children whose
+    subtree matches it outrank the rest, so a match past the cap is kept
+    instead of being folded into ``… N more`` (#1375).
+    """
+    def rank(i: int) -> tuple[int, int, int]:
+        hit = 1 if needle and _seek_hit_tree(kept[i], needle) else 0
+        return (-hit, -_keep_priority(kept[i]), i)
+
+    ranked = sorted(range(len(kept)), key=rank)
     winners = sorted(ranked[:cap])
     return [kept[i] for i in winners], len(kept) - cap
 

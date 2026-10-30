@@ -14946,3 +14946,71 @@ def test_linux_calc_cell_comments_show_in_snapshot_and_find(tmp_path) -> None:
         assert "1 match" in second and 'cell "C3"' in second, second
     finally:
         _stop_group(proc)
+
+
+def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
+    """#1375: find and scroll_to_find reach a parent's children past the caps.
+
+    Live Chrome. One div holds 60 buttons, and an SVG holds 1500 point
+    buttons with "Outlier 777" at index 777, past the 24 keep cap, the
+    200-child walk window and the 250-child fetch window. Skips when no
+    Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the child-cap find test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    buttons = "".join(f"<button type=button>Btn {i}</button>" for i in range(60))
+    points = "".join(
+        f"<circle role=button aria-label='{'Outlier 777' if i == 777 else f'pt {i}'}' "
+        f"cx='{5 + (i % 50) * 9}' cy='{5 + (i // 50) * 9}' r='3'/>"
+        for i in range(1500)
+    )
+    page = tmp_path / "child-cap.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>childcap</title>"
+        f"<div role=group aria-label=Buttons>{buttons}</div>"
+        f"<svg role=group aria-label=Chart width=460 height=280>{points}</svg>"
+    )
+    profile = tmp_path / "chrome-childcap-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        while True:
+            assert proc.poll() is None, f"Chrome exited with status {proc.returncode}"
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if "Btn 0" in _titles(shot):
+                    break
+            assert time.monotonic() < deadline, "Chrome never showed the page"
+            time.sleep(0.4)
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        for name in ("Btn 24", "Btn 59", "Outlier 777"):
+            located = runtime.find("chrome", text=name)
+            assert "no elements match" not in located, (name, located)
+            assert name in located, (name, located)
+        found = runtime.scroll_to_find("chrome", text="Btn 59", max_scrolls=2)
+        assert "Btn 59" in found and "not found" not in found, found
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
