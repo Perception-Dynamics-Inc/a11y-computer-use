@@ -115,6 +115,11 @@ _SCOPE_LOCK = threading.Lock()
 _SCOPE_DEPTH = 0
 _SCOPE_INDEX: tuple[dict[str, set[int]], dict[str, set[int]]] | None = None
 _SCOPE_MEMO: dict = {}
+# Whether ``scope_memo`` and the shared walk serve the open action. On at
+# every action entry; ``seal_scope_memo`` turns it off once the gate has
+# decided, so the action's own work (launch waits, polls, rechecks) always
+# reads live evidence.
+_SCOPE_SHARING = False
 
 # Count of full /proc walks, for the regression test (#1347).
 PROC_SCANS = 0
@@ -156,11 +161,12 @@ def proc_scope() -> Iterator[None]:
     Each entry starts a fresh walk, nested ones included (every batch step
     is its own action), and the last exit drops it.
     """
-    global _SCOPE_DEPTH, _SCOPE_INDEX, _SCOPE_MEMO
+    global _SCOPE_DEPTH, _SCOPE_INDEX, _SCOPE_MEMO, _SCOPE_SHARING
     with _SCOPE_LOCK:
         _SCOPE_DEPTH += 1
         _SCOPE_INDEX = None  # built lazily by the first lookup
         _SCOPE_MEMO = {}
+        outer_sharing, _SCOPE_SHARING = _SCOPE_SHARING, True
     try:
         yield
     finally:
@@ -169,16 +175,43 @@ def proc_scope() -> Iterator[None]:
             # Never resume an older walk: the outer action re-walks if it looks again.
             _SCOPE_INDEX = None
             _SCOPE_MEMO = {}
+            _SCOPE_SHARING = outer_sharing and _SCOPE_DEPTH > 0
+
+
+def drop_scope_memo() -> None:
+    """Forget every shared read of the open action (#1347).
+
+    A polling loop calls this at the top of every iteration, so identity
+    evidence is never older than one poll. A no-op outside an action.
+    """
+    global _SCOPE_INDEX, _SCOPE_MEMO
+    with _SCOPE_LOCK:
+        _SCOPE_INDEX = None
+        _SCOPE_MEMO = {}
+
+
+def seal_scope_memo() -> None:
+    """Drop the shared reads and stop sharing until the action ends (#1347).
+
+    Called when the gate hands over to the action itself: its rechecks,
+    launch waits and polls then read live evidence on every call.
+    """
+    global _SCOPE_SHARING
+    drop_scope_memo()
+    with _SCOPE_LOCK:
+        _SCOPE_SHARING = False
 
 
 def scope_memo(key, compute):
     """``compute()`` once per action for ``key`` (#1347); fresh outside an action.
 
     Dropped at every action entry and exit, like the /proc walk, so a result
-    is never carried from one action into another.
+    is never carried from one action into another, by every
+    ``drop_scope_memo`` (each poll iteration), and never served once the
+    action is sealed. Only a value that was returned is kept; a raise is not.
     """
     with _SCOPE_LOCK:
-        if _SCOPE_DEPTH == 0:
+        if _SCOPE_DEPTH == 0 or not _SCOPE_SHARING:
             memo = None
         else:
             memo = _SCOPE_MEMO
@@ -187,7 +220,7 @@ def scope_memo(key, compute):
     value = compute()
     if memo is not None:
         with _SCOPE_LOCK:
-            if memo is _SCOPE_MEMO:  # same action still open
+            if memo is _SCOPE_MEMO:  # same action, same poll, still open
                 memo[key] = value
     return value
 
@@ -204,7 +237,7 @@ def pids_named(name: str) -> set[int]:
         return set()
     global _SCOPE_INDEX
     with _SCOPE_LOCK:
-        if _SCOPE_DEPTH > 0:
+        if _SCOPE_DEPTH > 0 and _SCOPE_SHARING:
             if _SCOPE_INDEX is None:
                 _SCOPE_INDEX = _scan_proc()
             index = _SCOPE_INDEX

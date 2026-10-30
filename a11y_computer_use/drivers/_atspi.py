@@ -6979,7 +6979,7 @@ def find_root(app: str, scope) -> object | None:
     # A killed/restarted app can be absent from the desktop's cached child
     # array. Refresh the registry before ranking candidates: refreshing the
     # selected app's windows cannot discover its replacement registrant.
-    applications = _fresh_application_children(desktop)
+    applications = _desktop_applications(desktop)
     st = getattr(Atspi, "StateType", None)
     active = getattr(st, "ACTIVE", None)
 
@@ -7151,6 +7151,18 @@ def _toplevel_of(node):
             return None
         current = _call_first(current, ("get_parent", "getParent"))
     return None
+
+
+def _desktop_applications(desktop) -> list:
+    """The registry's applications, read fresh once per gate of an action (#1347).
+
+    ``find_root`` and the exe check's registry reads share it; every poll
+    iteration and the sealed action body read it again.
+    """
+    from a11y_computer_use.drivers import _linux_exe
+
+    return list(_linux_exe.scope_memo(
+        ("desktop_applications",), lambda: tuple(_fresh_application_children(desktop))))
 
 
 def _fresh_application_children(app) -> list:
@@ -12852,10 +12864,8 @@ def _registered_pids() -> set[int] | None:
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return None
-    count = max(0, int(_child_count(desktop) or 0))
     pids = set()
-    for index in range(min(count, 200)):
-        app = _child_at(desktop, index)
+    for app in _desktop_applications(desktop)[:200]:
         pid = _call_first(app, ("get_process_id",)) if app is not None else None
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             pids.add(pid)
@@ -12875,7 +12885,7 @@ def _registered_pids_named(name: str) -> set[int] | None:
     if desktop is None or not needle:
         return None
     pids = set()
-    for app in _fresh_application_children(desktop)[:200]:
+    for app in _desktop_applications(desktop)[:200]:
         if app is None:
             continue
         label = (_call_first(app, ("get_name",), default="") or "").lower()

@@ -593,6 +593,14 @@ def frontmost_app_id() -> str:
 
 
 def active_window() -> dict | None:
+    """``_active_window``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    row = _linux_exe.scope_memo(("active_window",), _active_window)
+    return dict(row) if row is not None else None
+
+
+def _active_window() -> dict | None:
     """The EWMH ``_NET_ACTIVE_WINDOW``, or None when there is no active window.
 
     ``window_id`` is the X id. ``app`` is the process comm, or the WM_CLASS
@@ -1178,6 +1186,14 @@ def title_suggestion(identifier: str) -> str | None:
 
 
 def pids_matching(identifier: str) -> set[int]:
+    """``_pids_matching``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return set(_linux_exe.scope_memo(("pids_matching", identifier),
+                                     lambda: frozenset(_pids_matching(identifier))))
+
+
+def _pids_matching(identifier: str) -> set[int]:
     """PIDs of the managed windows whose program ``identifier`` names.
 
     The match is the full program name when the comm is its 15-byte cut, and

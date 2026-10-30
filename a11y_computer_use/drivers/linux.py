@@ -1773,6 +1773,9 @@ class LinuxDriver:
                 if remaining <= 0:
                     break
                 time.sleep(min(_atspi.ATSPI_REGISTER_POLL_S, remaining))
+                from a11y_computer_use.drivers import _linux_exe
+
+                _linux_exe.drop_scope_memo()  # each poll reads identity live (#1347)
                 resolved, root = self._root_for_snapshot(app, scope)
                 if root is not None:
                     break
