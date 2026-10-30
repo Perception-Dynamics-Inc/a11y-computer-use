@@ -24056,6 +24056,56 @@ def snapshot_top_level_modals(root) -> list:
     return [node for node in candidates if is_modal(node) and _modal_in_window(node, root)]
 
 
+_SCOPED_MODAL_WALK_MAX = 1024
+_SCOPED_MODAL_ROLES = frozenset({"dialog", "alert", "window", "frame", "file chooser"})
+
+
+def _chromium_scoped_modal_candidates(root):
+    """Dialog-role candidates of a Chromium window, page documents queried alone.
+
+    The browser chrome around the page is a few hundred nodes and is walked
+    directly. Each web document is one Collection query (cached per
+    structural epoch). None when a document query did not complete, a child
+    count failed, or the walk exceeds its bound: the caller then runs the
+    original whole-window query, so this never reports fewer candidates
+    than that query would.
+    """
+    candidates = []
+    queue = deque([root])
+    seen = set()
+    while queue:
+        node = queue.popleft()
+        key = _ancestor_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(seen) > _SCOPED_MODAL_WALK_MAX:
+            return None
+        role = _role_name(node)
+        if not role and call_went_unanswered():
+            return None
+        if role in _SCOPED_MODAL_ROLES:
+            # The same roles the Collection rule matches.
+            candidates.append(node)
+        if role in {"document web", "document frame"}:
+            descendants = _modal_collection(node)
+            if descendants is None:
+                return None
+            candidates.extend(descendants)
+            continue
+        count = _child_count(node)
+        if count < 0 or call_went_unanswered():
+            return None
+        for index in range(count):
+            child = _child_at(node, index)
+            if child is None:
+                if call_went_unanswered():
+                    return None
+                continue
+            queue.append(child)
+    return candidates
+
+
 def active_modals(root, *, fallback: bool = True, point=None) -> list:
     """Fresh modal descendants before pruning, including native modal windows.
 
@@ -24078,7 +24128,16 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
     elif fallback:
         candidates = _cached_modal_collection(root)
     else:
-        candidates = _modal_collection(root)
+        # A whole-window query on a Chromium frame walks the page too. On a
+        # 5,000-row table it outlives the per-call wait, and Chromium keeps
+        # answering it after the timeout, so the snapshot walk that follows
+        # reads defaults and the window comes back empty (#1368). Walk the
+        # browser chrome and ask each page document on its own; a document
+        # query is answered from the structural cache when nothing changed.
+        candidates = (_chromium_scoped_modal_candidates(root)
+                      if _chromium_app(root) else None)
+        if candidates is None:
+            candidates = _modal_collection(root)
     if candidates is None and not fallback and not libreoffice:
         candidates = []
     if candidates is None:

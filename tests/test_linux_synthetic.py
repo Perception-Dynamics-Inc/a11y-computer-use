@@ -24251,3 +24251,47 @@ def test_prefetch_rule_matches_the_input_rule():
         assert (words[value // 32] & 0xFFFFFFFF) >> (value % 32) & 1, name
     value = int(Atspi.Role.PUSH_BUTTON)
     assert not (words[value // 32] & 0xFFFFFFFF) >> (value % 32) & 1
+
+
+@pytest.mark.parametrize("document_reply", ["answered", "unanswered"])
+def test_chromium_find_modal_discovery_does_not_query_the_whole_window(
+    fake_atspi, monkeypatch, document_reply,
+):
+    """#1368: a find on a 5,000-row page must not ask the frame for dialogs.
+
+    The whole-window Collection walks the page, outlives the per-call wait,
+    and Chromium keeps answering it, so the snapshot walk after it reads
+    defaults and the window comes back empty. Discovery walks the browser
+    chrome and queries the page document alone. When the document query does
+    not complete, the original whole-window query still runs.
+    """
+    frame = _Acc("frame", name="rowtable - Google Chrome", states=("SHOWING",))
+    panel = _Acc("panel")
+    bubble = _Acc("dialog", name="Allow?", states=("SHOWING", "MODAL"))
+    document = _Acc("document web", name="rowtable")
+    table = _Acc("table")
+    page_modal = _Acc("dialog", name="Confirm", states=("SHOWING", "MODAL"))
+    _adopt(frame, panel)
+    _adopt(panel, _Acc("push button", name="Reload"), bubble, document)
+    _adopt(document, table)
+    table.get_child_count = lambda: pytest.fail("page content is the document query's job")
+    monkeypatch.setattr(_atspi, "_libreoffice_accessible", lambda node: False)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "_fresh_application_children", lambda node: [frame])
+    monkeypatch.setattr(_atspi, "_modal_in_window", lambda modal, root: True)
+    queried = []
+
+    def collection(root, *, split=False):
+        queried.append(root)
+        if root is document:
+            return [page_modal] if document_reply == "answered" else None
+        assert root is frame
+        return [bubble, page_modal]
+
+    monkeypatch.setattr(_atspi, "_modal_collection", collection)
+    found = _atspi.active_modals(frame, fallback=False)
+    assert {id(node) for node in found} == {id(bubble), id(page_modal)}
+    if document_reply == "answered":
+        assert queried == [document]
+    else:
+        assert queried == [document, frame]
