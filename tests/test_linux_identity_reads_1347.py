@@ -134,3 +134,111 @@ def test_the_action_body_and_recheck_read_live(tmp_path, monkeypatch) -> None:
 
 _ATSPI_NAMED = _linux_exe._atspi_named_pids
 _ATSPI_OWNERS = _linux_exe._atspi_owner_pids
+
+
+def test_gate_x_probes_once_per_gate_live_after_seal(monkeypatch) -> None:
+    """#1347: the gate's X probes (interpreter_hosting, verified_pids_matching,
+    resolve_app) are read once per gate, fresh in every action, every poll and
+    the sealed body."""
+    reads = {"interpreter_hosting": 0, "verified_pids_matching": 0, "resolve_app": 0}
+    world = {"host": None, "pids": set(), "key": "mousepad"}
+
+    def hosting(identifier):
+        reads["interpreter_hosting"] += 1
+        return world["host"]
+
+    def verified(identifier):
+        reads["verified_pids_matching"] += 1
+        return set(world["pids"])
+
+    def resolve(identifier):
+        reads["resolve_app"] += 1
+        return world["key"]
+
+    monkeypatch.setattr(_linux_system, "_interpreter_hosting", hosting)
+    monkeypatch.setattr(_linux_system, "_verified_pids_matching", verified)
+    monkeypatch.setattr(_linux_system, "_resolve_app", resolve)
+
+    def probe():
+        return (_linux_system.interpreter_hosting("mousepad"),
+                _linux_system.verified_pids_matching("mousepad"),
+                _linux_system.resolve_app("mousepad"))
+
+    with _linux_exe.proc_scope():
+        assert probe() == probe() == (None, set(), "mousepad")
+        assert reads == {"interpreter_hosting": 1, "verified_pids_matching": 1, "resolve_app": 1}
+        world.update(host="python3", pids={51}, key="python3")  # an impostor maps a window
+        _linux_exe.drop_scope_memo()  # next poll iteration
+        assert probe() == ("python3", {51}, "python3")
+        world.update(host=None, pids={52}, key="mousepad")
+        _linux_exe.seal_scope_memo()  # the gate has decided: the body reads live
+        assert probe() == (None, {52}, "mousepad")
+        world["pids"] = {51, 52}
+        assert probe()[1] == {51, 52}
+    with _linux_exe.proc_scope():  # the next action reads again
+        probe()
+        probe()
+    assert reads == {"interpreter_hosting": 5, "verified_pids_matching": 5, "resolve_app": 5}
+    probe()  # outside an action: never shared
+    probe()
+    assert reads["resolve_app"] == 7
+
+
+class _CountedAcc(_Acc):
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self.asked = {"get_name": 0, "get_process_id": 0}
+
+    def get_name(self) -> str:
+        self.asked["get_name"] += 1
+        return self.name
+
+    def get_process_id(self) -> int:
+        self.asked["get_process_id"] += 1
+        return self.pid
+
+
+def test_registry_name_and_pid_read_once_per_gate(monkeypatch) -> None:
+    """#1347: find_root and the exe check's registry reads ask each application
+    for its name and pid once per gate; every poll and the sealed body ask again,
+    and a failed or empty read is never shared."""
+    bus = _bus(monkeypatch)
+    monkeypatch.setattr(_linux_exe, "binds", lambda app, pid: True)
+    gedit, mp = _CountedAcc("gedit", 77), _CountedAcc("mousepad", 52)
+    bus["desktop"].children += [gedit, mp]
+
+    def gate():
+        _atspi.find_root("mousepad", Scope.APP)
+        assert _atspi._registered_pids_named("mousepad") == {mp.pid} - {0}
+        _atspi._registered_pids()
+
+    with _linux_exe.proc_scope():
+        gate()
+        assert gedit.asked == {"get_name": 1, "get_process_id": 1}
+        mousepad_reads = dict(mp.asked)
+        gate()
+        # The matched app's names are shared; only find_root's own pid reads
+        # under its reply watch stay live.
+        assert mp.asked["get_name"] == mousepad_reads["get_name"]
+        assert gedit.asked == {"get_name": 1, "get_process_id": 1}
+        mp.pid = 53  # the app restarts between two polls
+        _linux_exe.drop_scope_memo()
+        gate()
+        assert _atspi._registered_pids() == {77, 53}
+        assert gedit.asked["get_name"] == 2
+        _linux_exe.seal_scope_memo()  # the body reads live
+        mp.pid = 54
+        assert _atspi._registered_pids() == {77, 54}
+        before = gedit.asked["get_name"]
+        _atspi._registered_pids_named("mousepad")
+        _atspi._registered_pids_named("mousepad")
+        assert gedit.asked["get_name"] == before + 2
+    gedit.name, gedit.pid = "", 0  # an unanswered registrant
+    with _linux_exe.proc_scope():
+        before = dict(gedit.asked)
+        _atspi._registered_pids()
+        _atspi._registered_pids()
+        _atspi._registered_pids_named("mousepad")
+        _atspi._registered_pids_named("mousepad")
+        assert gedit.asked["get_process_id"] == before["get_process_id"] + 2
+        assert gedit.asked["get_name"] == before["get_name"] + 2

@@ -7040,7 +7040,8 @@ def find_root(app: str, scope) -> object | None:
     for candidate in applications:
         if candidate is None:
             continue
-        name = (_call_first(candidate, ("get_name",), default="") or "").lower()
+        name = (_registry_read(candidate, "get_name") or "").lower()
+        # A shared name is non-empty, so a stale reply flag here is never read.
         name_unanswered = call_went_unanswered()
         # A dialog opened with Gtk.Dialog.run() wedges this process's
         # connection to the app: get_name comes back empty and child count
@@ -7051,7 +7052,8 @@ def find_root(app: str, scope) -> object | None:
         if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        if not _linux_system._names_program(needle, name) and not (pids and pid_of(candidate) in pids):
+        if not _linux_system._names_program(needle, name) and not (
+                pids and _registry_read(candidate, "get_process_id") in pids):
             continue
         with app_reply_watch(app, hinted, candidate) as watch:
             pid = pid_of(candidate)
@@ -7163,6 +7165,41 @@ def _desktop_applications(desktop) -> list:
 
     return list(_linux_exe.scope_memo(
         ("desktop_applications",), lambda: tuple(_fresh_application_children(desktop))))
+
+
+class _UnkeptRegistryRead(Exception):
+    """A registry read that failed or came back empty: returned, never shared."""
+
+
+def _registry_read(app, method: str):
+    """``app.<method>()`` for a registry application, once per gate (#1347).
+
+    Shared by ``find_root`` and the exe check's registry reads, so a gate asks
+    each application for its name and pid once instead of once per reader.
+    Only a non-empty name and a positive int pid are shared; an empty or
+    failed read is returned as read and asked again by the next reader. The
+    memo is dropped on every poll iteration and never served once the action
+    is sealed, like ``_desktop_applications``.
+    """
+    from a11y_computer_use.drivers import _linux_exe
+
+    def compute():
+        value = _call_first(app, (method,), default="" if method == "get_name" else None)
+        if method == "get_name":
+            keep = isinstance(value, str) and bool(value)
+        else:
+            keep = isinstance(value, int) and not isinstance(value, bool) and value > 0
+        if not keep:
+            raise _UnkeptRegistryRead(value)
+        return (app, value)
+
+    try:
+        held = _linux_exe.scope_memo(("registry_read", method, id(app)), compute)
+    except _UnkeptRegistryRead as unkept:
+        return unkept.args[0]
+    if held[0] is not app:  # an id reused by another proxy: read it live
+        return _call_first(app, (method,), default="" if method == "get_name" else None)
+    return held[1]
 
 
 def _fresh_application_children(app) -> list:
@@ -12866,7 +12903,7 @@ def _registered_pids() -> set[int] | None:
         return None
     pids = set()
     for app in _desktop_applications(desktop)[:200]:
-        pid = _call_first(app, ("get_process_id",)) if app is not None else None
+        pid = _registry_read(app, "get_process_id") if app is not None else None
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             pids.add(pid)
     return pids
@@ -12888,10 +12925,10 @@ def _registered_pids_named(name: str) -> set[int] | None:
     for app in _desktop_applications(desktop)[:200]:
         if app is None:
             continue
-        label = (_call_first(app, ("get_name",), default="") or "").lower()
+        label = (_registry_read(app, "get_name") or "").lower()
         if not _linux_system._names_program(needle, label):
             continue
-        pid = _call_first(app, ("get_process_id",))
+        pid = _registry_read(app, "get_process_id")
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             pids.add(pid)
     return pids

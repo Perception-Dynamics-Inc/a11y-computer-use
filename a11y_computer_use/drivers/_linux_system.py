@@ -1074,6 +1074,13 @@ def _class_matches_identifier(identifier: str, instance: str, klass: str) -> boo
 
 
 def resolve_app(identifier: str) -> str:
+    """``_resolve_app``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return _linux_exe.scope_memo(("resolve_app", identifier), lambda: _resolve_app(identifier))
+
+
+def _resolve_app(identifier: str) -> str:
     """Resolve a window title or program name to the permission-keying id.
 
     The id is the full program name when the kernel comm is that name's
@@ -1129,6 +1136,13 @@ def is_interpreter(name: str | None) -> bool:
 
 
 def interpreter_hosting(identifier: str) -> str | None:
+    """``_interpreter_hosting``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return _linux_exe.scope_memo(("interpreter_hosting", identifier), lambda: _interpreter_hosting(identifier))
+
+
+def _interpreter_hosting(identifier: str) -> str | None:
     """The interpreter comm of a mapped window whose WM_CLASS names ``identifier``.
 
     None when no such window is mapped or its program is not an interpreter.
@@ -1288,6 +1302,13 @@ def active_window_owner() -> int | None:
 
 
 def verified_pids_matching(identifier: str) -> set[int]:
+    """``_verified_pids_matching``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return set(_linux_exe.scope_memo(("verified_pids_matching", identifier), lambda: frozenset(_verified_pids_matching(identifier))))
+
+
+def _verified_pids_matching(identifier: str) -> set[int]:
     """`pids_matching`, with each window's owner taken from the X server.
 
     A window is considered when its ``_NET_WM_PID`` or its XRes client pid
