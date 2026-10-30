@@ -12957,6 +12957,34 @@ def _registered_pids() -> set[int] | None:
     return pids
 
 
+def registered_names_by_pid() -> dict[int, set[str]] | None:
+    """AT-SPI application names keyed by bus pid, or None when unreadable (#1358).
+
+    The pid comes from D-Bus credentials; the name is the app's own
+    (prgname for GTK). Used to apply the deny list to the process an action
+    reaches, whatever name the caller used.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    names: dict[int, set[str]] = {}
+    for app in _fresh_application_children(desktop)[:200]:
+        if app is None:
+            continue
+        pid = _call_first(app, ("get_process_id",))
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        label = (_call_first(app, ("get_name",), default="") or "").strip()
+        bucket = names.setdefault(pid, set())
+        if label:
+            bucket.add(label)
+    return names
+
+
 def _registered_pids_named(name: str) -> set[int] | None:
     """Bus pids of AT-SPI applications ``find_root`` would match by name (#1327)."""
     from a11y_computer_use.drivers import _linux_system
@@ -14556,6 +14584,18 @@ class _ReadBudget:
         return elapsed - credit >= self.limit
 
 
+def _state_flag_name(flag) -> str:
+    """Name of an Atspi.StateType from StateSet.get_states().
+
+    PyGObject 3.52+ makes GEnums IntEnums, so ``str(flag)`` is the number
+    ("12"), not "<enum ATSPI_STATE_FOCUSED ...>". Matching "FOCUSED" in that
+    string never succeeded, so a focused owner read as unresolved and the
+    retry verdict was unverifiable (#1362). ``value_name`` exists on both.
+    """
+    name = getattr(flag, "value_name", None) or getattr(flag, "name", None)
+    return name if isinstance(name, str) else str(flag)
+
+
 def _retry_evidence(action, target, focus):
     """Scoped evidence for formatting and inert labels; unknown elsewhere.
 
@@ -14598,7 +14638,7 @@ def _retry_evidence(action, target, focus):
             flags = _call_first(states, ("get_states",))
             if flags is None:
                 return None
-            selected = any("SELECTED" in str(flag) for flag in flags)
+            selected = any("SELECTED" in _state_flag_name(flag) for flag in flags)
             return RetryEvidence(effect=(target, "outline_selection", selected))
         if formatting:
             if not _state_has(target, "FOCUSED"):
@@ -14642,7 +14682,7 @@ def _retry_evidence(action, target, focus):
                 raise ValueError("unreadable identity/state")
             if role in {"canvas", "drawing area"} or role == "image" and not name:
                 raise ValueError("opaque signal")
-            return node, role, name, tuple(str(flag) for flag in flags)
+            return node, role, name, tuple(_state_flag_name(flag) for flag in flags)
 
         @cache
         def child_count(node):
@@ -18211,6 +18251,71 @@ def _chromium_contenteditable(acc) -> bool:
     }
 
 
+# Exact class tokens of editor surfaces that keep their own document model
+# (#1081, #1364). Matched as whole tokens: ``ql-editor-preview`` is not one.
+_MODEL_EDITOR_CLASSES = frozenset({
+    "ql-editor",                    # Quill
+    "ck-editor__editable",          # CKEditor 5
+    "ProseMirror",                  # ProseMirror, Tiptap, Remirror
+    "tiptap",
+    "cm-content",                   # CodeMirror 6
+    "public-DraftEditor-content",   # Draft.js
+    "ContentEditable__root",        # Lexical playground
+    "mce-content-body",             # TinyMCE inline
+    "fr-element",                   # Froala
+    "note-editable",                # Summernote
+    "trix-content",                 # Trix
+})
+_MODEL_EDITOR_TAGS = frozenset({"trix-editor"})
+_MODEL_EDITOR_ATTRS = ("data-lexical-editor", "data-slate-editor", "data-contents")
+# A contenteditable that is not an ARIA textbox and holds block children is a
+# structured document. The clear-and-type path cannot verify or restore its
+# blocks or formatting, so it is refused whatever framework renders it.
+_BLOCK_CHILD_ROLES = frozenset({
+    "paragraph", "heading", "list", "list item", "block quote", "section",
+    "panel", "table", "image", "separator", "article", "code", "form",
+})
+
+
+def _model_editor_surface(acc) -> bool:
+    """True for a Chromium contenteditable that keeps its own document model.
+
+    Known editor class tokens, tags and data attributes match first. Then
+    generically: a contenteditable without the ``textbox`` ARIA role (Chrome
+    reports it as a group/section) whose content is structured, i.e. it has
+    block children or embedded-object characters. Such a surface (ProseMirror,
+    Slate, Lexical, Draft.js, ...) is refused because a clear can delete its
+    blocks while the insert never lands (#1364). Unreadable structure on such
+    a group is treated as structured (fail safe).
+    """
+    if not _chromium_contenteditable(acc):
+        return False
+    attrs = _get_attributes(acc)
+    classes = set(str(attrs.get("class") or "").split())
+    if classes & _MODEL_EDITOR_CLASSES:
+        return True
+    if str(attrs.get("tag") or "").lower() in _MODEL_EDITOR_TAGS:
+        return True
+    if any(key in attrs for key in _MODEL_EDITOR_ATTRS):
+        return True
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    if "textbox" in xml:
+        return False  # an ARIA textbox keeps the plain clear-and-type path
+    try:
+        if "\ufffc" in (_full_text(acc) or ""):
+            return True
+        count = int(_child_count(acc) or 0)
+    except Exception:  # noqa: BLE001 - unreadable structure fails safe
+        return True
+    if count < 0:
+        return True  # libatspi read failure: structure unknown, fail safe
+    for index in range(min(count, 50)):
+        child = _child_at(acc, index)
+        if child is not None and _role_name(child) in _BLOCK_CHILD_ROLES:
+            return True
+    return False
+
+
 def _refuse_model_editor_replace(acc) -> None:
     """Refuse known Chromium model editors before any replace mutation.
 
@@ -18220,10 +18325,7 @@ def _refuse_model_editor_replace(acc) -> None:
     or its formatting. Match exact class tokens reported by AT-SPI, including
     empty editors, rather than treating every ARIA textbox as a model editor.
     """
-    classes = set(str(_get_attributes(acc).get("class") or "").split())
-    if not classes & {"ql-editor", "ck-editor__editable"}:
-        return
-    if not _chromium_contenteditable(acc):
+    if not _model_editor_surface(acc):
         return
     raise ComputerUseError(
         ErrorCode.UNSUPPORTED,

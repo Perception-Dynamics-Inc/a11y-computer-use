@@ -2479,6 +2479,13 @@ class LinuxDriver:
                     live_contexts = {el.context_identity for el in live.elements
                                      if el.context_identity}
                     if any(c not in live_contexts for c in LinuxDriver._ref_context(snap, anchor)):
+                        # A background tab's document is also absent from the
+                        # live tree, but its controls are alive and hidden:
+                        # that is not_showing (foreground the tab), not a
+                        # replaced page. Ask only the issuing handle; a
+                        # reload or navigation leaves it gone, and a namesake
+                        # search would retarget onto the replacement.
+                        self._raise_if_hidden_alive(snap, ref, handle_only=True)
                         raise ComputerUseError(
                             ErrorCode.STALE_REF,
                             f"{ref} no longer belongs to the issuing window/document",
@@ -2930,14 +2937,15 @@ class LinuxDriver:
             },
         )
 
-    def _raise_if_hidden_alive(self, snap: Snapshot, ref: str) -> None:
+    def _raise_if_hidden_alive(self, snap: Snapshot, ref: str, *, handle_only: bool = False) -> None:
         """Raise ``not_showing`` when ``ref`` still exists in a hidden document.
 
         The handle from the snapshot that issued the ref is checked first. A
         DEFUNCT handle is not that case. When the handle itself is gone, the
         raw tree (including documents the snapshot prunes) is searched for the
         same role and name. A showing match, or no match, leaves the original
-        ``stale_ref`` in place.
+        ``stale_ref`` in place. ``handle_only`` skips that namesake search, for
+        callers whose stale reason must not move onto a replacement node.
         """
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -2957,6 +2965,8 @@ class LinuxDriver:
                 raise self._not_showing_error(element.ref, element.role, element.title)
             if not gone:
                 return
+        if handle_only:
+            return
         try:
             root = self._run(lambda: _atspi.find_root(snap.app or "", snap.scope))
             if root is None:

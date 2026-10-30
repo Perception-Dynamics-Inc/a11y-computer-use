@@ -11126,7 +11126,13 @@ def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None
         assert snap is not None, (
             "Chrome did not expose Name and Div button; last titles: " + ", ".join(last_titles)
         )
-        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", _COVER_APP, "python3")
+        # The cover window runs under the interpreter _launch_named starts
+        # (sys.executable), which is "python" in a venv, not "python3". Grant
+        # that exact process name; the product's grant matching is unchanged.
+        runtime = _runtime_for(
+            tmp_path, driver, "chrome", "google-chrome", _COVER_APP, "python3",
+            os.path.basename(sys.executable),
+        )
         runtime._current = snap
         button = next(el for el in snap.elements if el.title == "Div button" and el.clickable)
         name = next(el for el in snap.elements if el.title == "Name" and el.editable)

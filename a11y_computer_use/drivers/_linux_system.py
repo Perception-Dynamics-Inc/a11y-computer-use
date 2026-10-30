@@ -1301,6 +1301,32 @@ def active_window_owner() -> int | None:
         return None
 
 
+def window_names_by_pid() -> dict[int, set[str]] | None:
+    """WM_CLASS names of every managed window, keyed by owner pid (#1358).
+
+    The owner is the X server's XRes pid, and also the self-reported
+    ``_NET_WM_PID`` when it differs or XRes names none: these names are only
+    used to *deny*, so attributing a window to every pid that could own it
+    fails closed. None when the X server cannot be read.
+    """
+    names: dict[int, set[str]] = {}
+    try:
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                instance, klass = _wm_class_strings(win, d)
+                found = {n for n in (instance, klass) if n}
+                if not found:
+                    continue
+                for pid in {_xres_pid(win, d), _pid_of(win, d)}:
+                    if pid:
+                        names.setdefault(int(pid), set()).update(found)
+    except ComputerUseError:
+        return None
+    except Exception:  # noqa: BLE001 - unreadable: the caller fails closed
+        return None
+    return names
+
+
 def verified_pids_matching(identifier: str) -> set[int]:
     """``_verified_pids_matching``, read once per gate of an action (#1347)."""
     from a11y_computer_use.drivers import _linux_exe
