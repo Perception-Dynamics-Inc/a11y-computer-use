@@ -334,6 +334,27 @@ def _owner_pid(win, d) -> int:
     return _xres_pid(win, d) or 0
 
 
+def _window_manager_pid(d) -> int:
+    """XRes owner of the EWMH ``_NET_SUPPORTING_WM_CHECK`` window, else 0."""
+    try:
+        check = _prop(d.screen().root, d, "_NET_SUPPORTING_WM_CHECK")
+        if not check or not int(check[0]):
+            return 0
+        return _owner_pid(d.create_resource_object("window", int(check[0])), d)
+    except Exception:  # noqa: BLE001 - no WM check window: nothing to exclude
+        return 0
+
+
+def _wm_owned(pid: int, d) -> bool:
+    """True when ``pid`` is the window manager's own process.
+
+    With show-desktop on, openbox makes one of its own windows active. It
+    has no ``_NET_WM_PID``, so it used to read as no app; XRes now names
+    openbox. The window manager is not an application the user focused.
+    """
+    return bool(pid) and pid == _window_manager_pid(d)
+
+
 def _app_id(win, d, *, settle: bool = False, pid: int | None = None) -> str:
     """Permission-keying app id: full program name, else comm, else WM_CLASS.
 
@@ -471,6 +492,8 @@ def frontmost_app_id() -> str:
                 return ""
             win = d.create_resource_object("window", int(active[0]))
             pid = _owner_pid(win, d)
+            if _wm_owned(pid, d):
+                return ""
             comm = _comm_for_pid(pid)
             if not comm:
                 return ""
@@ -496,6 +519,8 @@ def active_window() -> dict | None:
                 return None
             win = d.create_resource_object("window", int(active[0]))
             pid = _owner_pid(win, d)
+            if _wm_owned(pid, d):
+                return None
             return {
                 "window_id": int(win.id),
                 "app": _app_id(win, d, pid=pid),

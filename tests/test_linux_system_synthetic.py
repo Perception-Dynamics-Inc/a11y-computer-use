@@ -2029,7 +2029,8 @@ class _PopupWin(_FakeXWin):
         return _NS(parent=self.parent, children=[])
 
 
-def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800), xres=None):
+def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1280, 800), xres=None,
+                   wm_check=0):
     """Root children bottom -> top; ``managed`` are the EWMH clients."""
     import sys
     monkeypatch.setitem(sys.modules, "Xlib", _NS(X=_NS(IsViewable=2, InputOutput=1)))
@@ -2040,6 +2041,8 @@ def _popup_display(monkeypatch, managed, children, comms, *, active=0, screen=(1
         def get_full_property(self, atom, kind):
             if atom == "_NET_ACTIVE_WINDOW":
                 return _NS(value=[active]) if active else None
+            if atom == "_NET_SUPPORTING_WM_CHECK":
+                return _NS(value=[wm_check]) if wm_check else None
             return super().get_full_property(atom, kind)
 
         def get_geometry(self):
@@ -2159,6 +2162,30 @@ def test_frontmost_is_named_by_the_xres_owner(monkeypatch) -> None:
     _popup_display(monkeypatch, [impostor], [frame], {200: "mousepad", 300: "python3"},
                    active=0x20, xres={0x20: 300})
     assert _linux_system.frontmost_app_id() == "python3"
+
+
+def test_the_window_managers_own_active_window_is_no_frontmost_app(monkeypatch) -> None:
+    """#1332 CI: with show-desktop on, openbox makes its own window active. It
+    has no _NET_WM_PID and used to read as no app; XRes names openbox. The
+    window manager is not a focused application."""
+    client, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    wm_window = _PopupWin(0x40, 0, 0, 1, 1, 0, override=False)
+    check = _PopupWin(0x41, -1, -1, 1, 1, 0, override=False)
+    _popup_display(monkeypatch, [client], [frame, wm_window, check],
+                   {200: "mousepad", 77: "openbox"}, active=0x40,
+                   xres={0x20: 200, 0x40: 77, 0x41: 77}, wm_check=0x41)
+    assert _linux_system.frontmost_app_id() == ""
+    assert _linux_system.active_window() is None
+
+
+def test_a_client_is_still_frontmost_beside_the_window_manager(monkeypatch) -> None:
+    client, frame = _framed(0x20, 0, 0, 1000, 500, 200, frame_id=0x21)
+    check = _PopupWin(0x41, -1, -1, 1, 1, 0, override=False)
+    _popup_display(monkeypatch, [client], [frame, check],
+                   {200: "mousepad", 77: "openbox"}, active=0x20,
+                   xres={0x20: 200, 0x41: 77}, wm_check=0x41)
+    assert _linux_system.frontmost_app_id() == "mousepad"
+    assert _linux_system.active_window()["pid"] == 200
 
 
 def test_without_xres_the_net_wm_pid_still_names_the_point(monkeypatch) -> None:
