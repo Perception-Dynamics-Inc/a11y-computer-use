@@ -234,3 +234,16 @@ def _nobody_at_the_keyboard(monkeypatch):
         safety._real_seconds_since_user_input = safety.seconds_since_user_input
     monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
 
+
+
+@pytest.fixture(autouse=True)
+def _no_gate_decisions_carry_over():
+    """``_linux_exe.binds`` re-applies the gate decision made in this process;
+    one test's gate decision must not bind another test's fake registrants."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    saved = dict(_linux_exe._GATED)
+    _linux_exe._GATED.clear()
+    yield
+    _linux_exe._GATED.clear()
+    _linux_exe._GATED.update(saved)
