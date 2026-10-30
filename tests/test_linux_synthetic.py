@@ -21752,7 +21752,7 @@ def test_linux_replaced_document_ref_is_stale_even_when_the_window_overflows(
     live = replace(old, snapshot_id="live",
                    elements=(replace(window, snapshot_id="live", content_note=note), live_page))
     driver = LinuxDriver()
-    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *args: None)
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *args, **kwargs: None)
     with pytest.raises(ComputerUseError) as caught:
         driver.resolve_ref(old, "e3", live=live)
     if document_replaced:
@@ -21761,6 +21761,57 @@ def test_linux_replaced_document_ref_is_stale_even_when_the_window_overflows(
     else:
         assert caught.value.code is ErrorCode.NOT_VISIBLE
         assert caught.value.detail["reason"] == "window_beyond_display"
+
+
+@pytest.mark.parametrize("handle", ["hidden", "gone", "showing"])
+def test_linux_background_tab_ref_in_an_overflowing_window_is_not_showing(monkeypatch, handle):
+    """A tab sent to the background is not a replaced page.
+
+    Its document leaves the live window tree just as a reloaded one does, so
+    the overflow branch (#1204) called it document_changed. The issuing
+    handle decides: alive and hidden is not_showing (foreground the tab); gone
+    or still showing stays stale_ref document_changed, and no namesake search
+    may retarget the error onto another node.
+    """
+    from dataclasses import replace
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    window = Element("e1", "AXWindow", "Outcome Probe", None, Bounds(0, 100, 160, 900, 700), "old",
+                     context_identity=("frame", ":1.42", "/window"))
+    page = Element("e2", "AXGroup", "Outcome Probe", None, Bounds(0, 100, 200, 900, 660), "old",
+                   parent="e1", path=(0,),
+                   context_identity=("document web", ":1.42", "/document/1"))
+    target = Element("e3", "AXTextField", "Name", None, Bounds(0, 110, 210, 200, 20),
+                     "old", parent="e2", path=(0, 0))
+    old = Snapshot("old", Scope.WINDOW, "chrome", 42, 0., (), (window, page, target))
+    note = "window extends beyond the displays; off-screen controls may be omitted"
+    other = replace(page, snapshot_id="live", title="Other Probe",
+                    context_identity=("document web", ":1.42", "/document/2"))
+    live = replace(old, snapshot_id="live",
+                   elements=(replace(window, snapshot_id="live", content_note=note), other))
+    native = object()
+    monkeypatch.setattr(observe, "ax_handle_for",
+                        lambda snapshot_id, ref: native if (snapshot_id, ref) == ("old", "e3") else None)
+    monkeypatch.setattr(_atspi, "accessible_gone", lambda node: handle == "gone")
+    monkeypatch.setattr(_atspi, "hidden_web_target", lambda node: handle == "hidden")
+
+    def no_namesake(*_args, **_kwargs):
+        raise AssertionError("a document_changed ref must not search for a namesake")
+
+    monkeypatch.setattr(_atspi, "find_root", no_namesake)
+    monkeypatch.setattr(_atspi, "hidden_named_target", no_namesake)
+    driver = LinuxDriver()
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(old, "e3", live=live)
+    if handle == "hidden":
+        assert caught.value.code is ErrorCode.UNSUPPORTED
+        assert caught.value.detail["reason"] == "not_showing"
+        assert caught.value.detail["outcome"] == "refused"
+        assert caught.value.detail["next"] == ["foreground", "ref"]
+    else:
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "document_changed"
 
 
 @pytest.mark.parametrize("role,title,occupant", [
@@ -21792,7 +21843,7 @@ def test_linux_clipped_window_ref_failure_names_window_recovery(
         elements += (replace(target, snapshot_id="live", title=occupant),)
     live = replace(old, snapshot_id="live", elements=elements)
     driver = LinuxDriver()
-    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *args: None)
+    monkeypatch.setattr(driver, "_raise_if_hidden_alive", lambda *args, **kwargs: None)
     with pytest.raises(ComputerUseError) as caught:
         driver.resolve_ref(old, "e2", live=live)
     error = caught.value
