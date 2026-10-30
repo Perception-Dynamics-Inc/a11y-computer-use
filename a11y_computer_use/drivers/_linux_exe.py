@@ -37,6 +37,7 @@ import re
 import shlex
 import shutil
 import stat
+from typing import Callable
 
 #: Interpreter executables. A process running one of these hosts code whose
 #: every self-reported name is its own choice, so it is keyed as the
@@ -194,11 +195,11 @@ def grant_exe(name: str) -> str | None:
 
     A running non-interpreter process's exe wins (when every such process
     agrees and it is the installed binary or system-owned); else the
-    binary PATH or a .desktop file resolves. None when nothing is found or
-    ``name`` is an interpreter (interpreter grants are keyed by name).
+    binary PATH or a .desktop file resolves. None when nothing is found.
+    An interpreter name records the interpreter's realpath (#1340).
     """
     if interpreter_key(name):
-        return None
+        return _grant_interpreter_exe(name)
     try:
         owners = target_pids(name)
     except Exception as exc:  # a spoofed window grants nothing; fall back to PATH (#1327)
@@ -215,6 +216,32 @@ def grant_exe(name: str) -> str | None:
     installed = installed_exes(name)
     if len(installed) == 1:
         return next(iter(installed))
+    return None
+
+
+def _grant_interpreter_exe(name: str) -> str | None:
+    """The interpreter realpath an interpreter grant on ``name`` binds to (#1340).
+
+    The one interpreter of that family the live targets run (a venv, uv or
+    pyenv symlink resolves to it), else what PATH resolves ``name`` to.
+    """
+    try:
+        owners = target_pids(name)
+    except Exception as exc:  # a spoofed window grants nothing; fall back to PATH
+        if type(exc).__name__ != "WindowOwnerMismatch":
+            raise
+        owners = set()
+    family = _INTERPRETER_RE.match(os.path.basename(name)).group(1)
+    exes = {exe_of(pid) for pid in owners if _uid(pid) == _me()}
+    exes = {e for e in exes if e and interpreter_key(e)
+            and _INTERPRETER_RE.match(os.path.basename(e)).group(1) == family}
+    if len(exes) == 1:
+        return next(iter(exes))
+    found = shutil.which(name)
+    if found:
+        real = os.path.realpath(found)
+        if interpreter_key(real):
+            return real
     return None
 
 
@@ -397,20 +424,55 @@ def binds(name: str, pid: int | None) -> bool:
     if me is None or _uid(pid) != me:
         return False
     if interpreter_key(name):
-        # An interpreter grant binds only a process running that interpreter
-        # family: ``python`` (how a python3.13 app is keyed and granted)
-        # binds /usr/bin/python3.13, never ``sleep``. Exact family+major
-        # equality wrongly refused ``python`` for python3 (latency-bench R5).
-        exe = exe_of(pid)
-        return (exe is not None and interpreter_key(exe) is not None
-                and _INTERPRETER_RE.match(os.path.basename(exe)).group(1)
-                == _INTERPRETER_RE.match(os.path.basename(name)).group(1))
+        # An interpreter grant binds only the granted interpreter, by the
+        # realpath of /proc/<pid>/exe (#1340): never a binary merely named
+        # python3. ``python`` still binds /usr/bin/python3.13 (latency-bench R5).
+        return _interpreter_exe_ok(name, exe_of(pid), _GATED[key])
     named = pids_named(name) | {pid}
     _key, hint = _verdict(name, _GATED[key], {pid}, named)
     return hint is None and not _gone(pid)
 
 
-def check(name: str, recorded: str | None) -> tuple[str, str | None]:
+def _interpreter_exe_ok(name: str, exe: str | None, recorded: str | None) -> bool:
+    """Whether ``exe`` (a /proc/<pid>/exe realpath) is the interpreter ``name`` grants (#1340).
+
+    The basename only names the family (``python`` covers python3.13,
+    ``python3`` needs major 3). The decision is the path: with a bound
+    grant the realpath must equal the recorded interpreter's realpath, so a
+    venv, uv or pyenv symlink binds through to it and a copy or another
+    binary named ``python3`` never does. A name-only (legacy) grant takes
+    only a root-owned interpreter, which the user cannot plant.
+    """
+    if not exe or not interpreter_key(exe) or not interpreter_key(name):
+        return False
+    want = _INTERPRETER_RE.match(os.path.basename(name))
+    got = _INTERPRETER_RE.match(os.path.basename(exe))
+    if want.group(1) != got.group(1):
+        return False
+    if want.group(2) and interpreter_key(exe) != interpreter_key(name):
+        return False
+    if recorded is not None:
+        return os.path.realpath(exe) == os.path.realpath(recorded)
+    return _system_owned(exe)
+
+
+# The store's recorded-exe lookup, so an app keyed as an interpreter is held
+# to that interpreter's own grant (#1340). None: every interpreter is legacy.
+_RECORDED_FOR: Callable[[str], str | None] | None = None
+
+
+def _recorded_interpreter(key: str) -> str | None:
+    lookup = _RECORDED_FOR
+    if lookup is None:
+        return None
+    try:
+        return lookup(key)
+    except Exception:  # noqa: BLE001 - an unreadable store is a legacy grant here
+        return None
+
+
+def check(name: str, recorded: str | None,
+          recorded_for: Callable[[str], str | None] | None = None) -> tuple[str, str | None]:
     """(key, refusal hint) for the live processes behind ``name``.
 
     ``key`` is ``name`` when every live process's exe is the bound one,
@@ -418,9 +480,12 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     hint when the exe does not match (the caller refuses). With no live
     process the name is returned unchanged; a later check sees the process.
     """
+    global _RECORDED_FOR
+    if recorded_for is not None:
+        _RECORDED_FOR = recorded_for
     _GATED[(name or "").casefold()] = recorded
     if interpreter_key(name):
-        return name, None
+        return _interpreter_verdict(name, recorded)
     registrants = _atspi_named_pids(name)
     named = pids_named(name) | registrants
     if not named:
@@ -434,6 +499,40 @@ def check(name: str, recorded: str | None) -> tuple[str, str | None]:
     if not targets:
         return name, None  # nothing named this owns a window or a11y app (#1322)
     return _verdict(name, recorded, targets, named)
+
+
+def _interpreter_verdict(name: str, recorded: str | None) -> tuple[str, str | None]:
+    """``check`` for an interpreter name: every live target runs the granted interpreter (#1340)."""
+    named = pids_named(name) | _atspi_named_pids(name)
+    if not named:
+        return name, None
+    try:
+        targets = target_pids(name, named)
+    except Exception as exc:  # WindowOwnerMismatch: the X server disowns the claim (#1327)
+        if type(exc).__name__ != "WindowOwnerMismatch":
+            raise
+        return name, str(exc)
+    me = _me()
+    for pid in sorted(targets):
+        if _uid(pid) not in (me, None):
+            return name, (f"a window or a11y app named {name!r} belongs to pid {pid} of another "
+                          f"user (uid {_uid(pid)}); refused.")
+        exe = exe_of(pid)
+        if exe is None and _gone(pid):
+            continue
+        if not _interpreter_exe_ok(name, exe, recorded):
+            return name, _interpreter_hint(name, exe, recorded)
+    return name, None
+
+
+def _interpreter_hint(name: str, exe: str | None, recorded: str | None) -> str:
+    shown = exe or "(unreadable)"
+    if recorded is not None:
+        return (f"a process keyed as the interpreter {name!r} runs {shown}, not the granted "
+                f"interpreter {recorded}; refused. Re-grant {name} only if you trust that executable.")
+    return (f"a process keyed as the interpreter {name!r} runs {shown}, which is not an installed "
+            f"(root-owned) {name}; refused. Re-run `a11y-computer-use grant {name} <tier>` while "
+            f"the real interpreter runs to bind it.")
 
 
 def _verdict(name: str, recorded: str | None, targets: set[int],
@@ -454,6 +553,13 @@ def _verdict(name: str, recorded: str | None, targets: set[int],
         return name, None
     exes = {pid: (exe if exe is not None else _verified_ancestor_exe(pid, context))
             for pid, exe in live.items()}
+    # An exe is only an interpreter host when it is that interpreter's
+    # granted (or root-owned) binary; a native named ``python3`` is not (#1340).
+    for exe in {e for e in exes.values() if interpreter_key(e)}:
+        key = interpreter_key(exe)
+        recorded_host = _recorded_interpreter(key)
+        if not _interpreter_exe_ok(key, exe, recorded_host):
+            return name, _interpreter_hint(key, exe, recorded_host)
     hosts = {interpreter_key(e) for e in exes.values() if interpreter_key(e)}
     natives = {e for e in exes.values() if e and not interpreter_key(e)}
     if hosts and not natives and len(hosts) == 1:
