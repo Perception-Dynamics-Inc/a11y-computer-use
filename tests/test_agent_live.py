@@ -1710,39 +1710,46 @@ def test_agent_empty_desktop_first_observation_is_usable(tmp_path, isolated_home
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     marker = isolated_home / "desk.txt"
     marker.write_text("ready", encoding="utf-8")
-    front = _clear_focus()
-    seen: list[str] = []
+    # Iconify every window first. Writing _NET_ACTIVE_WINDOW as 0 alone
+    # lets openbox hand focus back to whatever window an earlier test left
+    # (CI saw "pytest", "Xvfb" and "openbox" here; wmctrl is not installed
+    # there). The model-timeout test below establishes the same desktop.
+    front = _clear_focus(show_desktop=True)
+    try:
+        seen: list[str] = []
 
-    def script(messages):
-        seen.append(message_text(messages))
-        return ModelTurn(calls=[ToolCall(
-            name="done",
-            args={
-                "answer": "desktop",
-                "conditions": [{"file_exists": str(marker), "contains": "ready"}],
-            },
-        )])
+        def script(messages):
+            seen.append(message_text(messages))
+            return ModelTurn(calls=[ToolCall(
+                name="done",
+                args={
+                    "answer": "desktop",
+                    "conditions": [{"file_exists": str(marker), "contains": "ready"}],
+                },
+            )])
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    result = _run_agent(
-        Agent,
-        ScriptedModel(script),
-        "Look at the desktop and stop.",
-        trace,
-        approve=None,
-        auto_deny=True,
-        max_steps=4,
-    )
-    assert seen, result
-    first = seen[0]
-    assert front in {"", "unknown"}, front
-    assert "No application is focused" in first
-    assert "launch" in first
-    assert "unknown has no permission grant" not in first
-    assert "ask the user" not in first
-    assert "needs_permission" not in first
-    assert result.status == "success", result
+        trace = tmp_path / "trace"
+        trace.mkdir()
+        result = _run_agent(
+            Agent,
+            ScriptedModel(script),
+            "Look at the desktop and stop.",
+            trace,
+            approve=None,
+            auto_deny=True,
+            max_steps=4,
+        )
+        assert seen, result
+        first = seen[0]
+        assert front in {"", "unknown"}, front
+        assert "No application is focused" in first
+        assert "launch" in first
+        assert "unknown has no permission grant" not in first
+        assert "ask the user" not in first
+        assert "needs_permission" not in first
+        assert result.status == "success", result
+    finally:
+        _set_showing_desktop(False)
 
 
 @requires_display
