@@ -596,6 +596,12 @@ class PermissionStore:
         self._validate_app(bundle_id)
         self._mutate(lambda: self._allow.add(bundle_id))
 
+    def has_deny_list(self) -> bool:
+        """True when the deny list has any entry (or the file is broken)."""
+        with self._lock:
+            self._refresh()
+            return bool(self._deny) or self._load_error is not None
+
     def is_denied(self, bundle_id: str) -> bool:
         """True when the deny/allow lists block ``bundle_id`` outright."""
         return self.policy(bundle_id)[1]
