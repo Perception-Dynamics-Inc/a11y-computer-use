@@ -2349,7 +2349,13 @@ class LinuxDriver:
         def read():
             root = handle
             document = False
-            for _ in range(32):
+            seen = set()
+            for _ in range(_atspi._FULL_ANCESTRY_MAX):
+                key = _atspi._ancestor_key(root)
+                if key in seen:
+                    root = handle
+                    break
+                seen.add(key)
                 role = _atspi._role_name(root)
                 if role.startswith("document"):
                     document = True

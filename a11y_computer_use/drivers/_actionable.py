@@ -399,7 +399,7 @@ def _toplevel(acc: object):
     current = acc
     frame = None
     seen: set[int] = set()
-    for _ in range(24):
+    for _ in range(_atspi._FULL_ANCESTRY_MAX):
         if current is None or id(current) in seen:
             break
         seen.add(id(current))
@@ -428,7 +428,7 @@ def _is_self_or_descendant(target: object, hit: object) -> bool:
         return False
     node = hit
     seen: set[int] = set()
-    for _ in range(32):
+    for _ in range(_atspi._FULL_ANCESTRY_MAX):
         if node is None or id(node) in seen:
             return False
         seen.add(id(node))
