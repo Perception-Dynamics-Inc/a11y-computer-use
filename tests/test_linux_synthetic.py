@@ -25169,3 +25169,28 @@ def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeyp
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()
         _atspi._CHROME_REBUILDING.clear()
+
+
+def test_resolve_does_not_reread_an_alive_offscreen_node(modal_boundary_tree, monkeypatch):
+    """#1402 timing: a node that is alive but off the display is pruned
+    from every read, so the #1392 second full read is skipped for it and the
+    stale_ref goes straight to the reveal path. An on-screen miss still
+    rereads once (see test_resolve_rereads_once_when_a_live_node_was_missed)."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    i = _ref_of(snap, inside)
+    real = driver.snapshot
+    reads = []
+
+    def probe(scope, app):
+        reads.append(1)
+        got = real(scope, app)
+        return __import__("dataclasses").replace(got, elements=tuple(
+            el for el in got.elements if el.title not in {inside.name, modal.name, bg.name}))
+
+    monkeypatch.setattr(driver, "effect_snapshot", probe, raising=False)
+    monkeypatch.setattr(_atspi, "offscreen_extents", lambda acc: ((0, -900), (40, 20)) if acc is inside else None)
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(snap, i.ref)
+    assert caught.value.code is ErrorCode.STALE_REF
+    assert len(reads) == 1

@@ -37,6 +37,7 @@ doctor`` still works.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import replace
 import re
@@ -5005,11 +5006,17 @@ class Runtime:
                     self._gate_anchor = (cell, snap, anchor)
                     return snap, cell
         self._gate_anchor = None
+        started = time.perf_counter()
         try:
             live = (self.driver.resolve_ref(snap, ref, live=live_snapshot)
                     if live_snapshot is not None else self.driver.resolve_ref(snap, ref))
         except ComputerUseError as exc:
+            failed = time.perf_counter()
             revealed = self._reveal_scrolled_off(snap, ref, exc) if live_snapshot is None else None
+            logging.getLogger(__name__).debug(
+                "resolve %s %s: failed rematch=%.0fms reveal=%.0fms revealed=%s",
+                kind, ref, (failed - started) * 1000, (time.perf_counter() - failed) * 1000,
+                revealed is not None)
             if revealed is None:
                 self._audit_stale(kind, ref, exc)
                 raise
