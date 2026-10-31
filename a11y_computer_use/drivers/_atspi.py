@@ -8137,72 +8137,28 @@ def _chrome_tree_rebuilding(app) -> bool:
 
 
 def _clear_chrome_hang(app) -> bool:
-    """Clear libatspi's hung mark on Chrome by moving it to a fresh connection.
+    """Move a Chrome application libatspi marked hung onto a fresh connection.
 
-    libatspi marks a bus name hung after one NoReply and drops the mark only
-    when its Peer.Ping on the old per-app socket completes. That socket can
-    stay wedged after a reload under load, so the mark outlives the page.
-    ``_revive_application`` puts the app on a new shared-bus connection.
-    Closing the old private socket completes its pending ping locally, which
-    removes the mark. The shared accessibility bus is never closed, and the
-    old connection is not unreffed (libatspi still holds it).
+    ``_revive_application`` replaces the per-app socket the hang-check ping
+    is stuck on with a new accessibility-bus connection. The old socket is
+    left open: libatspi still holds it, and closing it under libatspi broke
+    later reads. Pending replies are dispatched after the swap so a ping
+    that completes clears the mark. Returns True when the mark is gone.
     """
     try:
-        import ctypes
+        _revive_application(app)
     except Exception:
         return False
-    pointer = _gobject_pointer(app)
-    if not pointer:
-        return False
-
-    class _GObject(ctypes.Structure):
-        _fields_ = [("g_class", ctypes.c_void_p), ("ref_count", ctypes.c_uint),
-                    ("pad", ctypes.c_uint), ("qdata", ctypes.c_void_p)]
-
-    class _AtspiObject(ctypes.Structure):
-        _fields_ = [("parent", _GObject), ("app", ctypes.c_void_p), ("path", ctypes.c_char_p)]
-
-    class _AtspiApplication(ctypes.Structure):
-        _fields_ = [("parent", _GObject), ("hash", ctypes.c_void_p),
-                    ("bus_name", ctypes.c_char_p), ("bus", ctypes.c_void_p)]
-
-    def bus_of(ptr):
-        obj = _AtspiObject.from_address(ptr)
-        if not obj.app:
-            return None
-        return _AtspiApplication.from_address(obj.app).bus
-
-    try:
-        old = bus_of(pointer)
-        lib_atspi = _atspi()
-        desktop = lib_atspi.get_desktop(0) if lib_atspi is not None else None
-        desktop_ptr = _gobject_pointer(desktop) if desktop is not None else None
-        shared = bus_of(desktop_ptr) if desktop_ptr else None
-        if not old or not shared:
-            return False
-        if not _revive_application(app):
-            return False
-        if old == shared:
-            return True
-        lib = ctypes.CDLL("libdbus-1.so.3")
-        lib.dbus_connection_close.argtypes = [ctypes.c_void_p]
-        lib.dbus_connection_dispatch.argtypes = [ctypes.c_void_p]
-        lib.dbus_connection_dispatch.restype = ctypes.c_int
-        lib.dbus_connection_close(old)
-        # DBUS_DISPATCH_DATA_REMAINS is 0: run the pending-call notifies now.
-        for _ in range(64):
-            if lib.dbus_connection_dispatch(old) != 0:
-                break
-        return True
-    except Exception:
-        return False
+    _drain_atspi_replies(_CHROME_REBUILD_POLL_S)
+    return not _app_marked_hung(app)
 
 
 def _wait_chrome_page_rebuilt(app, pid) -> None:
     """Recover a hung or blank Chrome tree, within a short bound.
 
-    A hung mark is cleared by a reconnect, not waited out. A blank tree is
-    polled while pending replies are dispatched. A pid already reported
+    Pending replies are dispatched between reads, so a hang-check ping that
+    completes clears libatspi's mark. The reconnect is left to
+    ``scroll_to_find``'s own retry (``chrome_reconnect_hung``). A pid already reported
     stuck is probed once without waiting, so repeated snapshots cannot add
     up to the caller's hard limit.
     """
@@ -8211,14 +8167,9 @@ def _wait_chrome_page_rebuilt(app, pid) -> None:
             _CHROME_REBUILDING.discard(pid)
         return
     if pid is not None and pid in _CHROME_REBUILDING:
-        if _app_marked_hung(app):
-            _clear_chrome_hang(app)
         return
     deadline = time.monotonic() + _CHROME_REBUILD_WAIT_S
-    reconnected = False
     while True:
-        if not reconnected and _app_marked_hung(app):
-            reconnected = _clear_chrome_hang(app)
         _drain_atspi_replies(_CHROME_REBUILD_POLL_S)
         rebuilding = _without_child_cache(
             app,
@@ -8250,6 +8201,25 @@ def chrome_page_rebuilding(app: str) -> bool:
     except Exception:
         return False
     return isinstance(pid, int) and not isinstance(pid, bool) and pid in _CHROME_REBUILDING
+
+
+def chrome_reconnect_hung(app: str) -> bool:
+    """Reconnect ``app`` when libatspi refuses its calls as a hung process.
+
+    Called once by ``scroll_to_find`` after a snapshot left Chrome recorded
+    as rebuilding, not on every snapshot. True when the mark is cleared.
+    """
+    if not _CHROME_REBUILDING:
+        return False
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    owner = _call_first(root, ("get_application",), default=None) or root
+    if not _app_marked_hung(owner):
+        return False
+    return _clear_chrome_hang(owner)
 
 
 def chromium_snapshot_root(root):

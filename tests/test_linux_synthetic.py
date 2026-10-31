@@ -24935,36 +24935,37 @@ def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeyp
                           children=[_Node("rowtable", role="document web")])
         hung_page._app = hung_app
 
-        # The mark is cleared by a reconnect, not waited out.
-        cleared = []
+        # A snapshot never reconnects; a hang-check ping answered while
+        # replies are drained clears the mark and the page returns.
+        reconnects = []
+        monkeypatch.setattr(_atspi, "_clear_chrome_hang", lambda app: reconnects.append(app) or True)
 
-        def reconnect(app):
-            cleared.append(app)
-            app.hung = False
-            app._states = frozenset()
-            if hung_page not in app._children:
-                app._children.append(hung_page)
-            return True
+        def ping_answered(budget_s=0.25):
+            if clock["sleeps"] >= 1:
+                hung_app.hung = False
+                hung_app._states = frozenset()
+                if hung_page not in hung_app._children:
+                    hung_app._children.append(hung_page)
 
-        monkeypatch.setattr(_atspi, "_clear_chrome_hang", reconnect)
+        monkeypatch.setattr(_atspi, "_drain_atspi_replies", ping_answered)
         assert _atspi.chromium_snapshot_root(hung_page) is hung_page
-        assert cleared == [hung_app]
-        assert clock["sleeps"] == 0
+        assert reconnects == []
         assert 6161 not in _atspi._CHROME_REBUILDING
 
-        # A reconnect that does not clear the mark stays bounded and is recorded,
-        # and a later snapshot of that pid does not wait again.
+        # A mark that stays is bounded and recorded, and a later snapshot of
+        # that pid does not wait again.
+        monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda budget_s=0.25: None)
         clock.update(t=0.0, sleeps=0)
         still = _Hung()
         still_page = _Node("", states=())
         still_page._app = still
-        monkeypatch.setattr(_atspi, "_clear_chrome_hang", lambda app: True)
         _atspi.chromium_snapshot_root(still_page)
         assert clock["t"] <= _atspi._CHROME_REBUILD_WAIT_S + _atspi._CHROME_REBUILD_POLL_S
         assert 6161 in _atspi._CHROME_REBUILDING
         clock.update(t=0.0, sleeps=0)
         _atspi.chromium_snapshot_root(still_page)
         assert clock["sleeps"] == 0
+        assert reconnects == []
     finally:
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()

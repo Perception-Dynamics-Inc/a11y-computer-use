@@ -2693,7 +2693,7 @@ def test_scroll_to_find_reports_a_chrome_tree_still_rebuilding(monkeypatch) -> N
     from a11y_computer_use import server
 
     clock = {"t": 1000.0}
-    calls = {"snap": 0, "probe": 0}
+    calls = {"snap": 0, "probe": 0, "reconnect": 0}
     scrolled: list[str] = []
     poisoned = {"on": False}
 
@@ -2733,6 +2733,10 @@ def test_scroll_to_find_reports_a_chrome_tree_still_rebuilding(monkeypatch) -> N
             calls["probe"] += 1
             return True
 
+        def chrome_reconnect_hung(self, app):
+            calls["reconnect"] += 1
+            return False
+
     def sleep(seconds):
         clock["t"] += float(seconds)
 
@@ -2752,6 +2756,8 @@ def test_scroll_to_find_reports_a_chrome_tree_still_rebuilding(monkeypatch) -> N
     assert "not found after" not in out
     assert scrolled == []
     assert calls["probe"] == 3
+    # One reconnect in the retry, not one per snapshot.
+    assert calls["reconnect"] == 1
 
 
 def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:

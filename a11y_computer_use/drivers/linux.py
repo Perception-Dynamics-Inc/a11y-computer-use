@@ -5207,6 +5207,12 @@ class LinuxDriver:
 
         return bool(self._run(lambda: _atspi.chrome_page_rebuilding(app)))
 
+    def chrome_reconnect_hung(self, app: str) -> bool:
+        """Move a Chrome app libatspi marked hung onto a fresh connection, once."""
+        from a11y_computer_use.drivers import _atspi
+
+        return bool(self._run(lambda: _atspi.chrome_reconnect_hung(app)))
+
     def supports_in_page_find(self, app: str) -> bool:
         """True when Ctrl+F opens a find bar in ``app``.
 

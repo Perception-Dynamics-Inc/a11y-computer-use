@@ -9955,6 +9955,15 @@ class Runtime:
                     # reads are not frame waits. They have their own bound.
                     if page_rebuilding():
                         rebuild_waits += 1
+                        if rebuild_waits == 1:
+                            # libatspi may have marked Chrome hung: one
+                            # reconnect, here only, never per snapshot.
+                            reconnect = getattr(self.driver, "chrome_reconnect_hung", None)
+                            if callable(reconnect):
+                                try:
+                                    reconnect(bundle)
+                                except Exception:
+                                    pass
                         if rebuild_waits <= 2 and time.monotonic() < hard_deadline:
                             restore_page_frame()
                             continue
