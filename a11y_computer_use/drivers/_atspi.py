@@ -11231,6 +11231,7 @@ def _read_primary(read_cmd: list[str]) -> str | None:
 
 
 _NOT_POPUP = object()
+_HEX_VALUE = re.compile(r"#?[0-9A-Fa-f]*")
 
 
 def _colour_popup_dom_value(acc):
@@ -11257,7 +11258,16 @@ def _colour_popup_dom_value(acc):
             or str(attrs.get("id") or "") not in _CHROME_COLOR_FIELDS):
         return _NOT_POPUP
     now = _full_text(acc)
-    if not isinstance(now, str) or any(ch.lower() != ch or ch.upper() != ch for ch in now):
+    if not isinstance(now, str):
+        return None
+    if str(attrs.get("id")) == "hexValueContainer" and _HEX_VALUE.fullmatch(now):
+        # A case transform changes only the case of ASCII hex digits, and a
+        # full-width or masking transform leaves no ASCII hex, so the DOM value
+        # is this text up to case. Colour hex is case-insensitive: the value is
+        # given in canonical lowercase, and a restore types and compares that.
+        return now.lower()
+    # ASCII only: a full-width transform renders "10" as "\uff11\uff10".
+    if not now.isascii() or any(ch.lower() != ch or ch.upper() != ch for ch in now):
         return None
     return now
 
@@ -11370,12 +11380,16 @@ def chromium_replace_dom_text(acc, target: str) -> bool:
 
     try:
         with _linux_ime.ascii_passthrough(target):
-            if not _text_is_blank(_full_text(acc)):
-                _x11_select_all_and_delete(acc)
-                if not _wait_until_gone(acc):
-                    return False
-            else:
-                grab_focus(acc)
+            # Always clear: a blank read here can be the popup re-rendering
+            # after its commit, and typing into the field it then shows again
+            # appended to it (Green "7" + "10" = "710", #1394). Ctrl+A is
+            # confirmed to cover the value before the BackSpace.
+            _x11_select_all_and_delete(acc)
+            if not _wait_until_gone(acc):
+                return False
+            # Nothing is typed unless the field is still empty right before.
+            if target and not _text_is_blank(_full_text(acc)):
+                return False
             if target:
                 _type_into_target(acc, target)
     except ComputerUseError:

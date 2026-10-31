@@ -281,9 +281,8 @@ def test_popup_channel_input_dom_value_is_read_from_the_input(monkeypatch) -> No
     assert _atspi.chromium_dom_text(object()) == "50%"
 
 
-@pytest.mark.parametrize("shown", ["#00FF0A", None, "ab"])
-def test_popup_input_with_cased_or_unreadable_text_is_unknown(monkeypatch, shown) -> None:
-    attrs = HEX if shown and shown.startswith("#") else GREEN
+@pytest.mark.parametrize("attrs, shown", [(GREEN, None), (GREEN, "ab"), (HEX, "#00FFZZ"), (HEX, "\uff10\uff10"), (HEX, None)])
+def test_popup_input_with_cased_or_unreadable_text_is_unknown(monkeypatch, attrs, shown) -> None:
     _popup_input(monkeypatch, attrs, shown)
     assert _atspi.chromium_dom_text(object()) is None
 
@@ -312,3 +311,89 @@ def test_popup_rollback_that_did_not_land_reports_false(monkeypatch) -> None:
 
 
 _REAL_DOM_TEXT = _atspi.chromium_dom_text
+
+
+@pytest.mark.parametrize("shown", ["#00FF0A", "00ff0A", "00FF0A"])
+def test_popup_hex_input_reads_as_canonical_lowercase(monkeypatch, shown) -> None:
+    _popup_input(monkeypatch, HEX, shown)
+    assert _atspi.chromium_dom_text(object()) == shown.lower()
+
+
+def test_popup_hex_without_hash_rollback_reports_restored(monkeypatch) -> None:
+    # The popup shows hex in upper case whatever was typed.
+    field = _Field("00FF0A", lambda t: "12" if t == "12" else t.upper())
+    _keyed(monkeypatch, field, [], HEX)
+    monkeypatch.setattr(_atspi, "chromium_dom_text", _REAL_DOM_TEXT)
+    monkeypatch.setattr(_atspi, "_primary_tool", lambda: pytest.fail("PRIMARY read in the popup"))
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    monkeypatch.setattr(_atspi, "_hex_colour_confirmed", lambda *a, **k: False)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "12")
+    assert field.text == "00FF0A" and exc.value.detail["restored"] is True
+
+
+def test_popup_hex_left_dirty_reports_false(monkeypatch) -> None:
+    field = _Field("00FF0A", lambda t: "12")
+    _keyed(monkeypatch, field, [], HEX)
+    monkeypatch.setattr(_atspi, "chromium_dom_text", _REAL_DOM_TEXT)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    monkeypatch.setattr(_atspi, "_hex_colour_confirmed", lambda *a, **k: False)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "12")
+    assert exc.value.detail["restored"] is False
+
+
+def test_rollback_clears_even_when_the_field_reads_blank_and_never_appends(monkeypatch) -> None:
+    """Live #1394: the write left "7", a read showed blank, and "10" was typed after it."""
+    field = _Field("10", lambda t: "7" if t == "77" else t)
+    _keyed(monkeypatch, field, [], GREEN)
+    monkeypatch.setattr(_atspi, "chromium_dom_text", _REAL_DOM_TEXT)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    blank_once = {"n": 1}
+    real_shown = lambda acc: field.text  # noqa: E731
+
+    def shown(acc):
+        if field.text == "7" and blank_once["n"]:
+            blank_once["n"] -= 1  # the popup re-rendering after its commit
+            return ""
+        return real_shown(acc)
+
+    monkeypatch.setattr(_atspi, "_full_text", shown)
+    cleared: list[str] = []
+
+    def clear(acc):
+        cleared.append(field.text)
+        field.text = ""
+
+    monkeypatch.setattr(_atspi, "_x11_select_all_and_delete", clear)
+
+    def type_into(acc, text):
+        field.typed.append(text)
+        field.text = field.text + text if text == "10" else field.accept(text)
+
+    monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert field.text == "10" and exc.value.detail["restored"] is True
+    assert cleared[-1] == "7"
+
+
+def test_rollback_types_nothing_when_the_field_refills_after_the_clear(monkeypatch) -> None:
+    field = _Field("10", lambda t: "7" if t == "77" else t)
+    _keyed(monkeypatch, field, [], GREEN)
+    monkeypatch.setattr(_atspi, "chromium_dom_text", _REAL_DOM_TEXT)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    state = {"cleared": 0}
+
+    def clear(acc):
+        state["cleared"] += 1
+        field.text = ""
+
+    monkeypatch.setattr(_atspi, "_x11_select_all_and_delete", clear)
+    monkeypatch.setattr(_atspi, "_wait_until_gone", lambda acc: True)
+    # After the first clear the popup commits "7" back into the field.
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: "7" if state["cleared"] >= 2 and field.text == "" else field.text)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert field.typed == ["77"]  # no rollback text appended to a refilled field
+    assert exc.value.detail["restored"] is False
