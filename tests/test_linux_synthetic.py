@@ -24958,3 +24958,59 @@ def test_chromium_shallow_modal_scan_cannot_tell(monkeypatch, failure):
     monkeypatch.setattr(_atspi, "_atspi", lambda: (_ for _ in ()).throw(RuntimeError("timeout")))
     _atspi._modal_collection_state.busy = False
     assert _atspi._modal_collection(document) is None
+
+
+@pytest.mark.parametrize("case", [
+    "unchanged", "renamed", "role", "on_screen", "other_node", "recycled_row", "no_reveal",
+])
+def test_reveal_scrolled_off_acts_only_on_the_unchanged_issued_node(monkeypatch, case):
+    """#1402: only the same live node, unchanged and off screen, is revealed.
+
+    A held ref whose element a later find scrolled away resolves after the
+    reveal. A renamed node, a different role, a node still on screen, a
+    re-resolution that lands on another native object, or a recycled row is
+    refused: None, so the caller keeps its stale_ref. Nothing is scrolled
+    unless the issued node proved unchanged first.
+    """
+    from dataclasses import replace
+
+    from a11y_computer_use import observe
+    from tests.conftest import build_synthetic_snapshot
+    from a11y_computer_use.drivers import _atspi
+
+    issued_node, other_node = object(), object()
+    identity = (("push button", "Row 3", (), ("k", "1")),)
+    element = Element("e3", "AXButton", "Row 3", None, None, "snap-issued",
+                      row_identity=identity if case == "recycled_row" else ())
+    resolved = replace(element, snapshot_id="snap-live", row_identity=())
+    snap = replace(build_synthetic_snapshot(), snapshot_id="snap-issued", elements=(element,))
+    handles = {("snap-issued", "e3"): issued_node,
+               ("snap-live", "e3"): other_node if case == "other_node" else issued_node}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: handles.get((sid, ref)))
+    monkeypatch.setattr(_atspi, "offscreen_extents",
+                        lambda h: None if case == "on_screen" else ((28.0, -4000.0), (54.0, 21.0)))
+    monkeypatch.setattr(_atspi, "_drop_cached_properties", lambda h: None)
+    monkeypatch.setattr(_atspi, "_role_name", lambda h: "label" if case == "role" else "push button")
+    monkeypatch.setattr(_atspi, "_node_name", lambda h: "Row 4" if case == "renamed" else "Row 3")
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda h: (":1.2", str(id(h))))
+    driver = LinuxDriver()
+
+    def verify_row(anchor, handle):
+        raise ComputerUseError(ErrorCode.STALE_REF, "row identity changed",
+                               detail={"reason": "row_identity_changed"})
+
+    monkeypatch.setattr(driver, "_verify_chromium_row_target", verify_row)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    scrolled = []
+    monkeypatch.setattr(driver, "scroll_into_view",
+                        lambda el: scrolled.append(el.ref) or case != "no_reveal")
+    monkeypatch.setattr(driver, "resolve_ref", lambda s, ref, live=None: resolved)
+
+    found = driver.reveal_scrolled_off(snap, "e3")
+    if case == "unchanged":
+        assert found is resolved
+        assert scrolled == ["e3"]
+        return
+    assert found is None
+    if case in {"renamed", "role", "on_screen", "recycled_row"}:
+        assert scrolled == []
