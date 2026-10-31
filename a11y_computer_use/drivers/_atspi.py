@@ -10472,11 +10472,19 @@ def _qt_text_state(acc) -> tuple[str, int, int, int] | None:
     nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
     if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
         return None
-    if nchars != len(text):
+    # Qt counts and offsets are UTF-16 code units: "a😀b" is 4 units, 3
+    # Python characters (the CI live failure on bb9b7f4a). Offsets are
+    # converted to Python indices; one inside a surrogate pair is unreadable.
+    if nchars != _utf16_length(text):
         return None
     caret, start, end = _caret_and_selection(acc, nchars)
     if not all(isinstance(v, int) and not isinstance(v, bool) for v in (caret, start, end)):
         return None
+    if nchars != len(text):
+        try:
+            caret, start, end = (_qt_python_offset(text, v) for v in (caret, start, end))
+        except Exception:
+            return None
     return text, caret, start, end
 
 
@@ -10524,11 +10532,12 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
 
     ``replace`` selects the whole text with ctrl+a first and requires the
     selection to read back as the whole value before any character is
-    sent. ``append`` (a ref ``type``) reads the selection before any key:
-    a non-empty selection is replaced, as a keyboard would; only a bare
-    caret is moved to the end with End (required to read back there) so the
-    text appends. Otherwise the keys land at the
-    caret, replacing an existing selection the way a keyboard does.
+    sent. Otherwise (``append``, a ref ``type``, or a ref-less type) the
+    selection and caret are read before any key and the keys land there, as
+    real typing does: a non-empty selection is replaced, and a bare caret
+    inserts at its offset, so the expected read-back is the original with
+    the text inserted at the caret (#1420 review). ``append`` is kept for
+    callers and no longer moves the caret.
 
     Success is an exact read-back only. Keys pass through the field's
     validator and input mask, so a rejected or truncated value reads back
@@ -10597,16 +10606,6 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
                          "ctrl+a did not select the field's whole text; no characters were typed",
                          ["ctrl+a"], actual=_full_text(acc))
         start, end = 0, len(before)
-    elif append and start == end and caret != len(before):
-        # A bare caret: a ref type appends. A non-empty selection read here,
-        # before any key, is replaced instead, so End is never pressed over it.
-        _chord_into_target(acc, "End")
-        if _qt_wait_state(acc, lambda s: s[0] == before and s[1] == len(before)
-                          and s[2] == s[3]) is None:
-            raise refuse("caret_not_at_end",
-                         "End did not put the caret at the end of the text; no characters were typed",
-                         ["End"], actual=_full_text(acc))
-        caret, start, end = len(before), len(before), len(before)
     tick("select", t_sel)
     if start != end:
         want = before[:start] + text + before[end:]
@@ -10648,6 +10647,37 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
         expected=want,
         actual=got,
     )
+
+
+def qt_dependent_peer_changes(changed: list[str], peers_before: dict,
+                              acc, typed: str) -> tuple[list[str], list[str]]:
+    """Split peer changes after an exact Qt read-back into (dependent, suspect).
+
+    A Qt dialog recomputes linked fields from a committed edit: QColorDialog
+    rewrites Hue/Sat/Val/Red/Green/Blue from the "HTML:" field on every
+    textEdited (#1420 review). The target's exact read-back already proves
+    every typed character reached the target. A peer is still suspect when its
+    new text contains the typed text that its old text did not, which is
+    what a key stream routed to the wrong field looks like.
+    """
+    if not typed:
+        return list(changed), []
+    after = {}
+    try:
+        after = _collect_peer_fields(acc)
+    except Exception:
+        return [], list(changed)
+    dependent, suspect = [], []
+    for key, old in peers_before.items():
+        new = after.get(key)
+        if new is None or new == old:
+            continue
+        line = f"{key}: {old!r} -> {new!r}"[:180]
+        if typed in new and typed not in old:
+            suspect.append(line)
+        else:
+            dependent.append(line)
+    return dependent, suspect
 
 
 def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:

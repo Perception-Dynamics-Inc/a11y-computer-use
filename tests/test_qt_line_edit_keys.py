@@ -312,7 +312,7 @@ def test_restore_failure_is_reported_honestly(monkeypatch, field):
     assert err.value.detail["restored"] is False and field.text == "#00"
 
 
-def test_ref_type_appends_at_the_end_even_when_the_caret_is_mid_text(monkeypatch, field):
+def test_ref_type_inserts_at_a_mid_text_caret_like_real_typing(monkeypatch, field):
     drv = _driver(monkeypatch, field)
     for name, value in (("drawing_text_editable", False), ("math_command_editable", False),
                         ("gtk4_entry_needs_pointer_focus", False), ("gecko_entry_caret_to_end", None),
@@ -323,7 +323,7 @@ def test_ref_type_appends_at_the_end_even_when_the_caret_is_mid_text(monkeypatch
     monkeypatch.setattr(linux.LinuxDriver, "_refuse_hidden", lambda self, *a: None)
     field.text, field.caret, field.sel = "abc", 1, (1, 1)    # a click left the caret mid-text
     assert drv.type_into(_element(), "Z") == 1
-    assert field.text == "abcZ" and field.keys == ["End", "Z"]
+    assert field.text == "aZbc" and field.keys == ["Z"], "no End: keys land at the caret"
 
 
 def _ref_type_driver(monkeypatch, f):
@@ -360,14 +360,158 @@ def test_ref_type_replaces_a_partial_selection(monkeypatch, field):
     assert field.text == "#000000" and field.keys == ["00"]
 
 
-def test_ref_type_with_a_bare_caret_appends_after_end(monkeypatch, field):
+def test_ref_type_with_a_bare_caret_inserts_at_the_caret_offset(monkeypatch, field):
     drv = _ref_type_driver(monkeypatch, field)
-    field.text, field.caret, field.sel = "#ff00", 2, (2, 2)
-    assert drv.type_into(_element(), "00") == 2
-    assert field.text == "#ff0000" and field.keys == ["End", "00"]
+    field.text, field.caret, field.sel = "#ff0000", 2, (2, 2)   # Tester's Home, Right, Right
+    assert drv.type_into(_element(), "Z") == 1
+    assert field.text == "#fZf0000" and field.keys == ["Z"]
 
 
-def test_ref_type_into_an_unfocused_field_focuses_then_appends(monkeypatch, field):
+def test_ref_type_at_a_caret_refuses_when_the_read_back_is_not_the_caret_insert(monkeypatch, field):
+    drv = _ref_type_driver(monkeypatch, field)
+    field.text, field.caret, field.sel = "#ff0000", 2, (2, 2)
+    real_type = field.type
+
+    def appends(text):                  # the app moved the caret to End first, once
+        field.type = real_type
+        field.caret, field.sel = len(field.text), (len(field.text),) * 2
+        real_type(text)
+    field.type = appends
+    with pytest.raises(ComputerUseError) as err:
+        drv.type_into(_element(), "Z")
+    assert err.value.detail["reason"] == "text_mismatch"
+    assert err.value.detail["expected"] == "#fZf0000"
+    assert err.value.detail["actual"] == "#ff0000Z"
+    assert err.value.detail["restored"] is True and field.text == "#ff0000"
+
+
+class _ColorDialog:
+    """QColorDialog: the HTML field's textEdited rewrites the RGB spin boxes."""
+
+    def __init__(self, f):
+        self.f = f
+        self.peers = {"Red": "255", "Green": "0", "Blue": "0"}
+        real = f.type
+
+        def type_and_sync(text):
+            real(text)
+            v = f.text
+            if len(v) == 7 and v.startswith("#"):
+                self.peers = {k: str(int(v[i:i + 2], 16))
+                              for k, i in (("Red", 1), ("Green", 3), ("Blue", 5))}
+        f.type = type_and_sync
+
+    def collect(self, acc):
+        return {f"spin box|{k}|#0": v for k, v in self.peers.items()}
+
+
+def _color_dialog_driver(monkeypatch, field):
+    drv = _ref_type_driver(monkeypatch, field)
+    dialog = _ColorDialog(field)
+    monkeypatch.setattr(_atspi, "_collect_peer_fields", dialog.collect)
+    monkeypatch.setattr(_atspi, "peer_field_texts", dialog.collect)
+    monkeypatch.setattr(_atspi, "changed_peer_fields", _REAL_CHANGED_PEER_FIELDS)
+    return drv, dialog
+
+
+_REAL_CHANGED_PEER_FIELDS = _atspi.changed_peer_fields
+
+
+def test_color_dialog_spin_boxes_following_the_html_field_are_not_focus_lost(monkeypatch, field):
+    drv, dialog = _color_dialog_driver(monkeypatch, field)
+    field.chord("ctrl+a")
+    field.keys.clear()
+    assert drv.type_into(_element(), "#00ff00") == 7
+    assert field.text == "#00ff00" and dialog.peers == {"Red": "0", "Green": "255", "Blue": "0"}
+    assert len(drv._qt_dependent_changes) == 2     # Red and Green, recorded not refused
+
+
+def test_color_dialog_key_stream_landing_in_a_peer_is_text_mismatch_not_focus_lost(monkeypatch, field):
+    drv, dialog = _color_dialog_driver(monkeypatch, field)
+    field.chord("ctrl+a")
+    real = field.type
+
+    def leaks(text):                    # target got the keys, and so did a spin box
+        real(text)
+        dialog.peers["Blue"] = dialog.peers["Blue"] + text
+    field.type = leaks
+    with pytest.raises(ComputerUseError) as err:
+        drv.type_into(_element(), "#00ff00")
+    detail = err.value.detail
+    assert detail["reason"] == "peer_field_changed"    # never focus_lost after a confirmed edit
+    assert any("Blue" in line for line in detail["changed_fields"])
+    # The target had changed too: that is said, and its text is put back.
+    assert detail["target_changed"] is True and detail["input_sent"] is True
+    assert detail["original"] == "#ff0000" and detail["restored"] is True
+    assert field.text == "#ff0000"
+
+
+def test_color_dialog_rejected_value_is_still_refused(monkeypatch, field):
+    drv, dialog = _color_dialog_driver(monkeypatch, field)
+    field.accepts = _hex_validator
+    field.chord("ctrl+a")
+    with pytest.raises(ComputerUseError) as err:
+        drv.type_into(_element(), "hello")
+    assert err.value.detail["reason"] in {"text_mismatch", "focus_lost"}
+    assert err.value.detail["restored"] is True and err.value.detail["original"] == "#ff0000"
+    assert field.text == "#ff0000"
+
+
+def test_peer_focus_lost_after_a_refused_set_value_keeps_the_restore_flags(monkeypatch):
+    drv = object.__new__(linux.LinuxDriver)
+    drv._run = lambda fn: fn()
+    monkeypatch.setattr(_atspi, "changed_peer_fields", lambda acc, peers: ["Red: '255' -> '0'"])
+    first = ComputerUseError(linux.ErrorCode.UNSUPPORTED, "mismatch",
+                             detail={"reason": "text_mismatch", "input_sent": True,
+                                     "original": "#ff0000", "restored": False,
+                                     "keys_sent": ["ctrl+a", "#0"]})
+    with pytest.raises(ComputerUseError) as err:
+        drv._refuse_changed_peers(object(), {"x": "1"}, _element(), first)
+    d = err.value.detail
+    assert d["reason"] == "focus_lost" and d["restored"] is False and d["original"] == "#ff0000"
+    assert "could not be restored" in str(err.value)
+
+
+class _FakeText:
+    def __init__(self, text, caret, sel):
+        self.text, self.caret, self.sel = text, caret, sel
+
+    def get_character_count(self, acc):
+        return len(acc.text.encode("utf-16-le")) // 2
+
+    def get_caret_offset(self, acc):
+        return acc.caret
+
+    def get_n_selections(self, acc):
+        return 1 if acc.sel[0] != acc.sel[1] else 0
+
+    def get_selection(self, acc, i):
+        return acc.sel
+
+
+@pytest.mark.parametrize("text,caret,sel,want", [
+    ("a😀b", 4, (4, 4), ("a😀b", 3, 3, 3)),        # caret at the end in UTF-16 units
+    ("a😀b", 1, (1, 3), ("a😀b", 1, 1, 2)),        # the emoji selected
+    ("Startünï", 8, (8, 8), ("Startünï", 8, 8, 8)),
+])
+def test_qt_text_state_reads_utf16_offsets(monkeypatch, text, caret, sel, want):
+    acc = _FakeText(text, caret, sel)
+    fake = type("A", (), {"Text": acc})
+    monkeypatch.setattr(_atspi, "_atspi", lambda: fake)
+    monkeypatch.setattr(_atspi, "_full_text", lambda a: a.text)
+    monkeypatch.setattr(_atspi, "_selection_bounds", lambda b: b)
+    assert _atspi._qt_text_state(acc) == want
+
+
+def test_qt_text_state_refuses_an_offset_inside_a_surrogate_pair(monkeypatch):
+    acc = _FakeText("a😀b", 2, (2, 2))
+    fake = type("A", (), {"Text": acc})
+    monkeypatch.setattr(_atspi, "_atspi", lambda: fake)
+    monkeypatch.setattr(_atspi, "_full_text", lambda a: a.text)
+    assert _atspi._qt_text_state(acc) is None
+
+
+def test_ref_type_into_an_unfocused_field_focuses_then_types_at_the_caret(monkeypatch, field):
     drv = _ref_type_driver(monkeypatch, field)
     focus = {"on": False}
 
@@ -379,7 +523,7 @@ def test_ref_type_into_an_unfocused_field_focuses_then_appends(monkeypatch, fiel
     monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: focus["on"])
     field.text, field.caret, field.sel = "abc", 0, (0, 0)
     assert drv.type_into(_element(), "d") == 1
-    assert focus["on"] and field.text == "abcd" and field.keys == ["End", "d"]
+    assert focus["on"] and field.text == "dabc" and field.keys == ["d"]
 
 
 def test_qt_edit_logs_one_phase_timing_line(monkeypatch, field, caplog):

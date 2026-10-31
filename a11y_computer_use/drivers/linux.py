@@ -4390,19 +4390,25 @@ class LinuxDriver:
         if exc.detail.get("reason") == "focus_lost":
             exc.detail["changed_fields"] = changed[:8]
             return
-        raise ComputerUseError(
-            ErrorCode.FOCUS_LOST,
-            "set_value stopped because another field changed",
-            detail={
-                "ref": element.ref,
-                "role": element.role,
-                "reason": "focus_lost",
-                "outcome": "refused",
-                "next": ["ref", "cdp"],
-                "changed_fields": changed[:8],
-                "evidence": "another field changed during set_value",
-            },
-        ) from exc
+        detail = {
+            "ref": element.ref,
+            "role": element.role,
+            "reason": "focus_lost",
+            "outcome": "refused",
+            "next": ["ref", "cdp"],
+            "changed_fields": changed[:8],
+            "evidence": "another field changed during set_value",
+        }
+        # Keep what the first refusal knew: whether keys were sent, what
+        # the target held and whether it was restored (#1420 review).
+        for key in ("input_sent", "keys_sent", "original", "restored", "expected", "actual"):
+            if isinstance(exc.detail, dict) and key in exc.detail:
+                detail[key] = exc.detail[key]
+        message = "set_value stopped because another field changed"
+        if "restored" in detail:
+            message += ("; the original text was restored" if detail["restored"]
+                        else "; the original text could not be restored, check the field")
+        raise ComputerUseError(ErrorCode.FOCUS_LOST, message, detail=detail) from exc
 
     def text_visibility_unknown(self, element: Element) -> bool:
         """Whether this write needs private verification and a redacted receipt."""
@@ -5997,8 +6003,9 @@ class LinuxDriver:
             peers = {}
         if qt_edit:
             # #1418: keys, not EditableText, so Qt emits textEdited. A
-            # non-empty selection is replaced, as a keyboard would; with a
-            # bare caret the ref type presses End and appends.
+            # non-empty selection is replaced and a bare caret inserts at
+            # its offset, as a keyboard would.
+            qt_before = self._run(lambda: _atspi._full_text(handle)) or ""
             with _qt_edit_timing("type", element.ref) as phases:
                 phases["focus"] = phases["pre"] = time.perf_counter() - type_started
                 try:
@@ -6007,7 +6014,7 @@ class LinuxDriver:
                 except ComputerUseError as exc:
                     self._refuse_changed_peers(handle, peers, element, exc)
                     raise
-            self._raise_if_peers_changed(handle, peers, element)
+            self._raise_if_qt_peers_suspect(handle, peers, element, text, qt_before)
             return count
         try:
             try:
@@ -6208,6 +6215,52 @@ class LinuxDriver:
                 "changed_fields": changed[:8],
                 "evidence": "another field changed during type",
             },
+        )
+
+    def _raise_if_qt_peers_suspect(self, handle, peers: dict, element: Element,
+                                   text: str, original: str) -> None:
+        """After an exact Qt read-back, refuse only peers that look mistyped.
+
+        QColorDialog derives its spin boxes from the HTML field, so they
+        change on a correct edit; that was reported as a false focus_lost
+        (#1420 review). Those dependent changes are recorded, not refused.
+        """
+        if handle is None or not peers:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
+        except Exception:
+            return
+        self._qt_dependent_changes = []
+        if not changed:
+            return
+        dependent, suspect = self._run(lambda: _atspi.qt_dependent_peer_changes(
+            changed, peers, handle, text))
+        self._qt_dependent_changes = dependent[:8]
+        if dependent:
+            _QT_EDIT_LOG.debug("qt edit dependent fields changed ref=%s %s",
+                               element.ref, dependent[:8])
+        if not suspect:
+            return
+        # The target did take the keys (its exact read-back confirmed the
+        # edit), so this is never focus_lost: fail closed as a text mismatch
+        # on the other field, say the target changed, and put it back.
+        restored = bool(self._run(lambda: _atspi._qt_restore(handle, original)))
+        raise _atspi._text_mismatch(
+            "peer_field_changed",
+            "another field gained the typed text while the target took it; "
+            + ("the target's original text was restored" if restored
+               else "the target's original text could not be restored, check it"),
+            expected=original,
+            input_sent=True,
+            target_changed=True,
+            keys_sent=[text],
+            original=original,
+            restored=restored,
+            ref=element.ref,
+            changed_fields=suspect[:8],
         )
 
     def _type_confirmed_handle(self, handle, text: str) -> int:
