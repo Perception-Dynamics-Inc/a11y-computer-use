@@ -45,7 +45,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from functools import partial, wraps
 from threading import RLock
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
@@ -4495,7 +4495,8 @@ class Runtime:
         """
         present = {el.ref for el in snap.elements}
         taken = present | set(anchors) | set(changed)
-        top = max((int(r[1:]) for r in taken if r[:1] == "e" and r[1:].isdigit()), default=0)
+        top = max((int(r[1:]) for r in taken
+                   if r[:1] == "e" and r[1:].isdigit() and not observe.is_pinned_ref(r)), default=0)
         earlier = {
             ref: identity
             for ref, identity in getattr(self, "_reissued_refs", {}).items()
@@ -5979,7 +5980,24 @@ class Runtime:
             if armed:
                 self.driver._table_seek = seek
             try:
+                # Main's snapshot first. Only when it matched nothing are the
+                # children it left past the fetch window read by name, and
+                # only when one of them matches is the armed snapshot taken.
+                # A find that matched, or a page with no long parent, costs
+                # what it did on main.
                 snap = self.driver.snapshot(Scope(scope), bundle)
+                hidden = getattr(self.driver, "hidden_child_named", None)
+                if (seek and callable(hidden)
+                        and not observe.find_elements(snap, text=text, role=role,
+                                                      editable=editable, clickable=clickable)
+                        and hidden(seek)):
+                    # The first snapshot already ran the document and
+                    # table reveal for ``seek`` and it matched nothing, so
+                    # the armed one skips it and reads the far children only.
+                    if armed:
+                        self.driver._table_seek = None
+                    with self._child_seek(seek, far=True):
+                        snap = self.driver.snapshot(Scope(scope), bundle)
             finally:
                 if armed:
                     self.driver._table_seek = previous
@@ -6025,6 +6043,28 @@ class Runtime:
             return rendered
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
+
+    @contextmanager
+    def _child_seek(self, text: str | None, *, far: bool = False):
+        """Arm the driver's per-parent child search for one find (#1375).
+
+        A parent's children past the fan-out caps are folded into ``… N
+        more``. While armed, a child named ``text`` is kept, so find and
+        scroll_to_find see it. Drivers without the attribute are untouched.
+        """
+        driver = self.driver
+        if not hasattr(driver, "_child_seek"):
+            yield
+            return
+        previous = driver._child_seek
+        previous_far = getattr(driver, "_far_seek", False)
+        driver._child_seek = text
+        driver._far_seek = bool(far and text)
+        try:
+            yield
+        finally:
+            driver._child_seek = previous
+            driver._far_seek = previous_far
 
     def expanded_children(self, app: str, ref: str) -> str:
         """The next page of ``ref``'s own children, contiguous with the last page.
@@ -9947,7 +9987,9 @@ class Runtime:
 
         # Each injected scroll has its own receipt, including those that
         # complete before a later iteration fails; the outer row is observation.
-        return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
+        seek_text = text.strip() if isinstance(text, str) and text.strip() else None
+        with self._child_seek(seek_text):
+            return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
     #: How long `app launch` waits for the app's first window, and `app focus`
     #: for the app to become frontmost, before reporting what it saw.
