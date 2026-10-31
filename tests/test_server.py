@@ -7731,3 +7731,30 @@ def test_ref_survives_resnapshot_when_its_element_is_unchanged(
         else:
             runtime.click(ref="e4")
             assert mocked_driver["click"][-1][0].node_identity == (":1.2", "/page/go")
+
+
+def test_find_keeps_held_ref_for_same_native_node_with_other_wrappers(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1392: find reports another wrapper chain above an unchanged button;
+    the snapshot's ref for it keeps working."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, _ = _show_modal_case()
+    wrapper = Element("e5", "AXGroup", "Toolbar", None, None, "found",
+                      parent="e1", node_identity=(":1.2", "/wrap"))
+    found = dataclasses.replace(before, snapshot_id="found", elements=tuple(
+        dataclasses.replace(el, snapshot_id="found",
+                            parent="e5" if el.ref == "e4" else el.parent)
+        for el in before.elements) + (wrapper,))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        for _ in range(3):
+            runtime.desktop_snapshot(APP)
+        current[0] = found
+        runtime.find(APP, text="Go")
+        assert "e4" not in runtime._changed_snapshot_refs
+        current[0] = before
+        runtime.click(ref="e4")
+        assert mocked_driver["click"][-1][0].node_identity == (":1.2", "/page/go")

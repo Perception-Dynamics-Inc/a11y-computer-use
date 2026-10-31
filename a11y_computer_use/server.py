@@ -4438,8 +4438,20 @@ class Runtime:
                     # fresh one), so an older snapshot's ref never resolves to
                     # a different element.
                     del newly_exposed_item, new_surface_item
+                    # The same native node, unchanged in role, name, row and
+                    # document, is the same control even when a filtered or
+                    # differently pruned read reports another wrapper chain
+                    # above it (#1392: find refused an unchanged button).
+                    same_node = bool(
+                        old_identity != new_identity
+                        and prior.node_identity and prior.node_identity == element.node_identity
+                        and (prior.role, prior.title) == (element.role, element.title)
+                        and prior.row_identity == element.row_identity
+                        and prior.document_id == element.document_id
+                        and prior.blocked_by_modal == element.blocked_by_modal
+                    )
                     if old_identity != new_identity and not (
-                        verified_rename or same_node_rename
+                        verified_rename or same_node_rename or same_node
                     ):
                         changed[element.ref] = snap
                         # Only a control the agent can act on needs a working

@@ -12,6 +12,7 @@ Within a group, lines are ordered by theme, then by date.
 ### Safety
 
 - Bind every ref to its element's identity at snapshot time. A ref from an older snapshot is refused as `stale_ref` (`target_changed`) before any click, `type` or `set_value` if a later snapshot would give that number to a different element (for example the input of a `showModal()` dialog); the other element gets a fresh `eN` number instead. Refs keep the `eN` format, an unchanged control keeps its ref, and `find`/`scroll_to_find` apply the same check. Refs #1386
+- On Linux, a held page ref whose element sits behind a `showModal()` or `aria-modal` dialog is refused as `outside_active_modal` before `type`, `set_value` or click. Chrome drops that element from the tree, and the ref used to be matched to the dialog's control with the same role and name. A web field's focus handoff into a dialog is refused before any key, and an unreadable modal boundary refuses (`modal_boundary_unavailable`). `find` no longer refuses an unchanged control when it reports a different wrapper chain above the same native node. Refs #1386
 
 ## [0.4.81] - 2026-10-30
 
