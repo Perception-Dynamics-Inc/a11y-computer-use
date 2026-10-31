@@ -8060,6 +8060,168 @@ def _chrome_page_window(app, root):
     return named[0]
 
 
+# Chrome rebuilds its accessibility tree after a navigation or reload. Under
+# load one read can then outlast the 300ms method timeout. libatspi marks the
+# browser hung on that NoReply and fails every later call at once ("The
+# process appears to be hung") until its Peer.Ping reply is dispatched on this
+# event loop. Meanwhile the application reads DEFUNCT with no children, or its
+# frames read blank: untitled, neither ACTIVE nor SHOWING, nothing below them.
+# No root choice finds the page then, so the snapshot drains pending replies
+# and polls for the page instead of walking that tree. The wait has its own
+# short bound, separate from the caller's budgets. A pid still in that state
+# afterwards is recorded, so the caller can say so instead of reporting an
+# empty search.
+_CHROME_REBUILD_WAIT_S = 1.5
+_CHROME_REBUILD_POLL_S = 0.15
+_CHROME_REBUILDING: set[int] = set()
+
+
+def _blank_chrome_frame(frame) -> bool:
+    """True for a frame Chrome has emptied while it rebuilds the page."""
+    if frame is None or _is_browser_bar_frame(frame):
+        return False
+    if (_node_name(frame) or "").strip():
+        return False
+    if _state_has(frame, "ACTIVE") or _state_has(frame, "SHOWING"):
+        return False
+    try:
+        count = _child_count(frame)
+    except Exception:
+        return False
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or count > 2:
+        return False
+    for index in range(count):
+        child = _child_at(frame, index)
+        if child is None:
+            continue
+        if (_node_name(child) or "").strip():
+            return False
+        try:
+            kids = _child_count(child)
+        except Exception:
+            kids = 0
+        if isinstance(kids, int) and not isinstance(kids, bool) and kids > 0:
+            return False
+    return True
+
+
+def _app_marked_hung(app) -> bool:
+    """True when libatspi refuses every call to ``app`` as a hung process.
+
+    One raw child-count read, made only when the cached application already
+    looks empty or DEFUNCT. libatspi answers it at once while the mark lasts.
+    """
+    getter = getattr(app, "get_child_count", None)
+    if not callable(getter):
+        return False
+    try:
+        getter()
+    except Exception as exc:  # noqa: BLE001 - GLib.Error from libatspi
+        return "appears to be hung" in str(exc)
+    return False
+
+
+def _chrome_tree_rebuilding(app) -> bool:
+    """True while Chrome's tree cannot show the page: hung mark or blank frames."""
+    if app is None:
+        return False
+    try:
+        count = _child_count(app)
+    except Exception:
+        count = -1
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0 or _state_has(app, "DEFUNCT"):
+        return _app_marked_hung(app)
+    frames = [_child_at(app, index) for index in range(min(count, 8))]
+    frames = [frame for frame in frames if frame is not None]
+    return bool(frames) and all(_blank_chrome_frame(frame) for frame in frames)
+
+
+def _clear_chrome_hang(app) -> bool:
+    """Move a Chrome application libatspi marked hung onto a fresh connection.
+
+    ``_revive_application`` replaces the per-app socket the hang-check ping
+    is stuck on with a new accessibility-bus connection. The old socket is
+    left open: libatspi still holds it, and closing it under libatspi broke
+    later reads. Pending replies are dispatched after the swap so a ping
+    that completes clears the mark. Returns True when the mark is gone.
+    """
+    try:
+        _revive_application(app)
+    except Exception:
+        return False
+    _drain_atspi_replies(_CHROME_REBUILD_POLL_S)
+    return not _app_marked_hung(app)
+
+
+def _wait_chrome_page_rebuilt(app, pid) -> None:
+    """Recover a hung or blank Chrome tree, within a short bound.
+
+    Pending replies are dispatched between reads, so a hang-check ping that
+    completes clears libatspi's mark. The reconnect is left to
+    ``scroll_to_find``'s own retry (``chrome_reconnect_hung``). A pid already reported
+    stuck is probed once without waiting, so repeated snapshots cannot add
+    up to the caller's hard limit.
+    """
+    if not _chrome_tree_rebuilding(app):
+        if pid is not None:
+            _CHROME_REBUILDING.discard(pid)
+        return
+    if pid is not None and pid in _CHROME_REBUILDING:
+        return
+    deadline = time.monotonic() + _CHROME_REBUILD_WAIT_S
+    while True:
+        _drain_atspi_replies(_CHROME_REBUILD_POLL_S)
+        rebuilding = _without_child_cache(
+            app,
+            lambda: (_clear_browser_bar_cache(app), _chrome_tree_rebuilding(app))[1],
+            preserve_properties=True,
+        )
+        if not rebuilding:
+            if pid is not None:
+                _CHROME_REBUILDING.discard(pid)
+            return
+        if time.monotonic() >= deadline:
+            if pid is not None:
+                _CHROME_REBUILDING.add(pid)
+            return
+        time.sleep(_CHROME_REBUILD_POLL_S)
+
+
+def chrome_page_rebuilding(app: str) -> bool:
+    """True when the last snapshot of ``app`` found Chrome's tree still rebuilding."""
+    if not _CHROME_REBUILDING:
+        return False
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    return isinstance(pid, int) and not isinstance(pid, bool) and pid in _CHROME_REBUILDING
+
+
+def chrome_reconnect_hung(app: str) -> bool:
+    """Reconnect ``app`` when libatspi refuses its calls as a hung process.
+
+    Called once by ``scroll_to_find`` after a snapshot left Chrome recorded
+    as rebuilding, not on every snapshot. True when the mark is cleared.
+    """
+    if not _CHROME_REBUILDING:
+        return False
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    owner = _call_first(root, ("get_application",), default=None) or root
+    if not _app_marked_hung(owner):
+        return False
+    return _clear_chrome_hang(owner)
+
+
 def chromium_snapshot_root(root):
     """Page frame for a Chrome snapshot after the find bar or omnibox was open.
 
@@ -8076,6 +8238,14 @@ def chromium_snapshot_root(root):
     if root is None or not _chromium_app(root):
         return root
     app = _call_first(root, ("get_application", "getApplication")) or root
+    try:
+        root_pid = pid_of(root)
+    except Exception:
+        root_pid = None
+    if isinstance(root_pid, bool) or not isinstance(root_pid, int) or root_pid <= 0:
+        root_pid = None
+    # A blank tree after navigation is the page rebuilding, not a root to pick.
+    _wait_chrome_page_rebuilt(app, root_pid)
     latched = _browser_bar_latched(root)
     if not latched:
         # This snapshot is the open bar. Show it. The elements record the pid.
