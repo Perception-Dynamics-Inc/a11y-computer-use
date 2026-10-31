@@ -11173,10 +11173,109 @@ def _replace_with_keys(acc, text: str) -> bool:
         else:
             grab_focus(acc)
         _type_into_target(acc, text)
-        if _confirm_text(acc, text):
+        if _confirm_text(acc, text) or _hex_colour_confirmed(acc, text):
             return True
         _restore_text(acc, original)
+    if _chromium_app(acc):
+        # Keys reached the page: its input listeners already ran, so this is
+        # not a clean refusal even when the field reads the old text (#1394).
+        raise _keyed_write_mismatch(acc, text, original)
     return False
+
+
+def _keyed_write_mismatch(acc, text: str, original: str | None):
+    """A failed write whose keys were already sent, reported as ``partial``."""
+    now = _full_text(acc)
+    restored = original is not None and (now == original or _texts_match(now, original))
+    evidence = (
+        f"keys for {text!r} were sent and the field did not keep them; the page "
+        "may have received input events"
+        + ("; the original text was typed back" if restored
+           else f"; the field now reads {_excerpt(now)!r}, not the original {_excerpt(original)!r}")
+        + ". No commit key was sent"
+    )
+    return _text_mismatch(
+        "text_mismatch",
+        f"the value read back does not match {text!r}; input was sent to the page",
+        input_sent=True,
+        restored=bool(restored),
+        outcome="partial",
+        next=["ref"],
+        evidence=evidence,
+    )
+
+
+# Chromium's <input type=color> popup (color_picker.js): channel inputs by DOM id.
+_CHROME_COLOR_FIELDS = {
+    "rValueContainer": ("int", 255),
+    "gValueContainer": ("int", 255),
+    "bValueContainer": ("int", 255),
+    "hValueContainer": ("int", 359),
+    "sValueContainer": ("pct", 100),
+    "lValueContainer": ("pct", 100),
+    "hexValueContainer": ("hex", 0),
+}
+
+
+def _invalid_value_reason(attrs: dict, text: str) -> str | None:
+    """Why ``text`` cannot be held by a web input with these attributes, or None."""
+    if str(attrs.get("tag") or "").lower() != "input":
+        return None
+    kind = _CHROME_COLOR_FIELDS.get(str(attrs.get("id") or ""))
+    if kind is not None:
+        form, top = kind
+        if form == "hex":
+            if not re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+                return "a hex colour field takes #rrggbb"
+        else:
+            m = re.fullmatch(r"(\d{1,3})" + ("%?" if form == "pct" else ""), text)
+            if m is None or int(m.group(1)) > top:
+                return (f"a colour channel field takes a whole number 0-{top}"
+                        + ("%" if form == "pct" else ""))
+    raw = str(attrs.get("maxlength") or "").strip()
+    if raw.isdigit() and _utf16_length(text) > int(raw):
+        return f"the field holds at most {int(raw)} characters"
+    return None
+
+
+def _hex_colour_confirmed(acc, text: str) -> bool:
+    """The colour picker's hex field reads back ``text`` up to letter case.
+
+    The popup shows its hex input upper-cased, and hex digits name the same
+    colour in either case, so ``#00FF0A`` confirms a write of ``#00ff0a``.
+    Any other field, or any other difference, does not confirm.
+    """
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", text or ""):
+        return False
+    if str(_get_attributes(acc).get("id") or "") != "hexValueContainer" or not _chromium_app(acc):
+        return False
+    now = _full_text(acc)
+    return isinstance(now, str) and now.lower() == text.lower()
+
+
+def _refuse_invalid_field_value(acc, text: str) -> None:
+    """Refuse, before any focus, write, or key, a value the web field cannot hold.
+
+    A Chromium input with ``maxlength`` truncates typed text, and the colour
+    picker's channel fields parse what they get on every keystroke, so a
+    hex string typed into "Red channel" sent the page a different colour
+    while the write was refused (#1394).
+    """
+    if not isinstance(text, str) or not _chromium_app(acc):
+        return
+    why = _invalid_value_reason(_get_attributes(acc), text)
+    if why is None:
+        return
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{text!r} is not a valid value for this field: {why}; nothing was sent",
+        detail={
+            "platform": "linux",
+            "reason": "invalid_value",
+            "outcome": "refused",
+            "evidence": f"{why}; no key or write was sent",
+        },
+    )
 
 
 def _restore_text(acc, original: str | None) -> None:
@@ -18702,6 +18801,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     no keys. Success leaves the caret where the write put it.
     """
     _refuse_gecko_date_segment_replace(acc)
+    _refuse_invalid_field_value(acc, text)
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
     _refuse_model_editor_replace(acc)
