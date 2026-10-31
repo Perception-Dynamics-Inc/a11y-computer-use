@@ -362,9 +362,22 @@ def test_ref_type_replaces_a_partial_selection(monkeypatch, field):
 
 def test_ref_type_with_a_bare_caret_inserts_at_the_caret_offset(monkeypatch, field):
     drv = _ref_type_driver(monkeypatch, field)
-    field.text, field.caret, field.sel = "#ff0000", 2, (2, 2)   # Tester's Home, Right, Right
-    assert drv.type_into(_element(), "Z") == 1
-    assert field.text == "#fZf0000" and field.keys == ["Z"]
+    field.text, field.caret, field.sel = "hello world", 2, (2, 2)   # a plain QLineEdit
+    assert drv.type_into(_element(), "XY") == 2
+    assert field.text == "heXYllo world" and field.keys == ["XY"]
+
+
+def test_hex_field_caret_z_is_refused_and_restored_not_inserted(monkeypatch, field):
+    # QColorDialog's hex validator drops "Z", so "#fZf0000" can never read
+    # back; the honest result is text_mismatch with the original restored.
+    drv = _ref_type_driver(monkeypatch, field)
+    field.accepts = _hex_validator
+    field.text, field.caret, field.sel = "#ff0000", 2, (2, 2)
+    with pytest.raises(ComputerUseError) as err:
+        drv.type_into(_element(), "Z")
+    d = err.value.detail
+    assert d["reason"] == "text_mismatch" and d["expected"] == "#fZf0000"
+    assert d["actual"] == "#ff0000" and d["restored"] is True and field.text == "#ff0000"
 
 
 def test_ref_type_at_a_caret_refuses_when_the_read_back_is_not_the_caret_insert(monkeypatch, field):
@@ -415,6 +428,8 @@ def _color_dialog_driver(monkeypatch, field):
 
 
 _REAL_CHANGED_PEER_FIELDS = _atspi.changed_peer_fields
+_REAL_ATSPI = type("Real", (), {"peer_field_texts": staticmethod(_atspi.peer_field_texts),
+                                "changed_peer_fields": staticmethod(_atspi.changed_peer_fields)})
 
 
 def test_color_dialog_spin_boxes_following_the_html_field_are_not_focus_lost(monkeypatch, field):
@@ -426,24 +441,63 @@ def test_color_dialog_spin_boxes_following_the_html_field_are_not_focus_lost(mon
     assert len(drv._qt_dependent_changes) == 2     # Red and Green, recorded not refused
 
 
-def test_color_dialog_key_stream_landing_in_a_peer_is_text_mismatch_not_focus_lost(monkeypatch, field):
-    drv, dialog = _color_dialog_driver(monkeypatch, field)
-    field.chord("ctrl+a")
-    real = field.type
+class _EchoMirror:
+    """Tester's probe: Echo's textEdited copies its text into a sibling Mirror.
 
-    def leaks(text):                    # target got the keys, and so did a spin box
-        real(text)
-        dialog.peers["Blue"] = dialog.peers["Blue"] + text
-    field.type = leaks
-    with pytest.raises(ComputerUseError) as err:
-        drv.type_into(_element(), "#00ff00")
-    detail = err.value.detail
-    assert detail["reason"] == "peer_field_changed"    # never focus_lost after a confirmed edit
-    assert any("Blue" in line for line in detail["changed_fields"])
-    # The target had changed too: that is said, and its text is put back.
-    assert detail["target_changed"] is True and detail["input_sent"] is True
-    assert detail["original"] == "#ff0000" and detail["restored"] is True
-    assert field.text == "#ff0000"
+    Both are plain QLineEdits with no objectName, so Qt 6 gives them the
+    same accessible-id; only the bus path tells them apart.
+    """
+
+    def __init__(self, f):
+        self.echo, self.mirror = f, _LineEdit("mirror")
+        real = f.type
+
+        def type_and_mirror(text):
+            real(text)
+            self.mirror.text = f.text
+        f.type = type_and_mirror
+
+
+@pytest.mark.parametrize("setup,text,want", [
+    ("whole", "peer", "peer"),
+    ("caret", "Q", "ecQho"),
+])
+def test_echo_mirror_is_reported_as_a_dependent_change_not_refused(monkeypatch, field, setup, text, want):
+    drv = _ref_type_driver(monkeypatch, field)
+    probe = _EchoMirror(field)
+    field.text = "echo"
+    if setup == "whole":
+        field.chord("ctrl+a")
+    else:
+        field.caret, field.sel = 2, (2, 2)
+    root = object()
+    kids = {root: [field, probe.mirror]}
+    monkeypatch.setattr(_atspi, "_field_walk_root", lambda acc: root)
+    monkeypatch.setattr(_atspi, "_child_count", lambda n: len(kids.get(n, [])))
+    monkeypatch.setattr(_atspi, "_child_at", lambda n, i: kids[n][i])
+    monkeypatch.setattr(_atspi, "_parent_of", lambda n: None if n is root else root)
+    monkeypatch.setattr(_atspi, "_stable_id", lambda n, *a: "QWidget.QLineEdit")
+    monkeypatch.setattr(_atspi, "_node_name", lambda n: "Mirror:" if n is probe.mirror else "Echo:")
+    monkeypatch.setattr(_atspi, "_is_tracked_field", lambda n: n is not root)
+    monkeypatch.setattr(_atspi, "_full_text", lambda n: n.text)
+    for name in ("peer_field_texts", "changed_peer_fields"):
+        monkeypatch.setattr(_atspi, name, getattr(_REAL_ATSPI, name))
+    assert drv.type_into(_element(), text) == len(text)
+    assert field.text == want and probe.mirror.text == want
+    assert len(drv._qt_dependent_changes) == 1
+    assert "Mirror:" in drv._qt_dependent_changes[0] and repr(want) in drv._qt_dependent_changes[0]
+
+
+def test_same_qt_accessible_id_on_a_sibling_is_not_the_target(monkeypatch):
+    target, sibling = object(), object()
+    monkeypatch.setattr(_atspi, "_stable_id", lambda n, *a: "QWidget.QLineEdit")
+    monkeypatch.setattr(_atspi, "_role_name", lambda n: "text")
+    monkeypatch.setattr(_atspi, "_parent_of", lambda n: None)
+    monkeypatch.setattr(_atspi, "_qt_app", lambda n: True)
+    assert _atspi._under_target(sibling, target) is False
+    assert _atspi._under_target(target, target) is True
+    monkeypatch.setattr(_atspi, "_qt_app", lambda n: False)   # a web remount keeps its DOM id
+    assert _atspi._under_target(sibling, target) is True
 
 
 def test_color_dialog_rejected_value_is_still_refused(monkeypatch, field):

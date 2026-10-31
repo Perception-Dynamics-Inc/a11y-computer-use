@@ -10649,37 +10649,6 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
     )
 
 
-def qt_dependent_peer_changes(changed: list[str], peers_before: dict,
-                              acc, typed: str) -> tuple[list[str], list[str]]:
-    """Split peer changes after an exact Qt read-back into (dependent, suspect).
-
-    A Qt dialog recomputes linked fields from a committed edit: QColorDialog
-    rewrites Hue/Sat/Val/Red/Green/Blue from the "HTML:" field on every
-    textEdited (#1420 review). The target's exact read-back already proves
-    every typed character reached the target. A peer is still suspect when its
-    new text contains the typed text that its old text did not, which is
-    what a key stream routed to the wrong field looks like.
-    """
-    if not typed:
-        return list(changed), []
-    after = {}
-    try:
-        after = _collect_peer_fields(acc)
-    except Exception:
-        return [], list(changed)
-    dependent, suspect = [], []
-    for key, old in peers_before.items():
-        new = after.get(key)
-        if new is None or new == old:
-            continue
-        line = f"{key}: {old!r} -> {new!r}"[:180]
-        if typed in new and typed not in old:
-            suspect.append(line)
-        else:
-            dependent.append(line)
-    return dependent, suspect
-
-
 def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
     """Whether the field still holds its prior text around the typed text.
 
@@ -17116,6 +17085,13 @@ def _under_target(node, target) -> bool:
     """True when ``node`` is ``target`` or sits inside it."""
     current = node
     target_sid = _stable_id(target) or ""
+    if target_sid and _qt_app(target):
+        # Qt 6 derives accessible-id from the objectName/class chain, so two
+        # sibling QLineEdits without object names share one id: the Echo
+        # field's Mirror was taken for the target itself and never tracked
+        # as a peer (#1420 review). Qt objects keep a stable bus path, so
+        # only identity counts there.
+        target_sid = ""
     target_role = _role_name(target)
     for _ in range(10):
         if current is None:

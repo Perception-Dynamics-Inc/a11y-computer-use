@@ -8141,6 +8141,10 @@ class Runtime:
                 had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
             )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        dependent = getattr(self.driver, "_qt_dependent_changes", None)
+        if isinstance(dependent, list) and dependent:
+            # #1420: other fields the app changed in reaction to the edit.
+            note.append("; dependent_fields_changed: " + "; ".join(map(str, dependent)))
         return self._conclude(
             f"typed {shown} characters into {ref}{''.join(note)}",
             tool="type", app=gate, before=before, element=live, requested=text,

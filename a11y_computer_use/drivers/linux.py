@@ -1422,6 +1422,7 @@ class LinuxDriver:
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
+        self._qt_dependent_changes: list[str] = []
         # Impress or Draw frame text from before a type, and whether that
         # frame could be read. The outcome judge consumes these once.
         self._drawing_type_before: str | None = None
@@ -5862,6 +5863,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._focused_editable = None
+        self._qt_dependent_changes = []
         type_started = time.perf_counter()
         if element.secure:
             raise _secure_focus_error("the requested ref is a password field")
@@ -6005,7 +6007,6 @@ class LinuxDriver:
             # #1418: keys, not EditableText, so Qt emits textEdited. A
             # non-empty selection is replaced and a bare caret inserts at
             # its offset, as a keyboard would.
-            qt_before = self._run(lambda: _atspi._full_text(handle)) or ""
             with _qt_edit_timing("type", element.ref) as phases:
                 phases["focus"] = phases["pre"] = time.perf_counter() - type_started
                 try:
@@ -6014,7 +6015,7 @@ class LinuxDriver:
                 except ComputerUseError as exc:
                     self._refuse_changed_peers(handle, peers, element, exc)
                     raise
-            self._raise_if_qt_peers_suspect(handle, peers, element, text, qt_before)
+            self._record_qt_dependent_peers(handle, peers, element)
             return count
         try:
             try:
@@ -6217,14 +6218,16 @@ class LinuxDriver:
             },
         )
 
-    def _raise_if_qt_peers_suspect(self, handle, peers: dict, element: Element,
-                                   text: str, original: str) -> None:
-        """After an exact Qt read-back, refuse only peers that look mistyped.
+    def _record_qt_dependent_peers(self, handle, peers: dict, element: Element) -> None:
+        """After an exact Qt read-back, record peers that changed; never refuse.
 
-        QColorDialog derives its spin boxes from the HTML field, so they
-        change on a correct edit; that was reported as a false focus_lost
-        (#1420 review). Those dependent changes are recorded, not refused.
+        The target's exact read-back proves the keys reached the target, so
+        a peer that changed with it (QColorDialog's spin boxes, a field that
+        mirrors another) is the app reacting to the edit, not a misdirected
+        keystroke (#1420 review). The changes are reported in the result as
+        ``dependent_fields_changed`` and in one debug line.
         """
+        self._qt_dependent_changes = []
         if handle is None or not peers:
             return
         from a11y_computer_use.drivers import _atspi
@@ -6233,35 +6236,10 @@ class LinuxDriver:
             changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
         except Exception:
             return
-        self._qt_dependent_changes = []
-        if not changed:
-            return
-        dependent, suspect = self._run(lambda: _atspi.qt_dependent_peer_changes(
-            changed, peers, handle, text))
-        self._qt_dependent_changes = dependent[:8]
-        if dependent:
+        self._qt_dependent_changes = list(changed[:8])
+        if changed:
             _QT_EDIT_LOG.debug("qt edit dependent fields changed ref=%s %s",
-                               element.ref, dependent[:8])
-        if not suspect:
-            return
-        # The target did take the keys (its exact read-back confirmed the
-        # edit), so this is never focus_lost: fail closed as a text mismatch
-        # on the other field, say the target changed, and put it back.
-        restored = bool(self._run(lambda: _atspi._qt_restore(handle, original)))
-        raise _atspi._text_mismatch(
-            "peer_field_changed",
-            "another field gained the typed text while the target took it; "
-            + ("the target's original text was restored" if restored
-               else "the target's original text could not be restored, check it"),
-            expected=original,
-            input_sent=True,
-            target_changed=True,
-            keys_sent=[text],
-            original=original,
-            restored=restored,
-            ref=element.ref,
-            changed_fields=suspect[:8],
-        )
+                               element.ref, changed[:8])
 
     def _type_confirmed_handle(self, handle, text: str) -> int:
         """Insert ``text`` into a handle whose focus was already confirmed."""
