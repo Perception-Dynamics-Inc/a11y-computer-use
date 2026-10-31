@@ -19827,13 +19827,64 @@ def test_native_modal_sibling_blocks_background_snapshot(modal_boundary_tree):
     assert next(el for el in restored.elements if el.title == bg.name).actionable
 
 
-def test_modal_boundary_refuses_truncated_target_ancestry(modal_boundary_tree):
-    driver, frame, bg, modal, inside, calls = modal_boundary_tree
-    wrapper = bg
-    for _ in range(40):
+def _bury(node, depth):
+    """Wrap ``node`` in ``depth`` nested panels; return the outermost one."""
+    wrapper = node
+    for _ in range(depth):
         wrapper = _adopt(_Acc("panel"), wrapper)
-    frame.children[0] = wrapper
-    wrapper.parent = frame
+    return wrapper
+
+
+def _rehome(parent, old, new):
+    parent.children[parent.children.index(old)] = new
+    new.parent = parent
+
+
+def test_modal_boundary_refuses_deep_background_target(modal_boundary_tree):
+    """#1381: a complete 40+ deep ancestry behind an open modal is outside it."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    _rehome(frame, bg, _bury(bg, 40))
+    assert len(_atspi._modal_ancestry(bg)) > 32
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.refuse_outside_modal(bg)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.refuse_outside_modal(bg, frame)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+    assert calls == []
+
+
+def test_modal_boundary_allows_deep_target_inside_modal(modal_boundary_tree):
+    """#1381: a control 40+ accessibles deep inside the active modal is inside it."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    _rehome(modal, inside, _bury(inside, 40))
+    assert len(_atspi._modal_ancestry(inside)) > 32
+    assert _atspi.refuse_outside_modal(inside) is True
+    assert _atspi.refuse_outside_modal(inside, frame) is True
+    assert not _atspi.outside_modals(inside, [modal], cache={})
+    assert not _atspi.outside_modals(inside, [modal])
+
+
+def test_modal_boundary_allows_deep_target_without_modal(modal_boundary_tree):
+    """#1381: no modal open, 40+ deep controls are not refused."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    _rehome(frame, bg, _bury(bg, 40))
+    assert _atspi.refuse_outside_modal(bg) is False
+
+
+@pytest.mark.parametrize("break_kind", ["cycle", "backstop"])
+def test_modal_boundary_still_fails_closed_on_incomplete_ancestry(
+        modal_boundary_tree, monkeypatch, break_kind):
+    """An ancestry read that never reaches a parentless root is not 'no modal'."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    outer = _bury(bg, 40)
+    _rehome(frame, bg, outer)
+    if break_kind == "cycle":
+        frame.parent = outer  # The reported chain loops instead of ending.
+    else:
+        monkeypatch.setattr(_atspi, "_FULL_ANCESTRY_MAX", 20)
     with pytest.raises(ComputerUseError) as caught:
         _atspi.refuse_outside_modal(bg)
     assert caught.value.detail["reason"] == "modal_boundary_unavailable"
@@ -24295,3 +24346,137 @@ def test_chromium_find_modal_discovery_does_not_query_the_whole_window(
         assert queried == [document]
     else:
         assert queried == [document, frame]
+
+
+# --- #1381: every guard/visibility ancestor walk reads the full ancestry ---
+
+def _stack(top, depth, leaf, app=None):
+    """``top`` > ``depth`` panels > ``leaf``; returns ``leaf``."""
+    node = leaf
+    for _ in range(depth):
+        node = _GeckoNode("panel", "", ("SHOWING", "VISIBLE"), [node])
+    top.children.append(node)
+    node.parent = top
+    if app is not None:
+        current = leaf
+        while current is not None:
+            current.application = app
+            current = current.parent
+    return leaf
+
+
+def _deep_chrome(depth, gap, *, showing=True, target_showing=True):
+    """Chromium: application > frame > ``gap`` panels > document > ``depth`` panels > entry.
+
+    ``gap`` is the docked-DevTools shape: the page document sits far below
+    the frame. ``showing`` False is a background tab's document.
+    """
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    app.application = app
+    frame = _GeckoNode("frame", "Deep - Google Chrome", ("SHOWING", "VISIBLE", "ACTIVE"))
+    app.children.append(frame)
+    frame.parent = app
+    doc = _GeckoNode("document web", "Deep", ("SHOWING", "VISIBLE") if showing else ("VISIBLE",))
+    doc.description = "http://127.0.0.1/deep.html"
+    _stack(frame, gap, doc, app)
+    states = ("SHOWING", "VISIBLE", "EDITABLE") if target_showing else ("VISIBLE", "EDITABLE")
+    entry = _stack(doc, depth, _GeckoNode("entry", "Deep input", states), app)
+    return _NS(app=app, frame=frame, doc=doc, entry=entry)
+
+
+@pytest.mark.parametrize("depth,gap", [(40, 0), (10, 40), (40, 40)])
+def test_deep_chromium_page_control_is_not_hidden(depth, gap):
+    """#1381: a showing page control past 32 ancestors is not not_showing."""
+    tree = _deep_chrome(depth, gap)
+    assert _atspi.chromium_clipped_target(tree.entry) is False
+    assert _atspi._chromium_document_hidden(tree.entry) is False
+    assert _atspi.hidden_web_target(tree.entry) is False
+
+
+@pytest.mark.parametrize("depth,gap", [(40, 0), (40, 40)])
+def test_deep_chromium_background_tab_control_stays_hidden(depth, gap):
+    """#1381: depth no longer hides a background-tab document from the check."""
+    tree = _deep_chrome(depth, gap, showing=False, target_showing=False)
+    assert _atspi._chromium_document_hidden(tree.entry) is True
+    assert _atspi.hidden_web_target(tree.entry) is True
+
+
+def test_deep_chromium_orphan_document_is_still_hidden():
+    """A document that really has no frame above it stays hidden at any depth."""
+    tree = _deep_chrome(40, 40)
+    tree.frame.children.clear()
+    top = tree.doc
+    while top.parent is not tree.frame:
+        top = top.parent
+    top.parent = None
+    assert _atspi._chromium_document_hidden(tree.entry) is True
+    assert _atspi.hidden_web_target(tree.entry) is True
+
+
+def test_deep_chromium_page_control_is_page_content():
+    """#1381: URL, browser-chrome and frame lookups read past 32 ancestors."""
+    tree = _deep_chrome(40, 40)
+    assert _atspi.in_browser_chrome(tree.entry) is False
+    assert _atspi.browser_frame_view(tree.entry, {}) is False
+    assert _atspi.document_url_for(tree.entry) == "http://127.0.0.1/deep.html"
+    assert _atspi.top_window_title(tree.entry) == "Deep - Google Chrome"
+    assert _atspi._frame_ancestor(tree.entry) is tree.frame
+    assert _atspi._toplevel_of(tree.entry) is tree.frame
+    assert _atspi._application_ancestor(tree.entry) is tree.app
+    assert _atspi._frame_containing(tree.entry, [tree.frame]) is tree.frame
+    assert _atspi._field_walk_root(tree.entry) is tree.doc
+
+
+def test_deep_chromium_iframe_and_tab_lookups():
+    """#1381: iframe nesting and the selected tab are found past 32 ancestors."""
+    tree = _deep_chrome(0, 40)
+    inner = _GeckoNode("document web", "Inner", ("SHOWING", "VISIBLE"))
+    inner.description = "http://127.0.0.1/inner.html"
+    _stack(tree.doc, 40, inner, tree.app)
+    assert _atspi._nested_in_document(inner) is True
+    assert _atspi._enclosing_tab_document(inner) is tree.doc
+    tab = _GeckoNode("page tab", "Deep", ("SHOWING", "SELECTED"))
+    tree.frame.children.append(tab)
+    tab.parent = tree.frame
+    assert _atspi._selected_tab_name(tree.doc) == "Deep"
+    page = _stack(_GeckoNode("page tab", "Settings"), 40, _GeckoNode("push button", "OK"))
+    assert _atspi._page_tab_ancestor(page).name == "Settings"
+
+
+def test_deep_dialog_terminal_canvas_and_launcher_ancestors():
+    """#1381: dialog, terminal, canvas and run-prompt guards see past 32/64 levels."""
+    dialog = _GeckoNode("dialog", "Confirm")
+    _GeckoNode("frame", "App", (), [dialog])
+    assert _atspi._in_dialog(_stack(dialog, 40, _GeckoNode("push button", "OK"))) is True
+    term = _GeckoNode("terminal", "Terminal")
+    assert _atspi.terminal_ancestor(_stack(term, 70, _GeckoNode("text", ""))) is True
+    run = _GeckoNode("dialog", "Run Program")
+    assert _atspi.command_launcher_ancestor(
+        _stack(run, 70, _GeckoNode("text", "")), "xfce4-panel") is True
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    app.application = app
+    canvas = _GeckoNode("canvas", "")
+    doc = _GeckoNode("document web", "", ("SHOWING",), [canvas])
+    _GeckoNode("frame", "", (), [doc]).parent = app
+    button = _stack(canvas, 45, _GeckoNode("push button", "Fallback"), app)
+    assert _atspi.canvas_fallback_content(button) is True
+
+
+def test_deep_click_landing_and_toplevel_checks():
+    """#1381: the pointer-landing check and its window lookup read the full chain."""
+    from a11y_computer_use.drivers import _actionable
+
+    tree = _deep_chrome(30, 30)
+    hit = _stack(tree.entry, 40, _GeckoNode("static", "inner text"), tree.app)
+    assert _actionable._toplevel(tree.entry) is tree.frame
+    assert _actionable._is_self_or_descendant(tree.entry, hit) is True
+
+
+def test_deep_firefox_frame_showing_and_date_segment_guard():
+    """#1381: the Firefox showing check and date-segment guard read past 8 levels."""
+    doc = _GeckoNode("document web", "Deep", ("SHOWING", "VISIBLE"))
+    _GeckoNode("frame", "Deep - Firefox", ("SHOWING",), [doc])
+    leaf = _stack(doc, 20, _GeckoNode("entry", "x", ("SHOWING",)))
+    assert _atspi._frame_hierarchy_showing(leaf) is True
