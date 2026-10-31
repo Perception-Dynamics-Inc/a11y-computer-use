@@ -16,7 +16,7 @@ import pytest
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
 from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
-from tests.test_linux_live import _launch_chrome_file, _runtime_for, _titles  # noqa: E402
+from tests.test_linux_live import _launch_chrome_file, _runtime_for  # noqa: E402
 
 _HTML = """<!doctype html><html><head><title>menubar</title><style>
 [role=menu]{display:none;border:1px solid #888;padding:4px;background:#fff}
@@ -59,7 +59,9 @@ def test_linux_chrome_aria_submenu_item_click_sends_no_escape(tmp_path) -> None:
                 if exc.code is not ErrorCode.APP_NOT_FOUND:
                     raise
             else:
-                if "File" in _titles(shot):
+                # The page's own menubar item, not Chrome's "File" address-bar
+                # chip that a file:// page also shows.
+                if any(el.role == "AXMenuItem" and el.title == "File" for el in shot.elements):
                     break
             time.sleep(0.3)
         else:
@@ -71,8 +73,10 @@ def test_linux_chrome_aria_submenu_item_click_sends_no_escape(tmp_path) -> None:
                             if el.role == "AXWindow")
 
         def click_named(name: str) -> str:
-            found = runtime.find("chrome", text=name)
-            match = re.search(rf"\b(e\d+) \S+(?: \S+)? \"{re.escape(name)}\"", found)
+            # Scope to the page menubar's menuitem role. A bare text match
+            # picked Chrome's "File" address-bar chip on file:// pages.
+            found = runtime.find("chrome", text=name, role="menuitem")
+            match = re.search(rf"\b(e\d+) menuitem \"{re.escape(name)}\"", found)
             assert match, found
             return runtime.click(match.group(1))
 

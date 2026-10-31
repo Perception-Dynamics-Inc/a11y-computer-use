@@ -37,6 +37,7 @@ doctor`` still works.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import replace
 import re
@@ -417,6 +418,7 @@ def _act_mcp_result(payload: str):
     )
 
 
+_CLICK_LOG = logging.getLogger("a11y_computer_use.click")
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -6998,8 +7000,33 @@ class Runtime:
         offscreen_tab: list[Element] = []
         # The re-resolved ref after raising its app over another app's window.
         raised: list[Element] = []
+        # Debug-level phase timing for the ref click path, one line per click:
+        # Escape-dismiss check, occluder checks, hit test, and the action.
+        phases: dict[str, float] = {}
+
+        @contextmanager
+        def phase(name: str):
+            start = time.perf_counter()
+            try:
+                yield
+            finally:
+                phases[name] = phases.get(name, 0.0) + time.perf_counter() - start
 
         def execute() -> None:
+            start = time.perf_counter()
+            try:
+                execute_body()
+            finally:
+                if _CLICK_LOG.isEnabledFor(logging.DEBUG):
+                    _CLICK_LOG.debug(
+                        "click phases ref=%s escape=%.3fs occluder=%.3fs hit_test=%.3fs action=%.3fs total=%.3fs",
+                        getattr(target, "ref", None),
+                        phases.get("escape", 0.0), phases.get("occluder", 0.0),
+                        phases.get("hit_test", 0.0), phases.get("action", 0.0),
+                        time.perf_counter() - start,
+                    )
+
+        def execute_body() -> None:
             nonlocal before, selection_before, selection_target, toggle_probe
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
@@ -7021,18 +7048,21 @@ class Runtime:
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, act)
             if isinstance(act, Element):
-                cover = self._popover_cover(act, refresh=True)
+                with phase("occluder"):
+                    cover = self._popover_cover(act, refresh=True)
                 if cover:
                     raise _not_visible(act.ref, "covered", act.bounds, f"the ref is covered by {cover}")
             self._dismiss_target = act  # the menu chain holding it is kept (#1413)
             try:
-                menu_note.append(self._dismiss_open_menu(app))
+                with phase("escape"):
+                    menu_note.append(self._dismiss_open_menu(app))
             finally:
                 self._dismiss_target = None
             if isinstance(act, Element):
                 self._refuse_vanished_target(act, "Escape" if menu_note[-1] else "")
                 sibling_cover = getattr(self.driver, "same_app_window_cover", None)
-                cover = sibling_cover(act, app) if sibling_cover is not None else None
+                with phase("occluder"):
+                    cover = sibling_cover(act, app) if sibling_cover is not None else None
                 if cover:
                     raise ComputerUseError(
                         ErrorCode.UNSUPPORTED,
@@ -7073,7 +7103,9 @@ class Runtime:
             if plain:
                 if callable(probe_toggle):
                     toggle_probe = probe_toggle(act)
-                if self.driver.press_element(act):
+                with phase("action"):
+                    pressed = self.driver.press_element(act)
+                if pressed:
                     return  # activated via AX — the user's cursor never moved
                 toggle_probe = None
             if plain and dialogs_before is not None:
@@ -7102,6 +7134,7 @@ class Runtime:
             # point, so the hit-test runs right before them; an AXPress above
             # addressed the element itself and needs no such guard (#11).
             # A text ref uses the control's box, not the line-wide text box.
+            hit_start = time.perf_counter()
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
                 self._refuse_center_outside_window(
@@ -7115,7 +7148,10 @@ class Runtime:
                     ref if act is target else None,
                 )
             try:
-                self._recheck_target(app, act)
+                try:
+                    self._recheck_target(app, act)
+                finally:
+                    phases["hit_test"] = phases.get("hit_test", 0.0) + time.perf_counter() - hit_start
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_CHANGED or not isinstance(act, Element):
                     raise
@@ -7147,10 +7183,11 @@ class Runtime:
             # effect, and the receipt below names the actual mechanism.
             button_action = getattr(self.driver, "click_button_action", None)
             if isinstance(act, Element) and button_action is not None:
-                mechanism = button_action(
-                    act, button=parsed_button, count=count, modifiers=mods,
-                    allow_action=PREFER_AX_ACTIONS,
-                )
+                with phase("action"):
+                    mechanism = button_action(
+                        act, button=parsed_button, count=count, modifiers=mods,
+                        allow_action=PREFER_AX_ACTIONS,
+                    )
                 if mechanism is not None:
                     button_mechanism.append(mechanism)
                     return
@@ -7167,7 +7204,8 @@ class Runtime:
                 selection_before = selection_reader(act)
             if callable(probe_toggle):
                 toggle_probe = probe_toggle(act)
-            self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
+            with phase("action"):
+                self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
         # Read the folder location before the click. A side-pane selection
