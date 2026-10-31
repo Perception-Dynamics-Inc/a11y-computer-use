@@ -4323,6 +4323,9 @@ class Runtime:
         # it is no more evidence of continuity than the refused ref was.
         refused_refs = set(changed) | set(getattr(self, "_reissued_refs", ()))
         reissue: dict[str, tuple] = {}
+        # A surviving control that moved to another ref keeps the number it
+        # was issued under when that number is free (R1, #1386).
+        keep_number: dict[str, str] = {}
         for element in snap.elements:
             if refs is None or element.ref in refs:
                 old = anchors.get(element.ref)
@@ -4426,9 +4429,17 @@ class Runtime:
                             identity_indexes[snap.snapshot_id], element.ref, (old, last),
                         )
                     )
+                    # R1 (#1386): a ref is bound to the identity it was
+                    # issued with. Only the same native node (a verified or
+                    # same-node rename) keeps its number. A control that
+                    # moved, a new menu item, or a control inside a newly
+                    # opened surface is re-issued below (a moved control keeps
+                    # its own earlier number when free, anything else takes a
+                    # fresh one), so an older snapshot's ref never resolves to
+                    # a different element.
+                    del newly_exposed_item, new_surface_item
                     if old_identity != new_identity and not (
-                        verified_rename or same_node_rename or newly_exposed_item or shifted_control
-                        or new_surface_item
+                        verified_rename or same_node_rename
                     ):
                         changed[element.ref] = snap
                         # Only a control the agent can act on needs a working
@@ -4446,6 +4457,8 @@ class Runtime:
                         if ((element.clickable or element.editable or blocked_control)
                                 and element.role not in self._SURFACE_ROLES):
                             reissue[element.ref] = new_identity
+                            if shifted_control:
+                                keep_number[element.ref] = candidates[0].ref
                         continue
                 # A reload starts a new epoch, so refs are not compared with
                 # the old page. A ref whose control became an irreversible one
@@ -4468,7 +4481,7 @@ class Runtime:
                 anchors[element.ref] = snap
                 renames.pop(element.ref, None)
         if reissue:
-            snap = self._reissue_changed_refs(snap, reissue, anchors, changed)
+            snap = self._reissue_changed_refs(snap, reissue, anchors, changed, keep_number)
         self._changed_snapshot_refs = changed
         self._issued_anchors = anchors
         self._last_issued = snap
@@ -4480,9 +4493,37 @@ class Runtime:
             self._foreign_issued = None
         return snap
 
+    def _issue_matches(self, snap: Snapshot, matches) -> tuple[Snapshot, list]:
+        """Issue ``matches`` from ``snap`` under the identity rule (R1, #1386).
+
+        A filtered read (find, scroll_to_find) checks every ref it returns
+        against the identity that ref was issued with, like a snapshot does:
+        a number that named another control is refused for the old holder
+        and the match is shown under a re-issued ref. Returns the snapshot
+        the agent now acts on and the matches named by their issued refs.
+        """
+        matches = list(matches)
+        issued = self._note_issued(snap, {el.ref for el in matches}, preserve_identity=True)
+        if issued is snap:
+            return snap, matches
+        mapping = {
+            old.ref: new.ref for old, new in zip(snap.elements, issued.elements)
+            if old.ref != new.ref
+        }
+        self._current = issued
+        index = {el.ref: el for el in issued.elements}
+        moved = []
+        for el in matches:
+            ref = mapping.get(el.ref, el.ref)
+            parent = mapping.get(el.parent, el.parent) if el.parent else el.parent
+            moved.append(replace(el, ref=ref, parent=parent,
+                                 snapshot_id=index[ref].snapshot_id if ref in index else el.snapshot_id))
+        return issued, moved
+
     def _reissue_changed_refs(self, snap: Snapshot, reissue: dict[str, tuple],
                               anchors: dict[str, Snapshot],
-                              changed: dict[str, Snapshot]) -> Snapshot:
+                              changed: dict[str, Snapshot],
+                              keep_number: dict[str, str] | None = None) -> Snapshot:
         """Give controls behind a refused, reused ref a ref that is not refused.
 
         A page switched in place hands the old page's numbers to the new
@@ -4500,18 +4541,41 @@ class Runtime:
         earlier = {
             ref: identity
             for ref, identity in getattr(self, "_reissued_refs", {}).items()
-            if ref in anchors and ref not in present and ref not in changed
+            # A number still shown on another control is free when that
+            # control is itself being re-issued in this pass.
+            if ref in anchors and (ref not in present or ref in reissue)
+            and (ref not in changed or ref in reissue)
         }
         mapping: dict[str, str] = {}
+        used: set[str] = set()
+        keep_number = keep_number or {}
+        # Earlier numbers by identity, in issue order: one pass, not one
+        # scan per re-issued control (snapshots run to thousands of nodes).
+        by_identity: dict[object, list[str]] = {}
+        for r, ident in earlier.items():
+            try:
+                by_identity.setdefault(ident, []).append(r)
+            except TypeError:  # an unhashable identity is matched by scan below
+                continue
         for ref, identity in reissue.items():
-            name = next(
-                (r for r, ident in earlier.items()
-                 if ident == identity and r not in mapping.values()),
-                None,
-            )
+            kept = keep_number.get(ref)
+            # A moved control's own earlier number, when nothing else keeps
+            # it: its anchor already named this control, so it resolves to
+            # the same element as before.
+            if (kept is not None and kept not in used
+                    and (kept not in present or kept in reissue)):
+                mapping[ref] = kept
+                used.add(kept)
+                continue
+            try:
+                options = by_identity.get(identity, ())
+            except TypeError:
+                options = [r for r, ident in earlier.items() if ident == identity]
+            name = next((r for r in options if r not in used), None)
             if name is None:
                 top += 1
                 name = f"e{top}"
+            used.add(name)
             mapping[ref] = name
         renamed = observe.rename_refs(snap, mapping)
         for ref, name in mapping.items():
@@ -6025,7 +6089,7 @@ class Runtime:
                 ))
                 self._current = snap
             snap, matches = self._use_reissued_refs(snap, matches)
-            self._note_issued(snap, {el.ref for el in matches})
+            snap, matches = self._issue_matches(snap, matches)
             rendered = observe.render_matches(snap, matches, text=text)
             warning_reader = getattr(self.driver, "observation_warning", None)
             warning = warning_reader(snap) if callable(warning_reader) else ""
@@ -8966,7 +9030,7 @@ class Runtime:
             if kind != "visible":
                 return kind, None
             visible = visible_matches(later)
-            self._note_issued(later, {el.ref for el in visible})
+            later, visible = self._issue_matches(later, visible)
             return "found", (
                 f"found after {scrolls_issued} scroll(s):\n"
                 f"{observe.render_matches(later, visible)}"
@@ -9280,8 +9344,10 @@ class Runtime:
                     container = "unknown"
                 else:
                     title = f" {(anchor.title or '').strip()!r}" if (anchor.title or "").strip() else ""
+                    shot, (anchor,) = self._issue_matches(shot, [anchor])
                     container = f"{anchor.role}{title} ref={anchor.ref}"
-                self._note_issued(shot, {anchor.ref} if anchor is not None else set())
+                if anchor is None:
+                    self._note_issued(shot, set(), preserve_identity=True)
                 why = f" (time budget {budget_s:g}s)" if budget_hit else ""
                 if budget_hit and budget_cap == _SCROLL_FIND_HARD_S:
                     why += " (120s hard limit reached; call again to continue)"
@@ -9689,7 +9755,7 @@ class Runtime:
                         self._current = later
                         shown = visible_matches(later)
                         if shown:
-                            self._note_issued(later, {el.ref for el in shown})
+                            later, shown = self._issue_matches(later, shown)
                             return (
                                 "found after selecting the tab in its tab list "
                                 "(it was scrolled out of the tab bar):\n"
@@ -9704,7 +9770,7 @@ class Runtime:
                         # The report is still one step, not a row that was
                         # already on screen.
                         count = 1 if find_tried else 0
-                        self._note_issued(snap, {el.ref for el in shown})
+                        snap, shown = self._issue_matches(snap, shown)
                         return (
                             f"found after {count} scroll(s):\n"
                             f"{observe.render_matches(snap, shown)}"

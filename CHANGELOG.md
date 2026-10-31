@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [Unreleased]
+
+### Safety
+
+- Bind every ref to its element's identity at snapshot time. A ref from an older snapshot is refused as `stale_ref` (`target_changed`) before any click, `type` or `set_value` if a later snapshot would give that number to a different element (for example the input of a `showModal()` dialog); the other element gets a fresh `eN` number instead. Refs keep the `eN` format, an unchanged control keeps its ref, and `find`/`scroll_to_find` apply the same check. Refs #1386
+
 ## [0.4.81] - 2026-10-30
 
 14 commits since v0.4.80, through #1342. A patch release of Linux safety fixes: app grants are now bound to the real executable, user and AT-SPI bus owner of the target process, and to the X server's owner of a window, never to a name the app chose for itself. It also brings Qt 6 editing, GTK notebook and window-closing key fixes.

@@ -5417,9 +5417,16 @@ def test_find_preserves_omitted_ref_binding(
         assert mocked_driver["click"] == []
         assert audit_entries(audit_dir)[-1]["result"] == "stale_ref"
 
-        # A returned ref may acquire its explicitly shown new meaning.
-        assert "e6" in runtime.find(APP, text="none")
-        assert runtime._resolve("e6", "click")[1].title == "none"
+        # R1 (#1386): the replacement is shown under a fresh ref, and the
+        # number issued for Right never acquires the new meaning.
+        shown = runtime.find(APP, text="none")
+        fresh = _issued_ref(runtime, "none")
+        assert fresh != "e6" and fresh in shown and "e6" not in shown
+        assert runtime._resolve(fresh, "click")[1].title == "none"
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e6")
+        assert caught.value.code == ErrorCode.STALE_REF
+        assert mocked_driver["click"] == []
 
 
 @pytest.mark.parametrize("refresh", ["find", "snapshot"])
@@ -6701,6 +6708,14 @@ def test_shared_drag_tree_does_not_rebind_changed_destination(tmp_path, monkeypa
     assert audit_entries(tmp_path / "audit")[-1]["result"] == "stale_ref"
 
 
+def _issued_ref(runtime, title, role=None):
+    """The ref the latest observation issued for the element titled ``title``."""
+    found = [el.ref for el in runtime._last_issued.elements
+             if el.title == title and (role is None or el.role == role)]
+    assert len(found) == 1, found
+    return found[0]
+
+
 @pytest.mark.parametrize("mode", ["full", "interactive", "diff", "find"])
 @pytest.mark.parametrize("old_role,menu_name,item_name", [
     ("AXTabGroup", "Help", "About"),
@@ -6732,20 +6747,28 @@ def test_public_observation_issues_newly_opened_menu_item(
         # Internal reads do not issue the new ref or replace the old anchor.
         assert runtime._anchor("e2") == (before, old)
         if mode == "find":
-            assert "e2" in runtime.find(APP, text=item_name)
+            shown = runtime.find(APP, text=item_name)
         else:
-            runtime.desktop_snapshot(APP, mode=mode)
-        assert runtime._anchor("e2") == (opened, item)
-        runtime.click(ref="e2", verify=True)
+            shown = runtime.desktop_snapshot(APP, mode=mode)
+        # R1 (#1386): the item is issued under a fresh ref; the number the
+        # agent holds for the old control never resolves to the menu item.
+        fresh = _issued_ref(runtime, item_name)
+        assert fresh != "e2" and fresh in shown
+        assert runtime._anchor(fresh)[1].title == item_name
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e2")
+        assert caught.value.detail["reason"] == "target_changed"
+        assert len(mocked_driver["click"]) == 1
+        runtime.click(ref=fresh, verify=True)
         assert len(mocked_driver["click"]) == 2
-        assert mocked_driver["click"][-1][0] == item
+        assert mocked_driver["click"][-1][0].title == item_name
         replacement = dataclasses.replace(item, title="Different command", snapshot_id="changed")
         current[0] = dataclasses.replace(opened, snapshot_id="changed", elements=(menu, replacement))
         runtime.desktop_snapshot(APP)
         with pytest.raises(ComputerUseError) as caught:
-            runtime.click(ref="e2")
+            runtime.click(ref=fresh)
         assert caught.value.code is ErrorCode.STALE_REF
-        assert caught.value.detail["reason"] == "target_changed"
+        assert caught.value.detail["reason"] in {"target_changed", "title_changed"}
         assert len(mocked_driver["click"]) == 2
 
 
@@ -7000,19 +7023,28 @@ def test_snapshot_rebinds_renumbered_surviving_controls(
                 assert caught.value.detail["reason"] == "target_changed"
                 assert mocked_driver["click"] == []
                 return
+            # R1 (#1386): each surviving control keeps the number it was
+            # issued under; the number of the pruned Beta is refused rather
+            # than rebound to Gamma, which now sits in its slot.
             if mode != "diff":
-                assert 'e3 button "Gamma"' in rendered
-                assert 'e4 textfield' in rendered
-            for element in surviving:
-                assert runtime._anchor(element.ref) == (after, element)
+                assert 'e4 button "Gamma"' in rendered
+                assert 'e5 textfield' in rendered
+            for element, issued in zip(surviving, ("e2", "e4", "e5")):
+                held = runtime._anchor(issued)[1]
+                assert (held.role, held.title, held.node_identity) == (
+                    element.role, element.title, element.node_identity)
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref="e3")
+            assert caught.value.detail["reason"] == "target_changed"
             runtime.click(ref="e2")
-            runtime.click(ref="e3")
-            runtime.type_text(text="hi", ref="e4")
+            runtime.click(ref="e4")
+            runtime.type_text(text="hi", ref="e5")
         assert [target.title for target, _ in mocked_driver["click"]] == [
             "Alpha", "Gamma", "Alpha", "Gamma",
         ]
         assert mocked_driver["type"] == ["hi", "hi"]
-        assert focused == [surviving[-1], surviving[-1]]
+        assert [(el.role, el.node_identity) for el in focused] == [
+            (surviving[-1].role, surviving[-1].node_identity)] * 2
 
 
 @pytest.mark.parametrize("mode,change", [
@@ -7082,9 +7114,17 @@ def test_textarea_ref_after_scroll_wrapper_pruning(
             assert caught.value.detail["reason"] == "target_changed"
             assert not focused and not mocked_driver["type"]
             return
-        assert runtime._anchor("e2") == (after, after.element("e2"))
-        runtime.type_text(text="x", ref="e2")
-        assert focused == [after.element("e2")]
+        # R1 (#1386): the surviving text area keeps the number it was issued
+        # under (e3); the pruned wrapper's e2 never resolves to it.
+        textarea = after.element("e2")
+        held = runtime._anchor("e3")[1]
+        assert (held.role, held.node_identity) == (textarea.role, textarea.node_identity)
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.type_text(text="x", ref="e2")
+        assert caught.value.detail["reason"] == "target_changed"
+        assert not focused and not mocked_driver["type"]
+        runtime.type_text(text="x", ref="e3")
+        assert [(el.role, el.node_identity) for el in focused] == [(textarea.role, textarea.node_identity)]
         assert mocked_driver["type"] == ["x"]
 
 
@@ -7145,12 +7185,30 @@ def test_fresh_refs_inside_newly_opened_surface_are_issued(
     with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
         runtime.desktop_snapshot(APP, mode=mode)
         current[0] = after
+        refs = set()
         for _ in range(2):
-            runtime.desktop_snapshot(APP, mode=mode)
-            assert runtime._anchor("e3") == (after, field)
-            assert runtime._anchor("e4") == (after, button)
-        runtime.click(ref="e4", verify=True)
-        assert mocked_driver["click"][-1][0] == button
+            shown = runtime.desktop_snapshot(APP, mode=mode)
+            # R1 (#1386): controls inside the new surface are issued under
+            # fresh refs, stable across repeated snapshots; the numbers the
+            # agent holds for the old window's controls stay refused.
+            fresh = (_issued_ref(runtime, field.title, field.role),
+                     _issued_ref(runtime, button.title, button.role))
+            refs.add(fresh)
+            for ref, element in zip(fresh, (field, button)):
+                assert ref not in {"e2", "e3", "e4"}
+                held = runtime._anchor(ref)[1]
+                assert (held.role, held.title) == (element.role, element.title)
+                if mode != "diff":
+                    assert ref in shown
+        assert len(refs) == 1
+        for old in ("e3", "e4"):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.type_text(text="x", ref=old) if old == "e3" else runtime.click(ref=old)
+            assert caught.value.code is ErrorCode.STALE_REF
+            assert caught.value.detail["reason"] == "target_changed"
+        assert mocked_driver["click"] == [] and mocked_driver["type"] == []
+        runtime.click(ref=fresh[1], verify=True)
+        assert mocked_driver["click"][-1][0].title == button.title
         # The surface root itself took an old control's ref: never rebound.
         with pytest.raises(ComputerUseError) as caught:
             runtime.click(ref="e2")
@@ -7246,13 +7304,29 @@ def test_fresh_refs_inside_gtk4_popup_of_expanded_owner_are_issued(
     with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
         runtime.desktop_snapshot(APP, mode=mode)
         current[0] = after
+        refs = set()
         for _ in range(2):
-            runtime.desktop_snapshot(APP, mode=mode)
-            assert runtime._anchor("e4") == (after, first)
-            assert runtime._anchor("e5") == (after, second)
+            shown = runtime.desktop_snapshot(APP, mode=mode)
+            # R1 (#1386): popup items take fresh refs, stable across reads.
+            fresh = {}
+            for element in (first, second):
+                ref = _issued_ref(runtime, element.title, element.role)
+                assert ref not in {"e2", "e3", "e4", "e5"}
+                held = runtime._anchor(ref)[1]
+                assert (held.role, held.title) == (element.role, element.title)
+                if mode != "diff":
+                    assert ref in shown
+                fresh[element.title] = ref
+            refs.add(tuple(sorted(fresh.items())))
+        assert len(refs) == 1
+        for old in ("e4", "e5"):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref=old)
+            assert caught.value.code is ErrorCode.STALE_REF
+        assert mocked_driver["click"] == []
         target = second if kind == "dropdown" else first
-        runtime.click(ref=target.ref, verify=True)
-        assert mocked_driver["click"][-1][0] == target
+        runtime.click(ref=fresh[target.title], verify=True)
+        assert mocked_driver["click"][-1][0].title == target.title
         # The owner and the popup root took old refs; they are not inside a
         # new surface, so the #1021 refusal still holds for both.
         for ref, title in (("e2", "Country"), ("e3", "Argentina")):
@@ -7542,3 +7616,118 @@ def test_driver_refusal_keeps_its_ref_when_it_is_not_the_live_number() -> None:
         out = server._with_issued_ref(exc, ref, live)
         assert out.message == "e10 is not editable"
         assert out.detail == detail
+
+
+def _show_modal_case():
+    """#1386: a page snapshot, then the same page after ``showModal()``.
+
+    Refs restart at e1 per snapshot, so the new tree gives the dialog's
+    textfield and button the very numbers the page's own field and button
+    had (e3, e4). Nothing but node identity tells them apart.
+    """
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Page", None, None, "before",
+                     node_identity=(":1.2", "/window/1"))
+    page = (Element("e2", "AXButton", "Open modal", None, Bounds(1, 10, 10, 150, 25), "before",
+                    parent="e1", clickable=True, node_identity=(":1.2", "/page/open")),
+            Element("e3", "AXTextField", "Field", "", Bounds(1, 10, 40, 150, 25), "before",
+                    parent="e1", editable=True, node_identity=(":1.2", "/page/field")),
+            Element("e4", "AXButton", "Go", None, Bounds(1, 10, 70, 150, 25), "before",
+                    parent="e1", clickable=True, node_identity=(":1.2", "/page/go")))
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, *page))
+    dialog = (Element("e2", "AXDialog", "", None, Bounds(1, 300, 100, 300, 200), "after",
+                      parent="e1", modal=True, node_identity=(":1.2", "/dialog")),
+              Element("e3", "AXTextField", "Field", "", Bounds(1, 310, 120, 200, 25), "after",
+                      parent="e2", editable=True, node_identity=(":1.2", "/dialog/field")),
+              Element("e4", "AXButton", "Go", None, Bounds(1, 310, 160, 80, 25), "after",
+                      parent="e2", clickable=True, node_identity=(":1.2", "/dialog/go")))
+    behind = tuple(dataclasses.replace(el, ref=f"e{i}", snapshot_id="after", blocked_by_modal=True)
+                   for i, el in enumerate(page, 5))
+    after = dataclasses.replace(before, snapshot_id="after", elements=(
+        dataclasses.replace(window, snapshot_id="after", blocked_by_modal=True), *dialog, *behind))
+    return before, after
+
+
+@pytest.mark.parametrize("attempt", range(5))
+@pytest.mark.parametrize("observe_with", ["full", "interactive", "diff", "find"])
+@pytest.mark.parametrize("op", ["type", "set_value", "click"])
+def test_ref_from_older_snapshot_never_resolves_to_dialog_control(
+    monkeypatch, mocked_driver, store, audit_dir, op, observe_with, attempt,
+):
+    """#1386 (R1): an older snapshot's ref is refused, never silently rebound.
+
+    The dialog's controls share title and role with the page's, so only the
+    identity bound at snapshot time can tell e3 (page) from e3 (dialog).
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    before, after = _show_modal_case()
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        written = []
+        monkeypatch.setattr(runtime.driver, "set_value",
+                            lambda el, value: written.append((el, value)) or True,
+                            raising=False)
+        monkeypatch.setattr(runtime.driver, "type_into",
+                            lambda el, text: written.append((el, text)) or len(text),
+                            raising=False)
+        runtime.desktop_snapshot(APP)
+        old = "e4" if op == "click" else "e3"
+        current[0] = after
+        if observe_with == "find":
+            runtime.find(APP, text="Field" if op != "click" else "Go")
+        else:
+            runtime.desktop_snapshot(APP, mode=observe_with)
+        role = "AXButton" if op == "click" else "AXTextField"
+        title = "Go" if op == "click" else "Field"
+        fresh = [el.ref for el in runtime._last_issued.elements
+                 if el.role == role and el.title == title and not el.blocked_by_modal]
+        assert fresh and old not in fresh
+
+        def act_on(ref):
+            if op == "type":
+                return runtime.type_text(text="x", ref=ref)
+            if op == "set_value":
+                return runtime.set_value(ref, "x")
+            return runtime.click(ref=ref)
+
+        with pytest.raises(ComputerUseError) as caught:
+            act_on(old)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert caught.value.detail["reason"] == "target_changed"
+        assert mocked_driver["click"] == [] and mocked_driver["type"] == [] and written == []
+        # Normal use of a ref the current observation issued still works.
+        act_on(fresh[0])
+        acted = mocked_driver["click"][-1][0] if op == "click" else written[-1][0]
+        assert acted.node_identity[1].startswith("/dialog/")
+
+
+@pytest.mark.parametrize("op", ["type", "set_value", "click"])
+def test_ref_survives_resnapshot_when_its_element_is_unchanged(
+    monkeypatch, mocked_driver, store, audit_dir, op,
+):
+    """R1 keeps normal use working: an unchanged control keeps its ref."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, _ = _show_modal_case()
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: before)
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        written = []
+        monkeypatch.setattr(runtime.driver, "set_value",
+                            lambda el, value: written.append((el, value)) or True,
+                            raising=False)
+        monkeypatch.setattr(runtime.driver, "type_into",
+                            lambda el, text: written.append((el, text)) or len(text),
+                            raising=False)
+        for _ in range(3):
+            runtime.desktop_snapshot(APP)
+        if op == "type":
+            runtime.type_text(text="x", ref="e3")
+            assert written[-1][0].node_identity == (":1.2", "/page/field")
+        elif op == "set_value":
+            runtime.set_value("e3", "x")
+            assert written and written[-1][0].node_identity == (":1.2", "/page/field")
+        else:
+            runtime.click(ref="e4")
+            assert mocked_driver["click"][-1][0].node_identity == (":1.2", "/page/go")
