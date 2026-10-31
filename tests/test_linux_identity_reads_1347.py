@@ -298,3 +298,17 @@ def test_pid_matched_interpreter_registrant_takes_the_full_lookup(monkeypatch) -
     bus = _host_bus(monkeypatch, [_Acc("someprg", 71)], {71: "python3"})
     monkeypatch.setattr(_linux_system, "_pids_matching", lambda identifier: {71})
     assert bus and _atspi.may_host_interpreter("python3app") is True
+
+
+def test_no_interpreter_registrant_reads_no_x11_per_action(monkeypatch) -> None:
+    """#1354: with no interpreter among all registrants, the probe skips the X11 reads."""
+    _host_bus(monkeypatch, [_Acc("xfce4-terminal", 41), _Acc("thunar", 43)],
+              {41: "xfce4-terminal", 43: "thunar"})
+
+    def no_x(*a, **k):
+        raise AssertionError("X11 read on the no-interpreter path")
+
+    monkeypatch.setattr(_linux_system, "pids_matching", no_x)
+    monkeypatch.setattr(_linux_system, "active_window", no_x)
+    assert _atspi.may_host_interpreter("xfce4-terminal") is False
+

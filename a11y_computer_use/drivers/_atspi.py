@@ -7177,6 +7177,11 @@ def may_host_interpreter(app: str) -> bool:
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return True
+    # Every registrant the filter below could pick is one of these. When each
+    # is named, has a readable pid and runs no interpreter, the answer is
+    # False whatever the X11 reads would select, so they are skipped (#1354).
+    if _no_registrant_hosts_interpreter(desktop):
+        return False
     try:
         pids = set(_linux_system.pids_matching(app))
         row = _linux_system.active_window()
@@ -7201,6 +7206,23 @@ def may_host_interpreter(app: str) -> bool:
         if not comm or _linux_system.is_interpreter(comm):
             return True
     return False
+
+
+def _no_registrant_hosts_interpreter(desktop) -> bool:
+    """True when every registry application is named and runs a readable, non-interpreter comm."""
+    from a11y_computer_use.drivers import _linux_system
+
+    for candidate in _desktop_applications(desktop):
+        if candidate is None:
+            continue
+        name = _registry_read(candidate, "get_name") or ""
+        pid = _registry_read(candidate, "get_process_id")
+        if not name or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        comm = _linux_system._comm_for_pid(pid)
+        if not comm or _linux_system.is_interpreter(comm):
+            return False
+    return True
 
 
 def _desktop_applications(desktop) -> list:
