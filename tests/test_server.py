@@ -7888,3 +7888,61 @@ def test_find_does_not_reuse_a_held_number_for_a_control_now_behind_a_modal(
         with pytest.raises(ComputerUseError):
             runtime.click(ref="e4")
         assert not any(c[0].node_identity == (":1.2", "/dialog/go") for c in mocked_driver["click"])
+
+
+def test_a_number_is_never_moved_onto_a_different_non_control_element(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1408: hidden media controls handed their numbers to a slider and text.
+
+    The paused video's 'mute' button was e3 and 'play' was e2. Once playback
+    hides the controls, the audio scrubber (a slider, neither clickable nor
+    editable) and a static text sit at those numbers. Each snapshot and find
+    must print them under fresh numbers that resolve to themselves, while
+    the held e2/e3 stay refused for the buttons they were issued for.
+    """
+    store.set_tier(APP, safety.Tier.FULL)
+    base = build_synthetic_snapshot()
+    window = Element("e1", "AXWindow", "Video", None, None, "before")
+    play = Element("e2", "AXButton", "play", None, Bounds(1, 10, 500, 30, 30),
+                   "before", parent="e1", clickable=True)
+    mute = Element("e3", "AXButton", "mute", None, Bounds(1, 60, 500, 30, 30),
+                   "before", parent="e1", clickable=True)
+    before = dataclasses.replace(base, snapshot_id="before", elements=(window, play, mute))
+
+    def playing(sid):
+        return dataclasses.replace(base, snapshot_id=sid, elements=(
+            dataclasses.replace(window, snapshot_id=sid),
+            Element("e2", "AXStaticText", "playaudio time scrubber", None,
+                    Bounds(1, 14, 542, 972, 59), sid, parent="e1"),
+            Element("e3", "AXSlider", "audio time scrubber", "0.0",
+                    Bounds(1, 128, 553, 112, 33), sid, parent="e1"),
+        ))
+
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        printed = []
+        for number in range(2):
+            current[0] = playing(f"after-{number}")
+            text = runtime.desktop_snapshot(APP)
+            line = next(row for row in text.splitlines() if "slider" in row.lower())
+            ref = re.search(r"\be(\d+)\b", line).group(0)
+            assert ref not in {"e2", "e3"}, text
+            printed.append(ref)
+            label = next(row for row in text.splitlines() if "playaudio" in row)
+            assert not re.search(r"\be[23]\b", label), label
+        assert printed[0] == printed[1]
+        assert runtime._anchor(printed[0])[1].title == "audio time scrubber"
+        current[0] = playing("found")
+        found = runtime.find(APP, text="audio time scrubber")
+        row = next(r for r in found.splitlines() if "slider" in r.lower())
+        assert printed[0] in row and not re.search(r"\be3\b", row), found
+        assert runtime._anchor(printed[0])[1].role == "AXSlider"
+        for held, title in (("e3", "mute"), ("e2", "play")):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.click(ref=held)
+            assert caught.value.detail["reason"] == "target_changed"
+            assert caught.value.detail["anchor"]["title"] == title
+        assert mocked_driver["click"] == []
