@@ -121,7 +121,7 @@ def linux_prompt(action, app):
         if node is None:
             return NotImplemented  # Injected drivers may have no native handles.
         seen = set()
-        for _ in range(32):
+        for _ in range(api._FULL_ANCESTRY_MAX):
             if node is None:
                 break
             identity = api._atspi_wrapper_key(node) or id(node)

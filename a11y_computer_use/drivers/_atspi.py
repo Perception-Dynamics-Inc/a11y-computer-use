@@ -1027,7 +1027,13 @@ def _share_parent_application(parent, kids) -> None:
 def _frame_ancestor(acc):
     """The top-level frame that contains ``acc``, or ``acc`` when it is one."""
     node = acc
-    for _ in range(32):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if node is not None:
+            _key = _ancestor_key(node)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         if node is None:
             return None
         role = _role_name(node)
@@ -1191,7 +1197,13 @@ _TITLE_PREFIX_NEXT = frozenset(" .-(–—")
 def _page_tab_ancestor(acc):
     """Nearest page tab above ``acc``, or None when a window comes first."""
     node = acc
-    for _ in range(32):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if node is not None:
+            _key = _ancestor_key(node)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         if node is None:
             return None
         role = _role_name(node)
@@ -5527,7 +5539,13 @@ class ATSPIAccessor:
         chain: list = []
         frame = None
         current = node
-        for _ in range(32):
+        seen_keys: set = set()
+        for _ in range(_FULL_ANCESTRY_MAX):
+            if current is not None:
+                _key = _ancestor_key(current)
+                if _key in seen_keys:
+                    break
+                seen_keys.add(_key)
             if current is None:
                 break
             known = self._frames.get(id(current))
@@ -5960,7 +5978,7 @@ def _nested_in_document(node) -> bool:
 
     parent = _parent_of(node)
     seen: set[int] = set()
-    for _ in range(16):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if parent is None or id(parent) in seen:
             return False
         seen.add(id(parent))
@@ -6024,7 +6042,7 @@ def document_url_for(acc) -> str | None:
 
     node = acc
     seen: set[int] = set()
-    for _ in range(32):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if node is None or id(node) in seen:
             return None
         seen.add(id(node))
@@ -6155,7 +6173,19 @@ def _ancestor_key(acc) -> object:
     return id(acc)
 
 
-def _ancestor_chain(acc, limit: int = 32):
+# Runaway backstop for every guard/visibility ancestor walk (#1381). Real
+# trees end far below it; it is not a depth policy. Guards that need a
+# complete read (the modal boundary) refuse when a walk ends on a node that
+# still has a parent, so reaching it never means "no modal".
+_FULL_ANCESTRY_MAX = 4096
+
+
+def _full_ancestry(acc):
+    """``acc`` and every parent to the root; see `_FULL_ANCESTRY_MAX`."""
+    return _ancestor_chain(acc, _FULL_ANCESTRY_MAX)
+
+
+def _ancestor_chain(acc, limit: int | None = None):
     """Yield ``acc`` and its parents, nearest first.
 
     Each wrapper stays referenced until this generator is closed. The seen
@@ -6164,7 +6194,13 @@ def _ancestor_chain(acc, limit: int = 32):
     ``id()`` of one that nothing else references. Electron's page sits
     several panels under the frame; that collision used to end the walk
     on a panel and report the showing document hidden.
+
+    With no ``limit`` the walk reaches the root (#1381); `_FULL_ANCESTRY_MAX`
+    only stops a runaway chain. A caller that needs completeness checks
+    that the last node has no parent.
     """
+    if limit is None:
+        limit = _FULL_ANCESTRY_MAX
     node = acc
     pinned: list = []
     seen: set[object] = set()
@@ -6225,7 +6261,7 @@ def browser_frame_view(
     current_role = role_str
     seen: set[int] = set()
     result = True
-    for _ in range(32):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if current is None or id(current) in seen:
             result = True
             break
@@ -6272,7 +6308,7 @@ def in_browser_chrome(acc) -> bool:
         return False
     node = acc
     seen: set[int] = set()
-    for _ in range(32):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if node is None or id(node) in seen:
             return True
         seen.add(id(node))
@@ -6708,7 +6744,13 @@ def _popup_item_labels(node):
 def _application_ancestor(node):
     """The application that contains ``node``, or None."""
     current = node
-    for _ in range(20):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if current is not None:
+            _key = _ancestor_key(current)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         if current is None:
             return None
         if _role_name(current) == "application":
@@ -6859,7 +6901,13 @@ def _frame_containing(node, frames):
         return None
     wanted = {id(frame): frame for frame in frames}
     current = node
-    for _ in range(20):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if current is not None:
+            _key = _ancestor_key(current)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         if current is None:
             return None
         found = wanted.get(id(current))
@@ -7146,7 +7194,13 @@ def _application_of(node):
 def _toplevel_of(node):
     """The showing-window ancestor of ``node``, or None at the application."""
     current = node
-    for _ in range(32):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if current is not None:
+            _key = _ancestor_key(current)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         if current is None:
             return None
         role = _role_name(current)
@@ -9518,7 +9572,7 @@ def canvas_fallback_content(acc) -> bool:
         return False
     current = acc
     seen: set[int] = set()
-    for _ in range(40):
+    for _ in range(_FULL_ANCESTRY_MAX):
         parent = _parent_of(current)
         if parent is None or id(parent) in seen:
             return False
@@ -15384,7 +15438,13 @@ def _in_dialog(acc) -> bool:
     send one unless the popup itself is open and takes the key.
     """
     node = acc
-    for _ in range(32):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if node is not None:
+            _key = _ancestor_key(node)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         parent = _parent_of(node)
         if parent is None or parent is node:
             return False
@@ -16182,7 +16242,13 @@ def _field_walk_root(acc):
     node = acc
     document = None
     frame = acc
-    for _ in range(24):
+    seen_keys: set = set()
+    for _ in range(_FULL_ANCESTRY_MAX):
+        if node is not None:
+            _key = _ancestor_key(node)
+            if _key in seen_keys:
+                break
+            seen_keys.add(_key)
         parent = _parent_of(node)
         if parent is None:
             break
@@ -20673,7 +20739,7 @@ def terminal_ancestor(acc) -> bool:
     ordinary multiline editor is never mistaken for a command prompt.
     """
     seen = set()
-    for _ in range(64):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if acc is None or id(acc) in seen:
             return False
         seen.add(id(acc))
@@ -20690,7 +20756,7 @@ def command_launcher_ancestor(acc, app: str) -> bool:
     if app.casefold() not in _linux_system._COMMAND_DIALOG_HOSTS:
         return False
     seen = set()
-    for _ in range(64):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if acc is None or id(acc) in seen:
             return False
         seen.add(id(acc))
@@ -20754,7 +20820,7 @@ def top_window_title(acc) -> str:
     node = acc
     seen: set[int] = set()
     title = ""
-    for _ in range(24):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if node is None or id(node) in seen:
             break
         seen.add(id(node))
@@ -20956,7 +21022,7 @@ def _selected_tab_name(node) -> str | None:
     parent wrapper is not the identity of the next ancestor.
     """
     frame = None
-    for current in _ancestor_chain(node, 16):
+    for current in _full_ancestry(node):
         role = _role_name(current)
         if role in {"frame", "window"}:
             frame = current
@@ -21009,7 +21075,7 @@ def _enclosing_tab_document(doc):
     has that outer document as an ancestor.
     """
     outer = doc
-    for current in _ancestor_chain(doc, 24):
+    for current in _full_ancestry(doc):
         role = _role_name(current)
         if role in {"frame", "window", "application"}:
             break
@@ -21198,7 +21264,7 @@ def _chromium_document_hidden(acc) -> bool:
     """
     document = None
     reached_frame = False
-    for node in _ancestor_chain(acc, 32):
+    for node in _full_ancestry(acc):
         role = _role_name(node)
         if role in {"document web", "document frame"}:
             document = node
@@ -21569,7 +21635,7 @@ def chromium_clipped_target(acc) -> bool:
         pos, size = None, None
     if pos is not None and size is not None and _misses_primary_screen(pos, size):
         return False
-    for node in _ancestor_chain(acc, 32):
+    for node in _full_ancestry(acc):
         role = _role_name(node)
         if role in {"document web", "document frame"}:
             return _state_has(node, "SHOWING")
@@ -21594,7 +21660,7 @@ def hidden_web_target(acc) -> bool:
         return False
     node = acc
     seen: set[int] = set()
-    for _ in range(32):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if node is None or id(node) in seen:
             return False
         seen.add(id(node))
@@ -23522,7 +23588,7 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
         node = acc
         pinned = []
         seen = set()
-        for _ in range(32):
+        for _ in range(_FULL_ANCESTRY_MAX):
             if node is None:
                 break
             key = _ancestor_key(node)
@@ -23598,7 +23664,7 @@ def read_text_selections(
     ancestor = root
     ancestors = set()
     pinned = []
-    for _ in range(32):
+    for _ in range(_FULL_ANCESTRY_MAX):
         if ancestor is None:
             break
         if time.monotonic() >= deadline:
@@ -24241,17 +24307,12 @@ def modal_document(modal):
                  if _role_name(node) in {"document web", "document frame"}), None)
 
 
-# Runaway backstop for the modal guard's ancestor walk (#1381); see
-# `_modal_ancestry`. Real trees end far below it. Reaching it is an
-# incomplete read and fails closed; it never means "no modal".
-_MODAL_ANCESTRY_MAX = 4096
-
 
 def _modal_chain(acc, cache):
     """Reuse reported ancestry only during one read-only snapshot traversal."""
     if cache is None:
         return _modal_ancestry(acc)
-    limit = _MODAL_ANCESTRY_MAX
+    limit = _FULL_ANCESTRY_MAX
     chain = []
     keys = []
     seen = set()
@@ -24557,11 +24618,11 @@ def _modal_ancestry(acc) -> list:
     Chromium pages and docked DevTools put controls 40+ accessibles below
     the desktop, so the generic 32-node walk cut them off. This walk only
     stops at a parentless root, a self-parent or a repeated node (cycle).
-    `_MODAL_ANCESTRY_MAX` is a runaway backstop, not a depth policy:
+    `_FULL_ANCESTRY_MAX` is a runaway backstop, not a depth policy:
     a chain that hits it, or a cycle, still has a parent after its last
     node, and every caller treats that as an incomplete read and refuses.
     """
-    return list(_ancestor_chain(acc, _MODAL_ANCESTRY_MAX))
+    return list(_ancestor_chain(acc, _FULL_ANCESTRY_MAX))
 
 
 def _modal_ancestry_complete(chain) -> bool:
