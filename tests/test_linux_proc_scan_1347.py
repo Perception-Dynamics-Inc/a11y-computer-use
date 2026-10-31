@@ -6,6 +6,8 @@ the host is read.
 from __future__ import annotations
 
 import io
+import os
+import sys
 import threading
 from types import SimpleNamespace as _NS
 
@@ -152,6 +154,10 @@ def test_name_lookup_matches_comm_cut_and_exe_basename(monkeypatch) -> None:
         assert _linux_exe.pids_named("") == set()
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or not os.path.isdir("/proc"),
+    reason="reads the host's real /proc, which only Linux has",
+)
 def test_direct_walk_matches_the_reader_walk() -> None:
     """#1354: the inlined /proc walk gives exactly the walk through _comm and exe_of."""
     import os as _os
