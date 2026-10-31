@@ -150,3 +150,29 @@ def test_name_lookup_matches_comm_cut_and_exe_basename(monkeypatch) -> None:
         assert _linux_exe.pids_named("a-very-long-program-name") == {2}
         assert _linux_exe.pids_named("soffice.bin") == {1}
         assert _linux_exe.pids_named("") == set()
+
+
+def test_direct_walk_matches_the_reader_walk() -> None:
+    """#1354: the inlined /proc walk gives exactly the walk through _comm and exe_of."""
+    import os as _os
+
+    entries = _os.listdir("/proc")
+    direct = _linux_exe._scan_proc_direct(entries, {}, {})
+    by_comm: dict = {}
+    by_exe: dict = {}
+    for entry in entries:
+        if entry.isdigit():
+            pid = int(entry)
+            if comm := _linux_exe._comm(pid):
+                by_comm.setdefault(comm, set()).add(pid)
+            if exe := _linux_exe.exe_of(pid):
+                by_exe.setdefault(_os.path.basename(exe), set()).add(pid)
+    me = _os.getpid()
+    # Processes may come and go between the walks; this one is in both.
+    assert me in direct[0][_linux_exe._comm(me)] and me in by_comm[_linux_exe._comm(me)]
+    common = set(direct[0]) & set(by_comm)
+    assert len(common) >= 0.9 * max(len(by_comm), 1)
+    for name in common:
+        assert len(direct[0][name] ^ by_comm[name]) <= 2
+    exe = _os.path.basename(_linux_exe.exe_of(me))
+    assert me in direct[1][exe] and me in by_exe[exe]

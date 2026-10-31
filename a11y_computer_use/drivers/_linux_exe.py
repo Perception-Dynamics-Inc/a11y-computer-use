@@ -135,6 +135,8 @@ def _scan_proc() -> tuple[dict[str, set[int]], dict[str, set[int]]]:
         entries = os.listdir("/proc")
     except OSError:
         return by_comm, by_exe
+    if _comm is _REAL_COMM and exe_of is _REAL_EXE_OF:
+        return _scan_proc_direct(entries, by_comm, by_exe)
     # Most processes share a handful of executables: each distinct readlink
     # target is resolved once per walk (``exe_of`` still readlinks every pid).
     _WALK.realpaths = {}
@@ -151,6 +153,64 @@ def _scan_proc() -> tuple[dict[str, set[int]], dict[str, set[int]]]:
                 by_exe.setdefault(os.path.basename(exe), set()).add(pid)
     finally:
         _WALK.realpaths = None
+    return by_comm, by_exe
+
+
+def _scan_proc_direct(entries, by_comm, by_exe):
+    """``_scan_proc`` with ``_comm`` and ``exe_of`` inlined (#1354, terminal latency).
+
+    The same reads per pid (comm, then the exe link and its realpath) with the
+    same results, opened relative to one /proc directory fd. Used only while
+    ``_comm`` and ``exe_of`` are the real readers.
+    """
+    realpaths: dict[str, str] = {}
+    try:
+        proc = os.open("/proc", os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return by_comm, by_exe
+    try:
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            entry = str(pid)
+            comm = ""
+            try:
+                fd = os.open(entry + "/comm", os.O_RDONLY, dir_fd=proc)
+            except OSError:
+                fd = -1
+            if fd >= 0:
+                try:
+                    raw = os.read(fd, 4096)  # comm is at most 16 bytes
+                except OSError:
+                    raw = b""
+                finally:
+                    os.close(fd)
+                comm = raw.decode("utf-8", errors="replace").strip()
+            if comm:
+                pids = by_comm.get(comm)
+                if pids is None:
+                    by_comm[comm] = {pid}
+                else:
+                    pids.add(pid)
+            try:
+                target = os.readlink(entry + "/exe", dir_fd=proc)
+            except (OSError, ValueError):
+                continue
+            if target.endswith(" (deleted)"):
+                continue
+            resolved = realpaths.get(target)
+            if resolved is None:
+                resolved = realpaths[target] = os.path.realpath(target)
+            if resolved:
+                base = os.path.basename(resolved)
+                pids = by_exe.get(base)
+                if pids is None:
+                    by_exe[base] = {pid}
+                else:
+                    pids.add(pid)
+    finally:
+        os.close(proc)
     return by_comm, by_exe
 
 
@@ -772,3 +832,8 @@ def _diagnose(bad: str, why: str, exes: dict[int, str | None], raw: dict[int, st
             cur = ppid
         parts.append("pid " + " <- ".join(chain))
     return "; ".join(parts)
+
+
+# The real readers, so ``_scan_proc`` knows when it may inline them (#1354).
+_REAL_COMM = _comm
+_REAL_EXE_OF = exe_of
