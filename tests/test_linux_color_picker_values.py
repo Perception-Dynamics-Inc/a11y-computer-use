@@ -20,6 +20,7 @@ RED = {"tag": "input", "id": "rValueContainer", "text-input-type": "text", "maxl
 HUE = {"tag": "input", "id": "hValueContainer", "maxlength": "3"}
 SAT = {"tag": "input", "id": "sValueContainer", "maxlength": "4"}
 HEX = {"tag": "input", "id": "hexValueContainer", "maxlength": "7"}
+GREEN = {"tag": "input", "id": "gValueContainer", "text-input-type": "text", "maxlength": "3"}
 
 
 @pytest.mark.parametrize("attrs,value", [
@@ -108,10 +109,16 @@ class _Field:
         self.text = text
         self.accept = accept
         self.typed: list[str] = []
+        self.dom: str | None = None  # the DOM value when it differs from the rendered text
+
+    def dom_value(self):
+        return self.text if self.dom is None else self.dom
 
 
-def _keyed(monkeypatch, field, chords):
-    _chrome_field(monkeypatch, HEX)
+def _keyed(monkeypatch, field, chords, attrs=HEX):
+    _chrome_field(monkeypatch, attrs)
+    # The DOM value as read through PRIMARY: on Chromium only it confirms a rollback.
+    monkeypatch.setattr(_atspi, "chromium_dom_text", lambda acc: field.dom_value())
     monkeypatch.setattr(_linux_ime, "ascii_passthrough", lambda _t: contextlib.nullcontext())
     monkeypatch.setattr(_atspi, "_full_text", lambda acc: field.text)
     monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
@@ -180,3 +187,79 @@ def test_non_chromium_keyed_failure_keeps_returning_false(monkeypatch) -> None:
     _keyed(monkeypatch, field, chords)
     monkeypatch.setattr(_atspi, "_chromium_app", lambda acc: False)
     assert _atspi._replace_with_keys(object(), "new") is False
+
+
+def test_green_channel_mismatch_rolls_back_with_restored_true(monkeypatch) -> None:
+    # Tester's forced mismatch: Green holds 10, 77 is written and does not stick.
+    chords: list[str] = []
+    field = _Field("10", lambda t: "7" if t == "77" else t)
+    _keyed(monkeypatch, field, chords, GREEN)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    detail = exc.value.detail
+    assert detail["outcome"] == "partial" and detail["input_sent"] is True
+    assert field.dom_value() == "10" and detail["restored"] is True
+    assert chords == []
+
+
+def test_green_channel_rollback_retries_a_restore_that_did_not_land(monkeypatch) -> None:
+    # The first typed-back "10" is swallowed by the popup's parse; the DOM is
+    # left at 77 until the rollback confirms and retries.
+    chords: list[str] = []
+    restores = []
+
+    def accept(t):
+        if t == "10":
+            restores.append(t)
+            return "77" if len(restores) == 1 else "10"
+        return t
+
+    field = _Field("10", accept)
+    _keyed(monkeypatch, field, chords, GREEN)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)  # 77 forced to mismatch
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert len(restores) == 2
+    assert field.dom_value() == "10" and exc.value.detail["restored"] is True
+
+
+def test_green_channel_failed_rollback_reports_restored_false(monkeypatch) -> None:
+    chords: list[str] = []
+    field = _Field("10", lambda t: "77")  # the field keeps 77 whatever is typed back
+    _keyed(monkeypatch, field, chords, GREEN)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert field.dom_value() == "77"
+    assert exc.value.detail["restored"] is False
+    assert "'77'" in exc.value.detail["evidence"]
+
+
+def test_rendered_match_with_wrong_dom_reports_restored_false(monkeypatch) -> None:
+    # The rendered read shows the original back, but the DOM value is not it
+    # (as under CSS text-transform): restored must follow the DOM.
+    chords: list[str] = []
+    field = _Field("10", lambda t: t)
+    _keyed(monkeypatch, field, chords, GREEN)
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    real_type = _atspi._type_into_target
+
+    def type_into(acc, text):
+        real_type(acc, text)
+        field.dom = "77"  # the page keeps 77 whatever the rendered text says
+
+    monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert field.text == "10" and field.dom_value() == "77"
+    assert exc.value.detail["restored"] is False
+
+
+def test_keyed_mismatch_without_a_rollback_result_checks_the_dom(monkeypatch) -> None:
+    field = _Field("ABC", lambda t: t)
+    field.dom = "xyz"
+    _keyed(monkeypatch, field, [], GREEN)
+    err = _atspi._keyed_write_mismatch(object(), "new", "ABC")
+    assert err.detail["restored"] is False
+    field.dom = "ABC"
+    assert _atspi._keyed_write_mismatch(object(), "new", "ABC").detail["restored"] is True

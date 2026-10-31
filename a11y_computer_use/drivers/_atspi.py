@@ -11410,11 +11410,21 @@ def _replace_with_keys(acc, text: str) -> bool:
     dom_original = False
     from a11y_computer_use.drivers import _linux_ime
 
-    def rollback() -> None:
-        if dom_original:
-            chromium_replace_dom_text(acc, original)
-        else:
-            _restore_text(acc, original)
+    def rollback() -> bool:
+        # Every refusal puts the original back and confirms it. On Chromium
+        # only the DOM value confirms (#1394): the rendered read can be a CSS
+        # case rendering, or lag behind a colour-picker channel's own parse.
+        for _ in range(_ROLLBACK_ATTEMPTS):
+            try:
+                if chrome:
+                    chromium_replace_dom_text(acc, original)
+                else:
+                    _restore_text(acc, original)
+            except ComputerUseError:
+                pass
+            if _rollback_confirmed(acc, original, chrome):
+                return True
+        return False
 
     # One engine switch covers the clear, the write and a restore (#1219). The
     # original is typed back if the write fails, so it must be typeable too:
@@ -11447,22 +11457,43 @@ def _replace_with_keys(acc, text: str) -> bool:
         except ComputerUseError:
             rollback()
             raise
-        rollback()
+        restored = rollback()
     if chrome:
         # Keys reached the page: its input listeners already ran, so this is
         # not a clean refusal even when the field reads the old text (#1394).
-        raise _keyed_write_mismatch(acc, text, original)
+        raise _keyed_write_mismatch(acc, text, original, restored=restored)
     return False
 
 
-def _keyed_write_mismatch(acc, text: str, original: str | None):
-    """A failed write whose keys were already sent, reported as ``partial``."""
+_ROLLBACK_ATTEMPTS = 2
+
+
+def _rollback_confirmed(acc, original: str | None, chrome: bool) -> bool:
+    """Whether the field holds ``original`` again; on Chromium the DOM value decides.
+
+    The rendered read never confirms a Chromium field by itself: under CSS
+    text-transform it can match while the DOM value is wrong (#1388). A blank
+    original is confirmed by a blank field (no case rendering of "" is text).
+    """
+    if original is None:
+        return False
+    if chrome:
+        if _text_is_blank(original):
+            return _text_is_blank(_full_text(acc)) and not chromium_dom_text(acc)
+        return chromium_dom_text(acc) == original
     now = _full_text(acc)
-    restored = original is not None and (now == original or _texts_match(now, original))
-    if not restored and original is not None and _chromium_app(acc):
-        # Under CSS text-transform the rendered read differs in case from a
-        # DOM-value restore (#1388), so the DOM value decides.
-        restored = chromium_dom_text(acc) == original
+    return now == original or _texts_match(now, original)
+
+
+def _keyed_write_mismatch(acc, text: str, original: str | None, *, restored: bool | None = None):
+    """A failed write whose keys were already sent, reported as ``partial``.
+
+    ``restored`` is the confirmed rollback result; when not given it is
+    checked here, by the DOM value on Chromium.
+    """
+    now = _full_text(acc)
+    if restored is None:
+        restored = _rollback_confirmed(acc, original, _chromium_app(acc))
     evidence = (
         f"keys for {text!r} were sent and the field did not keep them; the page "
         "may have received input events"
