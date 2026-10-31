@@ -165,3 +165,20 @@ def test_renderer_busy_without_sysconf_is_unknown(monkeypatch):
 
     monkeypatch.delattr(os, "sysconf", raising=False)
     assert _page_health.renderer_busy((0.0, {5: 0}), (1.0, {5: 100})) is None
+
+
+@pytest.mark.parametrize("now", [15.802417778250641, 600.1, 1e6 + 0.3])
+def test_remaining_never_exceeds_budget_on_a_clock_that_has_not_ticked(endpoint, monkeypatch, now):
+    """A coarse monotonic clock (Windows) can read the same value twice;
+    (now + BUDGET) - now may then round above BUDGET."""
+    seen = []
+    class Transport:
+        def send(self, raw): pass
+        def recv(self, timeout=None):
+            seen.append(timeout)
+            return json.dumps({"id": 1, "result": {"result": {"value": 1}}})
+        def close(self): pass
+    monkeypatch.setattr(_page_health.time, "monotonic", lambda: now)
+    monkeypatch.setattr(_cdp, "connect", lambda *args, **kw: Transport())
+    assert _page_health.probe(42, "Busy Lab - Google Chrome", "file:///busy.html") is True
+    assert seen and all(0 < timeout <= _page_health.BUDGET for timeout in seen)
