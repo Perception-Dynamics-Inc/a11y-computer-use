@@ -15056,3 +15056,154 @@ def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_linux_chrome_deep_controls_obey_the_modal_boundary(tmp_path) -> None:
+    """#1381: controls 40 groups deep act inside an aria-modal dialog, and stay refused behind it.
+
+    Live Chrome. Each page subtree is 40 nested ``role=group`` divs, which
+    puts the inputs more than 32 accessibles below the desktop. The modal
+    guard used to stop its ancestor walk at 32 nodes and refuse every such
+    control with ``modal_boundary_unavailable``. Inside the open dialog,
+    ``type``, ``set_value`` and ``click`` by ref must land, five times each.
+    Behind it, the same calls must be refused ``outside_active_modal`` and
+    leave the background controls untouched.
+    """
+    from a11y_computer_use import safety, server
+
+    def nest(inner: str, tag: str) -> str:
+        for level in range(40):
+            inner = f'<div role=group aria-label="{tag}{level}">{inner}</div>'
+        return inner
+
+    behind = nest(
+        "<input aria-label='behind input'>"
+        "<button onclick=\"this.textContent='behind hit'\">behind button</button>", "b")
+    inside = nest(
+        "<input aria-label='inside input'>"
+        "<button onclick=\"this.dataset.n=(+this.dataset.n||0)+1;"
+        "this.textContent='inside clicked '+this.dataset.n\">inside clicked 0</button>", "d")
+    html = (
+        "<!doctype html><meta charset=utf-8><title>deepmodal</title>"
+        f"<main>{behind}</main>"
+        "<div role=dialog aria-modal=true aria-label='Deep dialog' "
+        "style='position:fixed;left:300px;top:150px;width:420px;background:#eee;"
+        f"border:1px solid #333;padding:8px'>{inside}</div>"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "deep-modal", html)
+    try:
+        wanted = {"behind input", "behind button", "inside input", "inside clicked 0"}
+        deadline = time.monotonic() + 45
+        titles: set[str] = set()
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited {proc.returncode} before the page was exposed")
+            try:
+                titles = {el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements}
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            if wanted <= titles:
+                break
+            time.sleep(0.5)
+        assert wanted <= titles, sorted(titles)[:80]
+        store = safety.PermissionStore(tmp_path / "deep-modal-permissions.json")
+        store.set_tier("chrome", safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "deep-modal-audit"), driver=driver,
+        )
+
+        def element(prefix: str):
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            runtime._current = shot
+            return next(el for el in shot.elements if el.title.startswith(prefix))
+
+        def refused(call) -> str:
+            with pytest.raises(ComputerUseError) as caught:
+                call()
+            return (caught.value.detail or {}).get("reason", "")
+
+        for attempt in range(1, 6):
+            typed = runtime.type_text(f"t{attempt}", ref=element("inside input").ref)
+            assert typed.outcome == "confirmed", (attempt, typed.outcome, typed.evidence)
+            assert f"t{attempt}" in _shown(element("inside input").value)
+
+            result = runtime.set_value(element("inside input").ref, f"v{attempt}")
+            assert str(result).startswith("set "), (attempt, result)
+            assert _shown(element("inside input").value) == f"v{attempt}"
+
+            runtime.click(element("inside clicked").ref)
+            clicked = f"inside clicked {attempt}"
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline and element("inside clicked").title != clicked:
+                time.sleep(0.2)
+            assert element("inside clicked").title == clicked
+
+            assert refused(lambda: runtime.type_text(
+                "x", ref=element("behind input").ref)) == "outside_active_modal"
+            assert refused(lambda: runtime.set_value(
+                element("behind input").ref, "x")) == "outside_active_modal"
+            assert refused(lambda: runtime.click(
+                element("behind button").ref)) == "outside_active_modal"
+        assert _shown(element("behind input").value) == ""
+        assert element("behind button").title == "behind button"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_linux_chrome_deep_controls_work_with_no_modal_open(tmp_path) -> None:
+    """#1381: with no dialog anywhere, controls 40 groups deep accept ref input.
+
+    Main refused them ``modal_boundary_unavailable`` past 32 ancestors.
+    """
+    from a11y_computer_use import safety, server
+
+    inner = ("<input aria-label='deep input'>"
+             "<button onclick=\"this.textContent='deep hit'\">deep button</button>")
+    for level in range(40):
+        inner = f'<div role=group aria-label="g{level}">{inner}</div>'
+    driver, proc = _launch_chrome_file(
+        tmp_path, "deep-nomodal", f"<!doctype html><meta charset=utf-8><title>deep</title>{inner}")
+    try:
+        deadline = time.monotonic() + 45
+        titles: set[str] = set()
+        while time.monotonic() < deadline and not {"deep input", "deep button"} <= titles:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited {proc.returncode} before the page was exposed")
+            try:
+                titles = {el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements}
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            time.sleep(0.5)
+        assert {"deep input", "deep button"} <= titles, sorted(titles)[:80]
+        store = safety.PermissionStore(tmp_path / "deep-nomodal-permissions.json")
+        store.set_tier("chrome", safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "deep-nomodal-audit"), driver=driver,
+        )
+
+        def element(prefix: str):
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            runtime._current = shot
+            return next(el for el in shot.elements if el.title.startswith(prefix))
+
+        typed = runtime.type_text("abc", ref=element("deep input").ref)
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert str(runtime.set_value(element("deep input").ref, "xyz")).startswith("set ")
+        assert _shown(element("deep input").value) == "xyz"
+        runtime.click(element("deep button").ref)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and element("deep ").title != "deep hit":
+            time.sleep(0.2)
+        assert any(el.title == "deep hit" for el in driver.snapshot(Scope.WINDOW, "chrome").elements)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
