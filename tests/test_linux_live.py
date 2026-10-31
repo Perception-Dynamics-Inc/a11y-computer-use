@@ -15309,3 +15309,89 @@ def test_linux_chrome_ref_scrolled_off_by_a_later_find_still_acts(tmp_path) -> N
         assert "clicked card25" in clicked(), result
     finally:
         _stop_group(proc)
+
+
+def test_linux_chrome_media_controls_hidden_refs_printed_after_act(tmp_path) -> None:
+    """#1408: refs printed after a video's controls auto-hide must act.
+
+    Live Chrome. A ``<video controls>`` above an ``<audio controls>``. Once
+    the video plays, Chrome drops its UA control buttons from the tree, and
+    other media-control nodes are read where those buttons were. The audio
+    scrubber ref that ``find`` prints must resolve to the scrubber and
+    ``set_value`` must seek the audio. The ref held for the video's
+    play button now names another element, so it stays refused.
+    """
+    import re
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("no ffmpeg to make the media clips")
+    for name, args in (
+        ("clip.webm", ["-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=30",
+                       "-c:v", "libvpx", "-b:v", "100k"]),
+        ("tone.ogg", ["-f", "lavfi", "-i", "sine=frequency=440:duration=30", "-c:a", "libvorbis"]),
+    ):
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", *args, str(tmp_path / name)],
+                       check=True, timeout=120)
+    html = (
+        "<!doctype html><html><head><title>media</title></head><body>"
+        "<video id=v controls muted width=640 src='clip.webm'></video><br>"
+        "<audio id=a controls src='tone.ogg'></audio><script>"
+        "a.onseeked=()=>{document.title='seeked '+Math.round(a.currentTime)};"
+        "v.onplaying=()=>{document.title='playing'};"
+        "</script></body></html>"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "media1408", html)
+    try:
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if "audio time scrubber" in _titles(shot):
+                    break
+            time.sleep(0.3)
+        else:
+            raise AssertionError("Chrome did not show the audio scrubber")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+
+        def window_title() -> str:
+            return " ".join(el.title or "" for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+                            if el.role == "AXWindow")
+
+        runtime.desktop_snapshot("chrome", mode="interactive")
+        found = runtime.find("chrome", text="play")
+        play = re.search(r"\b(e\d+) button \"play\"", found)
+        assert play, found
+        runtime.click(play.group(1))
+        for _ in range(30):
+            if "playing" in window_title():
+                break
+            time.sleep(0.2)
+        assert "playing" in window_title(), "the video did not start"
+        time.sleep(4)  # Chrome hides the video's controls while it plays.
+        for attempt in range(2):
+            found = (runtime.find("chrome", text="audio time scrubber") if attempt == 0
+                     else runtime.desktop_snapshot("chrome", mode="interactive"))
+            slider = re.search(r"\b(e\d+) slider \"audio time scrubber\"", found)
+            assert slider, found
+            result = runtime.set_value(slider.group(1), "20")
+            assert "audio time scrubber" in result or slider.group(1) in result, result
+        seeked = ""
+        for _ in range(20):
+            seeked = window_title()
+            if "seeked 20" in seeked:
+                break
+            time.sleep(0.2)
+        assert "seeked 20" in seeked, seeked
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()

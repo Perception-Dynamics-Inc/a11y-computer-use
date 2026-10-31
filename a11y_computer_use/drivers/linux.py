@@ -4495,6 +4495,9 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         self._refuse_chromium_occluded(element, handle)
         if handle is not None:
+            # A value the field cannot hold is refused before anything is
+            # focused, written, or typed (#1394).
+            self._run(lambda: _atspi._refuse_invalid_field_value(handle, value))
             # Before the window is raised, the field focused or a DOM write made:
             # any of them can commit or cancel an open composition (#1219).
             self._run(lambda: _atspi.refuse_open_composition(handle))

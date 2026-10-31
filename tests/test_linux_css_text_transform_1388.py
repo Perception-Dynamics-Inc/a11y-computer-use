@@ -139,8 +139,14 @@ def test_set_value_refusal_rolls_back_to_dom_original(chromium, keys):
     log, field = keys
     chromium["dom"] = "abc"
     field["text"] = "ABC"
-    # The write lands re-cased by script: DOM never equals the request.
-    assert _atspi._replace_with_keys(object(), "straße") is False
+    # The write lands re-cased by script: DOM never equals the request. Keys
+    # reached the page, so after the rollback this is a partial (#1394), not
+    # a clean refusal.
+    with pytest.raises(_atspi.ComputerUseError) as err:
+        _atspi._replace_with_keys(object(), "straße")
+    detail = err.value.detail
+    assert detail["input_sent"] is True and detail["outcome"] == "partial"
+    assert detail["restored"] is True
     assert chromium["set"] == ["abc"]
     assert ("restore_rendered", "ABC") not in log
 

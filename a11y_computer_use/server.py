@@ -4455,23 +4455,15 @@ class Runtime:
                         verified_rename or same_node_rename or same_node
                     ):
                         changed[element.ref] = snap
-                        # Only a control the agent can act on needs a working
-                        # number. Containers and surface roots keep the
-                        # refused one: their children's parent links and the
-                        # popover-cover check follow those refs.
-                        # A control behind a modal is shown blocked, not
-                        # clickable or editable, yet its ref must still reach
-                        # the outside_active_modal refusal rather than stale_ref
-                        # against the earlier issuance (#1274).
-                        blocked_control = element.blocked_by_modal and (
-                            element.role in observe._CLICKABLE_ROLES
-                            or element.role in observe._EDITABLE_ROLES
-                        )
-                        if ((element.clickable or element.editable or blocked_control)
-                                and element.role not in self._SURFACE_ROLES):
-                            reissue[element.ref] = new_identity
-                            if shifted_control:
-                                keep_number[element.ref] = candidates[0].ref
+                        # A number is never moved onto a different element
+                        # (#1408): whatever now sits under it, control,
+                        # slider, text or container, is shown under a fresh
+                        # number, and the held number stays refused for the
+                        # element it was issued for. rename_refs carries the
+                        # parent links of its children.
+                        reissue[element.ref] = new_identity
+                        if shifted_control:
+                            keep_number[element.ref] = candidates[0].ref
                         continue
                 # A reload starts a new epoch, so refs are not compared with
                 # the old page. A ref whose control became an irreversible one
