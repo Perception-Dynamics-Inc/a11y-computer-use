@@ -15382,3 +15382,108 @@ def test_linux_chrome_aria_menubar_without_aria_controls_items_click(tmp_path) -
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_linux_chrome_aria_menubar_sibling_items_click_while_menu_open(tmp_path) -> None:
+    """#1417: with Format open, sibling menubar items File and Help are clickable.
+
+    Live Chrome. APG menubar openers have no ``aria-controls``. The open
+    Format menu drops below the bar, so it does not cover File or Help;
+    clicking them by ref must run them, not be refused ``occluded_target``.
+    A page button really under the open Format menu is still refused and
+    nothing reaches it. Refs come from ``find(role="menuitem")`` so the
+    address bar's text never matches.
+    """
+    import re
+
+    html = (
+        "<!doctype html><html><head><title>bar</title><style>"
+        "ul{list-style:none;margin:0;padding:0}"
+        "[role=menubar]{margin-top:8px}"
+        "[role=menubar]>li{display:inline-block;position:relative;margin-right:24px}"
+        "[role=menu]{position:absolute;top:100%;left:0;background:#fff;"
+        "border:1px solid #000;width:200px;z-index:5}"
+        "[role=menu][hidden]{display:none}"
+        "#under{position:absolute;top:60px;left:120px;width:120px}"
+        "</style></head><body>"
+        "<ul role=menubar aria-label=Doc>"
+        "<li role=none><a role=menuitem href=# id=file aria-haspopup=true aria-expanded=false>File</a>"
+        "<ul role=menu aria-label=File hidden><li role=none><a role=menuitem href=#>New</a></li></ul></li>"
+        "<li role=none><a role=menuitem href=# id=fmt aria-haspopup=true aria-expanded=false>Format</a>"
+        "<ul role=menu aria-label=Format hidden>"
+        "<li role=none><a role=menuitem href=#>Bold</a></li>"
+        "<li role=none><a role=menuitem href=#>Italic</a></li>"
+        "<li role=none><a role=menuitem href=#>Underline</a></li>"
+        "<li role=none><a role=menuitem href=#>Strike</a></li></ul></li>"
+        "<li role=none><a role=menuitem href=# id=help aria-haspopup=true aria-expanded=false>Help</a>"
+        "<ul role=menu aria-label=Help hidden><li role=none><a role=menuitem href=#>About</a></li></ul></li>"
+        "</ul><button id=under>Under menu</button><script>"
+        "let log=[];"
+        "document.querySelectorAll('[aria-haspopup]').forEach(o=>o.onclick=e=>{"
+        "e.preventDefault();document.querySelectorAll('[aria-haspopup]').forEach(p=>{"
+        "p.setAttribute('aria-expanded','false');p.nextElementSibling.hidden=true});"
+        "o.setAttribute('aria-expanded','true');o.nextElementSibling.hidden=false;"
+        "log.push('open:'+o.textContent);document.title=log.join(' ')});"
+        "under.onclick=()=>{log.push('under:clicked');document.title=log.join(' ')};"
+        "</script></body></html>"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "menubar1417", html)
+    try:
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if "Format" in _titles(shot):
+                    break
+            time.sleep(0.3)
+        else:
+            raise AssertionError("Chrome did not show the menubar")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+
+        def window_title() -> str:
+            return " ".join(el.title or "" for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+                            if el.role == "AXWindow")
+
+        def menuitem(name: str) -> str:
+            found = runtime.find("chrome", text=name, role="menuitem")
+            match = re.search(rf"\b(e\d+) menuitem \"{name}\"", found)
+            assert match, found
+            return match.group(1)
+
+        def wait_title(text: str) -> bool:
+            for _ in range(20):
+                if text in window_title():
+                    return True
+                time.sleep(0.2)
+            return False
+
+        runtime.click(menuitem("Format"))
+        assert wait_title("open:Format")
+        runtime.click(menuitem("File"))
+        assert wait_title("open:Format open:File")
+        runtime.click(menuitem("Format"))
+        assert wait_title("open:File open:Format")
+        runtime.click(menuitem("Help"))
+        assert wait_title("open:Format open:Help")
+        # Reopen Format: a page button its real bounds cover is still refused.
+        runtime.click(menuitem("Format"))
+        assert wait_title("open:Help open:Format")
+        found = runtime.find("chrome", text="Under menu")
+        under = re.search(r"\b(e\d+) button \"Under menu\"", found)
+        assert under, found
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.click(under.group(1))
+        assert "occluded_target" in str(exc.value) or "covered" in str(exc.value)
+        assert "under:clicked" not in window_title()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
