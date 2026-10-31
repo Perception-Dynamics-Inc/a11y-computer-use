@@ -25295,6 +25295,38 @@ def _modal_ancestry_complete(chain) -> bool:
     return bool(chain) and _parent_of(chain[-1]) is None
 
 
+def same_accessible(left, right) -> bool:
+    """True when two handles name one native accessible."""
+    if left is right:
+        return True
+    try:
+        if left == right:
+            return True
+    except Exception:  # noqa: BLE001 - incomparable wrappers are different
+        pass
+    lp, rp = getattr(left, "path", None), getattr(right, "path", None)
+    if isinstance(lp, str) and lp and lp == rp:
+        la, ra = getattr(left, "app", None), getattr(right, "app", None)
+        return la is not None and (la is ra or la == ra)
+    return False
+
+
+def inside_open_modal(acc) -> bool:
+    """True when ``acc`` sits inside a dialog in its full ancestry.
+
+    An incomplete ancestry read raises rather than answering False.
+    """
+    chain = _modal_ancestry(acc)
+    if not _modal_ancestry_complete(chain):
+        raise ComputerUseError(ErrorCode.UNSUPPORTED,
+            "Cannot establish the target window's modal boundary; no input was sent",
+            detail={"reason": "modal_boundary_unavailable"})
+    for node in chain[1:]:
+        if _role_name(node) in {"dialog", "alert", "file chooser"}:
+            return True
+    return False
+
+
 def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, point=None) -> bool:
     """Refuse before input when the addressed accessible is outside a modal."""
     if root is None:

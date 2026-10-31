@@ -295,6 +295,9 @@ def test_linux_type_into_inserts_only_after_focus_is_confirmed(monkeypatch) -> N
     # This test checks focus/insert ordering on a synthetic handle, so the
     # pre-insert read must not load the platform's PyGObject binding.
     monkeypatch.setattr(_atspi, "_readable_text", lambda _acc: "")
+    # The #1392 pre-input modal read on this synthetic handle must not load
+    # the platform's PyGObject binding (absent on macOS/Windows CI).
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", lambda *a, **k: False)
     monkeypatch.setattr(
         _atspi, "insert_text", lambda _acc, text: order.append(f"insert:{text}") or len(text),
     )

@@ -7,6 +7,14 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [Unreleased]
+
+### Safety
+
+- Bind every ref to its element's identity at snapshot time. A ref from an older snapshot is refused as `stale_ref` (`target_changed`) before any click, `type` or `set_value` if a later snapshot would give that number to a different element (for example the input of a `showModal()` dialog); the other element gets a fresh `eN` number instead. Refs keep the `eN` format, an unchanged control keeps its ref, and `find`/`scroll_to_find` apply the same check. Refs #1386
+- On Linux, a held page ref whose element sits behind a `showModal()` or `aria-modal` dialog is refused as `outside_active_modal` before `type`, `set_value` or click. Chrome drops that element from the tree, and the ref used to be matched to the dialog's control with the same role and name. A web field's focus handoff into a dialog is refused before any key, and an unreadable modal boundary refuses (`modal_boundary_unavailable`). `find` no longer refuses an unchanged control when it reports a different wrapper chain above the same native node. Refs #1386
+- `find` and `scroll_to_find` keep the number an agent already holds for an unchanged control, even when their wider read numbers that control differently and puts another control at the held number; the other control gets a fresh number, so the held ref still acts on the same element. A held page ref is refused as `outside_active_modal` before `type` or `set_value` while its element is behind an open modal, also after a click moved focus into the dialog. On Linux, a ref whose issued accessible is still alive is matched against one more tree read when the first read missed it (Firefox rebuilds a just-shown `aria-modal` dialog). Refs #1392
+
 ## [0.4.81] - 2026-10-30
 
 14 commits since v0.4.80, through #1342. A patch release of Linux safety fixes: app grants are now bound to the real executable, user and AT-SPI bus owner of the target process, and to the X server's owner of a window, never to a name the app chose for itself. It also brings Qt 6 editing, GTK notebook and window-closing key fixes.
