@@ -3163,22 +3163,40 @@ class LinuxDriver:
             return
         raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _refuse_chromium_occluded(self, element: Element, handle,
+                                  x: int | None = None, y: int | None = None) -> None:
+        """Refuse any Chromium ref action on a target an open page menu covers.
+
+        Runs before every activation path (pointer, doAction, CDP, focus by
+        ref) and before any side effect (#1387). Without (x, y) the target's
+        own center is checked. A check that raises fails closed.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None or not isinstance(element, Element):
+            return
+        try:
+            occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
+        except Exception:  # noqa: BLE001 - an unreadable check refuses
+            occluder = ("menu", "(occluder check failed)")
+        if occluder is None:
+            return
+        where = "at the click point" if x is not None else ""
+        raise ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{element.ref} ({element.role} {element.title!r}) is covered {where} "
+            f"by {occluder[0]} {occluder[1]!r}; nothing was sent".replace("  ", " "),
+            detail={
+                "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
+                "hint": "Close the menu (Escape) or act on the menu item instead.",
+            },
+        )
+
     def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int) -> None:
         """Refuse page ref clicks whose native hit test cannot confirm the target."""
         from a11y_computer_use.drivers import _atspi
 
-        occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
-        if occluder is not None:
-            raise ComputerUseError(
-                ErrorCode.STALE_REF,
-                f"{element.ref} ({element.role} {element.title!r}) is covered at the click "
-                f"point by {occluder[0]} {occluder[1]!r}; "
-                "no click was sent",
-                detail={
-                    "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
-                    "hint": "Close the menu (Escape) or act on the menu item instead.",
-                },
-            )
+        self._refuse_chromium_occluded(element, handle, x, y)
         if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
@@ -3689,6 +3707,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if not self._run(lambda: _atspi.chromium_page_button(handle)):
             return None
+        self._refuse_chromium_occluded(element, handle)
         self._verify_chromium_row_target(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
@@ -3856,6 +3875,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_chromium_occluded(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_calendar_click(element, handle)
         self._refuse_expander_click(element, handle)
@@ -4293,6 +4313,7 @@ class LinuxDriver:
         self._check_readback = None
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_chromium_occluded(element, handle)
         if handle is not None:
             # Before the window is raised, the field focused or a DOM write made:
             # any of them can commit or cancel an open composition (#1219).
@@ -4611,6 +4632,7 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_chromium_occluded(target, handle)
             self._verify_chromium_row_target(target, handle)
             self._refuse_calendar_click(target, handle)
             self._refuse_expander_click(target, handle)

@@ -21786,15 +21786,21 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     return False
 
 
-def chromium_menu_occluder(acc, x: int, y: int):
+def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
     """A showing page menu over (x, y) that does not contain ``acc`` (#1387).
 
     Chromium answers AT-SPI hit tests from a cache of its last hover result
     while the point stays inside that node's bounds, so a menu opened over
     the target keeps reporting the target. One Collection query for showing
     menus in the target's document reads the real overlay. Returns the
-    menu's (role, name), None when nothing covers the point, or the
-    document's when a showing menu has no readable bounds (fail closed).
+    menu's (role, name), or None when nothing covers the point. A showing
+    menu whose bounds cannot be read is reported as covering (fail closed),
+    and so is any showing menu when the matches cannot be read.
+
+    Without (x, y) the target's own on-screen center is the point, for the
+    node-bound paths (doAction, CDP, focus by ref) that send no pointer
+    input but must not act on a covered control either (#1387). When the
+    target's bounds cannot be read, any showing menu outside it covers it.
     """
     if acc is None or not _chromium_app(acc):
         return None
@@ -21822,16 +21828,25 @@ def chromium_menu_occluder(acc, x: int, y: int):
         rule = Atspi.MatchRule.new(
             states, mt.ALL, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
         )
-        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 8, True)
     except Exception:  # noqa: BLE001 - fakes and GTK expose no Collection
         return None
+    try:
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 8, True)
+    except Exception:  # noqa: BLE001 - a Collection that cannot answer fails closed
+        return "menu", "(unreadable open menus)"
     keys = {_ancestor_key(node) for node in chain}
+    if x is None or y is None:
+        own = _raw_rect(acc, "SCREEN")
+        if own is not None and own[2] > 0 and own[3] > 0:
+            x, y = int(own[0] + own[2] // 2), int(own[1] + own[3] // 2)
+        else:
+            x = y = None
     for menu in hits or []:
         if _ancestor_key(menu) in keys:
             continue  # the target is inside this menu
         box = _raw_rect(menu, "SCREEN")
-        if box is None:
-            return _role_name(document), _node_name(document)
+        if box is None or x is None:
+            return _role_name(menu) or "menu", _node_name(menu)
         left, top, width, height = box
         if width > 0 and height > 0 and left <= x < left + width and top <= y < top + height:
             return _role_name(menu), _node_name(menu)
