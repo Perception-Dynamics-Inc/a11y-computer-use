@@ -23,6 +23,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
 import html
 import math
 import os
@@ -17061,6 +17062,9 @@ def _clear_number_input(acc) -> bool:
     return False
 
 
+_PEER_LOG = logging.getLogger("a11y_computer_use.peer_fields")
+
+
 _TRACKED_FIELD_ROLES = frozenset({
     "entry", "password text", "combo box", "spin button",
 })
@@ -17109,7 +17113,8 @@ def _field_walk_root(acc):
     """The document or frame that holds ``acc`` and its sibling fields."""
     node = acc
     document = None
-    frame = acc
+    frame = None
+    top = None
     seen_keys: set = set()
     for _ in range(_FULL_ANCESTRY_MAX):
         if node is not None:
@@ -17122,13 +17127,21 @@ def _field_walk_root(acc):
             break
         role = _role_name(parent)
         if role == "application":
+            top = node
             break
         if role in {"document web", "document frame"}:
             document = parent
         if role in {"frame", "window", "dialog"}:
             frame = parent
         node = parent
-    return document or frame
+    if document is not None or frame is not None:
+        return document or frame
+    # A frameless top level, e.g. a bare QWidget exposed as 'filler' right
+    # under 'application' (#1420 review): its fields are peers too. Never the
+    # target itself, and never the whole application.
+    if top is not None and top is not acc:
+        return top
+    return None
 
 
 def _collect_peer_fields(acc) -> dict[str, str]:
@@ -17170,9 +17183,15 @@ def _collect_peer_fields(acc) -> dict[str, str]:
 def peer_field_texts(acc) -> dict[str, str]:
     """Peer field text before a set_value. Empty when the tree cannot be read."""
     try:
-        return _collect_peer_fields(acc)
+        found = _collect_peer_fields(acc)
     except Exception:
+        _PEER_LOG.debug("peer field snapshot failed")
         return {}
+    if not found:
+        root = _field_walk_root(acc) if acc is not None else None
+        _PEER_LOG.debug("peer field snapshot empty root=%s",
+                        _role_name(root) if root is not None else None)
+    return found
 
 
 def changed_peer_fields(acc, before: dict) -> list[str]:
@@ -17187,7 +17206,10 @@ def changed_peer_fields(acc, before: dict) -> list[str]:
         return []
     changed: list[str] = []
     for key, old in before.items():
-        if key not in after or after[key] == old:
+        if key not in after:
+            _PEER_LOG.debug("peer field missing after edit key=%s", key)
+            continue
+        if after[key] == old:
             continue
         new = after[key]
         changed.append(f"{key}: {old!r} -> {new!r}"[:180])

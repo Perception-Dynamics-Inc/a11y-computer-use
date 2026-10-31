@@ -589,3 +589,72 @@ def test_qt_edit_logs_one_phase_timing_line(monkeypatch, field, caplog):
     assert len(lines) == 1
     for part in ("op=set_value", "focus=", "select=", "keys=", "readback=", "restore=", "total="):
         assert part in lines[0], lines[0]
+
+
+class _Node:
+    def __init__(self, role, name="", sid="", text=None, parent=None):
+        self.role, self.name, self.sid, self.text = role, name, sid, text
+        self.parent, self.kids = parent, []
+        if parent is not None:
+            parent.kids.append(self)
+
+
+def _frameless_qt_tree(monkeypatch):
+    """Tester's live probe: application > filler 'qcprobe' > Echo, Mirror (#1420)."""
+    app = _Node("application", "qcprobe")
+    filler = _Node("filler", "qcprobe", "QApplication.QWidget", parent=app)
+    echo = _Node("text", "Echo:", "QApplication.QWidget.QLineEdit", "echo", filler)
+    mirror = _Node("text", "Mirror:", "QApplication.QWidget.QLineEdit", "echo", filler)
+    monkeypatch.setattr(_atspi, "_role_name", lambda n: n.role)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda n: n.parent)
+    monkeypatch.setattr(_atspi, "_child_count", lambda n: len(n.kids))
+    monkeypatch.setattr(_atspi, "_child_at", lambda n, i: n.kids[i])
+    monkeypatch.setattr(_atspi, "_ancestor_key", lambda n: id(n))
+    monkeypatch.setattr(_atspi, "_stable_id", lambda n, *a: n.sid or None)
+    monkeypatch.setattr(_atspi, "_node_name", lambda n: n.name)
+    monkeypatch.setattr(_atspi, "_full_text", lambda n: n.text)
+    monkeypatch.setattr(_atspi, "_qt_app", lambda n: True)
+    monkeypatch.setattr(_atspi, "_state_has", lambda n, s: n.role == "text" and s in {"EDITABLE", "FOCUSABLE"})
+    monkeypatch.setattr(_atspi, "_number_input", lambda n: False)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda n: {})
+    monkeypatch.setattr(_atspi, "_is_tracked_field", _REAL_IS_TRACKED)
+    for name in ("peer_field_texts", "changed_peer_fields"):
+        monkeypatch.setattr(_atspi, name, getattr(_REAL_ATSPI, name))
+    return app, filler, echo, mirror
+
+
+_REAL_IS_TRACKED = _atspi._is_tracked_field
+
+
+def test_frameless_qt_top_level_walk_root_is_the_filler(monkeypatch):
+    app, filler, echo, mirror = _frameless_qt_tree(monkeypatch)
+    assert _atspi._field_walk_root(echo) is filler
+    # Same default Qt id, still distinct: only Mirror is a peer of Echo.
+    assert _atspi.peer_field_texts(echo) == {"text|Mirror:|QApplication.QWidget.QLineEdit#0": "echo"}
+
+
+def test_target_directly_under_application_has_no_walk_root(monkeypatch):
+    app, filler, echo, mirror = _frameless_qt_tree(monkeypatch)
+    lone = _Node("text", "Lone:", "x", "a", app)
+    assert _atspi._field_walk_root(lone) is None       # never the target, never the app
+    assert _atspi.peer_field_texts(lone) == {}
+
+
+def test_frameless_echo_mirror_change_is_reported(monkeypatch, caplog):
+    app, filler, echo, mirror = _frameless_qt_tree(monkeypatch)
+    before = _atspi.peer_field_texts(echo)
+    echo.text = mirror.text = "peer"
+    changed = _atspi.changed_peer_fields(echo, before)
+    assert changed == ["text|Mirror:|QApplication.QWidget.QLineEdit#0: 'echo' -> 'peer'"]
+    mirror.name = "Renamed:"
+    with caplog.at_level("DEBUG", logger="a11y_computer_use.peer_fields"):
+        assert _atspi.changed_peer_fields(echo, before) == []
+    assert "peer field missing after edit" in caplog.text
+
+
+def test_empty_peer_snapshot_is_logged(monkeypatch, caplog):
+    app, filler, echo, mirror = _frameless_qt_tree(monkeypatch)
+    filler.kids.remove(mirror)
+    with caplog.at_level("DEBUG", logger="a11y_computer_use.peer_fields"):
+        assert _atspi.peer_field_texts(echo) == {}
+    assert "peer field snapshot empty root=filler" in caplog.text
