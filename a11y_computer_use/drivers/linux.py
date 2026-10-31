@@ -5849,6 +5849,7 @@ class LinuxDriver:
         self._visible_action(element, "Type")
         context = self._run(lambda: _atspi.web_entry_context(handle))
         gecko_append = False
+        chrome_selection = None
         if (element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
                 and self._run(lambda: _atspi._chromium_app(handle))):
             if context is not None:
@@ -5859,10 +5860,21 @@ class LinuxDriver:
                 ))
                 if _page_health.probe(pid, title, url) is False:
                     raise _page_health.refusal()
-            # Accessibility focus bypasses page pointer handlers, including
-            # custom-value radios. Use the geometry-checked pointer path.
-            self.click(element)
-            if context is not None:
+            # #1425: a focused field holding a selection (the caller's
+            # ctrl+a) keeps it. The pointer press below collapsed it, so the
+            # text appended ("QQ" -> "QQhello") and the caret judge passed.
+            # Typing replaces a selection, as the keyboard does, and only an
+            # exact read-back of that replacement is a success.
+            if self._run(lambda: _atspi._focus_on_target(handle)):
+                chrome_selection = self._run(lambda: _atspi.entry_text_and_selection(handle))
+            if chrome_selection is None:
+                # Accessibility focus bypasses page pointer handlers, including
+                # custom-value radios. Use the geometry-checked pointer path.
+                self.click(element)
+            if chrome_selection is not None:
+                if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                    raise self._focus_lost_on(element)
+            elif context is not None:
                 # One wait checks the original entry and a detached remount.
                 # Do not re-grab focus after the requested pointer press.
                 try:
@@ -5952,7 +5964,20 @@ class LinuxDriver:
                 # Judge the read-back against an append. A write that loses
                 # or splits the prior text still fails this check.
                 append_state = (append_state[0], len(append_state[0]))
-        if append_state is None and context is not None and self._run(
+        if chrome_selection is not None:
+            # Re-read just before the keys: the selection must still be the
+            # one seen, or typing would not replace what the caller selected.
+            now = self._run(lambda: _atspi.entry_text_and_selection(handle))
+            if now != chrome_selection:
+                raise _atspi._text_mismatch(
+                    "selection_lost",
+                    "the field's selection changed before typing, so the text would "
+                    "not replace it; nothing was typed",
+                    expected=chrome_selection[0],
+                    actual=self._run(lambda: _atspi._full_text(handle)),
+                    input_sent=False,
+                )
+        if chrome_selection is None and append_state is None and context is not None and self._run(
             lambda: _atspi._chromium_app(handle)
         ):
             # Chrome web entries keep the caret the pointer press placed. A
@@ -5984,6 +6009,25 @@ class LinuxDriver:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
         self._raise_if_peers_changed(handle, peers, element)
+        if chrome_selection is not None:
+            prior, sel_start, sel_end = chrome_selection
+            want = prior[:sel_start] + text.replace("\r\n", "\n") + prior[sel_end:]
+            got = self._run(lambda: _atspi._full_text(handle))
+            for _ in range(10):
+                if got == want:
+                    break
+                time.sleep(0.05)
+                got = self._run(lambda: _atspi._full_text(handle))
+            if got != want:
+                raise _atspi._text_mismatch(
+                    "selection_not_replaced",
+                    f"the field read {got!r}, not the selection replaced by the text "
+                    f"({want!r}); the keys were sent, so check the field before typing again",
+                    expected=want,
+                    actual=got,
+                    input_sent=True,
+                )
+            self._type_expected = want
         if (
             append_state is not None and append_state[0]
             and not self._run(
