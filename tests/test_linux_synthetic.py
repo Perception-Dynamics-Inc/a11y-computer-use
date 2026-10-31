@@ -24960,6 +24960,60 @@ def test_chromium_shallow_modal_scan_cannot_tell(monkeypatch, failure):
     assert _atspi._modal_collection(document) is None
 
 
+@pytest.mark.parametrize("case", [
+    "unchanged", "renamed", "role", "on_screen", "other_node", "recycled_row", "no_reveal",
+])
+def test_reveal_scrolled_off_acts_only_on_the_unchanged_issued_node(monkeypatch, case):
+    """#1402: only the same live node, unchanged and off screen, is revealed.
+
+    A held ref whose element a later find scrolled away resolves after the
+    reveal. A renamed node, a different role, a node still on screen, a
+    re-resolution that lands on another native object, or a recycled row is
+    refused: None, so the caller keeps its stale_ref. Nothing is scrolled
+    unless the issued node proved unchanged first.
+    """
+    from dataclasses import replace
+
+    from a11y_computer_use import observe
+    from tests.conftest import build_synthetic_snapshot
+    from a11y_computer_use.drivers import _atspi
+
+    issued_node, other_node = object(), object()
+    identity = (("push button", "Row 3", (), ("k", "1")),)
+    element = Element("e3", "AXButton", "Row 3", None, None, "snap-issued",
+                      row_identity=identity if case == "recycled_row" else ())
+    resolved = replace(element, snapshot_id="snap-live", row_identity=())
+    snap = replace(build_synthetic_snapshot(), snapshot_id="snap-issued", elements=(element,))
+    handles = {("snap-issued", "e3"): issued_node,
+               ("snap-live", "e3"): other_node if case == "other_node" else issued_node}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: handles.get((sid, ref)))
+    monkeypatch.setattr(_atspi, "offscreen_extents",
+                        lambda h: None if case == "on_screen" else ((28.0, -4000.0), (54.0, 21.0)))
+    monkeypatch.setattr(_atspi, "_drop_cached_properties", lambda h: None)
+    monkeypatch.setattr(_atspi, "_role_name", lambda h: "label" if case == "role" else "push button")
+    monkeypatch.setattr(_atspi, "_node_name", lambda h: "Row 4" if case == "renamed" else "Row 3")
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda h: (":1.2", str(id(h))))
+    driver = LinuxDriver()
+
+    def verify_row(anchor, handle):
+        raise ComputerUseError(ErrorCode.STALE_REF, "row identity changed",
+                               detail={"reason": "row_identity_changed"})
+
+    monkeypatch.setattr(driver, "_verify_chromium_row_target", verify_row)
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    scrolled = []
+    monkeypatch.setattr(driver, "scroll_into_view",
+                        lambda el: scrolled.append(el.ref) or case != "no_reveal")
+    monkeypatch.setattr(driver, "resolve_ref", lambda s, ref, live=None: resolved)
+
+    found = driver.reveal_scrolled_off(snap, "e3")
+    if case == "unchanged":
+        assert found is resolved
+        assert scrolled == ["e3"]
+        return
+    assert found is None
+    if case in {"renamed", "role", "on_screen", "recycled_row"}:
+        assert scrolled == []
 def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeypatch) -> None:
     """Synthetic AT-SPI nodes, not a live Chrome page.
 
@@ -25115,3 +25169,28 @@ def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeyp
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()
         _atspi._CHROME_REBUILDING.clear()
+
+
+def test_resolve_does_not_reread_an_alive_offscreen_node(modal_boundary_tree, monkeypatch):
+    """#1402 timing: a node that is alive but off the display is pruned
+    from every read, so the #1392 second full read is skipped for it and the
+    stale_ref goes straight to the reveal path. An on-screen miss still
+    rereads once (see test_resolve_rereads_once_when_a_live_node_was_missed)."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    i = _ref_of(snap, inside)
+    real = driver.snapshot
+    reads = []
+
+    def probe(scope, app):
+        reads.append(1)
+        got = real(scope, app)
+        return __import__("dataclasses").replace(got, elements=tuple(
+            el for el in got.elements if el.title not in {inside.name, modal.name, bg.name}))
+
+    monkeypatch.setattr(driver, "effect_snapshot", probe, raising=False)
+    monkeypatch.setattr(_atspi, "offscreen_extents", lambda acc: ((0, -900), (40, 20)) if acc is inside else None)
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(snap, i.ref)
+    assert caught.value.code is ErrorCode.STALE_REF
+    assert len(reads) == 1

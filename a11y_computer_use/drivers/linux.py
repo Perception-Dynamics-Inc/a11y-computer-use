@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
@@ -2551,6 +2552,91 @@ class LinuxDriver:
             return False
         return not gone
 
+    def _issued_offscreen(self, snap: Snapshot, ref: str) -> bool:
+        """True when the issuing accessible of ``ref`` reads as off the display."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return False
+        run = getattr(self, "_run", None)
+        try:
+            found = (run(lambda: _atspi.offscreen_extents(handle)) if callable(run)
+                     else _atspi.offscreen_extents(handle))
+        except Exception:  # noqa: BLE001 - unreadable keeps the reread
+            return False
+        return found is not None
+
+    def reveal_scrolled_off(self, snap: Snapshot, ref: str) -> Element | None:
+        """Scroll an unchanged, scrolled-off issued element back and resolve it.
+
+        A later ``find`` can scroll the page or a container so a held ref's
+        element leaves the viewport (#1402). Its old position then holds
+        another element, so the position rematch refuses it. The issuing
+        accessible is still the same live object: when it is alive, off the
+        display, still has the issued role and name (and row identity), it
+        is scrolled into view and resolved again. The resolved element must
+        be that same native object, or None is returned and the caller keeps
+        its refusal. Nothing is clicked or typed here.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            anchor = snap.element(ref)
+        except KeyError:
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None or not anchor.title:
+            return None
+
+        def unchanged() -> bool:
+            if _atspi.offscreen_extents(handle) is None:
+                return False
+            _atspi._drop_cached_properties(handle)
+            role = _atspi._role_name(handle)
+            name = (_atspi._node_name(handle) or "").strip()
+            return _atspi._ROLE.get(role) == anchor.role and name == anchor.title
+
+        clock = time.perf_counter
+        marks: dict[str, float] = {}
+        start = clock()
+
+        def mark(phase: str) -> None:
+            marks[phase] = clock()
+
+        try:
+            try:
+                if not self._run(unchanged):
+                    return None
+                if anchor.row_identity:
+                    self._verify_chromium_row_target(anchor, handle)
+                key = self._run(lambda: _atspi._atspi_wrapper_key(handle))
+                mark("precheck")
+                if key is None or not self.scroll_into_view(anchor):
+                    return None
+                mark("scroll")
+                resolved = self.resolve_ref(snap, ref)
+                mark("resolve")
+                live_handle = observe.ax_handle_for(resolved.snapshot_id, resolved.ref)
+                if live_handle is None or self._run(lambda: _atspi._atspi_wrapper_key(live_handle)) != key:
+                    return None
+                mark("identity")
+            except ComputerUseError:
+                return None
+            except Exception:  # noqa: BLE001 - an unreadable reveal keeps the refusal
+                return None
+            return resolved
+        finally:
+            last, parts = start, []
+            for phase, at in marks.items():
+                parts.append(f"{phase}={(at - last) * 1000:.0f}ms")
+                last = at
+            logging.getLogger(__name__).debug(
+                "reveal_scrolled_off %s timing: %s total=%.0fms",
+                ref, " ".join(parts) or "-", (clock() - start) * 1000)
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
@@ -2607,7 +2693,11 @@ class LinuxDriver:
                 # only then; a gone node stays not_found (#1392 CI).
                 if (supplied or exc.code is not ErrorCode.STALE_REF
                         or exc.detail.get("reason") != "not_found"
-                        or not LinuxDriver._issued_alive(self, snap, ref)):
+                        or not LinuxDriver._issued_alive(self, snap, ref)
+                        or LinuxDriver._issued_offscreen(self, snap, ref)):
+                    # An alive node that is off the display is pruned from
+                    # every read, so a second full read cannot find it
+                    # (#1402 timing): the reveal path decides instead.
                     raise
                 live = probe(snap.scope, snap.app)
                 resolved = observe.rematch_ref(snap, ref, live)
