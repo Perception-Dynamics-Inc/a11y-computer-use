@@ -5991,9 +5991,12 @@ class LinuxDriver:
             peers = {}
         try:
             try:
-                count = self._type_confirmed_handle(handle, text)
+                if chrome_selection is not None:
+                    count = self._type_chrome_selection_keys(handle, element, text)
+                else:
+                    count = self._type_confirmed_handle(handle, text)
             except ComputerUseError as exc:
-                if exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                if chrome_selection is not None or exc.code is not ErrorCode.FOCUS_LOST or context is None:
                     raise
                 replacement = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
@@ -6181,6 +6184,30 @@ class LinuxDriver:
                 "evidence": "another field changed during type",
             },
         )
+
+    def _type_chrome_selection_keys(self, handle, element: Element, text: str) -> int:
+        """Replace a Chrome field's selection with real keys, only while it has focus.
+
+        #1425 (1 of 7 QQ runs on aa771304): the caller's ctrl+a had left the
+        document with no focused element, yet the field still read FOCUSED and
+        selected, so the pointer press was skipped. The text then went through
+        AT-SPI EditableText, which writes the value without focus and without
+        input events, and the value read-back matched. Keys reach only the
+        element that really has focus, so a field that lost it keeps its text
+        and the exact read-back after this refuses. Focus is read fresh here;
+        an unreadable focus is not focus.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        text = text.replace("\r\n", "\n")
+        if not text:
+            return 0
+        if self._run(lambda: _atspi._focus_on_target(handle)) is not True:
+            raise self._focus_lost_on(element)
+        if not self._run(lambda: _atspi._x11_keys_available()):
+            raise _wayland_input_error("type")
+        self._run(lambda: _atspi._type_into_target(handle, text))
+        return len(text)
 
     def _type_confirmed_handle(self, handle, text: str) -> int:
         """Insert ``text`` into a handle whose focus was already confirmed."""
