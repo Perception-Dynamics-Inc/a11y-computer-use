@@ -14966,7 +14966,7 @@ def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
     buttons = "".join(f"<button type=button>Btn {i}</button>" for i in range(60))
     points = "".join(
         f"<circle role=button aria-label='{'Outlier 777' if i == 777 else f'pt {i}'}' "
-        f"onclick=\"document.title='hit-'+this.getAttribute('aria-label')\" "
+        f"onclick=\"document.title='hit#'+this.getAttribute('aria-label').replace(/ /g,'_')\" "
         f"cx='{5 + (i % 50) * 9}' cy='{5 + (i // 50) * 9}' r='3'/>"
         for i in range(1500)
     )
@@ -15011,8 +15011,9 @@ def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
         assert "Btn 59" in found and "not found" not in found, found
         # Children past the 250-child fetch window: find, then click the
         # returned ref straight away, and check the page saw that child.
-        refs: dict[str, str] = {}
-        for name in ("Outlier 777", "pt 1499", "pt 260"):
+        names = ("Outlier 777", "pt 1499", "pt 260")
+
+        def find_ref(name: str) -> str:
             located = runtime.find("chrome", text=name)
             assert "no elements match" not in located, (name, located)
             target = next(
@@ -15021,18 +15022,34 @@ def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
                 None,
             )
             assert target is not None, (name, located)
-            refs[name] = target.ref
-            runtime.click(target.ref)
+            return target.ref
+
+        def click_lands(ref: str, name: str) -> None:
+            runtime.click(ref)
             landed = None
             deadline = time.monotonic() + 4
             while time.monotonic() < deadline:
                 titles = {str(row.get("title") or "") for row in driver.windows() or []}
-                hit = next((t for t in titles if t.startswith("hit-")), None)
-                if hit is not None and hit.startswith(f"hit-{name}") and not hit.startswith(f"hit-{name}0"):
-                    landed = hit
+                # The title spells the name with '_' so a later find of
+                # the name cannot match the window title instead.
+                hit = "hit#" + name.replace(" ", "_")
+                if any(t == hit or t.startswith(hit + " ") for t in titles):
+                    landed = True
                     break
                 time.sleep(0.15)
-            assert landed is not None, (name, driver.windows())
+            assert landed, (ref, name, driver.windows())
+
+        # Find then click straight away.
+        for name in names:
+            click_lands(find_ref(name), name)
+        # Find all three first, then click the earlier refs: each ref is its
+        # own child, the same on every find, and never the last one found.
+        refs = {name: find_ref(name) for name in names}
+        assert len(set(refs.values())) == len(names), refs
+        assert find_ref("Outlier 777") == refs["Outlier 777"]
+        find_ref("pt 260")
+        for name in names:
+            click_lands(refs[name], name)
     finally:
         proc.terminate()
         try:

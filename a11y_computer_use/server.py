@@ -4495,7 +4495,8 @@ class Runtime:
         """
         present = {el.ref for el in snap.elements}
         taken = present | set(anchors) | set(changed)
-        top = max((int(r[1:]) for r in taken if r[:1] == "e" and r[1:].isdigit()), default=0)
+        top = max((int(r[1:]) for r in taken
+                   if r[:1] == "e" and r[1:].isdigit() and not observe.is_pinned_ref(r)), default=0)
         earlier = {
             ref: identity
             for ref, identity in getattr(self, "_reissued_refs", {}).items()
@@ -5990,7 +5991,12 @@ class Runtime:
                         and not observe.find_elements(snap, text=text, role=role,
                                                       editable=editable, clickable=clickable)
                         and hidden(seek)):
-                    with self._child_seek(seek):
+                    # The first snapshot already ran the document and
+                    # table reveal for ``seek`` and it matched nothing, so
+                    # the armed one skips it and reads the far children only.
+                    if armed:
+                        self.driver._table_seek = None
+                    with self._child_seek(seek, far=True):
                         snap = self.driver.snapshot(Scope(scope), bundle)
             finally:
                 if armed:
@@ -6039,7 +6045,7 @@ class Runtime:
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
     @contextmanager
-    def _child_seek(self, text: str | None):
+    def _child_seek(self, text: str | None, *, far: bool = False):
         """Arm the driver's per-parent child search for one find (#1375).
 
         A parent's children past the fan-out caps are folded into ``… N
@@ -6051,11 +6057,14 @@ class Runtime:
             yield
             return
         previous = driver._child_seek
+        previous_far = getattr(driver, "_far_seek", False)
         driver._child_seek = text
+        driver._far_seek = bool(far and text)
         try:
             yield
         finally:
             driver._child_seek = previous
+            driver._far_seek = previous_far
 
     def expanded_children(self, app: str, ref: str) -> str:
         """The next page of ``ref``'s own children, contiguous with the last page.

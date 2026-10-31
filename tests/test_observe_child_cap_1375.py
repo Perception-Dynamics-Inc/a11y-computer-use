@@ -171,6 +171,10 @@ def _far_list(monkeypatch, names):
     from a11y_computer_use.drivers import _atspi
 
     kids = [_Kid(n) for n in names]
+    monkeypatch.setattr(observe, "_PINNED_REF_HOOK", None)
+    monkeypatch.setattr(_atspi, "_FAR_PINS", type(_atspi._FAR_PINS)())
+    monkeypatch.setattr(_atspi, "_FAR_REFS", {})
+    monkeypatch.setattr(_atspi, "_FAR_REF_PINS", {})
     monkeypatch.setattr(_atspi, "_child_at", lambda node, i: node[i] if i < len(node) else None)
     monkeypatch.setattr(_atspi, "_node_name", lambda child: child.name)
     monkeypatch.setattr(_atspi, "_extents", lambda child, **k: ((1.0, 2.0), (6.0, 6.0)))
@@ -249,3 +253,117 @@ def test_find_scans_unread_children_by_name_only_after_a_miss(monkeypatch) -> No
     reads.clear()
     assert driver.hidden_child_named("zzz nothing") is False
     assert len(reads) == 1250
+
+
+def _pinned_chart(monkeypatch):
+    """A 1500-point chart whose children 777 and 1499 were found past 250."""
+    from a11y_computer_use.drivers import _atspi
+
+    monkeypatch.setattr(observe, "_PINNED_REF_HOOK", None)
+    monkeypatch.setattr(_atspi, "_FAR_PINS", type(_atspi._FAR_PINS)())
+    monkeypatch.setattr(_atspi, "_FAR_REFS", {})
+    monkeypatch.setattr(_atspi, "_FAR_REF_PINS", {})
+    monkeypatch.setattr(_atspi, "_extents", lambda node, **k: (tuple(node["at"]), tuple(node["size"])))
+    monkeypatch.setattr(_atspi, "_child_at", lambda node, i: node["children"][i] if i < len(node["children"]) else None)
+    monkeypatch.setattr(_atspi, "_node_name", lambda node: node.get("title", ""))
+    chart = _point_chart(1500)
+    for index in (777, 1499):
+        _atspi.pin_far_child(chart["children"][index], chart, index, chart["children"][index]["title"])
+    return chart, _window(chart)
+
+
+def _ref_of(snap: Snapshot, title: str) -> str:
+    return next(el.ref for el in snap.elements if el.title == title)
+
+
+def test_far_children_have_distinct_refs_stable_across_finds(monkeypatch) -> None:
+    _chart, tree = _pinned_chart(monkeypatch)
+    ref_a = _ref_of(_snap(tree, seek="Outlier 777"), "Outlier 777")
+    ref_b = _ref_of(_snap(tree, seek="pt 1499"), "pt 1499")
+    assert ref_a != ref_b
+    assert observe.is_pinned_ref(ref_a) and observe.is_pinned_ref(ref_b)
+    assert _ref_of(_snap(tree, seek="Outlier 777"), "Outlier 777") == ref_a
+    both = _snap(tree, seek=("Outlier 777", "pt 1499"))
+    assert {_ref_of(both, "Outlier 777"), _ref_of(both, "pt 1499")} == {ref_a, ref_b}
+    # Pre-order refs never take a pinned number.
+    assert not any(observe.is_pinned_ref(el.ref) for el in _snap(tree).elements)
+
+
+def test_find_a_find_b_click_a_lands_on_a_or_refuses(monkeypatch) -> None:
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+    from a11y_computer_use.server import Runtime
+
+    chart, tree = _pinned_chart(monkeypatch)
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda fn: fn()
+    driver.effect_snapshot = lambda *a: _snap(tree)
+    driver.snapshot = driver.effect_snapshot
+    runtime = Runtime.__new__(Runtime)
+    runtime.driver = driver
+    first = _snap(tree, seek="Outlier 777")
+    ref_a = _ref_of(first, "Outlier 777")
+    runtime._current = first
+    runtime._note_issued(first, {ref_a})
+    second = _snap(tree, seek="pt 1499")
+    ref_b = _ref_of(second, "pt 1499")
+    runtime._current = second
+    runtime._note_issued(second, {ref_b})
+    assert ref_a != ref_b
+
+    snap, anchor = runtime._anchor(ref_a)
+    assert anchor.title == "Outlier 777"
+    assert driver.resolve_ref(snap, ref_a).title == "Outlier 777"
+    snap_b, _ = runtime._anchor(ref_b)
+    assert driver.resolve_ref(snap_b, ref_b).title == "pt 1499"
+
+    # A changed: refused, never redirected to B.
+    chart["children"][777]["title"] = "pt 77"
+    try:
+        driver.resolve_ref(snap, ref_a)
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.STALE_REF
+        assert exc.detail["reason"] == "title_changed"
+    else:
+        raise AssertionError("a changed far child must be refused")
+
+
+def test_pinned_ref_resolves_after_its_snapshot_handles_are_released(monkeypatch) -> None:
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    chart, tree = _pinned_chart(monkeypatch)
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda fn: fn()
+    driver.effect_snapshot = lambda *a: _snap(tree)
+    driver.snapshot = driver.effect_snapshot
+    first = _snap(tree, seek="Outlier 777")
+    ref_a = _ref_of(first, "Outlier 777")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *a: None)
+    assert driver.resolve_ref(first, ref_a).title == "Outlier 777"
+    chart["children"][777]["title"] = "pt 95"
+    try:
+        driver.resolve_ref(first, ref_a)
+    except Exception as exc:  # noqa: BLE001
+        assert getattr(exc, "detail", {}).get("reason") == "title_changed", exc
+    else:
+        raise AssertionError("must refuse, never rematch the slot")
+
+
+def test_only_find_after_a_miss_arms_the_far_child_scan() -> None:
+    """scroll_to_find keeps the 24-cap seek but never reads unfetched
+    children by name: its scrolls bring rows in, and a 300-row table scanned
+    on every scroll snapshot lost ROW-0300 under load."""
+    from a11y_computer_use.server import Runtime
+
+    class _Driver:
+        _child_seek = None
+        _far_seek = False
+
+    runtime = Runtime.__new__(Runtime)
+    runtime.driver = _Driver()
+    with runtime._child_seek("ROW-0300"):
+        assert runtime.driver._child_seek == "ROW-0300"
+        assert runtime.driver._far_seek is False
+    with runtime._child_seek("Outlier 777", far=True):
+        assert runtime.driver._far_seek is True
+    assert runtime.driver._child_seek is None and runtime.driver._far_seek is False

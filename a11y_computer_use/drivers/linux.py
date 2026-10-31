@@ -1419,6 +1419,7 @@ class LinuxDriver:
         #: Text armed by find / scroll_to_find so a named child past the
         #: per-parent caps is still walked (#1375). None on a plain snapshot.
         self._child_seek: str | None = None
+        self._far_seek: bool = False
         #: Texts that earlier finds matched. Later snapshots, including the
         #: one an action re-resolves its ref against, keep those children
         #: too, so a ref found past the caps still resolves (#1375).
@@ -1975,6 +1976,7 @@ class LinuxDriver:
                 accessor._table_seek = self._table_seek
                 accessor._expand_page = self._expand_page
                 accessor.child_seek = getattr(self, "_child_seek", None)
+                accessor.far_seek = bool(getattr(self, "_far_seek", False))
                 self._last_accessor = accessor
                 geometry = _atspi.primary_geometry()
 
@@ -2451,10 +2453,24 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         handle = observe.ax_handle_for(snap.snapshot_id, ref)
-        if handle is None or _atspi.far_pin(handle) is None:
+        pin = None
+        if observe.is_pinned_ref(ref):
+            # A pinned ref names one native child; never rematch it to a
+            # sibling. Its pin outlives the issuing snapshot's handles.
+            pin = _atspi._FAR_REF_PINS.get(int(ref[1:]) - observe.PINNED_REF_BASE)
+            if pin is None:
+                pin = _atspi.far_pin(handle) if handle is not None else None
+            if pin is None:
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    f"{ref} ({anchor.role} {anchor.title!r}) is no longer pinned; "
+                    "use find(text=...) to locate it again",
+                    detail={"ref": ref, "reason": "gone", "outcome": "refused"},
+                )
+        elif handle is None or _atspi.far_pin(handle) is None:
             return None
         run = getattr(self, "_run", None) or (lambda fn: fn())
-        reason = run(lambda: _atspi.far_child_check(handle))
+        reason = run(lambda: _atspi.far_child_check(handle, pin))
         if reason is None:
             return anchor
         raise ComputerUseError(

@@ -2108,9 +2108,13 @@ def align_refs(basis: Snapshot, current: Snapshot) -> Snapshot:
     mapping = _match_refs(basis, current)
     used = {el.ref for el in basis.elements}
     assigned: dict[str, str] = {}
+    used |= {el.ref for el in current.elements if is_pinned_ref(el.ref)}
     for el in current.elements:
         kept = mapping.get(el.ref)
-        if kept is not None and kept not in assigned.values():
+        if is_pinned_ref(el.ref):
+            # A child pinned to its parent and index keeps its own ref.
+            assigned[el.ref] = el.ref
+        elif kept is not None and not is_pinned_ref(kept) and kept not in assigned.values():
             assigned[el.ref] = kept
         else:
             assigned[el.ref] = _alloc_ref(used)
@@ -3109,6 +3113,33 @@ def _checked_state(role: str, subrole: str, value: object) -> bool | None:
         return None
 
 
+#: Refs at or above this number name one native child by parent and index
+#: (#1375). Pre-order refs stay below it, so the two never meet.
+PINNED_REF_BASE = 1_000_000
+_PINNED_REF_HOOK = None
+
+
+def set_pinned_ref_hook(hook) -> None:
+    """Install ``hook(handle) -> int | None``: a stable number for ``handle``."""
+    global _PINNED_REF_HOOK
+    _PINNED_REF_HOOK = hook
+
+
+def is_pinned_ref(ref: str | None) -> bool:
+    return bool(ref) and ref[:1] == "e" and ref[1:].isdigit() and int(ref[1:]) >= PINNED_REF_BASE
+
+
+def _pinned_ref(handle: object) -> str | None:
+    hook = _PINNED_REF_HOOK
+    if hook is None:
+        return None
+    try:
+        number = hook(handle)
+    except Exception:  # noqa: BLE001 - an unpinned node keeps its pre-order ref
+        return None
+    return f"e{PINNED_REF_BASE + int(number)}" if number is not None else None
+
+
 def _flatten(
     node: _PNode,
     parent_ref: str | None,
@@ -3124,7 +3155,8 @@ def _flatten(
     """Assign pre-order refs and emit `Element`s (parents before children)."""
     instance_id = node.raw.instance_id or instance_id
     document_id = node.raw.document_id or document_id
-    ref = f"e{len(out) + 1}"
+    pinned = _pinned_ref(node.node) if node.node is not None and _PINNED_REF_HOOK else None
+    ref = pinned or f"e{len(out) + 1}"
     path = parent_path + (node.raw.role,)
     clickable, editable, secure = _target_flags(node.raw)
     if node.node is not None:  # retain the live handle for act-time AX actions

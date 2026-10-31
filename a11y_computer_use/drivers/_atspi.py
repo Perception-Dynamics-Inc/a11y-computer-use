@@ -4635,6 +4635,9 @@ class ATSPIAccessor:
         # direct child past the fetch window whose name contains this text
         # is still listed (#1375). None on a plain snapshot.
         self.child_seek: str | tuple[str, ...] | None = None
+        #: Read unfetched children by name too. find arms it only after a
+        #: miss; scroll_to_find never does, its scrolls bring rows in.
+        self.far_seek: bool = False
         # Children a list or table did not publish. ``take_unlisted`` moves
         # the count onto the prune elision for ``… N more``.
         self._unlisted: dict[object, int] = {}
@@ -5418,7 +5421,8 @@ class ATSPIAccessor:
             if child is not None:
                 kids.append(child)
         if total > count:
-            kids.extend(_seek_children_past_fetch(node, count, total, self.child_seek))
+            if self.far_seek:
+                kids.extend(_seek_children_past_fetch(node, count, total, self.child_seek))
             self.hidden_parents.append((node, count, total))
             # ``… N more`` counts the children never fetched, not only the
             # fetched ones the pruner dropped (#1375).
@@ -19866,13 +19870,40 @@ def pin_far_child(child, parent, index: int, name: str) -> None:
     key = _far_key(child)
     _FAR_PINS[key] = (child, parent, int(index), str(name), extents)
     _FAR_PINS.move_to_end(key)
+    from a11y_computer_use import observe
+
+    if observe._PINNED_REF_HOOK is None:
+        observe.set_pinned_ref_hook(far_ref_number)
     while len(_FAR_PINS) > _MAX_FAR_PINS:
         _FAR_PINS.popitem(last=False)
 
 
+#: ``(parent key, child index) -> number``: one ref per native child,
+#: the same on every find (#1375).
+_FAR_REFS: dict[tuple, int] = {}
+#: ``number -> (parent, index, name, extents)``: the pin behind each pinned
+#: ref, so the ref resolves after its snapshot's handles are released.
+_FAR_REF_PINS: dict[int, tuple] = {}
+
+
+def far_ref_number(handle) -> int | None:
+    """Stable ref number for a pinned far child, else None."""
+    pin = far_pin(handle)
+    if pin is None:
+        return None
+    parent, index = pin[0], pin[1]
+    key = (_far_key(parent), int(index))
+    number = _FAR_REFS.get(key)
+    if number is None:
+        number = len(_FAR_REFS) + 1
+        _FAR_REFS[key] = number
+    _FAR_REF_PINS[number] = tuple(pin)
+    return number
+
+
 def far_pin(handle):
     """``(parent, index, name, extents)`` for a pinned far child, else None."""
-    if handle is None:
+    if handle is None or not _FAR_PINS:
         return None
     key = _far_key(handle)
     entry = _FAR_PINS.get(key)
@@ -19881,13 +19912,13 @@ def far_pin(handle):
     return entry[1:]
 
 
-def far_child_check(handle) -> str | None:
+def far_child_check(handle, pin=None) -> str | None:
     """None when the pinned child is still at its index under its name.
 
     Otherwise the reason it is not: ``gone``, ``title_changed`` or
     ``moved``. Reads one child, its name and its extents.
     """
-    pin = far_pin(handle)
+    pin = far_pin(handle) if pin is None else pin
     if pin is None:
         return "gone"
     parent, index, name, extents = pin
