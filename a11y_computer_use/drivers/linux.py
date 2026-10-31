@@ -4634,6 +4634,10 @@ class LinuxDriver:
         if self._run(lambda: _atspi._blocks_text_replace(handle)):
             restore()
             raise _not_editable(element)
+        if self._run(lambda: _atspi.qt_line_edit(handle)):
+            # #1418: Qt emits textEdited only for keyboard input, so an
+            # EditableText write can change the text while the app ignores it.
+            return self._set_qt_line_edit(element, handle, value)
         context = self._run(lambda: _atspi.web_entry_context(handle))
         if context is not None and self._run(lambda: (
             _atspi.chromium_nested_web_entry(handle)
@@ -5964,6 +5968,15 @@ class LinuxDriver:
             peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
         except Exception:
             peers = {}
+        if self._run(lambda: _atspi.qt_line_edit(handle)):
+            # #1418: keys, not EditableText, so Qt emits textEdited.
+            try:
+                count = self._run(lambda: _atspi.qt_line_edit_keys(handle, text, replace=False))
+            except ComputerUseError as exc:
+                self._refuse_changed_peers(handle, peers, element, exc)
+                raise
+            self._raise_if_peers_changed(handle, peers, element)
+            return count
         try:
             try:
                 count = self._type_confirmed_handle(handle, text)
@@ -6097,6 +6110,29 @@ class LinuxDriver:
             detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch",
                     "expected": want, "actual": got},
         )
+
+    def _set_qt_line_edit(self, element: Element, handle, value: str) -> bool:
+        """Replace a Qt line edit's text with real key events (#1418).
+
+        Focus the field (AT-SPI focus, then the geometry-checked pointer
+        press when that does not take), require focus before any key,
+        select all and confirm the selection covers the value, then type.
+        Success is the exact read-back after keyboard input, which is the
+        path that fires Qt's ``textEdited``; EditableText is never used.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if _on_wayland():
+            raise _wayland_input_error("set_value on a Qt line edit")
+        self._run(lambda: _atspi.grab_focus(handle))
+        if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+            self.click(element)
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                raise self._focus_lost_on(element)
+        self._refuse_input_off_target(element, handle)
+        self._run(lambda: _atspi.qt_line_edit_keys(handle, value, replace=True))
+        self._focused_editable = handle
+        return True
 
     def _focus_lost_on(self, element: Element) -> ComputerUseError:
         return ComputerUseError(
@@ -6373,6 +6409,16 @@ class LinuxDriver:
             if status != "skip":
                 self._drawing_type_state = status
                 self._drawing_type_before = "" if shown is None else shown
+        if handle is not None and self._run(lambda: _atspi.qt_line_edit(handle)):
+            # #1418: a Qt line edit applies only keyboard edits (textEdited).
+            if _on_wayland():
+                raise _wayland_input_error("type into a Qt line edit")
+            if text.endswith("\n") and "\n" not in text[:-1] and "\t" not in text:
+                # Return is sent only after the text itself read back.
+                self._run(lambda: _atspi.qt_line_edit_keys(handle, text[:-1], replace=False))
+                self._run(lambda: _atspi._chord_into_target(handle, "Return"))
+                return len(text)
+            return self._run(lambda: _atspi.qt_line_edit_keys(handle, text, replace=False))
         if handle is not None:
             try:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))

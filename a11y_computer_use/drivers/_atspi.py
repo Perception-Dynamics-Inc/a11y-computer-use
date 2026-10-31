@@ -2906,7 +2906,7 @@ def gtk4_entry_needs_pointer_focus(acc) -> bool:
     """
     if acc is None or not _gtk4_app(acc):
         return False
-    if _role_name(acc) not in {"text", "entry", "password text"}:
+    if _role_name(acc) not in {"text", "entry"}:
         return False
     return _state_has(acc, "EDITABLE") and _state_has(acc, "SHOWING")
 
@@ -10432,6 +10432,118 @@ def entry_text_and_caret(acc) -> tuple[str, int] | None:
     if start != end or nchars != len(text):
         return None
     return text, caret
+
+
+_QT_KEY_EDIT_POLLS = 10
+_QT_KEY_EDIT_PAUSE_S = 0.05
+
+
+def qt_line_edit(acc) -> bool:
+    """A Qt single-line editable text field (QLineEdit, #1418).
+
+    Qt emits ``textEdited`` only for keyboard input. An AT-SPI EditableText
+    write changes the text without it, and widgets that listen only to user
+    edits (QColorDialog's "HTML:" field) ignore the value.
+    """
+    if acc is None or not _qt_app(acc):
+        return False
+    if _role_name(acc) not in {"text", "entry"}:
+        return False
+    if _state_has(acc, "MULTI_LINE") or not _state_has(acc, "SINGLE_LINE"):
+        return False
+    return bool(_state_has(acc, "EDITABLE"))
+
+
+def _qt_text_state(acc) -> tuple[str, int, int, int] | None:
+    """(text, caret, selection start, selection end) read fresh, else None."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    if nchars != len(text):
+        return None
+    caret, start, end = _caret_and_selection(acc, nchars)
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (caret, start, end)):
+        return None
+    return text, caret, start, end
+
+
+def qt_line_edit_keys(acc, text: str, *, replace: bool) -> int:
+    """Type ``text`` into a focused Qt line edit as real key events (#1418).
+
+    ``replace`` selects the whole text with ctrl+a first and requires the
+    selection to read back as the whole value before any character is
+    sent. Without it the keys land at the caret, replacing an existing
+    selection the way a keyboard does. The field has to read back exactly
+    as the keyboard edit would leave it, or the call raises; no success is
+    reported from an EditableText write the app may not have seen.
+    """
+    if "\n" in text or "\r" in text or "\t" in text:
+        raise _text_mismatch(
+            "single_line_field",
+            "a Qt single-line field cannot hold a newline or tab; nothing was typed",
+            expected=text,
+            input_sent=False,
+        )
+    if not _x11_keys_available():
+        from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "a Qt line edit only applies keyboard edits, and X11 key input is "
+            "unavailable; nothing was written",
+            detail={"platform": "linux", "reason": "qt_key_input_unavailable",
+                    "outcome": "refused", "input_sent": False},
+        )
+    state = _qt_text_state(acc)
+    if state is None:
+        raise _text_mismatch(
+            "text_unreadable",
+            "the Qt field's text and caret could not be read; nothing was typed",
+            input_sent=False,
+        )
+    before, caret, start, end = state
+    if replace and before:
+        _chord_into_target(acc, "ctrl+a")
+        for _ in range(_QT_KEY_EDIT_POLLS):
+            state = _qt_text_state(acc)
+            if state is not None and state[0] == before and (state[2], state[3]) == (0, len(before)):
+                break
+            time.sleep(_QT_KEY_EDIT_PAUSE_S)
+        else:
+            raise _text_mismatch(
+                "selection_not_whole",
+                "ctrl+a did not select the field's whole text; no characters were typed",
+                expected=text,
+                actual=state[0] if state else None,
+                input_sent=True,
+                keys_sent=["ctrl+a"],
+            )
+        start, end = 0, len(before)
+    if start != end:
+        want = before[:start] + text + before[end:]
+    elif replace:
+        want = text
+    else:
+        want = before[:caret] + text + before[caret:]
+    if text:
+        _type_into_target(acc, text)
+    got = _full_text(acc)
+    for _ in range(_QT_KEY_EDIT_POLLS):
+        if got == want:
+            return len(text)
+        time.sleep(_QT_KEY_EDIT_PAUSE_S)
+        got = _full_text(acc)
+    if got == want:
+        return len(text)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the Qt field reads {_excerpt(got)!r} after the keys, not {_excerpt(want)!r}; "
+        "the keys were sent, so check the field before typing again",
+        expected=want,
+        actual=got,
+        input_sent=True,
+    )
 
 
 def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
