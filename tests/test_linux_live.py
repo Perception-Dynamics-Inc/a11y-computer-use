@@ -15043,3 +15043,57 @@ def test_linux_chrome_deep_controls_obey_the_modal_boundary(tmp_path) -> None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_linux_chrome_deep_controls_work_with_no_modal_open(tmp_path) -> None:
+    """#1381: with no dialog anywhere, controls 40 groups deep accept ref input.
+
+    Main refused them ``modal_boundary_unavailable`` past 32 ancestors.
+    """
+    from a11y_computer_use import safety, server
+
+    inner = ("<input aria-label='deep input'>"
+             "<button onclick=\"this.textContent='deep hit'\">deep button</button>")
+    for level in range(40):
+        inner = f'<div role=group aria-label="g{level}">{inner}</div>'
+    driver, proc = _launch_chrome_file(
+        tmp_path, "deep-nomodal", f"<!doctype html><meta charset=utf-8><title>deep</title>{inner}")
+    try:
+        deadline = time.monotonic() + 45
+        titles: set[str] = set()
+        while time.monotonic() < deadline and not {"deep input", "deep button"} <= titles:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited {proc.returncode} before the page was exposed")
+            try:
+                titles = {el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements}
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            time.sleep(0.5)
+        assert {"deep input", "deep button"} <= titles, sorted(titles)[:80]
+        store = safety.PermissionStore(tmp_path / "deep-nomodal-permissions.json")
+        store.set_tier("chrome", safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "deep-nomodal-audit"), driver=driver,
+        )
+
+        def element(prefix: str):
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            runtime._current = shot
+            return next(el for el in shot.elements if el.title.startswith(prefix))
+
+        typed = runtime.type_text("abc", ref=element("deep input").ref)
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert str(runtime.set_value(element("deep input").ref, "xyz")).startswith("set ")
+        assert _shown(element("deep input").value) == "xyz"
+        runtime.click(element("deep button").ref)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and element("deep ").title != "deep hit":
+            time.sleep(0.2)
+        assert any(el.title == "deep hit" for el in driver.snapshot(Scope.WINDOW, "chrome").elements)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
