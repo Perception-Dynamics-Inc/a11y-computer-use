@@ -9042,6 +9042,7 @@ class Runtime:
             buffer_tried = False
             frame_latched = False
             frame_waits = 0
+            rebuild_waits = 0
             same_rows = 0
             previous_rows: tuple[str, ...] | None = None
             last_anchor: Element | None = None
@@ -9273,7 +9274,8 @@ class Runtime:
                 return f"{float(value):g}"
 
             def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
-                           budget_cap: float | None = None, unreadable: bool = False) -> str:
+                           budget_cap: float | None = None, unreadable: bool = False,
+                           rebuilding: bool = False) -> str:
                 names = () if not horizontal and header_only(shot, anchor) else row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
@@ -9291,6 +9293,14 @@ class Runtime:
                     f"not found after {count} scroll(s){why}: "
                     f"no element matches text={text!r} role={role!r}"
                 )
+                if rebuilding:
+                    heading = (
+                        f"page_tree_rebuilding after {count} scroll(s): "
+                        "Chrome's accessibility tree stayed unreadable after the navigation or reload "
+                        "(blank frames, or chrome_marked_hung: libatspi still refused calls to Chrome "
+                        "as a hung process after a reconnect); "
+                        f"text={text!r} role={role!r} was not searched"
+                    )
                 if unreadable:
                     heading = (
                         f"container_not_readable after {count} scroll(s): "
@@ -9346,6 +9356,16 @@ class Runtime:
                     return False
                 frame_latched = True
                 return True
+
+            def page_rebuilding() -> bool:
+                """True when the driver saw Chrome's tree still blank."""
+                probe = getattr(self.driver, "chrome_page_rebuilding", None)
+                if not callable(probe):
+                    return False
+                try:
+                    return bool(probe(bundle))
+                except Exception:
+                    return False
 
             def restore_page_frame() -> bool:
                 """Re-read until the page frame is back.
@@ -9930,6 +9950,15 @@ class Runtime:
                 if page_frame_missing(snap, anchor) and callable(
                     getattr(self.driver, "latch_chromium_find", None)
                 ):
+                    # A blank tree is Chrome rebuilding the page after a
+                    # navigation. Each snapshot already polled it, so those
+                    # reads are not frame waits. They have their own bound.
+                    if page_rebuilding():
+                        rebuild_waits += 1
+                        if rebuild_waits <= 2 and time.monotonic() < hard_deadline:
+                            restore_page_frame()
+                            continue
+                        return unfinished(issued, snap, anchor, budget_hit=False, rebuilding=True)
                     frame_waits += 1
                     if frame_waits <= 4:
                         restore_page_frame()

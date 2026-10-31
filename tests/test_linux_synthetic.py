@@ -24813,3 +24813,159 @@ def test_chromium_shallow_modal_scan_cannot_tell(monkeypatch, failure):
     monkeypatch.setattr(_atspi, "_atspi", lambda: (_ for _ in ()).throw(RuntimeError("timeout")))
     _atspi._modal_collection_state.busy = False
     assert _atspi._modal_collection(document) is None
+
+
+def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeypatch) -> None:
+    """Synthetic AT-SPI nodes, not a live Chrome page.
+
+    After a reload every Chrome frame is briefly blank: untitled, neither
+    ACTIVE nor SHOWING, with no content. The snapshot polls until the titled
+    page frame returns and picks it. A tree that stays blank is waited on only
+    for the short rebuild bound, and the pid is then reported as rebuilding.
+    A normal tree does not sleep at all.
+    """
+
+    class _States:
+        def __init__(self, names):
+            self.names = frozenset(names)
+
+    class _Node:
+        def __init__(self, name, *, role="frame", children=(), states=(), pid=6161):
+            self._name = name
+            self._role = role
+            self._children = list(children)
+            self._states = frozenset(states)
+            self._pid = pid
+            self._app = None
+
+        def get_name(self):
+            return self._name
+
+        def get_role_name(self):
+            return self._role
+
+        def get_child_count(self):
+            return len(self._children)
+
+        def get_child_at_index(self, index):
+            return self._children[index]
+
+        def get_state_set(self):
+            return _States(self._states)
+
+        def get_process_id(self):
+            return self._pid
+
+        def get_application(self):
+            return self._app
+
+        def get_toolkit_name(self):
+            return "Chrome"
+
+    def application(*frames):
+        app = _Node("Google Chrome", role="application", children=list(frames))
+        for frame in frames:
+            frame._app = app
+        return app
+
+    clock = {"t": 0.0, "sleeps": 0}
+    restore = {"after": None, "app": None, "page": None}
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+        clock["sleeps"] += 1
+        if restore["after"] is not None and clock["sleeps"] >= restore["after"]:
+            app, page = restore["app"], restore["page"]
+            if page not in app._children:
+                page._app = app
+                app._children.append(page)
+
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda budget_s=0.25: None)
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    _atspi._CHROME_REBUILDING.clear()
+    try:
+        blank = _Node("", children=[_Node("", role="panel")])
+        other = _Node("")
+        app = application(blank, other)
+        page = _Node(
+            "rowtable - Google Chrome",
+            states=("ACTIVE", "SHOWING"),
+            children=[_Node("rowtable", role="document web")],
+        )
+        restore.update(after=3, app=app, page=page)
+        assert _atspi.chromium_snapshot_root(blank) is page
+        assert clock["sleeps"] == 3
+        assert 6161 not in _atspi._CHROME_REBUILDING
+
+        clock.update(t=0.0, sleeps=0)
+        restore.update(after=None)
+        stuck = _Node("", children=[_Node("", role="panel")])
+        application(stuck, _Node(""))
+        assert _atspi.chromium_snapshot_root(stuck) is stuck
+        assert clock["t"] <= _atspi._CHROME_REBUILD_WAIT_S + _atspi._CHROME_REBUILD_POLL_S
+        assert 6161 in _atspi._CHROME_REBUILDING
+
+        clock.update(t=0.0, sleeps=0)
+        live = _Node("rowtable - Google Chrome", states=("ACTIVE", "SHOWING"),
+                     children=[_Node("rowtable", role="document web")])
+        application(live)
+        assert _atspi.chromium_snapshot_root(live) is live
+        assert clock["sleeps"] == 0
+        assert 6161 not in _atspi._CHROME_REBUILDING
+
+        # libatspi marked the browser hung: the app reads DEFUNCT and empty,
+        # and every call fails at once until the hang-check ping is answered.
+        class _Hung(_Node):
+            def __init__(self):
+                super().__init__("", role="application", states=("DEFUNCT",))
+                self.hung = True
+
+            def get_child_count(self):
+                if self.hung:
+                    raise RuntimeError("atspi_error: The process appears to be hung.")
+                return len(self._children)
+
+        clock.update(t=0.0, sleeps=0)
+        hung_app = _Hung()
+        hung_page = _Node("rowtable - Google Chrome", states=("ACTIVE", "SHOWING"),
+                          children=[_Node("rowtable", role="document web")])
+        hung_page._app = hung_app
+
+        # The mark is cleared by a reconnect, not waited out.
+        cleared = []
+
+        def reconnect(app):
+            cleared.append(app)
+            app.hung = False
+            app._states = frozenset()
+            if hung_page not in app._children:
+                app._children.append(hung_page)
+            return True
+
+        monkeypatch.setattr(_atspi, "_clear_chrome_hang", reconnect)
+        assert _atspi.chromium_snapshot_root(hung_page) is hung_page
+        assert cleared == [hung_app]
+        assert clock["sleeps"] == 0
+        assert 6161 not in _atspi._CHROME_REBUILDING
+
+        # A reconnect that does not clear the mark stays bounded and is recorded,
+        # and a later snapshot of that pid does not wait again.
+        clock.update(t=0.0, sleeps=0)
+        still = _Hung()
+        still_page = _Node("", states=())
+        still_page._app = still
+        monkeypatch.setattr(_atspi, "_clear_chrome_hang", lambda app: True)
+        _atspi.chromium_snapshot_root(still_page)
+        assert clock["t"] <= _atspi._CHROME_REBUILD_WAIT_S + _atspi._CHROME_REBUILD_POLL_S
+        assert 6161 in _atspi._CHROME_REBUILDING
+        clock.update(t=0.0, sleeps=0)
+        _atspi.chromium_snapshot_root(still_page)
+        assert clock["sleeps"] == 0
+    finally:
+        _atspi._BROWSER_BAR_PIDS.clear()
+        _atspi._BROWSER_BAR_CLEARED.clear()
+        _atspi._CHROME_REBUILDING.clear()

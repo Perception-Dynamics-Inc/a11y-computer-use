@@ -5196,6 +5196,17 @@ class LinuxDriver:
 
         return bool(self._run(lambda: _atspi.latch_chromium_find(app)))
 
+    def chrome_page_rebuilding(self, app: str) -> bool:
+        """True when Chrome's tree was still blank after the last snapshot's wait.
+
+        After a navigation or reload Chrome empties every frame while it
+        rebuilds the page. ``scroll_to_find`` then reports that state instead
+        of an empty search, and it does not count those reads as frame waits.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        return bool(self._run(lambda: _atspi.chrome_page_rebuilding(app)))
+
     def supports_in_page_find(self, app: str) -> bool:
         """True when Ctrl+F opens a find bar in ``app``.
 
