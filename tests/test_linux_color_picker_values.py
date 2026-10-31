@@ -263,3 +263,52 @@ def test_keyed_mismatch_without_a_rollback_result_checks_the_dom(monkeypatch) ->
     assert err.detail["restored"] is False
     field.dom = "ABC"
     assert _atspi._keyed_write_mismatch(object(), "new", "ABC").detail["restored"] is True
+
+
+def _popup_input(monkeypatch, attrs, shown):
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: dict(attrs))
+    monkeypatch.setattr(_atspi, "_full_text", lambda acc: shown)
+    # The popup's select-all never reaches PRIMARY: the scoped read must not use it.
+    monkeypatch.setattr(_atspi, "_primary_tool", lambda: pytest.fail("PRIMARY read in the popup"))
+    monkeypatch.setattr(_atspi, "_chord_into_target", lambda *a: pytest.fail("chord in the popup read"))
+
+
+def test_popup_channel_input_dom_value_is_read_from_the_input(monkeypatch) -> None:
+    _popup_input(monkeypatch, GREEN, "10")
+    assert _atspi.chromium_dom_text(object()) == "10"
+    _popup_input(monkeypatch, SAT, "50%")
+    assert _atspi.chromium_dom_text(object()) == "50%"
+
+
+@pytest.mark.parametrize("shown", ["#00FF0A", None, "ab"])
+def test_popup_input_with_cased_or_unreadable_text_is_unknown(monkeypatch, shown) -> None:
+    attrs = HEX if shown and shown.startswith("#") else GREEN
+    _popup_input(monkeypatch, attrs, shown)
+    assert _atspi.chromium_dom_text(object()) is None
+
+
+def test_popup_green_rollback_confirms_restored_through_the_scoped_read(monkeypatch) -> None:
+    chords: list[str] = []
+    field = _Field("10", lambda t: "7" if t == "77" else t)
+    _keyed(monkeypatch, field, chords, GREEN)
+    monkeypatch.setattr(_atspi, "chromium_dom_text", _REAL_DOM_TEXT)
+    monkeypatch.setattr(_atspi, "_primary_tool", lambda: pytest.fail("PRIMARY read in the popup"))
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert field.text == "10" and exc.value.detail["restored"] is True
+    assert field.typed == ["77", "10"]  # one rollback, no forced retry
+
+
+def test_popup_rollback_that_did_not_land_reports_false(monkeypatch) -> None:
+    field = _Field("10", lambda t: "77")
+    _keyed(monkeypatch, field, [], GREEN)
+    monkeypatch.setattr(_atspi, "chromium_dom_text", _REAL_DOM_TEXT)
+    monkeypatch.setattr(_atspi, "_primary_tool", lambda: pytest.fail("PRIMARY read in the popup"))
+    monkeypatch.setattr(_atspi, "_confirm_text", lambda acc, text: False)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "77")
+    assert exc.value.detail["restored"] is False
+
+
+_REAL_DOM_TEXT = _atspi.chromium_dom_text

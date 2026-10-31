@@ -11230,6 +11230,38 @@ def _read_primary(read_cmd: list[str]) -> str | None:
         return None
 
 
+_NOT_POPUP = object()
+
+
+def _colour_popup_dom_value(acc):
+    """The DOM value of a Chrome colour-picker popup input, ``None``, or ``_NOT_POPUP``.
+
+    The popup (color_picker.js) is a page popup: a select-all there does not
+    reach the X11 PRIMARY selection, so the PRIMARY read polled to its limit
+    and came back unread on every call. A refused write paid that several
+    times (the initial read, the rollback write's check and its confirmation,
+    and the retry they forced), and the restore could never confirm (#1394).
+
+    The value is read from the input itself instead. CSS can make an input's
+    rendered text differ from its value only by text-transform (case,
+    full-width) or text-security (masking). None of them yields a string with
+    no cased letters from a different value, so a rendered read without cased
+    letters (the channel fields: digits and ``%``) is the DOM value. A read
+    with cased letters (the hex field) or no read at all is unknown: ``None``.
+    """
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        return _NOT_POPUP
+    if (str(attrs.get("tag") or "").lower() != "input"
+            or str(attrs.get("id") or "") not in _CHROME_COLOR_FIELDS):
+        return _NOT_POPUP
+    now = _full_text(acc)
+    if not isinstance(now, str) or any(ch.lower() != ch or ch.upper() != ch for ch in now):
+        return None
+    return now
+
+
 def chromium_dom_text(acc) -> str | None:
     """The DOM value of a focused Chromium input or textarea, or ``None``.
 
@@ -11241,7 +11273,12 @@ def chromium_dom_text(acc) -> str | None:
     PRIMARY never left the nonce. Typing nothing and deleting nothing, it
     only replaces the X11 PRIMARY selection, which any select-all does.
     """
-    if acc is None or not _chromium_app(acc) or not _x11_keys_available():
+    if acc is None or not _chromium_app(acc):
+        return None
+    scoped = _colour_popup_dom_value(acc)
+    if scoped is not _NOT_POPUP:
+        return scoped
+    if not _x11_keys_available():
         return None
     tool = _primary_tool()
     if tool is None:
