@@ -24472,3 +24472,11 @@ def test_deep_click_landing_and_toplevel_checks():
     hit = _stack(tree.entry, 40, _GeckoNode("static", "inner text"), tree.app)
     assert _actionable._toplevel(tree.entry) is tree.frame
     assert _actionable._is_self_or_descendant(tree.entry, hit) is True
+
+
+def test_deep_firefox_frame_showing_and_date_segment_guard():
+    """#1381: the Firefox showing check and date-segment guard read past 8 levels."""
+    doc = _GeckoNode("document web", "Deep", ("SHOWING", "VISIBLE"))
+    _GeckoNode("frame", "Deep - Firefox", ("SHOWING",), [doc])
+    leaf = _stack(doc, 20, _GeckoNode("entry", "x", ("SHOWING",)))
+    assert _atspi._frame_hierarchy_showing(leaf) is True

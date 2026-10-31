@@ -11276,7 +11276,7 @@ def _refuse_gecko_date_segment_replace(acc) -> None:
     """
     if _role_name(acc) != "spin button" or not _gecko_app(acc):
         return
-    for node in _ancestor_chain(acc, 8):
+    for node in _full_ancestry(acc):
         role = _role_name(node)
         attrs = _get_attributes(node)
         kind = str(attrs.get("text-input-type") or "").lower()
@@ -21005,7 +21005,7 @@ def _frame_hierarchy_showing(node) -> bool:
     """
     # Parent reads can return fresh GI proxies. Keep them alive and use
     # native identity so a recycled Python id cannot hide the active page.
-    for current in _ancestor_chain(node, 8):
+    for current in _full_ancestry(node):
         role = _role_name(current)
         if role in {"document web", "document frame", "internal frame", "scroll pane"}:
             if _state_has(current, "SHOWING"):
