@@ -845,6 +845,27 @@ def _tree_has_showing_dialog(node: object, depth: int = 0) -> bool:
     return False
 
 
+def target_in_menu_bar(app: object, target: object) -> bool:
+    """True when ``target`` is the app's menu bar or sits inside it (#1413).
+
+    An ARIA menubar in a Chrome page keeps its open submenus inside the bar,
+    so a submenu item has the bar among its ancestors. Escape before a click
+    on that item closes the very menu chain that holds it. A native popup
+    window is not inside the bar and keeps the old dismiss. A read error
+    propagates, so the caller can refuse before any key is sent.
+    """
+    bar = find_menu_bar(app)
+    if bar is None or target is None:
+        return False
+    from a11y_computer_use.drivers import _atspi
+
+    want = _node_key(bar)
+    for node in _atspi._ancestor_chain(target, _atspi._FULL_ANCESTRY_MAX):
+        if _node_key(node) == want:
+            return True
+    return False
+
+
 def escape_reaches_menu(app: object) -> bool:
     """False when Escape would dismiss a showing dialog instead of the menu."""
     return not _tree_has_showing_dialog(app)
