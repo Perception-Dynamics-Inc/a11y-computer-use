@@ -5739,6 +5739,31 @@ class Runtime:
             return ""
         if not state or not state.get("open"):
             return ""
+        target = getattr(self, "_dismiss_target", None)
+        contains_fn = getattr(self.driver, "menu_contains_target", None)
+        if isinstance(target, Element) and callable(contains_fn):
+            # A target inside the open menu chain is clicked where it is.
+            # Escape would close the menu that holds it (#1413).
+            try:
+                inside = contains_fn(app, target)
+            except Exception:
+                inside = None
+            if inside is None:
+                path = [str(part) for part in (state.get("path") or [])]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "could not tell whether the target is inside the open menu; Escape was not sent",
+                    detail={
+                        "ref": target.ref,
+                        "reason": "menu_dismiss_blocked",
+                        "outcome": "refused",
+                        "path": path,
+                        "next": ["ref"],
+                        "evidence": "Escape could close the menu that holds the target, so nothing was sent",
+                    },
+                )
+            if inside:
+                return ""
         safe_fn = getattr(self.driver, "menu_escape_safe", None)
         if callable(safe_fn):
             try:
@@ -5768,7 +5793,7 @@ class Runtime:
             return ""
         return f" (closed open menu {' > '.join(str(t) for t in path)} first)" if path else ""
 
-    def _refuse_vanished_target(self, element: Element) -> None:
+    def _refuse_vanished_target(self, element: Element, sent: str = "") -> None:
         """Refuse when ``element`` disappeared before the pointer or the keys.
 
         The action has not been sent. A driver without this check, or a
@@ -5784,6 +5809,23 @@ class Runtime:
         if not gone:
             return
         title = f" {element.title!r}" if element.title else ""
+        if sent:
+            # A key already went out (#1413): say so, never "nothing was sent".
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}{title}) vanished after {sent} was sent; "
+                "the click was not sent",
+                detail={
+                    "ref": element.ref,
+                    "role": element.role,
+                    "reason": "target_vanished",
+                    "outcome": "refused",
+                    "sent": [sent],
+                    "next": ["ref"],
+                    "evidence": f"{sent} was sent first and {element.ref} was gone afterwards; "
+                                "the action itself was not sent",
+                },
+            )
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             f"{element.ref} ({element.role}{title}) vanished before the action; nothing was sent",
@@ -6982,9 +7024,13 @@ class Runtime:
                 cover = self._popover_cover(act, refresh=True)
                 if cover:
                     raise _not_visible(act.ref, "covered", act.bounds, f"the ref is covered by {cover}")
-            menu_note.append(self._dismiss_open_menu(app))
+            self._dismiss_target = act  # the menu chain holding it is kept (#1413)
+            try:
+                menu_note.append(self._dismiss_open_menu(app))
+            finally:
+                self._dismiss_target = None
             if isinstance(act, Element):
-                self._refuse_vanished_target(act)
+                self._refuse_vanished_target(act, "Escape" if menu_note[-1] else "")
                 sibling_cover = getattr(self.driver, "same_app_window_cover", None)
                 cover = sibling_cover(act, app) if sibling_cover is not None else None
                 if cover:
@@ -8039,8 +8085,12 @@ class Runtime:
             self._reject_domain(Click(target=live), app=gate)
             self._refuse_disabled(live, verb="type")
             self._guard_user(gate)
-            note.append(self._dismiss_open_menu(gate))
-            self._refuse_vanished_target(live)
+            self._dismiss_target = live  # the menu chain holding it is kept (#1413)
+            try:
+                note.append(self._dismiss_open_menu(gate))
+            finally:
+                self._dismiss_target = None
+            self._refuse_vanished_target(live, "Escape" if note[-1] else "")
             try:
                 return self._deliver_type_at_ref(live, text)
             except ComputerUseError as exc:
