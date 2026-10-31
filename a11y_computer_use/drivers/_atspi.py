@@ -21786,6 +21786,58 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     return False
 
 
+def chromium_menu_occluder(acc, x: int, y: int):
+    """A showing page menu over (x, y) that does not contain ``acc`` (#1387).
+
+    Chromium answers AT-SPI hit tests from a cache of its last hover result
+    while the point stays inside that node's bounds, so a menu opened over
+    the target keeps reporting the target. One Collection query for showing
+    menus in the target's document reads the real overlay. Returns the
+    menu's (role, name), None when nothing covers the point, or the
+    document's when a showing menu has no readable bounds (fail closed).
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    document = None
+    chain = []  # pinned while keys are compared: they may be id()-based
+    for node in _ancestor_chain(acc):
+        chain.append(node)
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            document = node
+            break
+        if role in {"frame", "window", "application"}:
+            break
+    if document is None:
+        return None
+    try:
+        Atspi = _atspi()
+        coll = _call_first(document, ("get_collection_iface", "get_collection"))
+        roles = [r for r in (getattr(Atspi.Role, "MENU", None),
+                             getattr(Atspi.Role, "POPUP_MENU", None)) if r is not None]
+        if coll is None or not roles:
+            return None
+        states = Atspi.StateSet.new([Atspi.StateType.SHOWING])
+        mt = Atspi.CollectionMatchType
+        rule = Atspi.MatchRule.new(
+            states, mt.ALL, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
+        )
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 8, True)
+    except Exception:  # noqa: BLE001 - fakes and GTK expose no Collection
+        return None
+    keys = {_ancestor_key(node) for node in chain}
+    for menu in hits or []:
+        if _ancestor_key(menu) in keys:
+            continue  # the target is inside this menu
+        box = _raw_rect(menu, "SCREEN")
+        if box is None:
+            return _role_name(document), _node_name(document)
+        left, top, width, height = box
+        if width > 0 and height > 0 and left <= x < left + width and top <= y < top + height:
+            return _role_name(menu), _node_name(menu)
+    return None
+
+
 def chromium_clipped_target(acc) -> bool:
     """A VISIBLE Chromium page node whose native state says it is not painted.
 

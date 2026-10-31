@@ -3167,6 +3167,18 @@ class LinuxDriver:
         """Refuse page ref clicks whose native hit test cannot confirm the target."""
         from a11y_computer_use.drivers import _atspi
 
+        occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
+        if occluder is not None:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.role} {element.title!r}) is covered at the click "
+                f"point by {occluder[0]} {occluder[1]!r}; "
+                "no click was sent",
+                detail={
+                    "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
+                    "hint": "Close the menu (Escape) or act on the menu item instead.",
+                },
+            )
         if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
