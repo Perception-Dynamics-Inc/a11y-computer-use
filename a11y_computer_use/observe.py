@@ -2872,23 +2872,37 @@ def _named_radio_group(raw: RawNode, kept: list[_PNode]) -> bool:
     )
 
 
-def _child_seek_needle(accessor: object) -> str | None:
-    """The folded text a find / scroll_to_find is looking for, if armed."""
-    seek = getattr(accessor, "child_seek", None)
-    if not isinstance(seek, str):
-        return None
-    folded = seek.replace("\u00a0", " ").strip().casefold()
-    return folded or None
+def _fold_seeks(seek: object) -> tuple[str, ...]:
+    """Folded, non-empty seek texts from a string or a sequence of strings."""
+    items = (seek,) if isinstance(seek, str) else tuple(seek or ()) if isinstance(seek, (tuple, list)) else ()
+    out = []
+    for item in items:
+        if isinstance(item, str):
+            folded = item.replace("\u00a0", " ").strip().casefold()
+            if folded and folded not in out:
+                out.append(folded)
+    return tuple(out)
 
 
-def _seek_hit_raw(raw: RawNode, needle: str) -> bool:
+def _child_seek_needle(accessor: object) -> tuple[str, ...] | None:
+    """The folded texts a find / scroll_to_find is looking for, if armed.
+
+    ``find`` arms it only after a plain snapshot matched nothing and left
+    children past the fetch window unread (#1375).
+    """
+    return _fold_seeks(getattr(accessor, "child_seek", None)) or None
+
+
+def _seek_hit_raw(raw: RawNode, needle: tuple[str, ...] | str) -> bool:
+    needles = (needle,) if isinstance(needle, str) else needle
     text = f"{raw.title or ''} {raw.description or ''}"
     if raw.value is not None:
         text += f" {raw.value}"
-    return needle in text.replace("\u00a0", " ").casefold()
+    text = text.replace("\u00a0", " ").casefold()
+    return any(n in text for n in needles)
 
 
-def _seek_hit_tree(node: _PNode, needle: str) -> bool:
+def _seek_hit_tree(node: _PNode, needle: tuple[str, ...] | str) -> bool:
     if _seek_hit_raw(node.raw, needle):
         return True
     return any(_seek_hit_tree(child, needle) for child in node.children)
@@ -2912,7 +2926,7 @@ def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
 
 
 def _cap_children(
-    kept: list[_PNode], cap: int, needle: str | None = None,
+    kept: list[_PNode], cap: int, needle: tuple[str, ...] | None = None,
 ) -> tuple[list[_PNode], int]:
     """Keep the ``cap`` highest-priority children, in document order.
 

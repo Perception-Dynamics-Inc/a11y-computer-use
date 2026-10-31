@@ -131,3 +131,121 @@ def test_atspi_seek_reads_past_fetch_window(monkeypatch) -> None:
     assert _atspi._seek_children_past_fetch(object(), start, 1500, "outlier 777") == [777]
     assert _atspi._seek_children_past_fetch(object(), start, 1500, None) == []
     assert _atspi._seek_children_past_fetch(object(), start, 1500, "pt 9999") == []
+
+
+def test_two_far_children_get_distinct_refs_and_resolve_back() -> None:
+    """Refs found past the caps stay distinct and re-resolve to that child.
+
+    The driver keeps earlier find texts armed (``remember_child_seek``), so
+    the live tree an action re-resolves against lists the same children.
+    """
+    tree = _window(_point_chart(1500))
+    found = _snap(tree, seek=("pt 1499", "outlier 777"))
+    far = {el.title: el.ref for el in found.elements if el.title in {"pt 1499", "Outlier 777"}}
+    assert set(far) == {"pt 1499", "Outlier 777"}
+    assert len(set(far.values())) == 2
+    live = _snap(tree, seek=("outlier 777", "pt 1499"))
+    for title, ref in far.items():
+        resolved = observe.rematch_ref(found, ref, live)
+        assert resolved.title == title
+
+
+def test_unarmed_live_tree_does_not_rebind_far_ref_to_a_sibling() -> None:
+    tree = _window(_point_chart(1500))
+    found = _snap(tree, seek="Outlier 777")
+    ref = next(el.ref for el in found.elements if el.title == "Outlier 777")
+    live = _snap(tree)
+    try:
+        resolved = observe.rematch_ref(found, ref, live)
+    except Exception:
+        return
+    assert resolved.title == "Outlier 777"
+
+
+class _Kid:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def _far_list(monkeypatch, names):
+    from a11y_computer_use.drivers import _atspi
+
+    kids = [_Kid(n) for n in names]
+    monkeypatch.setattr(_atspi, "_child_at", lambda node, i: node[i] if i < len(node) else None)
+    monkeypatch.setattr(_atspi, "_node_name", lambda child: child.name)
+    monkeypatch.setattr(_atspi, "_extents", lambda child, **k: ((1.0, 2.0), (6.0, 6.0)))
+    return _atspi, kids
+
+
+def test_far_child_is_keyed_to_parent_and_index(monkeypatch) -> None:
+    names = [f"pt {i}" for i in range(1500)]
+    names[777] = "Outlier 777"
+    _atspi, kids = _far_list(monkeypatch, names)
+    hits = _atspi._seek_children_past_fetch(kids, 250, 1500, ("outlier 777", "pt 1499"))
+    assert hits == [kids[777], kids[1499]]
+    assert _atspi.far_pin(kids[777])[1:3] == (777, "Outlier 777")
+    assert _atspi.far_pin(kids[1499])[1:3] == (1499, "pt 1499")
+    assert _atspi.far_child_check(kids[777]) is None
+    # A sibling now sits at index 777: refuse, never click the slot.
+    kids[777] = _Kid("pt 77")
+    assert _atspi.far_child_check(hits[0]) == "title_changed"
+    del kids[1000:]
+    assert _atspi.far_child_check(hits[1]) == "gone"
+
+
+def test_linux_resolve_ref_checks_far_child_name(monkeypatch) -> None:
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    names = [f"pt {i}" for i in range(1500)]
+    names[777] = "Outlier 777"
+    _atspi, kids = _far_list(monkeypatch, names)
+    _atspi._seek_children_past_fetch(kids, 250, 1500, "outlier 777")
+    snap = _snap(_window(_point_chart(1500)), seek="Outlier 777")
+    target = next(el for el in snap.elements if el.title == "Outlier 777")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: kids[777] if ref == target.ref else None)
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda fn: fn()
+    # The live tree an action reads does not list the far child at all.
+    unarmed = _snap(_window(_point_chart(1500)))
+    assert not any(el.title == "Outlier 777" for el in unarmed.elements)
+    driver.effect_snapshot = lambda *a: unarmed
+    driver.snapshot = driver.effect_snapshot
+    resolved = driver.resolve_ref(snap, target.ref)
+    assert resolved.title == "Outlier 777" and resolved.bounds == target.bounds
+    assert driver.take_resolved_popover_cover(resolved) == (True, None)
+    pinned = kids[777]
+    kids[777] = _Kid("pt 77")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: pinned)
+    try:
+        driver.resolve_ref(snap, target.ref)
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.STALE_REF
+        assert exc.detail["reason"] == "title_changed"
+    else:
+        raise AssertionError("a renamed slot must be refused")
+
+
+
+def test_find_scans_unread_children_by_name_only_after_a_miss(monkeypatch) -> None:
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    names = [f"pt {i}" for i in range(1500)]
+    names[777] = "Outlier 777"
+    _atspi, kids = _far_list(monkeypatch, names)
+    reads: list[int] = []
+    monkeypatch.setattr(_atspi, "_child_at", lambda node, i: reads.append(i) or node[i])
+    driver = LinuxDriver.__new__(LinuxDriver)
+    driver._run = lambda fn: fn()
+    driver._last_accessor = None
+    assert driver.hidden_child_named("Outlier 777") is False and reads == []
+
+    class Acc:
+        hidden_parents = [(kids, 250, 1500)]
+
+    driver._last_accessor = Acc()
+    assert driver.hidden_child_named("outlier 777") is True
+    assert reads[-1] == 777  # stops at the first hit
+    reads.clear()
+    assert driver.hidden_child_named("zzz nothing") is False
+    assert len(reads) == 1250

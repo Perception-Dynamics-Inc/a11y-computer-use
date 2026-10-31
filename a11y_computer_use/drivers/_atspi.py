@@ -22,6 +22,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import html
 import math
 import os
@@ -4633,10 +4634,13 @@ class ATSPIAccessor:
         # Set by LinuxDriver.snapshot for ``find`` / ``scroll_to_find``: a
         # direct child past the fetch window whose name contains this text
         # is still listed (#1375). None on a plain snapshot.
-        self.child_seek: str | None = None
+        self.child_seek: str | tuple[str, ...] | None = None
         # Children a list or table did not publish. ``take_unlisted`` moves
         # the count onto the prune elision for ``… N more``.
         self._unlisted: dict[object, int] = {}
+        #: ``(parent, fetched, total)`` for each parent read past its fetch
+        #: window, so ``find`` can scan the rest by name without a re-walk.
+        self.hidden_parents: list[tuple[object, int, int]] = []
         # Expand-page nodes the pruner must keep even when their box is
         # below the viewport. Empty on a normal snapshot.
         self._page_keep: set[object] = set()
@@ -5415,6 +5419,7 @@ class ATSPIAccessor:
                 kids.append(child)
         if total > count:
             kids.extend(_seek_children_past_fetch(node, count, total, self.child_seek))
+            self.hidden_parents.append((node, count, total))
             # ``… N more`` counts the children never fetched, not only the
             # fetched ones the pruner dropped (#1375).
             self._note_unlisted(node, total - count)
@@ -19816,20 +19821,104 @@ def _seek_children_past_fetch(node, start: int, total: int, seek) -> list:
     Only ``find`` / ``scroll_to_find`` arm ``seek``; a plain snapshot reads
     nothing here. The scan reads names only and stops at the seek window.
     """
-    if not isinstance(seek, str) or not seek.strip():
+    from a11y_computer_use.observe import _fold_seeks
+
+    needles = _fold_seeks(seek)
+    if not needles:
         return []
-    needle = seek.replace("\u00a0", " ").strip().casefold()
     hits = []
     for index in range(start, min(int(total), _GTK_SEEK_MAX_ROWS)):
         child = _child_at(node, index)
         if child is None:
             continue
-        name = (_node_name(child) or "").replace("\u00a0", " ").casefold()
-        if needle in name:
+        raw = _node_name(child) or ""
+        name = raw.replace("\u00a0", " ").casefold()
+        if any(needle in name for needle in needles):
             hits.append(child)
-            if len(hits) >= 8:
+            pin_far_child(child, node, index, raw)
+            if len(hits) >= 8 * len(needles):
                 break
     return hits
+
+
+#: Children read past the fetch window, keyed by bus name and object path:
+#: ``key -> (child, parent, index, name, extents)``. A later snapshot
+#: does not list these children, so their refs resolve here (#1375).
+_FAR_PINS: "OrderedDict[int, tuple]" = OrderedDict()
+_MAX_FAR_PINS = 256
+
+
+def _far_key(acc) -> tuple:
+    """Bus name and object path across wrappers; ``id()`` for a test double."""
+    try:
+        key = _atspi_wrapper_key(acc)
+    except Exception:  # noqa: BLE001
+        key = None
+    return ("path", *key) if key else ("id", id(acc))
+
+
+def pin_far_child(child, parent, index: int, name: str) -> None:
+    """Key a child found past the fetch window to its parent and live index."""
+    try:
+        extents = _extents(child)
+    except Exception:  # noqa: BLE001 - a pin without extents is still name-checked
+        extents = (None, None)
+    key = _far_key(child)
+    _FAR_PINS[key] = (child, parent, int(index), str(name), extents)
+    _FAR_PINS.move_to_end(key)
+    while len(_FAR_PINS) > _MAX_FAR_PINS:
+        _FAR_PINS.popitem(last=False)
+
+
+def far_pin(handle):
+    """``(parent, index, name, extents)`` for a pinned far child, else None."""
+    if handle is None:
+        return None
+    key = _far_key(handle)
+    entry = _FAR_PINS.get(key)
+    if entry is None or (key[0] == "id" and entry[0] is not handle):
+        return None
+    return entry[1:]
+
+
+def far_child_check(handle) -> str | None:
+    """None when the pinned child is still at its index under its name.
+
+    Otherwise the reason it is not: ``gone``, ``title_changed`` or
+    ``moved``. Reads one child, its name and its extents.
+    """
+    pin = far_pin(handle)
+    if pin is None:
+        return "gone"
+    parent, index, name, extents = pin
+    live = _child_at(parent, index)
+    if live is None:
+        return "gone"
+    if (_node_name(live) or "") != name:
+        return "title_changed"
+    if extents != (None, None) and _extents(live) != extents:
+        return "moved"
+    return None
+
+
+def any_child_past_fetch(node, start: int, total: int, seek) -> bool:
+    """True once one unread child at ``start``.. has ``seek`` in its name.
+
+    Names only, no extents and no pin; stops at the first hit.
+    """
+    from a11y_computer_use.observe import _fold_seeks
+
+    needles = _fold_seeks(seek)
+    if not needles:
+        return False
+    for index in range(start, min(int(total), _GTK_SEEK_MAX_ROWS)):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        name = (_node_name(child) or "").replace("\u00a0", " ").casefold()
+        if any(needle in name for needle in needles):
+            return True
+    return False
 
 
 def child_labels(node, limit: int | None = None) -> list[str]:

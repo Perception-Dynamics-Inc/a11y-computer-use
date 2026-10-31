@@ -5978,12 +5978,23 @@ class Runtime:
             previous = getattr(self.driver, "_table_seek", None) if armed else None
             if armed:
                 self.driver._table_seek = seek
-            with self._child_seek(seek):
-                try:
-                    snap = self.driver.snapshot(Scope(scope), bundle)
-                finally:
-                    if armed:
-                        self.driver._table_seek = previous
+            try:
+                # Main's snapshot first. Only when it matched nothing are the
+                # children it left past the fetch window read by name, and
+                # only when one of them matches is the armed snapshot taken.
+                # A find that matched, or a page with no long parent, costs
+                # what it did on main.
+                snap = self.driver.snapshot(Scope(scope), bundle)
+                hidden = getattr(self.driver, "hidden_child_named", None)
+                if (seek and callable(hidden)
+                        and not observe.find_elements(snap, text=text, role=role,
+                                                      editable=editable, clickable=clickable)
+                        and hidden(seek)):
+                    with self._child_seek(seek):
+                        snap = self.driver.snapshot(Scope(scope), bundle)
+            finally:
+                if armed:
+                    self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
             matches = observe.prefer_exact_targets(
                 observe.find_elements(

@@ -14966,6 +14966,7 @@ def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
     buttons = "".join(f"<button type=button>Btn {i}</button>" for i in range(60))
     points = "".join(
         f"<circle role=button aria-label='{'Outlier 777' if i == 777 else f'pt {i}'}' "
+        f"onclick=\"document.title='hit-'+this.getAttribute('aria-label')\" "
         f"cx='{5 + (i % 50) * 9}' cy='{5 + (i // 50) * 9}' r='3'/>"
         for i in range(1500)
     )
@@ -15008,6 +15009,30 @@ def test_linux_chrome_find_child_past_per_parent_cap(tmp_path) -> None:
             assert name in located, (name, located)
         found = runtime.scroll_to_find("chrome", text="Btn 59", max_scrolls=2)
         assert "Btn 59" in found and "not found" not in found, found
+        # Children past the 250-child fetch window: find, then click the
+        # returned ref straight away, and check the page saw that child.
+        refs: dict[str, str] = {}
+        for name in ("Outlier 777", "pt 1499", "pt 260"):
+            located = runtime.find("chrome", text=name)
+            assert "no elements match" not in located, (name, located)
+            target = next(
+                (el for el in runtime._current.elements
+                 if el.role == "AXButton" and (el.title or "").strip() == name),
+                None,
+            )
+            assert target is not None, (name, located)
+            refs[name] = target.ref
+            runtime.click(target.ref)
+            landed = None
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                titles = {str(row.get("title") or "") for row in driver.windows() or []}
+                hit = next((t for t in titles if t.startswith("hit-")), None)
+                if hit is not None and hit.startswith(f"hit-{name}") and not hit.startswith(f"hit-{name}0"):
+                    landed = hit
+                    break
+                time.sleep(0.15)
+            assert landed is not None, (name, driver.windows())
     finally:
         proc.terminate()
         try:
