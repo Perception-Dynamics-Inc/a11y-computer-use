@@ -2562,7 +2562,7 @@ class LinuxDriver:
                 # The full tree supplies matching, covers and the before-state.
                 # Only this target needs an identity for the ensuing action.
                 identity = self._run(lambda: _atspi.chromium_row_identity(handle, fresh=True))
-                self._verify_chromium_row_target(anchor, handle, current=identity)
+                identity = self._verify_chromium_row_target(anchor, handle, current=identity)
                 resolved = replace(resolved, row_identity=identity)
             self._remember_popover_cover(live, resolved)
             self._resolved_click_snapshot = (resolved, live)
@@ -3775,10 +3775,14 @@ class LinuxDriver:
         )
 
     def _verify_chromium_row_target(self, element: Element, handle,
-                                    *, current: tuple | None = None) -> None:
-        """Refuse a recycled row before dispatching any input."""
+                                    *, current: tuple | None = None) -> tuple:
+        """Refuse a recycled row before dispatching any input.
+
+        Returns the live identity that matched (``()`` when the element has
+        none), so a caller that passed its own read can keep a good one.
+        """
         if not element.row_identity:
-            return
+            return ()
         from a11y_computer_use.drivers import _atspi
 
         def fresh() -> tuple:
@@ -3787,13 +3791,22 @@ class LinuxDriver:
             except Exception:
                 return ()
 
+        def degraded(identity: tuple) -> bool:
+            # A failed walk returns (); a slow role read returns "" for that
+            # node. Neither is a reading of a different row.
+            return not identity or any(not part[0] for part in identity)
+
         if current is None:
             current = fresh()
-            # Every read in the identity walk maps a slow or failed D-Bus reply
-            # to a default ("" role, no parent), so one degraded read under
-            # load looks like a recycled row (#1368). A recycled row reads
-            # differently every time; refuse unless a second read agrees.
-            if current != element.row_identity:
+        # Every read in the identity walk maps a slow or failed D-Bus reply
+        # to a default ("" role, no parent), so one degraded read under
+        # load looks like a recycled row (#1368). A recycled row reads
+        # differently every time; refuse unless a second read agrees. A
+        # caller's own read gets the same second read. Only a second read
+        # that is itself degraded earns a third; the match is still exact.
+        if current != element.row_identity:
+            current = fresh()
+            if current != element.row_identity and degraded(current):
                 current = fresh()
         if current != element.row_identity:
             raise ComputerUseError(
@@ -3802,6 +3815,7 @@ class LinuxDriver:
                 detail={"ref": element.ref, "reason": "target_changed", "outcome": "refused",
                         "hint": "Re-observe and find the intended row again."},
             )
+        return current
 
     def _verify_gtk_cell_target(self, element: Element, handle) -> None:
         """Reject recycled GTK cells even when a snapshot cached their old name."""

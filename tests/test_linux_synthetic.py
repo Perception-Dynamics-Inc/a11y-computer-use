@@ -19685,7 +19685,10 @@ def test_scale_description_filter_preserves_labels(
 
 @pytest.mark.parametrize("reads, refused", [
     (("degraded", "same"), False),
-    (("degraded", "degraded"), True),
+    (("degraded", "degraded", "degraded"), True),
+    (("degraded", "empty", "same"), False),
+    (("empty", "degraded", "recycled"), True),
+    (("degraded", "recycled"), True),
     (("recycled", "recycled"), True),
     (("recycled", "same"), False),
 ])
@@ -19697,13 +19700,16 @@ def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
     Each failed AT-SPI read in the walk becomes a default (empty role), so
     one slow reply looks like a recycled row. The check reads again and
     refuses only when the second read also disagrees; it never trusts the
-    snapshot without a fresh read that matches.
+    snapshot without a fresh read that matches. A second read that is itself
+    degraded (no walk, or an empty role) earns one third read (#1398 under
+    load 30), and three reads is the limit.
     """
     from a11y_computer_use.drivers import _atspi
 
     identity = (("push button", "", (), "k1"), ("table row", "", (), "k2"))
     values = {"same": identity,
               "degraded": (("", "", (), "k1"),),
+              "empty": (),
               "recycled": (("push button", "", (), "k1"), ("table row", "", (), "k9"))}
     calls = []
 
@@ -19722,8 +19728,52 @@ def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
             driver._verify_chromium_row_target(element, object())
         assert exc.value.code is ErrorCode.STALE_REF
     else:
-        driver._verify_chromium_row_target(element, object())
-    assert len(calls) == 2
+        assert driver._verify_chromium_row_target(element, object()) == identity
+    assert len(calls) == len(reads)
+
+
+@pytest.mark.parametrize("reads, refused", [
+    (("same",), False),
+    (("degraded", "same"), False),
+    (("degraded", "empty", "same"), False),
+    (("degraded", "degraded", "degraded"), True),
+    (("recycled", "recycled"), True),
+])
+def test_chromium_row_identity_caller_read_gets_the_same_second_read(
+    monkeypatch, reads, refused,
+):
+    """The rematch path passes its own fresh read; one degraded read of it
+    must not refuse a live row either (#1398: refused under load 30 with
+    the same ref, bounds and page). The verified identity is returned so the
+    resolved ref keeps the good read, not the degraded one."""
+    from a11y_computer_use.drivers import _atspi
+
+    identity = (("push button", "", (), "k1"), ("table row", "", (), "k2"))
+    values = {"same": identity,
+              "degraded": (("", "", (), "k1"), ("table row", "", (), "k2")),
+              "empty": (),
+              "recycled": (("push button", "", (), "k1"), ("table row", "", (), "k9"))}
+    calls = []
+
+    def fake_identity(handle, *, fresh=False, cache=None):
+        assert fresh
+        calls.append(handle)
+        return values[reads[len(calls)]]
+
+    monkeypatch.setattr(_atspi, "chromium_row_identity", fake_identity)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    element = Element("e1", "AXButton", "edit 300", None, None, "snap",
+                      row_identity=identity)
+    first = values[reads[0]]
+    if refused:
+        with pytest.raises(ComputerUseError) as exc:
+            driver._verify_chromium_row_target(element, object(), current=first)
+        assert exc.value.code is ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == "target_changed"
+    else:
+        assert driver._verify_chromium_row_target(element, object(), current=first) == identity
+    assert len(calls) == len(reads) - 1
 
 
 def test_chromium_row_identity_match_reads_once(monkeypatch):
