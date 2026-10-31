@@ -3589,6 +3589,7 @@ class LinuxDriver:
         Chromium's Component hit test shares stale CSS-transform geometry.
         Never fall through to that point after an absent or failed action,
         and never translate right/multiple/modified clicks into activation.
+        A plain right-click uses only the node's showContextMenu action.
         The returned mechanism is a delivery receipt, not effect verification.
         """
         from a11y_computer_use import observe
@@ -3622,6 +3623,26 @@ class LinuxDriver:
                 ))
                 if sent:
                     self._button_click_probe = (element, handle, previous)
+                    return f"AT-SPI doAction({name})"
+        context = (
+            allow_action and button is MouseButton.RIGHT and count == 1 and not modifiers
+        )
+        if context:
+            # A right-click asks for the page's context menu. Chromium exposes
+            # that as the node's own showContextMenu action, which fires
+            # contextmenu at this node without a hit test (#1383). It is never
+            # an activation, and the outcome judge still checks for a menu.
+            self._raise_handle_window(handle)
+            self._visible_action(element, "Click", handle)
+            self._verify_chromium_row_target(element, handle)
+            action = self._run(lambda: _atspi.chromium_button_context_menu_action(handle))
+            if action is not None:
+                iface, index, name = action
+                attempted = True
+                sent = self._run(lambda: _atspi._call_first(
+                    iface, ("do_action", "doAction"), index, default=False,
+                ))
+                if sent:
                     return f"AT-SPI doAction({name})"
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
