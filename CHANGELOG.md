@@ -9,7 +9,7 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.82] - 2026-10-30
 
-4 changes since v0.4.81, through #1365. A patch release: the deny list now applies to the target's resolved identity, `set_value` refuses contenteditable rich editors such as ProseMirror (Tiptap), a background Chrome tab in an overflowing window is no longer reported as showing, and Linux actions read process and AT-SPI identity once per action, bringing `screenshot` latency back near 0.4.80.
+5 changes since v0.4.81, through #1376. A patch release: the deny list now applies to the target's resolved identity, `set_value` refuses contenteditable rich editors such as ProseMirror (Tiptap), a background Chrome tab in an overflowing window is no longer reported as showing, and Linux actions read process and AT-SPI identity once per action, bringing `screenshot` latency back near 0.4.80.
 
 Thanks to Mukhsin0508.
 
@@ -22,6 +22,10 @@ Thanks to Mukhsin0508.
 
 - A background-tab ref in an overflowing Chrome window is reported `not_showing`, and retry evidence reads state names from PyGObject IntEnum flags. Refs #1362 (#1363) (0a2b62b, 2026-10-30)
 - Walk `/proc`, open the X connection and look up the AT-SPI interpreter host once per action, not once per check. Refs #1347 (#1354) (40218344..b094bc71, 2026-10-30)
+
+### Fixed
+
+- `scroll_to_find` and the following click on large Chromium tables under load no longer miss rows or time out on the modal-boundary check. Fixes #1368 (#1376) (83b2d06, 2026-10-31)
 
 ## [0.4.81] - 2026-10-30
 
