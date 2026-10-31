@@ -22469,6 +22469,53 @@ def _occluder_owns_target_menu(opener, chain) -> bool:
     return False
 
 
+def _occluder_menubar_of(chain):
+    """Key of the nearest ``menu bar`` above ``chain[0]``, None when a menu
+    lies in between (the node is inside a dropdown, not on the bar)."""
+    for node in chain[1:]:
+        role = _role_name(node)
+        if role == "menu bar":
+            return _ancestor_key(node)
+        if role in _OCCLUDER_MENU_ROLES or role in {"document web", "document frame"}:
+            return None
+    return None
+
+
+def _occluder_sibling_bar_menus(opener, chain):
+    """The opener's own showing menus when the target is a sibling item on
+    the same menu bar (#1417), else None.
+
+    An APG opener without ``aria-controls`` has no ``controller_for``, but
+    its menu is structurally owned: a child of the opener or a sibling under
+    the opener's parent. A top-level sibling item is outside that menu, so
+    the menu covers it only where its real bounds overlap the point; the
+    caller checks those bounds. None (fail closed) when the target is not a
+    menu item on the opener's bar or the opener's menu cannot be located.
+    """
+    if not chain or _role_name(chain[0]) != "menu item":
+        return None
+    opener_key = _ancestor_key(opener)
+    if _ancestor_key(chain[0]) == opener_key:
+        return None
+    bar = _occluder_menubar_of(chain)
+    if bar is None:
+        return None
+    opener_chain = list(_ancestor_chain(opener))
+    if _occluder_menubar_of(opener_chain) != bar:
+        return None
+    parent = _safe(lambda: _call_first(opener, ("get_parent", "getParent")))
+    menus = []
+    for owner in (opener, parent):
+        if owner is None:
+            continue
+        kids = _occluder_children(owner, _OCCLUDER_WIDE)
+        if kids is None:
+            return None
+        menus.extend(kid for kid in kids
+                     if _role_name(kid) in _OCCLUDER_MENU_ROLES and _state_has(kid, "SHOWING"))
+    return menus or None
+
+
 def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
     """A showing menu over (x, y) that does not contain ``acc`` (#1387).
 
@@ -22577,6 +22624,10 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
         if not menus:
             if _occluder_owns_target_menu(opener, chain):
                 continue  # the target is inside this opener's own menu (#1412)
+            own = _occluder_sibling_bar_menus(opener, chain)
+            if own:
+                candidates.extend(own)  # bounds decide, below (#1417)
+                continue
             return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
         candidates.extend(menus)
     if not candidates:
