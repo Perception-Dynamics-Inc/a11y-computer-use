@@ -2551,6 +2551,55 @@ class LinuxDriver:
             return False
         return not gone
 
+    def reveal_scrolled_off(self, snap: Snapshot, ref: str) -> Element | None:
+        """Scroll an unchanged, scrolled-off issued element back and resolve it.
+
+        A later ``find`` can scroll the page or a container so a held ref's
+        element leaves the viewport (#1402). Its old position then holds
+        another element, so the position rematch refuses it. The issuing
+        accessible is still the same live object: when it is alive, off the
+        display, still has the issued role and name (and row identity), it
+        is scrolled into view and resolved again. The resolved element must
+        be that same native object, or None is returned and the caller keeps
+        its refusal. Nothing is clicked or typed here.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            anchor = snap.element(ref)
+        except KeyError:
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None or not anchor.title:
+            return None
+
+        def unchanged() -> bool:
+            if _atspi.offscreen_extents(handle) is None:
+                return False
+            _atspi._drop_cached_properties(handle)
+            role = _atspi._role_name(handle)
+            name = (_atspi._node_name(handle) or "").strip()
+            return _atspi._ROLE.get(role) == anchor.role and name == anchor.title
+
+        try:
+            if not self._run(unchanged):
+                return None
+            if anchor.row_identity:
+                self._verify_chromium_row_target(anchor, handle)
+            key = self._run(lambda: _atspi._atspi_wrapper_key(handle))
+            if key is None or not self.scroll_into_view(anchor):
+                return None
+            resolved = self.resolve_ref(snap, ref)
+            live_handle = observe.ax_handle_for(resolved.snapshot_id, resolved.ref)
+            if live_handle is None or self._run(lambda: _atspi._atspi_wrapper_key(live_handle)) != key:
+                return None
+        except ComputerUseError:
+            return None
+        except Exception:  # noqa: BLE001 - an unreadable reveal keeps the refusal
+            return None
+        return resolved
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution

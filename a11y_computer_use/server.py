@@ -4873,6 +4873,19 @@ class Runtime:
             )
         return self._current
 
+    def _issued_anchor(self, ref: str) -> tuple[Snapshot, Element]:
+        """The snapshot and element ``ref`` was issued for, without the changed-ref refusal.
+
+        Only for asking the issuing accessible itself whether it is unchanged
+        (#1402). Every action still goes through `_anchor` or a check that
+        proves the issued native object, role, name and row are unchanged.
+        """
+        snap = self._require_snapshot(ref)
+        issued = getattr(self, "_last_issued", None)
+        if issued is not None and snap.app == issued.app:
+            snap = getattr(self, "_issued_anchors", {}).get(ref, snap)
+        return snap, snap.element(ref)
+
     def _anchor(self, ref: str) -> tuple[Snapshot, Element]:
         """Look up the issuing anchor, retaining refs omitted by a later find.
 
@@ -4948,7 +4961,24 @@ class Runtime:
         ordinary live resolution and the act-time security checks. A drag may
         share its source's live tree with the destination before any input.
         """
-        snap, anchor = self._anchor_audited(ref, kind)
+        try:
+            snap, anchor = self._anchor_audited(ref, kind)
+        except ComputerUseError as exc:
+            # A later find gave this number's old slot to another element
+            # and kept the ref bound to its issued element (#1386). When
+            # that element only scrolled away, reveal and act on it (#1402).
+            revealed = None
+            if live_snapshot is None and exc.detail.get("reason") == "target_changed":
+                try:
+                    issued_snap, issued = self._issued_anchor(ref)
+                except (ComputerUseError, KeyError):
+                    issued_snap = None
+                if issued_snap is not None and not (kind == "typetext" and issued.secure):
+                    revealed = self._reveal_scrolled_off(issued_snap, ref, exc)
+            if revealed is None:
+                raise
+            self._gate_anchor = (revealed, issued_snap, issued)
+            return issued_snap, revealed
         if kind == "typetext" and anchor.secure:
             self._record_failure(
                 kind, app=snap.app or "unknown",
@@ -4979,11 +5009,37 @@ class Runtime:
             live = (self.driver.resolve_ref(snap, ref, live=live_snapshot)
                     if live_snapshot is not None else self.driver.resolve_ref(snap, ref))
         except ComputerUseError as exc:
-            self._audit_stale(kind, ref, exc)
-            raise
+            revealed = self._reveal_scrolled_off(snap, ref, exc) if live_snapshot is None else None
+            if revealed is None:
+                self._audit_stale(kind, ref, exc)
+                raise
+            live = revealed
         # The confirmation gate reads the issuing anchor's menu ancestors.
         self._gate_anchor = (live, snap, anchor)
         return snap, live
+
+    def _reveal_scrolled_off(self, snap: Snapshot, ref: str,
+                             exc: ComputerUseError) -> Element | None:
+        """The issued element, scrolled back into view, when only scrolling moved it.
+
+        A position rematch reports ``title_changed`` or ``not_found`` once a
+        later ``find`` scrolls the held element away (#1402). The driver
+        reveals it only when the issuing accessible is alive, off screen and
+        still has the issued role, name and row identity, and the re-resolved
+        element is the same native object. Anything else keeps ``exc``.
+        """
+        if exc.code is not ErrorCode.STALE_REF or exc.detail.get("reason") not in {
+            "title_changed", "not_found", "target_changed",
+        }:
+            return None
+        fn = getattr(self.driver, "reveal_scrolled_off", None)
+        if not callable(fn) or self._alive_offscreen(ref) is None:
+            return None
+        try:
+            found = fn(snap, ref)
+        except Exception:  # noqa: BLE001 - a failed reveal keeps the refusal
+            return None
+        return found if isinstance(found, Element) else None
 
     def _alive_offscreen(self, ref: str) -> Bounds | None:
         """Bounds when ``ref`` is still a live node that misses the display.
@@ -4995,6 +5051,13 @@ class Runtime:
         snap = getattr(self, "_current", None)
         fn = getattr(self.driver, "alive_offscreen", None)
         if snap is None or not callable(fn):
+            return None
+        # A later find can hand the same number to another element (#1402).
+        # Ask about the element the ref was issued for, never the namesake
+        # number in the latest snapshot.
+        try:
+            snap, _issued = self._issued_anchor(ref)
+        except (ComputerUseError, KeyError):
             return None
         try:
             found = fn(snap, ref)

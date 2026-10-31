@@ -15207,3 +15207,105 @@ def test_linux_chrome_deep_controls_work_with_no_modal_open(tmp_path) -> None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def _ref_for(found: str, title: str) -> str:
+    import re
+
+    match = re.search(r"\b(e\d+) button \"" + re.escape(title) + r"\"", found)
+    assert match, found
+    return match.group(1)
+
+
+def test_linux_chrome_ref_scrolled_off_by_a_later_find_still_acts(tmp_path) -> None:
+    """#1402: a ref a later ``find`` scrolled off the page still acts.
+
+    Live Chrome. A 30-card horizontal strip, then 180 block buttons, so the
+    document scrolls. ``find`` Row 3 (on screen), then ``find`` Row 170,
+    which scrolls the page so Row 3 leaves the viewport. The held Row 3
+    ref is the same live accessible: ``scroll(into_view=true)`` must reveal
+    it and ``click`` must land on Row 3, not on whatever now sits at its old
+    position. The strip variant holds Card 25 across a ``find`` for Card 12.
+    Each click writes its target into the document title.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the off-screen ref test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "offref.html"
+    page.write_text(
+        "<!doctype html><html><head><title>offref</title><style>"
+        "#strip{display:flex;overflow-x:auto;width:600px;margin:10px;border:1px solid #888}"
+        "#strip button{flex:0 0 180px;height:44px;margin:4px}</style></head><body>"
+        "<div id=strip></div><script>"
+        "const L=s=>{document.title='clicked '+s};"
+        "for(let i=1;i<=30;i++){const b=document.createElement('button');"
+        "b.textContent='Card '+i;b.onclick=()=>L('card'+i);strip.appendChild(b)}"
+        "for(let i=1;i<=180;i++){const b=document.createElement('button');"
+        "b.textContent='Row '+i;b.style.display='block';b.style.margin='6px';"
+        "b.onclick=()=>L('row'+i);document.body.appendChild(b)}"
+        "</script></body></html>"
+    )
+    profile = tmp_path / "chrome-offref-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        ready = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if "Row 3" in _titles(shot):
+                    ready = True
+                    break
+            time.sleep(0.3)
+        assert ready, "Chrome did not show Row 3"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+
+        def clicked() -> str:
+            for _ in range(20):
+                titles = [el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+                          if el.role == "AXWindow"]
+                hit = [t for t in titles if "clicked " in (t or "")]
+                if hit:
+                    return hit[0]
+                time.sleep(0.2)
+            return ""
+
+        row3 = _ref_for(runtime.find("chrome", text="Row 3"), "Row 3")
+        runtime.find("chrome", text="Row 170")
+        assert "Row 3" not in _titles(driver.snapshot(Scope.WINDOW, "chrome")), \
+            "find(Row 170) did not scroll Row 3 off screen"
+        scrolled = runtime.scroll(ref=row3, into_view=True)
+        assert "into view" in scrolled, scrolled
+        runtime.find("chrome", text="Row 170")
+        result = runtime.click(row3)
+        assert "Row 3" in result, result
+        assert "clicked row3" in clicked(), result
+
+        card25 = _ref_for(runtime.find("chrome", text="Card 25"), "Card 25")
+        runtime.find("chrome", text="Card 12")
+        result = runtime.click(card25)
+        assert "Card 25" in result, result
+        assert "clicked card25" in clicked(), result
+    finally:
+        _stop_group(proc)
