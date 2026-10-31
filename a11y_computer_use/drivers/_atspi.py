@@ -10435,6 +10435,21 @@ def entry_text_and_caret(acc) -> tuple[str, int] | None:
     return text, caret
 
 
+def entry_text_and_selection(acc) -> tuple[str, int, int] | None:
+    """(text, selection start, selection end) of an entry with a non-empty
+    selection, read fresh; None when there is none or it cannot be read."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    if nchars != len(text):
+        return None
+    _caret, start, end = _caret_and_selection(acc, nchars)
+    if start == end:
+        return None
+    return text, start, end
+
+
 _QT_KEY_EDIT_POLLS = 10
 _QT_KEY_EDIT_PAUSE_S = 0.05
 
