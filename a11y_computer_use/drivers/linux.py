@@ -8028,6 +8028,27 @@ class LinuxDriver:
         except Exception:
             return True
 
+    def menu_contains_target(self, app: str, element: Element) -> bool | None:
+        """Whether ``element`` lives inside the open menu bar of ``app`` (#1413).
+
+        False when there is no handle or no menu bar. None when the tree
+        could not be read, so the caller refuses rather than send Escape.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            return False
+        if handle is None:
+            return False
+        try:
+            root = self._menu_root(app)
+            return bool(self._run(lambda: _linux_menus.target_in_menu_bar(root, handle)))
+        except Exception:
+            return None
+
     def target_vanished(self, element: Element) -> bool:
         """True when ``element``'s accessible is gone and must not be clicked.
 
