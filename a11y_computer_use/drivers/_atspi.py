@@ -10679,6 +10679,33 @@ def _selection_covers_value(acc) -> bool | None:
     return start == 0 and end == count
 
 
+def _transformed_selection_covers_value(acc) -> bool:
+    """A whole-value selection of a CSS case-transformed Chromium field (#1388).
+
+    Chromium counts the rendered text (``STRASSE``, 7) but publishes the
+    selection in DOM offsets (``straße``, 0..6). The selection counts as the
+    whole value only when it starts at 0, X11 PRIMARY holds exactly as many
+    characters as it spans, and that text could render as the field's text.
+    """
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    selections = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    if not isinstance(selections, int) or isinstance(selections, bool) or selections <= 0:
+        return False
+    _caret, start, end = _caret_and_selection(acc, count)
+    if start != 0 or not isinstance(end, int) or end <= 0 or end == count:
+        return False
+    tool = _primary_tool()
+    if tool is None:
+        return False
+    selected = _read_primary(tool[1])
+    if selected is None or len(selected) != end:
+        return False
+    return css_case_rendering(_full_text(acc), selected)
+
+
 def _confirm_select_all(acc) -> None:
     """Refuse before any delete when Ctrl+A did not select the whole value (#1225).
 
@@ -10691,7 +10718,7 @@ def _confirm_select_all(acc) -> None:
         return
     for poll in range(_SELECT_ALL_POLLS):
         covered = _selection_covers_value(acc)
-        if covered is None or covered:
+        if covered is None or covered or _transformed_selection_covers_value(acc):
             return
         if poll + 1 < _SELECT_ALL_POLLS:
             time.sleep(_SELECT_ALL_PAUSE_S)
@@ -11140,6 +11167,226 @@ def _focus_and_replace(acc, text: str) -> bool:
     return _confirm_text_landed(acc, text)
 
 
+# CSS text-transform (#1388). Chrome publishes a field's *rendered* text
+# over AT-SPI: an ``uppercase`` input whose DOM value is "hello world" reads
+# "HELLO WORLD". These helpers never relax the general read-back check. They
+# run only after it failed, only on a Chromium field, and only when the
+# rendered text is exactly a CSS case transform of the expected value. The
+# value is then read from the DOM itself: Ctrl+A in a Chromium input or
+# textarea publishes the field's value (not its painted glyphs) as the X11
+# PRIMARY selection. A read is accepted only when PRIMARY changed from a
+# fresh nonce, so a stale selection can never confirm a write.
+_PRIMARY_POLLS = 10
+_PRIMARY_PAUSE_S = 0.03
+
+
+def _case_shape_key(text: str) -> str:
+    """A loose key for "these could be the same text in another case".
+
+    Only a trigger for reading the DOM, never a reason to accept: NFKC folds
+    ligatures (``\ufb01`` -> ``fi``) and digraphs, ``casefold`` maps ``\u00df``
+    to ``ss``, and the Turkish dotted/dotless i both become ``i``.
+    """
+    import unicodedata
+
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    folded = folded.replace("i\u0307", "i").replace("\u0131", "i")
+    return unicodedata.normalize("NFKC", folded)
+
+
+def css_case_rendering(rendered: str | None, value: str | None) -> bool:
+    """True when ``rendered`` differs from ``value`` but could be a case rendering of it.
+
+    The comparison is loose on purpose (CSS case mapping is locale-aware and
+    not one-to-one), so it only decides whether the DOM value is read. A
+    write is accepted only when that DOM value equals the request exactly.
+    """
+    if rendered is None or value is None or rendered == value:
+        return False
+    return _case_shape_key(rendered) == _case_shape_key(value)
+
+
+def _primary_tool() -> tuple[list[str], list[str]] | None:
+    import shutil
+
+    if shutil.which("xclip"):
+        return (["xclip", "-selection", "primary", "-i"],
+                ["xclip", "-selection", "primary", "-o"])
+    if shutil.which("xsel"):
+        return ["xsel", "--primary", "--input"], ["xsel", "--primary", "--output"]
+    return None
+
+
+def _read_primary(read_cmd: list[str]) -> str | None:
+    try:
+        done = subprocess.run(read_cmd, capture_output=True, timeout=5, check=False)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        return done.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def chromium_dom_text(acc) -> str | None:
+    """The DOM value of a focused Chromium input or textarea, or ``None``.
+
+    PRIMARY is set to a nonce, Ctrl+A is pressed on ``acc`` only while focus
+    is confirmed on it, and the whole-value selection is confirmed before
+    PRIMARY is read. The caret and selection captured before are put back
+    with no keys. ``None`` (unverified) when this is not Chromium on X11, no
+    xclip/xsel is installed, focus or the selection is not confirmed, or
+    PRIMARY never left the nonce. Typing nothing and deleting nothing, it
+    only replaces the X11 PRIMARY selection, which any select-all does.
+    """
+    if acc is None or not _chromium_app(acc) or not _x11_keys_available():
+        return None
+    tool = _primary_tool()
+    if tool is None:
+        return None
+    write_cmd, read_cmd = tool
+    import secrets
+
+    nonce = "a11y-dom-read-" + secrets.token_hex(8)
+    try:
+        subprocess.run(write_cmd, input=nonce.encode(), stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5, check=False)
+    except Exception:
+        return None
+    if _read_primary(read_cmd) != nonce:
+        return None
+    saved = _capture_text_points(acc)
+    try:
+        from a11y_computer_use.drivers import _linux_ime
+
+        _linux_ime.require_no_composition()
+        _chord_into_target(acc, "ctrl+a")
+        _confirm_select_all(acc)
+        for poll in range(_PRIMARY_POLLS):
+            got = _read_primary(read_cmd)
+            if got is not None and got != nonce:
+                return got
+            if poll + 1 < _PRIMARY_POLLS:
+                time.sleep(_PRIMARY_PAUSE_S)
+        return None
+    except ComputerUseError:
+        return None
+    finally:
+        _restore_text_points(saved)
+
+
+class _CssTransformedWrite(int):
+    """A confirmed write whose AT-SPI read-back is its CSS case rendering.
+
+    ``css_rendered`` is that read-back, so the outcome judge can compare the
+    same rendered string a snapshot shows (#1388).
+    """
+
+    css_rendered: str = ""
+
+    @classmethod
+    def of(cls, rendered: str) -> "_CssTransformedWrite":
+        done = cls(1)
+        done.css_rendered = rendered
+        return done
+
+
+def css_transformed_value_confirms(acc, rendered: str | None, value: str) -> bool:
+    """Whether a whole-field write of ``value`` holds although the read-back differs.
+
+    The DOM value is read only on Chromium when ``rendered`` could be a case
+    rendering of ``value``, and the write holds only when it equals ``value``
+    exactly.
+    """
+    if not css_case_rendering(rendered, value) or not _chromium_app(acc):
+        return False
+    return chromium_dom_text(acc) == value
+
+
+def dom_holds_typed(dom: str | None, before: str | None, text: str) -> bool:
+    """Whether the DOM value is the prior field with ``text`` inserted exactly once.
+
+    ``text`` has to appear verbatim. The rest is compared to the rendered
+    ``before`` loosely, because that is all that was read before typing.
+    """
+    return _typed_rest(dom, before, text) is not None
+
+
+def _typed_rest(dom: str | None, before: str | None, text: str) -> str | None:
+    if dom is None or not text:
+        return None
+    prior = _case_shape_key(before or "")
+    start = dom.find(text)
+    while start >= 0:
+        rest = dom[:start] + dom[start + len(text):]
+        if _case_shape_key(rest) == prior:
+            return rest
+        start = dom.find(text, start + 1)
+    return None
+
+
+def chromium_replace_dom_text(acc, target: str) -> bool:
+    """Make a Chromium field hold exactly ``target``; True only when the DOM confirms it."""
+    from a11y_computer_use.drivers import _linux_ime
+
+    try:
+        with _linux_ime.ascii_passthrough(target):
+            if not _text_is_blank(_full_text(acc)):
+                _x11_select_all_and_delete(acc)
+                if not _wait_until_gone(acc):
+                    return False
+            else:
+                grab_focus(acc)
+            if target:
+                _type_into_target(acc, target)
+    except ComputerUseError:
+        return False
+    if not target:
+        return _text_is_blank(_full_text(acc))
+    return chromium_dom_text(acc) == target
+
+
+def css_transformed_type_confirms(acc, before: str | None, after: str | None, text: str) -> str | None:
+    """The DOM value when typed ``text`` landed exactly in a Chromium field, else ``None``.
+
+    The DOM is read when the rendered ``after`` could be ``before`` with
+    ``text`` inserted in another case; it has to hold ``text`` verbatim.
+    """
+    if after is None or not text or not _chromium_app(acc):
+        return None
+    prior = before or ""
+    key = _case_shape_key(after)
+    if not any(_case_shape_key(prior[:i] + text + prior[i:]) == key for i in range(len(prior) + 1)):
+        return None
+    dom = chromium_dom_text(acc)
+    return dom if dom_holds_typed(dom, before, text) else None
+
+
+def undo_chromium_type(acc, before: str | None, text: str) -> bool:
+    """Take refused typed ``text`` back out of a Chromium field; True only when confirmed.
+
+    The field is set to the DOM value without the typed text when it is
+    there verbatim once, or to empty when it was blank before. Otherwise the
+    prior value is unknown and nothing more is typed.
+    """
+    dom = chromium_dom_text(acc)
+    if dom is None:
+        if not _text_is_blank(before or ""):
+            return False
+        target = ""
+    else:
+        target = _typed_rest(dom, before, text)
+        if target is None:
+            if not _text_is_blank(before or ""):
+                return False
+            target = ""
+        if dom == target:
+            return True
+    return chromium_replace_dom_text(acc, target)
+
+
 def _replace_with_keys(acc, text: str) -> bool:
     """Clear the field and type ``text``. Used when EditableText is missing.
 
@@ -11159,24 +11406,49 @@ def _replace_with_keys(acc, text: str) -> bool:
     if current is None or not _x11_keys_available():
         return False
     original = current
+    chrome = _chromium_app(acc)
+    dom_original = False
     from a11y_computer_use.drivers import _linux_ime
+
+    def rollback() -> None:
+        if dom_original:
+            chromium_replace_dom_text(acc, original)
+        else:
+            _restore_text(acc, original)
 
     # One engine switch covers the clear, the write and a restore (#1219). The
     # original is typed back if the write fails, so it must be typeable too:
     # when the engine cannot be switched, this refuses before any key is sent.
     with _linux_ime.ascii_passthrough(text + current):
         if not _text_is_blank(current):
+            if chrome:
+                # The read is the rendered text. Under CSS text-transform a
+                # restore would type the painted case back as the value
+                # (#1388), so the DOM value is what is restored.
+                dom = chromium_dom_text(acc)
+                if dom == text:
+                    return _CssTransformedWrite.of(current)
+                if dom is not None:
+                    original, dom_original = dom, True
             _x11_select_all_and_delete(acc)
             if not _wait_until_gone(acc):
-                _restore_text(acc, original)
+                rollback()
                 return False
         else:
             grab_focus(acc)
-        _type_into_target(acc, text)
-        if _confirm_text(acc, text) or _hex_colour_confirmed(acc, text):
-            return True
-        _restore_text(acc, original)
-    if _chromium_app(acc):
+            dom_original = chrome
+        try:
+            _type_into_target(acc, text)
+            if _confirm_text(acc, text) or _hex_colour_confirmed(acc, text):
+                return True
+            rendered = _full_text(acc)
+            if css_transformed_value_confirms(acc, rendered, text):
+                return _CssTransformedWrite.of(rendered)
+        except ComputerUseError:
+            rollback()
+            raise
+        rollback()
+    if chrome:
         # Keys reached the page: its input listeners already ran, so this is
         # not a clean refusal even when the field reads the old text (#1394).
         raise _keyed_write_mismatch(acc, text, original)
@@ -11187,6 +11459,10 @@ def _keyed_write_mismatch(acc, text: str, original: str | None):
     """A failed write whose keys were already sent, reported as ``partial``."""
     now = _full_text(acc)
     restored = original is not None and (now == original or _texts_match(now, original))
+    if not restored and original is not None and _chromium_app(acc):
+        # Under CSS text-transform the rendered read differs in case from a
+        # DOM-value restore (#1388), so the DOM value decides.
+        restored = chromium_dom_text(acc) == original
     evidence = (
         f"keys for {text!r} were sent and the field did not keep them; the page "
         "may have received input events"
@@ -18814,7 +19090,9 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
             raise
         if not ok:
             _restore_text_points(saved)
-    return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
+    if getattr(ok, "private_text_verified", False) is True or isinstance(ok, _CssTransformedWrite):
+        return ok
+    return bool(ok)
 
 
 def refuse_open_composition(acc) -> None:
