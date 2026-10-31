@@ -5969,9 +5969,10 @@ class LinuxDriver:
         except Exception:
             peers = {}
         if self._run(lambda: _atspi.qt_line_edit(handle)):
-            # #1418: keys, not EditableText, so Qt emits textEdited.
+            # #1418: keys, not EditableText, so Qt emits textEdited. A ref
+            # type into a single-line entry appends at the end (documented).
             try:
-                count = self._run(lambda: _atspi.qt_line_edit_keys(handle, text, replace=False))
+                count = self._run(lambda: _atspi.qt_line_edit_keys(handle, text, append=True))
             except ComputerUseError as exc:
                 self._refuse_changed_peers(handle, peers, element, exc)
                 raise

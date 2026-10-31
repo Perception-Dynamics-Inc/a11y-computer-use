@@ -9,6 +9,7 @@ Skipped without an X display, an AT-SPI bus, and PyQt6.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -67,6 +68,20 @@ def _wait_for(log_path, mark, needle, timeout=3.0):
     return log_path.read_text()[mark:]
 
 
+def _field_ref(text: str, label: str) -> str:
+    """The ref of the text field named ``label``, not its QLabel buddy.
+
+    Real Qt 6 names the QLineEdit after its buddy label, so both lines carry
+    the label; the field's line is the text role (textarea/textfield).
+    """
+    for line in text.splitlines():
+        if f'"{label}"' in line and ("textarea" in line or "textfield" in line):
+            found = re.search(r"\be\d+\b", line)
+            if found:
+                return found.group(0)
+    return _ref_of(text, label)
+
+
 def test_set_value_and_type_fire_qt_text_edited(tmp_path):
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -96,22 +111,31 @@ def test_set_value_and_type_fire_qt_text_edited(tmp_path):
         assert '"Hex colour:"' in text and '"HTML:"' in text, text
 
         mark = len(log_path.read_text())
-        runtime.set_value(ref=_ref_of(text, "Hex colour:"), value="#00ff00")
+        runtime.set_value(ref=_field_ref(text, "Hex colour:"), value="#00ff00")
         new = _wait_for(log_path, mark, "EDITED #00ff00")
         assert "EDITED #00ff00" in new, new
 
         text = runtime.desktop_snapshot("cuqtedit", mode="full")
         assert "applied: #00ff00" in text, text
         mark = len(log_path.read_text())
-        runtime.type_text(text="1", ref=_ref_of(text, "Hex colour:"))
+        runtime.type_text(text="1", ref=_field_ref(text, "Hex colour:"))
         new = _wait_for(log_path, mark, "EDITED #00ff001")
         assert "EDITED #00ff001" in new, new
 
         text = runtime.desktop_snapshot("cuqtedit", mode="full")
         mark = len(log_path.read_text())
-        runtime.set_value(ref=_ref_of(text, "HTML:"), value="#00ff00")
+        runtime.set_value(ref=_field_ref(text, "HTML:"), value="#00ff00")
         new = _wait_for(log_path, mark, "COLOUR #00ff00")
         assert "COLOUR #00ff00" in new, new
+
+        # A value the HTML validator rejects is refused, and the field is put
+        # back through the same key path, not left half-typed.
+        text = runtime.desktop_snapshot("cuqtedit", mode="full")
+        with pytest.raises(ComputerUseError) as err:
+            runtime.set_value(ref=_field_ref(text, "HTML:"), value="hello")
+        assert err.value.detail.get("restored") is True, err.value.detail
+        text = runtime.desktop_snapshot("cuqtedit", mode="full")
+        assert "#00ff00" in text and "hello" not in text, text
     finally:
         _stop(proc)
         log.close()

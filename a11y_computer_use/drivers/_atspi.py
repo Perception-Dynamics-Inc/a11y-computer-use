@@ -10444,14 +10444,26 @@ def qt_line_edit(acc) -> bool:
     Qt emits ``textEdited`` only for keyboard input. An AT-SPI EditableText
     write changes the text without it, and widgets that listen only to user
     edits (QColorDialog's "HTML:" field) ignore the value.
+
+    Real Qt 6 (6.11/6.12, probed over the AT-SPI bus) exposes a QLineEdit as
+    role ``text`` with EDITABLE, ENABLED, FOCUSABLE, SENSITIVE, SHOWING and
+    VISIBLE, and with neither SINGLE_LINE nor MULTI_LINE; QPlainTextEdit and
+    QTextEdit add MULTI_LINE. A read-only QLineEdit keeps EDITABLE and adds
+    READ_ONLY. The application's toolkit name is ``Qt``. So a single-line Qt
+    field is "not MULTI_LINE", never "has SINGLE_LINE". A password field
+    (masked text) stays on the older path: its read-back cannot be checked.
     """
     if acc is None or not _qt_app(acc):
         return False
     if _role_name(acc) not in {"text", "entry"}:
         return False
-    if _state_has(acc, "MULTI_LINE") or not _state_has(acc, "SINGLE_LINE"):
+    if not _state_has(acc, "EDITABLE") or _state_has(acc, "MULTI_LINE"):
         return False
-    return bool(_state_has(acc, "EDITABLE"))
+    if _state_has(acc, "READ_ONLY"):
+        return False
+    if _editable_iface(acc) is None:
+        return False
+    return not bool(_safe(lambda: is_secure(acc)))
 
 
 def _qt_text_state(acc) -> tuple[str, int, int, int] | None:
@@ -10468,15 +10480,62 @@ def _qt_text_state(acc) -> tuple[str, int, int, int] | None:
     return text, caret, start, end
 
 
-def qt_line_edit_keys(acc, text: str, *, replace: bool) -> int:
+def _qt_wait_state(acc, ok) -> tuple[str, int, int, int] | None:
+    """Poll the field until ``ok(state)``; the last state read, or None."""
+    state = None
+    for _ in range(_QT_KEY_EDIT_POLLS):
+        state = _qt_text_state(acc)
+        if state is not None and ok(state):
+            return state
+        time.sleep(_QT_KEY_EDIT_PAUSE_S)
+    return None
+
+
+def _qt_select_whole(acc) -> bool:
+    """ctrl+a, then True only when the selection reads back as the whole text."""
+    _chord_into_target(acc, "ctrl+a")
+    return _qt_wait_state(
+        acc, lambda s: s[0] == "" or (s[2], s[3]) == (0, len(s[0]))) is not None
+
+
+def _qt_restore(acc, before: str) -> bool:
+    """Put ``before`` back with the same real-key path; True when it reads back.
+
+    ctrl+a has to select the whole current text before anything is typed;
+    an empty original is restored with BackSpace over that selection.
+    """
+    try:
+        if _full_text(acc) == before:
+            return True
+        if not _qt_select_whole(acc):
+            return False
+        if before:
+            _type_into_target(acc, before)
+        elif _full_text(acc):
+            _chord_into_target(acc, "BackSpace")
+        return _qt_wait_state(acc, lambda s: s[0] == before) is not None
+    except Exception:
+        return False
+
+
+def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = False) -> int:
     """Type ``text`` into a focused Qt line edit as real key events (#1418).
 
     ``replace`` selects the whole text with ctrl+a first and requires the
     selection to read back as the whole value before any character is
-    sent. Without it the keys land at the caret, replacing an existing
-    selection the way a keyboard does. The field has to read back exactly
-    as the keyboard edit would leave it, or the call raises; no success is
-    reported from an EditableText write the app may not have seen.
+    sent. ``append`` (a ref ``type``) moves the caret to the end with End
+    and requires it there with no selection, matching the documented ref
+    type semantics for a single-line entry. Otherwise the keys land at the
+    caret, replacing an existing selection the way a keyboard does.
+
+    Success is an exact read-back only. Keys pass through the field's
+    validator and input mask, so a rejected or truncated value reads back
+    differently and is refused. After any refusal once keys were sent, the
+    original text is put back through ctrl+a and typing, and ``restored``
+    reports whether it read back. AT-SPI exposes no validator, mask or
+    hasAcceptableInput state for a QLineEdit, so an exact read-back of an
+    intermediate value (for example "#00f" in QColorDialog) is the limit
+    of what can be checked.
     """
     if "\n" in text or "\r" in text or "\t" in text:
         raise _text_mismatch(
@@ -10503,23 +10562,35 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool) -> int:
             input_sent=False,
         )
     before, caret, start, end = state
+
+    def refuse(reason, message, keys_sent, **detail):
+        restored = _qt_restore(acc, before)
+        return _text_mismatch(
+            reason,
+            message + ("; the original text was restored" if restored
+                       else "; the original text could not be restored, check the field"),
+            expected=detail.pop("expected", text),
+            input_sent=True,
+            keys_sent=keys_sent,
+            original=before,
+            restored=restored,
+            **detail,
+        )
+
     if replace and before:
-        _chord_into_target(acc, "ctrl+a")
-        for _ in range(_QT_KEY_EDIT_POLLS):
-            state = _qt_text_state(acc)
-            if state is not None and state[0] == before and (state[2], state[3]) == (0, len(before)):
-                break
-            time.sleep(_QT_KEY_EDIT_PAUSE_S)
-        else:
-            raise _text_mismatch(
-                "selection_not_whole",
-                "ctrl+a did not select the field's whole text; no characters were typed",
-                expected=text,
-                actual=state[0] if state else None,
-                input_sent=True,
-                keys_sent=["ctrl+a"],
-            )
+        if not _qt_select_whole(acc):
+            raise refuse("selection_not_whole",
+                         "ctrl+a did not select the field's whole text; no characters were typed",
+                         ["ctrl+a"], actual=_full_text(acc))
         start, end = 0, len(before)
+    elif append and (caret != len(before) or start != end):
+        _chord_into_target(acc, "End")
+        if _qt_wait_state(acc, lambda s: s[0] == before and s[1] == len(before)
+                          and s[2] == s[3]) is None:
+            raise refuse("caret_not_at_end",
+                         "End did not put the caret at the end of the text; no characters were typed",
+                         ["End"], actual=_full_text(acc))
+        caret, start, end = len(before), len(before), len(before)
     if start != end:
         want = before[:start] + text + before[end:]
     elif replace:
@@ -10527,7 +10598,16 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool) -> int:
     else:
         want = before[:caret] + text + before[caret:]
     if text:
-        _type_into_target(acc, text)
+        try:
+            _type_into_target(acc, text)
+        except Exception as exc:
+            from a11y_computer_use.schema import ComputerUseError
+
+            if isinstance(exc, ComputerUseError) and isinstance(exc.detail, dict):
+                if exc.detail.get("input_sent") is not False:
+                    exc.detail["restored"] = _qt_restore(acc, before)
+                    exc.detail["original"] = before
+            raise
     got = _full_text(acc)
     for _ in range(_QT_KEY_EDIT_POLLS):
         if got == want:
@@ -10536,13 +10616,13 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool) -> int:
         got = _full_text(acc)
     if got == want:
         return len(text)
-    raise _text_mismatch(
+    raise refuse(
         "text_mismatch",
-        f"the Qt field reads {_excerpt(got)!r} after the keys, not {_excerpt(want)!r}; "
-        "the keys were sent, so check the field before typing again",
+        f"the Qt field read {_excerpt(got)!r} after the keys, not {_excerpt(want)!r} "
+        "(its validator or input mask did not accept the value)",
+        ["ctrl+a", text] if replace and before else [text],
         expected=want,
         actual=got,
-        input_sent=True,
     )
 
 

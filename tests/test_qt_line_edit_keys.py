@@ -14,6 +14,14 @@ from a11y_computer_use.drivers import _atspi, _cdp_forms, linux
 from a11y_computer_use.schema import Bounds, ComputerUseError, Element
 
 
+# Probed from a real PyQt6 6.11 / Qt 6.12 QColorDialog over the AT-SPI bus:
+# the "HTML:" QLineEdit is role "text" with these states and Text plus
+# EditableText; QPlainTextEdit and QTextEdit add MULTI_LINE; a read-only
+# QLineEdit adds READ_ONLY. The application's ToolkitName is "Qt".
+_REAL_QT6_LINE_EDIT_STATES = frozenset(
+    {"EDITABLE", "ENABLED", "FOCUSABLE", "SENSITIVE", "SHOWING", "VISIBLE"})
+
+
 class _LineEdit:
     """A QLineEdit: keys fire textEdited, EditableText does not."""
 
@@ -28,6 +36,15 @@ class _LineEdit:
         self.keys.append(chord)
         if chord == "ctrl+a" and self.selects_all:
             self.sel = (0, len(self.text))
+        elif chord == "End":
+            self.caret = len(self.text)
+            self.sel = (self.caret, self.caret)
+        elif chord == "BackSpace":
+            start, end = self.sel
+            if start != end:
+                self.text = self.text[:start] + self.text[end:]
+                self.caret, self.sel = start, (start, start)
+                self.edited.append(self.text)
 
     def type(self, text):
         self.keys.append(text)
@@ -55,8 +72,11 @@ def _element(qt=True):
 @pytest.fixture
 def field(monkeypatch):
     f = _LineEdit()
-    states = {"SINGLE_LINE", "EDITABLE", "FOCUSABLE", "FOCUSED"}
+    # The state set real Qt 6 exposes for a QLineEdit: no SINGLE_LINE.
+    states = set(_REAL_QT6_LINE_EDIT_STATES) | {"FOCUSED"}
     monkeypatch.setattr(_atspi, "_qt_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object())
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
     monkeypatch.setattr(_atspi, "_role_name", lambda acc: "text")
     monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in states)
     monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
@@ -188,7 +208,119 @@ def test_newline_in_set_value_is_refused_before_any_key(monkeypatch, field):
     (True, {"SINGLE_LINE", "EDITABLE"}, "spin button", False),
 ])
 def test_qt_line_edit_detection(monkeypatch, toolkit_qt, states, role, expect):
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object())
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
     monkeypatch.setattr(_atspi, "_qt_app", lambda acc: toolkit_qt)
     monkeypatch.setattr(_atspi, "_role_name", lambda acc: role)
     monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in states)
     assert _atspi.qt_line_edit(object()) is expect
+
+
+class _QtApp:
+    def get_toolkit_name(self):
+        return "Qt"
+
+
+class _QtNode:
+    def __init__(self, role="text"):
+        self.role = role
+
+    def get_application(self):
+        return _QtApp()
+
+    def get_role_name(self):
+        return self.role
+
+
+@pytest.mark.parametrize("extra,role,expect", [
+    (set(), "text", True),                      # QLineEdit (QColorDialog "HTML:")
+    ({"MULTI_LINE"}, "text", False),            # QPlainTextEdit / QTextEdit
+    ({"READ_ONLY"}, "text", False),             # read-only QLineEdit
+])
+def test_qt_line_edit_detection_on_the_real_qt6_attribute_shape(monkeypatch, extra, role, expect):
+    states = set(_REAL_QT6_LINE_EDIT_STATES) | extra
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in states)
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object())
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    assert "SINGLE_LINE" not in states
+    assert _atspi.qt_line_edit(_QtNode(role)) is expect
+
+
+def test_qt_password_field_is_not_taken_by_the_key_path(monkeypatch):
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name in _REAL_QT6_LINE_EDIT_STATES)
+    monkeypatch.setattr(_atspi, "_editable_iface", lambda acc: object())
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: True)
+    assert _atspi.qt_line_edit(_QtNode()) is False
+
+
+def _hex_validator(new, old):
+    """QColorDialog's HTML validator: '#' and up to six hex digits."""
+    import re
+    return new if re.fullmatch(r"#?[0-9A-Fa-f]{0,6}", new) else old
+
+
+def _typing(validator):
+    """Key-by-key acceptance, the way Qt applies a validator per keystroke."""
+    def accepts(new, old):
+        return validator(new, old)
+    return accepts
+
+
+@pytest.mark.parametrize("value,partial", [("hello", "#e"), ("#00ff00ff", "#00ff00")])
+def test_set_value_with_a_rejected_value_is_refused_and_restored(monkeypatch, field, value, partial):
+    def per_key(f):
+        orig = f.type
+
+        def typ(text):
+            for ch in text:
+                orig(ch)
+        return typ
+    field.accepts = _hex_validator
+    field.type = per_key(field)
+    drv = _driver(monkeypatch, field)
+    with pytest.raises(ComputerUseError) as err:
+        drv.set_value(_element(), value)
+    d = err.value.detail
+    # Real Qt left "#e" and "#00ff00" (probed); the fake's validator differs in detail.
+    assert d["reason"] == "text_mismatch" and d["actual"] != value
+    assert d["restored"] is True and field.text == "#ff0000"
+    assert field.editable_text_writes == 0
+
+
+def test_max_length_truncation_is_refused_and_the_original_restored(monkeypatch, field):
+    field.text, field.caret, field.sel = "abcd", 4, (4, 4)
+    field.accepts = lambda new, old: new[:4]
+    drv = _driver(monkeypatch, field)
+    with pytest.raises(ComputerUseError) as err:
+        drv.set_value(_element(), "wxyz12")
+    assert err.value.detail["actual"] == "wxyz"
+    assert err.value.detail["restored"] is True and field.text == "abcd"
+
+
+def test_restore_failure_is_reported_honestly(monkeypatch, field):
+    field.accepts = lambda new, old: new[:3]
+    drv = _driver(monkeypatch, field)
+    real_chord = field.chord
+
+    def chord(c):
+        real_chord(c)
+        if len(field.keys) > 1:      # the restore's ctrl+a does not select
+            field.sel = (field.caret, field.caret)
+    field.chord = chord
+    with pytest.raises(ComputerUseError) as err:
+        drv.set_value(_element(), "#00ff00")
+    assert err.value.detail["restored"] is False and field.text == "#00"
+
+
+def test_ref_type_appends_at_the_end_even_when_the_caret_is_mid_text(monkeypatch, field):
+    drv = _driver(monkeypatch, field)
+    for name, value in (("drawing_text_editable", False), ("math_command_editable", False),
+                        ("gtk4_entry_needs_pointer_focus", False), ("gecko_entry_caret_to_end", None),
+                        ("gecko_plain_entry", False), ("_chromium_app", False),
+                        ("append_target_entry", False), ("changed_peer_fields", [])):
+        monkeypatch.setattr(_atspi, name, (lambda v: lambda *a, **k: v)(value))
+    monkeypatch.setattr(_atspi, "_refuse_chromium_tab_text", lambda *a: None, raising=False)
+    monkeypatch.setattr(linux.LinuxDriver, "_refuse_hidden", lambda self, *a: None)
+    field.text, field.caret, field.sel = "abc", 1, (1, 1)    # a click left the caret mid-text
+    assert drv.type_into(_element(), "Z") == 1
+    assert field.text == "abcZ" and field.keys == ["End", "Z"]
