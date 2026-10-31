@@ -1378,6 +1378,29 @@ def _missing_atspi_bindings(exc: BaseException) -> ComputerUseError:
     )
 
 
+# A row-identity read that lost parts to unanswered D-Bus calls is retried
+# for at most this long before the action is refused as unreadable.
+_ROW_IDENTITY_READ_WAIT_S = 1.5
+_ROW_IDENTITY_READ_POLL_S = 0.1
+
+
+def _row_identity_unreadable(current: tuple, issued: tuple) -> bool:
+    """True when ``current`` lost parts to failed reads, not to a different row.
+
+    A failed role read yields a part with no role. Each part ends with the
+    node's bus name and object path; a part whose path still matches the
+    issued part but whose role went blank was not read. An empty identity
+    (the target is no longer inside a row) stays a plain mismatch.
+    """
+    issued_roles = {part[-1]: part[0] for part in issued if part}
+    for part in current:
+        if not part or part[0]:
+            continue
+        if issued_roles.get(part[-1]):
+            return True
+    return False
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -3795,6 +3818,32 @@ class LinuxDriver:
             # differently every time; refuse unless a second read agrees.
             if current != element.row_identity:
                 current = fresh()
+        # After one NoReply, libatspi fails every call to the app at once until
+        # its hang-check ping is answered (#1396). Two back-to-back reads then
+        # both lose a role, so the second read "agrees" on a degraded identity.
+        # An unreadable part is not evidence either way: dispatch pending
+        # replies and read again, within a short bound. A readable identity is
+        # still compared exactly, so a different row is refused as before.
+        deadline = time.monotonic() + _ROW_IDENTITY_READ_WAIT_S
+        while (
+            current != element.row_identity
+            and _row_identity_unreadable(current, element.row_identity)
+            and time.monotonic() < deadline
+        ):
+            try:
+                self._run(lambda: _atspi._drain_atspi_replies(_ROW_IDENTITY_READ_POLL_S))
+            except Exception:
+                pass
+            time.sleep(_ROW_IDENTITY_READ_POLL_S)
+            current = fresh()
+        if current != element.row_identity and _row_identity_unreadable(current, element.row_identity):
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.title!r}) row identity could not be read "
+                "(the browser did not answer accessibility reads); no input was sent",
+                detail={"ref": element.ref, "reason": "target_unreadable", "outcome": "refused",
+                        "hint": "The page is busy. Re-observe and try again."},
+            )
         if current != element.row_identity:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,

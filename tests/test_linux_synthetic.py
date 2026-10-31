@@ -19685,21 +19685,27 @@ def test_scale_description_filter_preserves_labels(
 
 @pytest.mark.parametrize("reads, refused", [
     (("degraded", "same"), False),
-    (("degraded", "degraded"), True),
-    (("recycled", "recycled"), True),
+    (("degraded", "degraded"), "target_unreadable"),
+    (("degraded", "degraded", "degraded", "same"), False),
+    (("recycled", "recycled"), "target_changed"),
     (("recycled", "same"), False),
+    (("degraded", "degraded", "recycled"), "target_changed"),
 ])
 def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
     monkeypatch, reads, refused,
 ):
-    """#1368: a timed-out read in the identity walk must not refuse a live row.
+    """#1368, #1396: timed-out reads in the identity walk must not refuse a live row.
 
     Each failed AT-SPI read in the walk becomes a default (empty role), so
-    one slow reply looks like a recycled row. The check reads again and
-    refuses only when the second read also disagrees; it never trusts the
-    snapshot without a fresh read that matches.
+    one slow reply looks like a recycled row. After one NoReply, libatspi
+    fails every call to the app until its hang-check ping is answered, so
+    two back-to-back reads can both come back degraded. The check keeps
+    reading (bounded) while parts are unreadable, then compares exactly:
+    a readable different row is still refused as changed, and an identity
+    that never becomes readable is refused as unreadable, never accepted.
     """
     from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers import linux as linux_mod
 
     identity = (("push button", "", (), "k1"), ("table row", "", (), "k2"))
     values = {"same": identity,
@@ -19710,8 +19716,12 @@ def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
     def fake_identity(handle, *, fresh=False, cache=None):
         assert fresh
         calls.append(handle)
-        return values[reads[len(calls) - 1]]
+        return values[reads[min(len(calls), len(reads)) - 1]]
 
+    clock = {"t": 0.0}
+    monkeypatch.setattr(linux_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(linux_mod.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda budget_s=0.25: None)
     monkeypatch.setattr(_atspi, "chromium_row_identity", fake_identity)
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
@@ -19721,9 +19731,25 @@ def test_chromium_row_identity_one_degraded_read_is_not_a_recycled_row(
         with pytest.raises(ComputerUseError) as exc:
             driver._verify_chromium_row_target(element, object())
         assert exc.value.code is ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == refused
+        assert exc.value.detail["outcome"] == "refused"
     else:
         driver._verify_chromium_row_target(element, object())
-    assert len(calls) == 2
+    if reads[:2] != ("degraded", "degraded"):
+        assert len(calls) == 2
+    assert clock["t"] <= linux_mod._ROW_IDENTITY_READ_WAIT_S + linux_mod._ROW_IDENTITY_READ_POLL_S
+
+
+def test_chromium_row_identity_unreadable_only_for_blank_roles_on_issued_paths():
+    from a11y_computer_use.drivers.linux import _row_identity_unreadable
+
+    issued = (("push button", "", (), "k1"), ("table row", "", (), "k2"))
+    assert not _row_identity_unreadable((), issued)
+    assert _row_identity_unreadable((("", "", (), "k1"), ("table row", "", (), "k2")), issued)
+    # A readable different row is never treated as unreadable.
+    assert not _row_identity_unreadable((("push button", "", (), "k1"), ("table row", "", (), "k9")), issued)
+    # A blank role on a node that was not in the issued row is a different row.
+    assert not _row_identity_unreadable((("", "", (), "k7"), ("table row", "", (), "k9")), issued)
 
 
 def test_chromium_row_identity_match_reads_once(monkeypatch):
