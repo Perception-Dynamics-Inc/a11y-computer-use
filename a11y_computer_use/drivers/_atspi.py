@@ -21498,7 +21498,26 @@ def chromium_button_click_action(acc):
     count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
     for index in range(int(count)):
         name = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
-        if name in {"click", "press"}:
+        # Chromium names an aria-haspopup button's default action "open"
+        # (kOpen) instead of "press"; it is the same activation (#1383, #861).
+        if name in {"click", "press", "open"}:
+            return action, index, name
+    return None
+
+
+def chromium_button_context_menu_action(acc):
+    """Return the node's own ``showContextMenu`` action, or None.
+
+    Chromium dispatches contextmenu at the node itself, so no stale hit test
+    or pointer is involved. No other action is substituted.
+    """
+    action = _action_iface(acc)
+    if action is None:
+        return None
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for index in range(int(count)):
+        name = _call_first(action, ("get_action_name", "get_name"), index, default="") or ""
+        if name.lower() == "showcontextmenu":
             return action, index, name
     return None
 
