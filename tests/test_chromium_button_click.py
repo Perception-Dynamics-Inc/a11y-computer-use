@@ -242,3 +242,48 @@ def test_scoped_click_evidence_preserves_process_exit(button_case, monkeypatch):
     verdict, evidence = rt._judge_mutation("chrome", None, element, None, cover_click=True)
     assert verdict == "partial"
     assert "process exited" in evidence
+
+
+def test_haspopup_button_open_action_activates(button_case):
+    """#1383: Chromium names an aria-haspopup button's action "open"."""
+    driver, element, node, frame, action, names, calls = button_case
+    names[:] = ["open", "showContextMenu"]
+    result = driver.click_button_action(element, button=MouseButton.LEFT, count=1, modifiers=())
+    assert result == "AT-SPI doAction(open)"
+    assert calls == ["open"]
+
+
+@pytest.mark.parametrize("names", [["press", "showContextMenu"], ["open", "showContextMenu"]])
+def test_right_click_uses_node_context_menu_action(button_case, names):
+    """#1383: a right-click by ref opens the page menu, never activates."""
+    driver, element, node, frame, action, advertised, calls = button_case
+    advertised[:] = names
+    result = driver.click_button_action(element, button=MouseButton.RIGHT, count=1, modifiers=())
+    assert result == "AT-SPI doAction(showContextMenu)"
+    assert calls == ["showContextMenu"]
+    # A context menu is not a click; no name-change receipt is issued.
+    assert driver._button_click_probe is None
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"count": 2}, {"modifiers": ("shift",)}, {"allow_action": False},
+])
+def test_modified_right_click_is_not_rewritten(button_case, kwargs):
+    driver, element, node, frame, action, names, calls = button_case
+    names[:] = ["press", "showContextMenu"]
+    params = dict(button=MouseButton.RIGHT, count=1, modifiers=())
+    params.update(kwargs)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click_button_action(element, **params)
+    assert exc.value.detail["outcome"] == "refused"
+    assert not calls
+
+
+def test_failed_context_menu_action_is_unconfirmed_not_retried(button_case):
+    driver, element, node, frame, action, names, calls = button_case
+    names[:] = ["press", "showContextMenu"]
+    action.do_action = lambda i: calls.append(names[i]) or False
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click_button_action(element, button=MouseButton.RIGHT, count=1, modifiers=())
+    assert exc.value.detail["outcome"] == "unconfirmed"
+    assert calls == ["showContextMenu"]
