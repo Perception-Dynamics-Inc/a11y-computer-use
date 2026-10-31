@@ -37,7 +37,9 @@ import re
 import shlex
 import shutil
 import stat
-from typing import Callable
+import threading
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
 #: Interpreter executables. A process running one of these hosts code whose
 #: every self-reported name is its own choice, so it is keyed as the
@@ -64,7 +66,17 @@ def exe_of(pid: int) -> str | None:
         return None
     if target.endswith(" (deleted)"):
         return None
-    return os.path.realpath(target)
+    memo = getattr(_WALK, "realpaths", None)
+    if memo is None:
+        return os.path.realpath(target)
+    resolved = memo.get(target)
+    if resolved is None:
+        resolved = memo[target] = os.path.realpath(target)
+    return resolved
+
+
+# Set only for the duration of one ``_scan_proc`` walk on this thread.
+_WALK = threading.local()
 
 
 def interpreter_key(exe: str | None) -> str | None:
@@ -81,37 +93,220 @@ def interpreter_key(exe: str | None) -> str | None:
 
 def _comm(pid: int) -> str:
     try:
-        with open(f"/proc/{int(pid)}/comm", encoding="utf-8", errors="replace") as fh:
-            return fh.read().strip()
+        fd = os.open(f"/proc/{int(pid)}/comm", os.O_RDONLY)
     except OSError:
         return ""
+    try:
+        raw = os.read(fd, 4096)  # comm is at most 16 bytes
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    return raw.decode("utf-8", errors="replace").strip()
+
+
+# Per-action /proc index (#1347). While any action is open (``proc_scope``),
+# the first ``pids_named`` walks /proc once and later lookups read that walk,
+# on whichever thread the action's work runs (find_root runs on the AT-SPI
+# thread). Every action entry drops the walk, so a lookup never reads a walk
+# taken before the newest action began. With no action open every call walks
+# /proc afresh, as before.
+_SCOPE_LOCK = threading.Lock()
+_SCOPE_DEPTH = 0
+_SCOPE_INDEX: tuple[dict[str, set[int]], dict[str, set[int]]] | None = None
+_SCOPE_MEMO: dict = {}
+# Whether ``scope_memo`` and the shared walk serve the open action. On at
+# every action entry; ``seal_scope_memo`` turns it off once the gate has
+# decided, so the action's own work (launch waits, polls, rechecks) always
+# reads live evidence.
+_SCOPE_SHARING = False
+
+# Count of full /proc walks, for the regression test (#1347).
+PROC_SCANS = 0
+
+
+def _scan_proc() -> tuple[dict[str, set[int]], dict[str, set[int]]]:
+    """One walk of /proc: (comm -> pids, exe realpath basename -> pids)."""
+    global PROC_SCANS
+    PROC_SCANS += 1
+    by_comm: dict[str, set[int]] = {}
+    by_exe: dict[str, set[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return by_comm, by_exe
+    if _comm is _REAL_COMM and exe_of is _REAL_EXE_OF:
+        return _scan_proc_direct(entries, by_comm, by_exe)
+    # Most processes share a handful of executables: each distinct readlink
+    # target is resolved once per walk (``exe_of`` still readlinks every pid).
+    _WALK.realpaths = {}
+    try:
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            comm = _comm(pid)
+            if comm:
+                by_comm.setdefault(comm, set()).add(pid)
+            exe = exe_of(pid)
+            if exe:
+                by_exe.setdefault(os.path.basename(exe), set()).add(pid)
+    finally:
+        _WALK.realpaths = None
+    return by_comm, by_exe
+
+
+def _scan_proc_direct(entries, by_comm, by_exe):
+    """``_scan_proc`` with ``_comm`` and ``exe_of`` inlined (#1354, terminal latency).
+
+    The same reads per pid (comm, then the exe link and its realpath) with the
+    same results, opened relative to one /proc directory fd. Used only while
+    ``_comm`` and ``exe_of`` are the real readers.
+    """
+    realpaths: dict[str, str] = {}
+    try:
+        proc = os.open("/proc", os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return by_comm, by_exe
+    try:
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            entry = str(pid)
+            comm = ""
+            try:
+                fd = os.open(entry + "/comm", os.O_RDONLY, dir_fd=proc)
+            except OSError:
+                fd = -1
+            if fd >= 0:
+                try:
+                    raw = os.read(fd, 4096)  # comm is at most 16 bytes
+                except OSError:
+                    raw = b""
+                finally:
+                    os.close(fd)
+                comm = raw.decode("utf-8", errors="replace").strip()
+            if comm:
+                pids = by_comm.get(comm)
+                if pids is None:
+                    by_comm[comm] = {pid}
+                else:
+                    pids.add(pid)
+            try:
+                target = os.readlink(entry + "/exe", dir_fd=proc)
+            except (OSError, ValueError):
+                continue
+            if target.endswith(" (deleted)"):
+                continue
+            resolved = realpaths.get(target)
+            if resolved is None:
+                resolved = realpaths[target] = os.path.realpath(target)
+            if resolved:
+                base = os.path.basename(resolved)
+                pids = by_exe.get(base)
+                if pids is None:
+                    by_exe[base] = {pid}
+                else:
+                    pids.add(pid)
+    finally:
+        os.close(proc)
+    return by_comm, by_exe
+
+
+@contextmanager
+def proc_scope() -> Iterator[None]:
+    """Share one /proc walk among every ``pids_named`` call in one action (#1347).
+
+    Each entry starts a fresh walk, nested ones included (every batch step
+    is its own action), and the last exit drops it.
+    """
+    global _SCOPE_DEPTH, _SCOPE_INDEX, _SCOPE_MEMO, _SCOPE_SHARING
+    with _SCOPE_LOCK:
+        _SCOPE_DEPTH += 1
+        _SCOPE_INDEX = None  # built lazily by the first lookup
+        _SCOPE_MEMO = {}
+        outer_sharing, _SCOPE_SHARING = _SCOPE_SHARING, True
+    try:
+        yield
+    finally:
+        with _SCOPE_LOCK:
+            _SCOPE_DEPTH -= 1
+            # Never resume an older walk: the outer action re-walks if it looks again.
+            _SCOPE_INDEX = None
+            _SCOPE_MEMO = {}
+            _SCOPE_SHARING = outer_sharing and _SCOPE_DEPTH > 0
+
+
+def drop_scope_memo() -> None:
+    """Forget every shared read of the open action (#1347).
+
+    A polling loop calls this at the top of every iteration, so identity
+    evidence is never older than one poll. A no-op outside an action.
+    """
+    global _SCOPE_INDEX, _SCOPE_MEMO
+    with _SCOPE_LOCK:
+        _SCOPE_INDEX = None
+        _SCOPE_MEMO = {}
+
+
+def seal_scope_memo() -> None:
+    """Drop the shared reads and stop sharing until the action ends (#1347).
+
+    Called when the gate hands over to the action itself: its rechecks,
+    launch waits and polls then read live evidence on every call.
+    """
+    global _SCOPE_SHARING
+    drop_scope_memo()
+    with _SCOPE_LOCK:
+        _SCOPE_SHARING = False
+
+
+def scope_memo(key, compute):
+    """``compute()`` once per action for ``key`` (#1347); fresh outside an action.
+
+    Dropped at every action entry and exit, like the /proc walk, so a result
+    is never carried from one action into another, by every
+    ``drop_scope_memo`` (each poll iteration), and never served once the
+    action is sealed. Only a value that was returned is kept; a raise is not.
+    """
+    with _SCOPE_LOCK:
+        if _SCOPE_DEPTH == 0 or not _SCOPE_SHARING:
+            memo = None
+        else:
+            memo = _SCOPE_MEMO
+            if key in memo:
+                return memo[key]
+    value = compute()
+    if memo is not None:
+        with _SCOPE_LOCK:
+            if memo is _SCOPE_MEMO:  # same action, same poll, still open
+                memo[key] = value
+    return value
 
 
 def pids_named(name: str) -> set[int]:
     """Live pids whose comm or exe basename is ``name`` (or its 15-byte cut).
 
     Includes processes with no window yet, so a pre-window spoof is seen.
+    The whole of /proc is always considered; inside ``proc_scope`` the walk
+    is taken once per action and shared (#1347).
     """
     wanted = (name or "").strip()
     if not wanted:
         return set()
-    cut = wanted[:15]
-    found: set[int] = set()
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return found
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        if _comm(pid) == cut:
-            found.add(pid)
-            continue
-        exe = exe_of(pid)
-        if exe and os.path.basename(exe) == wanted:
-            found.add(pid)
-    return found
+    global _SCOPE_INDEX
+    with _SCOPE_LOCK:
+        if _SCOPE_DEPTH > 0 and _SCOPE_SHARING:
+            if _SCOPE_INDEX is None:
+                _SCOPE_INDEX = _scan_proc()
+            index = _SCOPE_INDEX
+        else:
+            index = None
+    if index is None:
+        index = _scan_proc()
+    by_comm, by_exe = index
+    return set(by_comm.get(wanted[:15], ())) | set(by_exe.get(wanted, ()))
 
 
 def _desktop_exec_paths(name: str) -> list[str]:
@@ -369,9 +564,12 @@ def _x11_owner_pids(name: str) -> set[int]:
 def _atspi_owner_pids() -> set[int]:
     """Pids registered on the AT-SPI bus (from D-Bus credentials, not self-reported)."""
     try:
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _atspi, _atspi_events
 
-        return set(_atspi._registered_pids() or ())
+        # One trip to the AT-SPI thread for the whole registry read, and one
+        # read per action (#1347); every action reads the registry afresh.
+        pids = scope_memo(("atspi_owner_pids",), lambda: _atspi_events.run(_atspi._registered_pids))
+        return set(pids or ())
     except Exception:  # noqa: BLE001 - no bus: X11 still names owners
         return set()
 
@@ -395,9 +593,13 @@ def target_pids(name: str, named: set[int] | None = None) -> set[int]:
 def _atspi_named_pids(name: str) -> set[int]:
     """Bus pids of AT-SPI applications whose name is ``name`` (#1327)."""
     try:
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _atspi, _atspi_events
 
-        return set(_atspi._registered_pids_named(name) or ())
+        pids = scope_memo(
+            ("atspi_named_pids", name),
+            lambda: _atspi_events.run(lambda: _atspi._registered_pids_named(name)),
+        )
+        return set(pids or ())
     except Exception:  # noqa: BLE001 - no bus: nothing registers under the name
         return set()
 
@@ -484,6 +686,13 @@ def check(name: str, recorded: str | None,
     if recorded_for is not None:
         _RECORDED_FOR = recorded_for
     _GATED[(name or "").casefold()] = recorded
+    # One verdict per action for the same inputs (#1347): a screenshot gates
+    # the frontmost app twice. Dropped at every action entry and exit.
+    return scope_memo(("check", name, recorded, _RECORDED_FOR),
+                      lambda: _check_verdict(name, recorded))
+
+
+def _check_verdict(name: str, recorded: str | None) -> tuple[str, str | None]:
     if interpreter_key(name):
         return _interpreter_verdict(name, recorded)
     registrants = _atspi_named_pids(name)
@@ -623,3 +832,8 @@ def _diagnose(bad: str, why: str, exes: dict[int, str | None], raw: dict[int, st
             cur = ppid
         parts.append("pid " + " <- ".join(chain))
     return "; ".join(parts)
+
+
+# The real readers, so ``_scan_proc`` knows when it may inline them (#1354).
+_REAL_COMM = _comm
+_REAL_EXE_OF = exe_of

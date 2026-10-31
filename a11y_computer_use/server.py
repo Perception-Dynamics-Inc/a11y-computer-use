@@ -45,7 +45,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from functools import partial, wraps
 from threading import RLock
 from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
@@ -421,6 +421,38 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 
+def _proc_scope():
+    """One shared /proc walk and X connection per action on Linux (#1347); a no-op elsewhere."""
+    if sys.platform.startswith("linux"):
+        return _linux_action_scope()
+    return nullcontext()
+
+
+@contextmanager
+def _linux_action_scope():
+    """One /proc walk and one X connection per thread for one action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe, _linux_system
+
+    with _linux_exe.proc_scope(), _linux_system.x_scope():
+        yield
+
+
+def _drop_identity_reads() -> None:
+    """Forget the open action's shared identity reads (Linux, #1347); call per poll."""
+    if sys.platform.startswith("linux"):
+        from a11y_computer_use.drivers import _linux_exe
+
+        _linux_exe.drop_scope_memo()
+
+
+def _seal_identity_reads() -> None:
+    """Stop sharing identity reads for the rest of the action (Linux, #1347)."""
+    if sys.platform.startswith("linux"):
+        from a11y_computer_use.drivers import _linux_exe
+
+        _linux_exe.seal_scope_memo()
+
+
 def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Concatenate["Runtime", _P], _R]:
     """Keep an entire tool's resolve/gate/act/audit sequence on one ref epoch.
 
@@ -442,7 +474,8 @@ def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Co
             depth = getattr(self, "_tool_depth", 0)
             self._tool_depth = depth + 1
             try:
-                result = method(self, *args, **kwargs)
+                with _proc_scope():
+                    result = method(self, *args, **kwargs)
             finally:
                 self._tool_depth = depth
             if depth == 0:
@@ -2738,10 +2771,11 @@ class Runtime:
         Every name an interpreter-hosted app shows (WM_CLASS, prgname, AT-SPI
         name, cmdline) is set by that process, so a grant on the requested
         name is never inherited by it, before or after its window maps
-        (#1296). A deny on the requested name still wins. Read fresh on
-        every call; nothing is cached.
+        (#1296). A deny on the requested name still wins. The AT-SPI
+        lookup is shared within one action and taken fresh by every action
+        (#1347); the grant and deny reads are never cached.
         """
-        from a11y_computer_use.drivers import _linux_system
+        from a11y_computer_use.drivers import _linux_exe, _linux_system
 
         _PRGNAME_HINTS.pop(resolved, None)
         wanted = (identifier or "").strip()
@@ -2757,10 +2791,15 @@ class Runtime:
             if host is None:
                 probe = getattr(self.driver, "interpreter_host", None)
                 if callable(probe):
-                    try:
-                        host = probe(wanted)
-                    except Exception:  # noqa: BLE001 - no evidence keeps the name
-                        host = None
+
+                    def ask() -> str | None:
+                        try:
+                            return probe(wanted)
+                        except Exception:  # noqa: BLE001 - no evidence keeps the name
+                            return None
+
+                    # One AT-SPI D-Bus lookup per name per action (#1347).
+                    host = _linux_exe.scope_memo(("interpreter_host", id(self.driver), wanted), ask)
         if not host:
             return resolved
         if self.store.policy(wanted)[1]:
@@ -3065,7 +3104,12 @@ class Runtime:
                     )
                 if prompt is not None:
                     # The user can revoke a grant while confirmation is open.
+                    # The human wait is a poll: re-read identity live (#1347).
+                    _drop_identity_reads()
                     decision = self._require_permission(action, self._action_gate_key(app), secure=secure)
+            # The gate has decided. The recheck, the action and every wait
+            # or poll in it read identity live from here on (#1347).
+            _seal_identity_reads()
             if recheck is not None:
                 recheck(app)
             if CONFIRMATION_GATE:
@@ -7565,6 +7609,7 @@ class Runtime:
         deadline = time.monotonic() + max(0.0, timeout_s)
         hits = 0
         while True:
+            _drop_identity_reads()  # each poll reads identity live (#1347)
             if self._linux_candidates_active(candidates):
                 hits += 1
                 if hits >= 2:
@@ -10135,6 +10180,7 @@ class Runtime:
         bundle: str | None = None
         _running = None
         while True:
+            _drop_identity_reads()  # each poll reads identity live (#1347)
             try:
                 if (bundle is None or bundle.lower() == identifier.lower()) and not self._resolves_apps():
                     _running, bundle = _running_app(identifier)
@@ -10257,6 +10303,7 @@ class Runtime:
         deadline = time.monotonic() + timeout_s
         hits = 0
         while True:
+            _drop_identity_reads()  # each poll reads identity live (#1347)
             front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
             if (front and front.lower() == bundle.lower()) or (
                     pid and not self._resolves_apps() and _top_window_pid() == pid):
@@ -10408,6 +10455,7 @@ class Runtime:
         """
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
+            _drop_identity_reads()  # each poll reads identity live (#1347)
             found = self._window_title_containing(word)
             if found:
                 return found

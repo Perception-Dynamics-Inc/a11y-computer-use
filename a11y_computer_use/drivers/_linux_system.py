@@ -93,8 +93,94 @@ def _close_display(d) -> None:
         pass
 
 
+# Per-action X connection reuse (#1347). Inside ``x_scope`` the action opens
+# one connection and every probe of the action reuses it, on any thread (the
+# server thread and the AT-SPI event thread alike). Probes on it are
+# serialized by ``_X_USE``, held for the whole probe, so two threads never
+# interleave requests on the socket. It is closed when the outermost scope
+# exits. A probe that raises drops the connection, so the next probe
+# reconnects. Outside a scope every
+# probe opens and closes its own connection, as before. Every request still
+# reads the live server state; only the socket is reused.
+_X_LOCK = threading.Lock()
+_X_DEPTH = 0
+_X_GEN = 0
+_X_OPEN: list = []
+_X_SHARED = None  # (generation, display, opener)
+_X_USE = threading.RLock()
+
+
+@contextmanager
+def x_scope():
+    """Reuse one X connection per thread for the duration of one action (#1347)."""
+    global _X_DEPTH, _X_GEN
+    with _X_LOCK:
+        _X_DEPTH += 1
+        if _X_DEPTH == 1:
+            _X_GEN += 1
+    try:
+        yield
+    finally:
+        with _X_LOCK:
+            _X_DEPTH -= 1
+            closing = []
+            if _X_DEPTH == 0:
+                closing, _X_OPEN[:] = list(_X_OPEN), []
+                _X_GEN += 1  # invalidate every thread's cached connection
+        for d in closing:
+            _close_display(d)
+
+
+def _scoped_display():
+    """The open action's connection, or None outside one. Call with ``_X_USE`` held."""
+    with _X_LOCK:
+        if _X_DEPTH == 0:
+            return None
+        gen = _X_GEN
+    # Keyed on the opener too, so a swapped ``_display`` (another server or a
+    # synthetic one in tests) is never answered from the old connection.
+    opener = _display
+    global _X_SHARED
+    cached = _X_SHARED
+    if cached is not None and cached[0] == gen and cached[2] is opener:
+        return cached[1]
+    d = opener()
+    with _X_LOCK:
+        stale = _X_DEPTH == 0 or _X_GEN != gen
+        if not stale:
+            _X_OPEN.append(d)
+    if stale:  # the action ended while connecting: use a one-shot connection
+        _close_display(d)
+        return None
+    _X_SHARED = (gen, d, opener)
+    return d
+
+
+def _drop_scoped(d) -> None:
+    with _X_LOCK:
+        if d in _X_OPEN:
+            _X_OPEN.remove(d)
+    global _X_SHARED
+    cached = _X_SHARED
+    if cached is not None and cached[1] is d:
+        _X_SHARED = None
+    _close_display(d)
+
+
 @contextmanager
 def _open_display():
+    with _X_LOCK:
+        scoped = _X_DEPTH > 0
+    if scoped:
+        with _X_USE:
+            d = _scoped_display()
+            if d is not None:
+                try:
+                    yield d
+                except BaseException:
+                    _drop_scoped(d)  # a failed probe may leave the connection unusable
+                    raise
+                return
     d = _display()
     try:
         yield d
@@ -507,6 +593,14 @@ def frontmost_app_id() -> str:
 
 
 def active_window() -> dict | None:
+    """``_active_window``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    row = _linux_exe.scope_memo(("active_window",), _active_window)
+    return dict(row) if row is not None else None
+
+
+def _active_window() -> dict | None:
     """The EWMH ``_NET_ACTIVE_WINDOW``, or None when there is no active window.
 
     ``window_id`` is the X id. ``app`` is the process comm, or the WM_CLASS
@@ -980,6 +1074,13 @@ def _class_matches_identifier(identifier: str, instance: str, klass: str) -> boo
 
 
 def resolve_app(identifier: str) -> str:
+    """``_resolve_app``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return _linux_exe.scope_memo(("resolve_app", identifier), lambda: _resolve_app(identifier))
+
+
+def _resolve_app(identifier: str) -> str:
     """Resolve a window title or program name to the permission-keying id.
 
     The id is the full program name when the kernel comm is that name's
@@ -1035,6 +1136,13 @@ def is_interpreter(name: str | None) -> bool:
 
 
 def interpreter_hosting(identifier: str) -> str | None:
+    """``_interpreter_hosting``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return _linux_exe.scope_memo(("interpreter_hosting", identifier), lambda: _interpreter_hosting(identifier))
+
+
+def _interpreter_hosting(identifier: str) -> str | None:
     """The interpreter comm of a mapped window whose WM_CLASS names ``identifier``.
 
     None when no such window is mapped or its program is not an interpreter.
@@ -1092,6 +1200,14 @@ def title_suggestion(identifier: str) -> str | None:
 
 
 def pids_matching(identifier: str) -> set[int]:
+    """``_pids_matching``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return set(_linux_exe.scope_memo(("pids_matching", identifier),
+                                     lambda: frozenset(_pids_matching(identifier))))
+
+
+def _pids_matching(identifier: str) -> set[int]:
     """PIDs of the managed windows whose program ``identifier`` names.
 
     The match is the full program name when the comm is its 15-byte cut, and
@@ -1212,6 +1328,13 @@ def window_names_by_pid() -> dict[int, set[str]] | None:
 
 
 def verified_pids_matching(identifier: str) -> set[int]:
+    """``_verified_pids_matching``, read once per gate of an action (#1347)."""
+    from a11y_computer_use.drivers import _linux_exe
+
+    return set(_linux_exe.scope_memo(("verified_pids_matching", identifier), lambda: frozenset(_verified_pids_matching(identifier))))
+
+
+def _verified_pids_matching(identifier: str) -> set[int]:
     """`pids_matching`, with each window's owner taken from the X server.
 
     A window is considered when its ``_NET_WM_PID`` or its XRes client pid

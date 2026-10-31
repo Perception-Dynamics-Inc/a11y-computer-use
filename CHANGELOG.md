@@ -7,6 +7,26 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.82] - 2026-10-30
+
+5 changes since v0.4.81, through #1376. A patch release: the deny list now applies to the target's resolved identity, `set_value` refuses contenteditable rich editors such as ProseMirror (Tiptap), a background Chrome tab in an overflowing window is no longer reported as showing, and Linux actions read process and AT-SPI identity once per action, bringing `screenshot` latency back near 0.4.80.
+
+Thanks to Mukhsin0508.
+
+### Safety
+
+- A deny is checked against the target's resolved identity, so `app="python3"` or an untargeted `type` no longer bypasses a deny on an interpreter-hosted app's name. Refs #1358 (#1359) (67ea0df, 2026-10-30)
+- `set_value` on any contenteditable rich editor (for example ProseMirror/Tiptap in Chrome) is refused before it can delete the document, instead of only Quill and CKEditor. Fixes #1364 (#1365) (708e45a, 2026-10-30)
+
+### Linux drivers
+
+- A background-tab ref in an overflowing Chrome window is reported `not_showing`, and retry evidence reads state names from PyGObject IntEnum flags. Refs #1362 (#1363) (0a2b62b, 2026-10-30)
+- Walk `/proc`, open the X connection and look up the AT-SPI interpreter host once per action, not once per check. Refs #1347 (#1354) (40218344..b094bc71, 2026-10-30)
+
+### Fixed
+
+- `scroll_to_find` and the following click on large Chromium tables under load no longer miss rows or time out on the modal-boundary check. Fixes #1368 (#1376) (83b2d06, 2026-10-31)
+
 ## [0.4.81] - 2026-10-30
 
 14 commits since v0.4.80, through #1342. A patch release of Linux safety fixes: app grants are now bound to the real executable, user and AT-SPI bus owner of the target process, and to the X server's owner of a window, never to a name the app chose for itself. It also brings Qt 6 editing, GTK notebook and window-closing key fixes.

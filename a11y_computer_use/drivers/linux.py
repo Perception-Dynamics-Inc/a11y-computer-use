@@ -1493,6 +1493,10 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         try:
+            # No candidate runs an interpreter: find_root's frame and state
+            # reads cannot turn that into a host (#1347).
+            if not self._run(lambda: _atspi.may_host_interpreter(app)):
+                return None
             root = self._run(lambda: _atspi.find_root(app, Scope.APP))
             if root is None:
                 return None
@@ -1831,6 +1835,9 @@ class LinuxDriver:
                 if remaining <= 0:
                     break
                 time.sleep(min(_atspi.ATSPI_REGISTER_POLL_S, remaining))
+                from a11y_computer_use.drivers import _linux_exe
+
+                _linux_exe.drop_scope_memo()  # each poll reads identity live (#1347)
                 resolved, root = self._root_for_snapshot(app, scope)
                 if root is not None:
                     break

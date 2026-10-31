@@ -5595,18 +5595,13 @@ def _screen_size() -> tuple[int, int]:
     A too-small guess would make the engine drop real nodes as "offscreen", so
     err large; the value only bounds the projected coordinate space."""
     try:
-        from Xlib import display as _xd
+        from a11y_computer_use.drivers import _linux_system
 
-        d = _xd.Display()
-        try:
+        # The action's X connection when one is open (#1347), else a one-shot one.
+        with _linux_system._open_display() as d:
             screen = d.screen()
             w = int(screen.width_in_pixels)
             h = int(screen.height_in_pixels)
-        finally:
-            try:
-                d.close()
-            except Exception:
-                pass
         if w > 0 and h > 0:
             return w, h
     except Exception:
@@ -7032,7 +7027,7 @@ def find_root(app: str, scope) -> object | None:
     # A killed/restarted app can be absent from the desktop's cached child
     # array. Refresh the registry before ranking candidates: refreshing the
     # selected app's windows cannot discover its replacement registrant.
-    applications = _fresh_application_children(desktop)
+    applications = _desktop_applications(desktop)
     st = getattr(Atspi, "StateType", None)
     active = getattr(st, "ACTIVE", None)
 
@@ -7093,7 +7088,8 @@ def find_root(app: str, scope) -> object | None:
     for candidate in applications:
         if candidate is None:
             continue
-        name = (_call_first(candidate, ("get_name",), default="") or "").lower()
+        name = (_registry_read(candidate, "get_name") or "").lower()
+        # A shared name is non-empty, so a stale reply flag here is never read.
         name_unanswered = call_went_unanswered()
         # A dialog opened with Gtk.Dialog.run() wedges this process's
         # connection to the app: get_name comes back empty and child count
@@ -7104,7 +7100,8 @@ def find_root(app: str, scope) -> object | None:
         if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        if not _linux_system._names_program(needle, name) and not (pids and pid_of(candidate) in pids):
+        if not _linux_system._names_program(needle, name) and not (
+                pids and _registry_read(candidate, "get_process_id") in pids):
             continue
         with app_reply_watch(app, hinted, candidate) as watch:
             pid = pid_of(candidate)
@@ -7210,6 +7207,123 @@ def _toplevel_of(node):
             return None
         current = _call_first(current, ("get_parent", "getParent"))
     return None
+
+
+def may_host_interpreter(app: str) -> bool:
+    """False only when no registrant ``find_root(app)`` could pick runs an interpreter.
+
+    ``interpreter_host`` reports an interpreter only when the root it finds
+    belongs to a process whose comm is an interpreter (#1296). This reads the
+    registry the way ``find_root`` filters it (name, X11 pid, an active portal
+    window's pid) using the per-gate registry reads, and answers False only
+    when every such registrant has a readable pid whose comm is not an
+    interpreter. Anything unread, unnamed or unanswered answers True, so the
+    full lookup runs; the frame and state reads it skips cannot change a
+    None verdict (#1347).
+    """
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import ComputerUseError
+
+    Atspi = _atspi()
+    needle = (app or "").lower()
+    if not needle:
+        return True
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return True
+    # Every registrant the filter below could pick is one of these. When each
+    # is named, has a readable pid and runs no interpreter, the answer is
+    # False whatever the X11 reads would select, so they are skipped (#1354).
+    if _no_registrant_hosts_interpreter(desktop):
+        return False
+    try:
+        pids = set(_linux_system.pids_matching(app))
+        row = _linux_system.active_window()
+        if row and str(row.get("app", "")).lower() == needle:
+            pids.add(int(row.get("pid") or 0))
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - no X11 evidence: take the full lookup
+        return True
+    for candidate in _desktop_applications(desktop):
+        if candidate is None:
+            continue
+        name = (_registry_read(candidate, "get_name") or "").lower()
+        pid = _registry_read(candidate, "get_process_id")
+        if not name:
+            return True
+        if not _linux_system._names_program(needle, name) and pid not in pids:
+            continue
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return True
+        comm = _linux_system._comm_for_pid(pid)
+        if not comm or _linux_system.is_interpreter(comm):
+            return True
+    return False
+
+
+def _no_registrant_hosts_interpreter(desktop) -> bool:
+    """True when every registry application is named and runs a readable, non-interpreter comm."""
+    from a11y_computer_use.drivers import _linux_system
+
+    for candidate in _desktop_applications(desktop):
+        if candidate is None:
+            continue
+        name = _registry_read(candidate, "get_name") or ""
+        pid = _registry_read(candidate, "get_process_id")
+        if not name or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        comm = _linux_system._comm_for_pid(pid)
+        if not comm or _linux_system.is_interpreter(comm):
+            return False
+    return True
+
+
+def _desktop_applications(desktop) -> list:
+    """The registry's applications, read fresh once per gate of an action (#1347).
+
+    ``find_root`` and the exe check's registry reads share it; every poll
+    iteration and the sealed action body read it again.
+    """
+    from a11y_computer_use.drivers import _linux_exe
+
+    return list(_linux_exe.scope_memo(
+        ("desktop_applications",), lambda: tuple(_fresh_application_children(desktop))))
+
+
+class _UnkeptRegistryRead(Exception):
+    """A registry read that failed or came back empty: returned, never shared."""
+
+
+def _registry_read(app, method: str):
+    """``app.<method>()`` for a registry application, once per gate (#1347).
+
+    Shared by ``find_root`` and the exe check's registry reads, so a gate asks
+    each application for its name and pid once instead of once per reader.
+    Only a non-empty name and a positive int pid are shared; an empty or
+    failed read is returned as read and asked again by the next reader. The
+    memo is dropped on every poll iteration and never served once the action
+    is sealed, like ``_desktop_applications``.
+    """
+    from a11y_computer_use.drivers import _linux_exe
+
+    def compute():
+        value = _call_first(app, (method,), default="" if method == "get_name" else None)
+        if method == "get_name":
+            keep = isinstance(value, str) and bool(value)
+        else:
+            keep = isinstance(value, int) and not isinstance(value, bool) and value > 0
+        if not keep:
+            raise _UnkeptRegistryRead(value)
+        return (app, value)
+
+    try:
+        held = _linux_exe.scope_memo(("registry_read", method, id(app)), compute)
+    except _UnkeptRegistryRead as unkept:
+        return unkept.args[0]
+    if held[0] is not app:  # an id reused by another proxy: read it live
+        return _call_first(app, (method,), default="" if method == "get_name" else None)
+    return held[1]
 
 
 def _fresh_application_children(app) -> list:
@@ -12911,11 +13025,9 @@ def _registered_pids() -> set[int] | None:
     desktop = _safe(lambda: Atspi.get_desktop(0))
     if desktop is None:
         return None
-    count = max(0, int(_child_count(desktop) or 0))
     pids = set()
-    for index in range(min(count, 200)):
-        app = _child_at(desktop, index)
-        pid = _call_first(app, ("get_process_id",)) if app is not None else None
+    for app in _desktop_applications(desktop)[:200]:
+        pid = _registry_read(app, "get_process_id") if app is not None else None
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             pids.add(pid)
     return pids
@@ -12962,13 +13074,13 @@ def _registered_pids_named(name: str) -> set[int] | None:
     if desktop is None or not needle:
         return None
     pids = set()
-    for app in _fresh_application_children(desktop)[:200]:
+    for app in _desktop_applications(desktop)[:200]:
         if app is None:
             continue
-        label = (_call_first(app, ("get_name",), default="") or "").lower()
+        label = (_registry_read(app, "get_name") or "").lower()
         if not _linux_system._names_program(needle, label):
             continue
-        pid = _call_first(app, ("get_process_id",))
+        pid = _registry_read(app, "get_process_id")
         if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             pids.add(pid)
     return pids
