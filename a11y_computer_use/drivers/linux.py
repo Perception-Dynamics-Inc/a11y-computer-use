@@ -1416,6 +1416,14 @@ class LinuxDriver:
         # that node lists its next page of children instead of the band the
         # last snapshot already showed. Cleared after the snapshot.
         self._expand_page: tuple | None = None
+        #: Text armed by find / scroll_to_find so a named child past the
+        #: per-parent caps is still walked (#1375). None on a plain snapshot.
+        self._child_seek: str | None = None
+        self._far_seek: bool = False
+        #: Texts that earlier finds matched. Later snapshots, including the
+        #: one an action re-resolves its ref against, keep those children
+        #: too, so a ref found past the caps still resolves (#1375).
+        self._last_accessor = None
         # How far expand has already paged each node, keyed by AT-SPI path.
         self._expand_cursors: dict[object, int] = {}
 
@@ -1587,6 +1595,22 @@ class LinuxDriver:
         if scope is Scope.DISPLAY:
             return _dbus_guard.call_with_reconnect(self._snapshot_desktop)
         return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
+
+    def hidden_child_named(self, text: str) -> bool:
+        """True when a child the last snapshot did not fetch has ``text`` in its name.
+
+        Reads names only, from the parents that snapshot recorded, and stops
+        at the first hit. A find runs the armed snapshot only after this.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        parents = list(getattr(getattr(self, "_last_accessor", None), "hidden_parents", None) or ())
+        if not parents:
+            return False
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        return bool(run(lambda: any(
+            _atspi.any_child_past_fetch(node, start, total, text) for node, start, total in parents
+        )))
 
     def effect_snapshot(self, scope: Scope, app: str) -> Snapshot:
         """Read all effect evidence without issuing new row-ref identities."""
@@ -1951,6 +1975,9 @@ class LinuxDriver:
                 seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
                 accessor._table_seek = self._table_seek
                 accessor._expand_page = self._expand_page
+                accessor.child_seek = getattr(self, "_child_seek", None)
+                accessor.far_seek = bool(getattr(self, "_far_seek", False))
+                self._last_accessor = accessor
                 geometry = _atspi.primary_geometry()
 
                 def _walk_tree(node: object) -> Snapshot:
@@ -2420,6 +2447,45 @@ class LinuxDriver:
 
         return self._run(lambda: linux_prompt(action, app))
 
+    def _resolve_far_child(self, snap: Snapshot, ref: str, anchor: Element) -> Element | None:
+        """Resolve a child read past the fetch window by its parent and index.
+
+        A later snapshot does not list that child, so rematching against it
+        would bind the slot to a sibling. The ref is keyed to its parent and
+        live child index; the child at that index must still carry the same
+        name and extents, or the ref is refused as stale (#1375).
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        pin = None
+        if observe.is_pinned_ref(ref):
+            # A pinned ref names one native child; never rematch it to a
+            # sibling. Its pin outlives the issuing snapshot's handles.
+            pin = _atspi._FAR_REF_PINS.get(int(ref[1:]) - observe.PINNED_REF_BASE)
+            if pin is None:
+                pin = _atspi.far_pin(handle) if handle is not None else None
+            if pin is None:
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    f"{ref} ({anchor.role} {anchor.title!r}) is no longer pinned; "
+                    "use find(text=...) to locate it again",
+                    detail={"ref": ref, "reason": "gone", "outcome": "refused"},
+                )
+        elif handle is None or _atspi.far_pin(handle) is None:
+            return None
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        reason = run(lambda: _atspi.far_child_check(handle, pin))
+        if reason is None:
+            return anchor
+        raise ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{ref} ({anchor.role} {anchor.title!r}) is no longer at its place in the list "
+            f"({reason}); use find(text=...) to locate it again",
+            detail={"ref": ref, "reason": reason, "outcome": "refused"},
+        )
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
@@ -2452,6 +2518,16 @@ class LinuxDriver:
 
         self._resolved_popover_cover = None
         self._resolved_click_snapshot = None
+        far = LinuxDriver._resolve_far_child(self, snap, ref, anchor)
+        if far is not None:
+            # The live tree does not list this child, but it still carries
+            # any popover over it. Keep that evidence for the click.
+            if live is None and callable(getattr(self, "snapshot", None)):
+                probe = getattr(self, "effect_snapshot", self.snapshot)
+                live = probe(snap.scope, snap.app)
+            if live is not None and callable(getattr(self, "_remember_popover_cover", None)):
+                self._remember_popover_cover(live, far)
+            return far
         if live is None:
             probe = getattr(self, "effect_snapshot", self.snapshot)
             live = probe(snap.scope, snap.app)
@@ -3087,10 +3163,40 @@ class LinuxDriver:
             return
         raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _refuse_chromium_occluded(self, element: Element, handle,
+                                  x: int | None = None, y: int | None = None) -> None:
+        """Refuse any Chromium ref action on a target an open page menu covers.
+
+        Runs before every activation path (pointer, doAction, CDP, focus by
+        ref) and before any side effect (#1387). Without (x, y) the target's
+        own center is checked. A check that raises fails closed.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None or not isinstance(element, Element):
+            return
+        try:
+            occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
+        except Exception:  # noqa: BLE001 - an unreadable check refuses
+            occluder = ("menu", "(occluder check failed)")
+        if occluder is None:
+            return
+        where = "at the click point" if x is not None else ""
+        raise ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{element.ref} ({element.role} {element.title!r}) is covered {where} "
+            f"by {occluder[0]} {occluder[1]!r}; nothing was sent".replace("  ", " "),
+            detail={
+                "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
+                "hint": "Close the menu (Escape) or act on the menu item instead.",
+            },
+        )
+
     def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int) -> None:
         """Refuse page ref clicks whose native hit test cannot confirm the target."""
         from a11y_computer_use.drivers import _atspi
 
+        self._refuse_chromium_occluded(element, handle, x, y)
         if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
@@ -3601,6 +3707,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if not self._run(lambda: _atspi.chromium_page_button(handle)):
             return None
+        self._refuse_chromium_occluded(element, handle)
         self._verify_chromium_row_target(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
@@ -3768,6 +3875,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_chromium_occluded(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_calendar_click(element, handle)
         self._refuse_expander_click(element, handle)
@@ -4205,6 +4313,7 @@ class LinuxDriver:
         self._check_readback = None
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_chromium_occluded(element, handle)
         if handle is not None:
             # Before the window is raised, the field focused or a DOM write made:
             # any of them can commit or cancel an open composition (#1219).
@@ -4529,6 +4638,7 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_chromium_occluded(target, handle)
             self._verify_chromium_row_target(target, handle)
             self._refuse_calendar_click(target, handle)
             self._refuse_expander_click(target, handle)

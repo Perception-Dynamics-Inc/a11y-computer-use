@@ -17470,6 +17470,183 @@ def test_chromium_transform_click_requires_native_hit(monkeypatch, hit_kind):
     assert not target.pressed and not other.pressed
 
 
+def _menu_collection(monkeypatch, document, menus, rects):
+    """Fake Collection: ``document`` reports ``menus`` as its showing menus."""
+    queries = []
+    fake = _NS(
+        Role=_NS(MENU="menu", POPUP_MENU="popup menu"),
+        StateType=_NS(SHOWING="showing"),
+        StateSet=_NS(new=lambda states: tuple(states)),
+        CollectionMatchType=_NS(ALL="all", ANY="any", NONE="none"),
+        CollectionSortOrder=_NS(CANONICAL="canonical"),
+        CoordType=_NS(SCREEN=0),
+        MatchRule=_NS(new=lambda *args: args),
+    )
+
+    def get_matches(rule, order, limit, traverse):
+        if "menu" not in (rule[4] or []):
+            return []  # other Collection readers (focus, documents) see nothing
+        queries.append((rule[0], rule[4], limit))
+        return list(menus)
+
+    document.get_collection_iface = lambda: _NS(get_matches=get_matches)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: fake)
+    real_rect = _atspi._raw_rect
+    monkeypatch.setattr(_atspi, "_raw_rect",
+                        lambda node, coord: rects[node] if node in rects else real_rect(node, coord))
+    return queries
+
+
+@pytest.mark.parametrize("case", ["covering", "contains_target", "elsewhere", "no_bounds", "none"])
+def test_chromium_ref_click_refuses_target_under_open_page_menu(monkeypatch, case):
+    """#1387: Chromium's hit cache keeps answering the covered target."""
+    from a11y_computer_use.drivers import linux
+
+    _frame, panel, target, text = _chrome_collapsed_panel()
+    document = panel.parent
+    target.states.add("SHOWING")
+    text.parent = target
+    menu = _GeckoNode("menu", "File menu", ("SHOWING", "VISIBLE"))
+    menu.application = target.application
+    menu.parent = document
+    if case == "contains_target":
+        target.parent = menu
+    rects = {menu: {"covering": (100, 120, 200, 60), "contains_target": (100, 120, 200, 60),
+                    "elsewhere": (400, 400, 100, 100), "no_bounds": None,
+                    "none": (100, 120, 200, 60)}[case]}
+    rects[target] = (22, 115, 280, 40)  # the target's own box, read on the action paths
+    queries = _menu_collection(monkeypatch, document, [] if case == "none" else [menu], rects)
+    # The stale cached hit test still reports the target at its own center.
+    hits = []
+    document.get_component_iface = lambda: _NS(
+        get_accessible_at_point=lambda *a: (hits.append(a), target)[1])
+    element = Element("e1", "AXButton", target.name, None,
+                      Bounds(0, 22, 115, 280, 40), "files", clickable=True)
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: target})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *a: None)
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda *a: None)
+    clicks = []
+    monkeypatch.setattr(_linux_input, "click", lambda *a, **kw: clicks.append((a, kw)))
+    if case in {"covering", "no_bounds"}:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.click(element)
+        assert exc.value.code == ErrorCode.STALE_REF
+        assert exc.value.detail["reason"] == "occluded_target"
+        assert exc.value.detail["outcome"] == "refused"
+        assert not clicks and not hits
+        # Unreadable bounds name the menu, not the document (#1387).
+        assert "menu 'File menu'" in str(exc.value)
+        assert "document web" not in str(exc.value)
+    else:
+        driver.click(element)
+        assert clicks == [((162, 135), {"button": "left", "count": 1})]
+        assert len(hits) == 1
+    # Bounded Collection queries for showing menus, no tree walk: one before
+    # any side effect and, when the pointer path is reached, one at the point.
+    query = (("showing",), ["menu", "popup menu"], 8)
+    assert queries == [query] * (1 if case in {"covering", "no_bounds"} else 2)
+    assert not target.pressed
+
+
+def _covered_chromium_target(monkeypatch, role, covered=True):
+    _frame, panel, target, text = _chrome_collapsed_panel()
+    document = panel.parent
+    target.states.add("SHOWING")
+    text.parent = target
+    menu = _GeckoNode("menu", "Row menu", ("SHOWING", "VISIBLE"))
+    menu.application = target.application
+    menu.parent = document
+    box = (100, 120, 200, 60) if covered else (400, 400, 100, 100)
+    queries = _menu_collection(monkeypatch, document, [menu],
+                               {menu: box, target: (105, 115, 115, 40)})
+    element = Element("e1", role, target.name, None,
+                      Bounds(0, 105, 115, 115, 40), "files", clickable=True, editable=role == "AXTextField")
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: target})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    fired = []
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *a: fired.append("raise"))
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    from a11y_computer_use.drivers import _cdp_forms
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda *a, **k: fired.append("cdp") or True)
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda *a, **k: fired.append("cdp_write") or None)
+    for name in ("do_press", "grab_focus", "_do_action_named"):
+        monkeypatch.setattr(_atspi, name, lambda *a, _n=name, **k: fired.append(_n) or True)
+    monkeypatch.setattr(_atspi, "chromium_page_button", lambda h: True)
+    return driver, element, target, fired, queries
+
+
+from a11y_computer_use.schema import MouseButton  # noqa: E402
+
+_ACTION_PATHS = {
+    "press_row": ("AXRow", lambda d, e: d.press_element(e)),
+    "press_checkbox_cdp": ("AXCheckBox", lambda d, e: d.press_element(e)),
+    "button_action": ("AXButton", lambda d, e: d.click_button_action(
+        e, button=MouseButton.LEFT, count=1, modifiers=())),
+    "button_context_menu": ("AXButton", lambda d, e: d.click_button_action(
+        e, button=MouseButton.RIGHT, count=1, modifiers=())),
+    "set_value": ("AXTextField", lambda d, e: d.set_value(e, "hello")),
+}
+
+
+@pytest.mark.parametrize("path", sorted(_ACTION_PATHS))
+def test_chromium_covered_target_refused_on_every_action_path(monkeypatch, path):
+    """#1387: doAction, CDP, button actions and focus-by-ref share the occluder gate."""
+    role, act = _ACTION_PATHS[path]
+    driver, element, target, fired, queries = _covered_chromium_target(monkeypatch, role)
+    with pytest.raises(ComputerUseError) as exc:
+        act(driver, element)
+    assert exc.value.code == ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "occluded_target"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "menu 'Row menu'" in str(exc.value)
+    assert fired == [] and not target.pressed
+    assert len(queries) == 1
+
+
+@pytest.mark.parametrize("failure", ["target_bounds", "matches", "checker"])
+def test_chromium_action_path_occluder_fails_closed(monkeypatch, failure):
+    driver, element, target, fired, _q = _covered_chromium_target(monkeypatch, "AXRow", covered=False)
+    if failure == "target_bounds":
+        real = _atspi._raw_rect
+        monkeypatch.setattr(_atspi, "_raw_rect",
+                            lambda n, c: None if n is target else real(n, c))
+    elif failure == "matches":
+        document = target
+        while _atspi._role_name(document) != "document web":
+            document = document.parent
+        def boom(*a):
+            raise RuntimeError("dbus")
+        document.get_collection_iface = lambda: _NS(get_matches=boom)
+    else:
+        def boom(*a, **k):
+            raise RuntimeError("dbus")
+        monkeypatch.setattr(_atspi, "chromium_menu_occluder", boom)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "occluded_target"
+    assert fired == [] and not target.pressed
+
+
+def test_chromium_uncovered_target_action_path_not_refused(monkeypatch):
+    driver, element, target, fired, queries = _covered_chromium_target(
+        monkeypatch, "AXCheckBox", covered=False)
+    assert driver.press_element(element) is True
+    assert fired == ["cdp"] and len(queries) == 1
+
+
+def test_chromium_menu_occluder_ignores_native_apps(monkeypatch):
+    frame, _panel, target, _text = _chrome_collapsed_panel()
+    target.application.toolkit = "GTK"
+    target.application.name = "Editor"
+    assert _atspi.chromium_menu_occluder(target, 162, 135) is None
+
+
 def test_chromium_hit_test_descends_and_matches_native_identity(monkeypatch):
     _frame, panel, target, _text = _chrome_collapsed_panel()
     document = panel.parent
