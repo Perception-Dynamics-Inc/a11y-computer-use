@@ -2906,7 +2906,7 @@ def gtk4_entry_needs_pointer_focus(acc) -> bool:
     """
     if acc is None or not _gtk4_app(acc):
         return False
-    if _role_name(acc) not in {"text", "entry"}:
+    if _role_name(acc) not in {"text", "entry", "password text"}:
         return False
     return _state_has(acc, "EDITABLE") and _state_has(acc, "SHOWING")
 
