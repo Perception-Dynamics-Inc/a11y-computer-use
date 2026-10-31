@@ -2108,9 +2108,13 @@ def align_refs(basis: Snapshot, current: Snapshot) -> Snapshot:
     mapping = _match_refs(basis, current)
     used = {el.ref for el in basis.elements}
     assigned: dict[str, str] = {}
+    used |= {el.ref for el in current.elements if is_pinned_ref(el.ref)}
     for el in current.elements:
         kept = mapping.get(el.ref)
-        if kept is not None and kept not in assigned.values():
+        if is_pinned_ref(el.ref):
+            # A child pinned to its parent and index keeps its own ref.
+            assigned[el.ref] = el.ref
+        elif kept is not None and not is_pinned_ref(kept) and kept not in assigned.values():
             assigned[el.ref] = kept
         else:
             assigned[el.ref] = _alloc_ref(used)
@@ -2559,6 +2563,14 @@ def _prune_inner(
         elided = len(raw_children)
     else:
         walked = raw_children[:_MAX_WALK_CHILDREN]
+        needle = _child_seek_needle(accessor)
+        if needle and len(raw_children) > _MAX_WALK_CHILDREN:
+            # find / scroll_to_find: a named child past the walk window is
+            # still read, so the search is not limited to the first 200.
+            walked = walked + tuple(
+                child for child in raw_children[_MAX_WALK_CHILDREN:]
+                if _seek_hit_raw(accessor.read(child), needle)
+            )
         elided = len(raw_children) - len(walked)
         # Read the children first: a child is kept iff it has bounds and is not
         # decorative (the only None return below), so the collapse decision --
@@ -2603,7 +2615,7 @@ def _prune_inner(
         else:
             cap = MAX_CHILDREN
         if len(kept) > cap:
-            kept, dropped = _cap_children(kept, cap)
+            kept, dropped = _cap_children(kept, cap, _child_seek_needle(accessor))
             elided += dropped
 
     # A table can publish only the on-screen band. The rest are still its
@@ -2835,24 +2847,69 @@ def _union_bounds(rects: list[Bounds]) -> Bounds:
     return Bounds(display_id=first.display_id, x=x1, y=y1, width=x2 - x1, height=y2 - y1)
 
 
+#: Leaf control roles whose uniform, titled runs get the sheet allowance.
+_UNIFORM_LEAF_ROLES = frozenset({"AXRadioButton", "AXButton", "AXCheckBox"})
+
+
 def _named_radio_group(raw: RawNode, kept: list[_PNode]) -> bool:
     """Keep compact named choices, including GTK colour chooser swatches.
 
-    Reuse the sheet allowance only for groups of leaf radio buttons. Mixed
-    containers and controls with nested content retain the ordinary cap.
-    The raw walk and snapshot token budgets still apply.
+    Reuse the sheet allowance only for groups or toolbars whose children are
+    all titled leaf controls of one role (radio buttons, buttons, or check
+    boxes), e.g. a div of 60 buttons (#1375). Mixed containers and controls
+    with nested content retain the ordinary cap. The raw walk and snapshot
+    token budgets still apply.
     """
-    return (
-        raw.role in {"AXGroup", "AXRadioGroup"}
-        and bool(kept)
-        and all(
-            child.raw.role == "AXRadioButton"
-            and bool(child.raw.title.strip())
-            and not child.children
-            and not child.elided
-            for child in kept
-        )
+    if raw.role not in {"AXGroup", "AXRadioGroup", "AXToolbar"} or not kept:
+        return False
+    role = kept[0].raw.role
+    if role not in _UNIFORM_LEAF_ROLES:
+        return False
+    if role != "AXRadioButton" and raw.role == "AXRadioGroup":
+        return False
+    return all(
+        child.raw.role == role
+        and bool(child.raw.title.strip())
+        and not child.children
+        and not child.elided
+        for child in kept
     )
+
+
+def _fold_seeks(seek: object) -> tuple[str, ...]:
+    """Folded, non-empty seek texts from a string or a sequence of strings."""
+    items = (seek,) if isinstance(seek, str) else tuple(seek or ()) if isinstance(seek, (tuple, list)) else ()
+    out = []
+    for item in items:
+        if isinstance(item, str):
+            folded = item.replace("\u00a0", " ").strip().casefold()
+            if folded and folded not in out:
+                out.append(folded)
+    return tuple(out)
+
+
+def _child_seek_needle(accessor: object) -> tuple[str, ...] | None:
+    """The folded texts a find / scroll_to_find is looking for, if armed.
+
+    ``find`` arms it only after a plain snapshot matched nothing and left
+    children past the fetch window unread (#1375).
+    """
+    return _fold_seeks(getattr(accessor, "child_seek", None)) or None
+
+
+def _seek_hit_raw(raw: RawNode, needle: tuple[str, ...] | str) -> bool:
+    needles = (needle,) if isinstance(needle, str) else needle
+    text = f"{raw.title or ''} {raw.description or ''}"
+    if raw.value is not None:
+        text += f" {raw.value}"
+    text = text.replace("\u00a0", " ").casefold()
+    return any(n in text for n in needles)
+
+
+def _seek_hit_tree(node: _PNode, needle: tuple[str, ...] | str) -> bool:
+    if _seek_hit_raw(node.raw, needle):
+        return True
+    return any(_seek_hit_tree(child, needle) for child in node.children)
 
 
 def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
@@ -2872,9 +2929,20 @@ def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
     return False
 
 
-def _cap_children(kept: list[_PNode], cap: int) -> tuple[list[_PNode], int]:
-    """Keep the ``cap`` highest-priority children, in document order."""
-    ranked = sorted(range(len(kept)), key=lambda i: (-_keep_priority(kept[i]), i))
+def _cap_children(
+    kept: list[_PNode], cap: int, needle: tuple[str, ...] | None = None,
+) -> tuple[list[_PNode], int]:
+    """Keep the ``cap`` highest-priority children, in document order.
+
+    While find / scroll_to_find is armed with ``needle``, children whose
+    subtree matches it outrank the rest, so a match past the cap is kept
+    instead of being folded into ``… N more`` (#1375).
+    """
+    def rank(i: int) -> tuple[int, int, int]:
+        hit = 1 if needle and _seek_hit_tree(kept[i], needle) else 0
+        return (-hit, -_keep_priority(kept[i]), i)
+
+    ranked = sorted(range(len(kept)), key=rank)
     winners = sorted(ranked[:cap])
     return [kept[i] for i in winners], len(kept) - cap
 
@@ -3045,6 +3113,33 @@ def _checked_state(role: str, subrole: str, value: object) -> bool | None:
         return None
 
 
+#: Refs at or above this number name one native child by parent and index
+#: (#1375). Pre-order refs stay below it, so the two never meet.
+PINNED_REF_BASE = 1_000_000
+_PINNED_REF_HOOK = None
+
+
+def set_pinned_ref_hook(hook) -> None:
+    """Install ``hook(handle) -> int | None``: a stable number for ``handle``."""
+    global _PINNED_REF_HOOK
+    _PINNED_REF_HOOK = hook
+
+
+def is_pinned_ref(ref: str | None) -> bool:
+    return bool(ref) and ref[:1] == "e" and ref[1:].isdigit() and int(ref[1:]) >= PINNED_REF_BASE
+
+
+def _pinned_ref(handle: object) -> str | None:
+    hook = _PINNED_REF_HOOK
+    if hook is None:
+        return None
+    try:
+        number = hook(handle)
+    except Exception:  # noqa: BLE001 - an unpinned node keeps its pre-order ref
+        return None
+    return f"e{PINNED_REF_BASE + int(number)}" if number is not None else None
+
+
 def _flatten(
     node: _PNode,
     parent_ref: str | None,
@@ -3060,7 +3155,8 @@ def _flatten(
     """Assign pre-order refs and emit `Element`s (parents before children)."""
     instance_id = node.raw.instance_id or instance_id
     document_id = node.raw.document_id or document_id
-    ref = f"e{len(out) + 1}"
+    pinned = _pinned_ref(node.node) if node.node is not None and _PINNED_REF_HOOK else None
+    ref = pinned or f"e{len(out) + 1}"
     path = parent_path + (node.raw.role,)
     clickable, editable, secure = _target_flags(node.raw)
     if node.node is not None:  # retain the live handle for act-time AX actions
