@@ -3178,9 +3178,20 @@ class LinuxDriver:
         try:
             occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
         except Exception:  # noqa: BLE001 - an unreadable check refuses
-            occluder = ("menu", "(occluder check failed)")
+            occluder = _atspi.UNKNOWN_MENU_STATE
         if occluder is None:
             return
+        if tuple(occluder) == _atspi.UNKNOWN_MENU_STATE:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.role} {element.title!r}): Chrome did not answer "
+                "whether a menu covers it; nothing was sent",
+                detail={
+                    "ref": element.ref, "reason": "occlusion_unverified", "outcome": "refused",
+                    "retryable": True,
+                    "hint": "Retry; if a menu is open, close it (Escape) first.",
+                },
+            )
         where = "at the click point" if x is not None else ""
         raise ComputerUseError(
             ErrorCode.STALE_REF,
