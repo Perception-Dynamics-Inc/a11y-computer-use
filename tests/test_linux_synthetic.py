@@ -25032,6 +25032,7 @@ def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeyp
     _atspi._BROWSER_BAR_CLEARED.clear()
     _atspi._BROWSER_BAR_OPEN.clear()
     _atspi._CHROME_REBUILDING.clear()
+    getattr(_atspi, "_CHROME_RECONNECTED", set()).clear()
     try:
         blank = _Node("", children=[_Node("", role="panel")])
         other = _Node("")
@@ -25110,11 +25111,114 @@ def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeyp
         clock.update(t=0.0, sleeps=0)
         _atspi.chromium_snapshot_root(still_page)
         assert clock["sleeps"] == 0
-        assert reconnects == []
+        # A later snapshot still acts on the mark instead of leaving it alone:
+        # it reconnects the application once, without waiting again.
+        assert reconnects == [still]
+        clock.update(t=0.0, sleeps=0)
+        _atspi.chromium_snapshot_root(still_page)
+        assert clock["sleeps"] == 0
+        assert reconnects == [still]
+        assert 6161 in _atspi._CHROME_REBUILDING
     finally:
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()
         _atspi._CHROME_REBUILDING.clear()
+        getattr(_atspi, "_CHROME_RECONNECTED", set()).clear()
+
+
+def test_snapshot_only_loop_recovers_chrome_left_hung_after_reload(monkeypatch) -> None:
+    """Synthetic AT-SPI nodes, not a live Chrome page.
+
+    CI run 41238313130 (reload 3): libatspi marked Chrome hung after F5 and
+    every later ``snapshot`` of that pid returned at once with an empty
+    application (role "", 0 children) for 30 s, because a recorded-stuck pid
+    neither dispatched replies nor reconnected; only ``scroll_to_find``
+    reconnects. A caller that only snapshots must get the page back once a
+    fresh connection clears the mark, and the reconnect happens once per pid.
+    """
+
+    class _States:
+        def __init__(self, names):
+            self.names = frozenset(names)
+
+    class _Node:
+        def __init__(self, name, *, role="frame", children=(), states=()):
+            self._name, self._role = name, role
+            self._children, self._states = list(children), frozenset(states)
+            self._app = None
+            self.hung = False
+
+        def _check(self):
+            if self.hung:
+                raise RuntimeError("atspi_error: The process appears to be hung.")
+
+        def get_name(self):
+            self._check()
+            return self._name
+
+        def get_role_name(self):
+            self._check()
+            return self._role
+
+        def get_child_count(self):
+            self._check()
+            return len(self._children)
+
+        def get_child_at_index(self, index):
+            self._check()
+            return self._children[index]
+
+        def get_state_set(self):
+            return _States(("DEFUNCT",) if self.hung else self._states)
+
+        def get_process_id(self):
+            return 6161
+
+        def get_application(self):
+            return self._app
+
+        def get_toolkit_name(self):
+            return "Chrome"
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(_atspi.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(_atspi.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(_atspi, "_drain_atspi_replies", lambda budget_s=0.25: None)
+    page = _Node("rowtable - Google Chrome", states=("ACTIVE", "SHOWING"),
+                 children=[_Node("rowtable", role="document web")])
+    app = _Node("Google Chrome", role="application", children=[page])
+    page._app = app
+    app.hung = True  # the ping that would clear it is never dispatched
+    reconnects = []
+
+    def reconnect(target):
+        reconnects.append(target)
+        target.hung = False  # a fresh connection answers again
+        return True
+
+    monkeypatch.setattr(_atspi, "_clear_chrome_hang", reconnect)
+    for name in ("_BROWSER_BAR_PIDS", "_BROWSER_BAR_CLEARED", "_BROWSER_BAR_OPEN",
+                 "_CHROME_REBUILDING", "_CHROME_RECONNECTED"):
+        getattr(_atspi, name, set()).clear()
+    try:
+        # First snapshot after the reload: bounded wait, pid recorded stuck.
+        _atspi.chromium_snapshot_root(page)
+        assert 6161 in _atspi._CHROME_REBUILDING
+        # The test's wait_at_top loop: snapshots only, no scroll_to_find.
+        for _ in range(5):
+            clock["t"] = 0.0
+            if 6161 not in _atspi._CHROME_REBUILDING:
+                break
+            _atspi.chromium_snapshot_root(page)
+            assert clock["t"] == 0.0  # never waits again for a stuck pid
+        assert 6161 not in _atspi._CHROME_REBUILDING
+        assert reconnects == [app]
+        assert _atspi.chromium_snapshot_root(page) is page
+        assert reconnects == [app]
+    finally:
+        for name in ("_BROWSER_BAR_PIDS", "_BROWSER_BAR_CLEARED", "_BROWSER_BAR_OPEN",
+                     "_CHROME_REBUILDING", "_CHROME_RECONNECTED"):
+            getattr(_atspi, name, set()).clear()
 
 
 def _apg_menubar(monkeypatch):

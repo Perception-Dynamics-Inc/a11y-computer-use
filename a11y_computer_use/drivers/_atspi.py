@@ -8074,6 +8074,8 @@ def _chrome_page_window(app, root):
 _CHROME_REBUILD_WAIT_S = 1.5
 _CHROME_REBUILD_POLL_S = 0.15
 _CHROME_REBUILDING: set[int] = set()
+# Pids a snapshot already moved onto a fresh connection (bounded: one each).
+_CHROME_RECONNECTED: set[int] = set()
 
 
 def _blank_chrome_frame(frame) -> bool:
@@ -8157,16 +8159,31 @@ def _wait_chrome_page_rebuilt(app, pid) -> None:
     """Recover a hung or blank Chrome tree, within a short bound.
 
     Pending replies are dispatched between reads, so a hang-check ping that
-    completes clears libatspi's mark. The reconnect is left to
-    ``scroll_to_find``'s own retry (``chrome_reconnect_hung``). A pid already reported
-    stuck is probed once without waiting, so repeated snapshots cannot add
-    up to the caller's hard limit.
+    completes clears libatspi's mark. A pid already reported stuck does not
+    wait again, so repeated snapshots cannot add up to the caller's hard
+    limit; each later snapshot still dispatches queued replies once and, the
+    first time, reconnects an application libatspi still marks hung.
     """
     if not _chrome_tree_rebuilding(app):
         if pid is not None:
             _CHROME_REBUILDING.discard(pid)
         return
     if pid is not None and pid in _CHROME_REBUILDING:
+        # Recorded stuck: no second wait, but never leave the mark to itself.
+        # Nothing else dispatches libatspi's hang-check ping, so a caller that
+        # only snapshots (no scroll_to_find retry) would see an empty
+        # application for good. Dispatch replies already queued, then move a
+        # still-marked application onto a fresh connection, once per pid.
+        _drain_atspi_replies(_CHROME_REBUILD_POLL_S)
+        if pid not in _CHROME_RECONNECTED and _app_marked_hung(app):
+            _CHROME_RECONNECTED.add(pid)
+            _clear_chrome_hang(app)
+        if not _without_child_cache(
+            app,
+            lambda: (_clear_browser_bar_cache(app), _chrome_tree_rebuilding(app))[1],
+            preserve_properties=True,
+        ):
+            _CHROME_REBUILDING.discard(pid)
         return
     deadline = time.monotonic() + _CHROME_REBUILD_WAIT_S
     while True:
