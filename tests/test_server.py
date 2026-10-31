@@ -7758,3 +7758,55 @@ def test_find_keeps_held_ref_for_same_native_node_with_other_wrappers(
         current[0] = before
         runtime.click(ref="e4")
         assert mocked_driver["click"][-1][0].node_identity == (":1.2", "/page/go")
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_find_reuses_held_number_when_the_read_renumbers_an_unchanged_control(
+    monkeypatch, mocked_driver, store, audit_dir, attempt,
+):
+    """#1392: find reads more rows above an unchanged button, so its read
+    numbers the button e9 and puts another control on the held e4. find
+    shows the button as e4, e4 is not refused, and clicking e4 hits it."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, _ = _show_modal_case()
+    rows = tuple(
+        Element(f"e{i}", "AXButton", f"Row {i}", None, Bounds(1, 10, 100 + 30 * i, 150, 25), "found",
+                parent="e1", clickable=True, node_identity=(":1.2", f"/row/{i}"))
+        for i in range(4, 9)
+    )
+    page = {el.ref: el for el in before.elements}
+    go = dataclasses.replace(page["e4"], ref="e9", snapshot_id="found")
+    found = dataclasses.replace(before, snapshot_id="found", elements=tuple(
+        dataclasses.replace(el, snapshot_id="found") for el in before.elements if el.ref != "e4"
+    ) + rows + (go,))
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        for _ in range(3):
+            runtime.desktop_snapshot(APP)
+        current[0] = found
+        shown = runtime.find(APP, text="Go")
+        assert "e4" in shown and "e9" not in shown, shown
+        assert "e4" not in runtime._changed_snapshot_refs
+        runtime.click(ref="e4")
+        assert mocked_driver["click"][-1][0].node_identity == (":1.2", "/page/go")
+
+
+def test_find_does_not_reuse_a_held_number_for_a_control_now_behind_a_modal(
+    monkeypatch, mocked_driver, store, audit_dir,
+):
+    """#1392: the held-number reuse never carries a page ref onto the dialog's
+    namesake, and a page control behind the modal is still refused."""
+    store.set_tier(APP, safety.Tier.FULL)
+    before, after = _show_modal_case()
+    current = [before]
+    monkeypatch.setattr(observe, "snapshot", lambda *args, **kwargs: current[0])
+    monkeypatch.setattr(observe, "press_element", lambda el: False)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        runtime.desktop_snapshot(APP)
+        current[0] = after
+        runtime.find(APP, text="Go")
+        with pytest.raises(ComputerUseError):
+            runtime.click(ref="e4")
+        assert not any(c[0].node_identity == (":1.2", "/dialog/go") for c in mocked_driver["click"])

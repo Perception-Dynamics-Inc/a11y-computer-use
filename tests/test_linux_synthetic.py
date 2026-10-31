@@ -24652,3 +24652,63 @@ def test_same_accessible_and_inside_open_modal(modal_boundary_tree):
     driver, frame, bg, modal, inside, calls = modal_boundary_tree
     assert _atspi.same_accessible(bg, bg) and not _atspi.same_accessible(bg, inside)
     assert _atspi.inside_open_modal(inside) and not _atspi.inside_open_modal(bg)
+
+
+def test_pre_key_check_refuses_target_behind_modal_wherever_focus_is(
+    modal_boundary_tree, monkeypatch,
+):
+    """#1392: a click focused the dialog field; a held page-field ref is
+    refused before keys whatever holds focus, and a dialog ref still works."""
+    from a11y_computer_use.drivers import _atspi_events
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    # No event stream here: rediscover modals on every read.
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: False)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    b, i = _ref_of(snap, bg), _ref_of(snap, inside)
+    for focused in (inside, bg):
+        focused.states.add("FOCUSED")
+        with pytest.raises(ComputerUseError) as caught:
+            driver._refuse_input_off_target(b, bg)
+        assert caught.value.detail["reason"] == "outside_active_modal"
+        focused.states.discard("FOCUSED")
+    driver._refuse_input_off_target(i, inside)
+    frame.children.remove(modal)
+    modal.parent = None
+    driver._refuse_input_off_target(b, bg)
+
+
+def test_pre_key_check_fails_closed(modal_boundary_tree, monkeypatch):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    i = _ref_of(snap, inside)
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", lambda acc: (_ for _ in ()).throw(RuntimeError("x")))
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_input_off_target(i, inside)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+
+
+def test_resolve_rereads_once_when_a_live_node_was_missed(modal_boundary_tree, monkeypatch):
+    """#1392 CI: one live read that misses a node whose issued accessible is
+    alive is read again once; a gone node is not_found after one read."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    i = _ref_of(snap, inside)
+    real = driver.snapshot
+    reads = []
+
+    def probe(scope, app):
+        reads.append(1)
+        got = real(scope, app)
+        if len(reads) == 1:
+            return __import__("dataclasses").replace(got, elements=tuple(
+                el for el in got.elements if el.title not in {inside.name, modal.name, bg.name}))
+        return got
+
+    monkeypatch.setattr(driver, "effect_snapshot", probe, raising=False)
+    assert driver.resolve_ref(snap, i.ref).title == inside.name
+    assert len(reads) == 2
+    reads.clear()
+    inside.states.add("DEFUNCT")
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(snap, i.ref)
+    assert caught.value.code is ErrorCode.STALE_REF and len(reads) == 1

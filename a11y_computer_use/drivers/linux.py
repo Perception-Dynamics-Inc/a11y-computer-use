@@ -2536,6 +2536,21 @@ class LinuxDriver:
                 detail={"ref": ref, "reason": "modal_boundary_unavailable"},
             ) from exc
 
+    def _issued_alive(self, snap: Snapshot, ref: str) -> bool:
+        """True when the issuing accessible of ``ref`` still answers as live."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return False
+        run = getattr(self, "_run", None)
+        try:
+            gone = run(lambda: _atspi.accessible_gone(handle)) if callable(run) else _atspi.accessible_gone(handle)
+        except Exception:  # noqa: BLE001 - unreadable is not alive
+            return False
+        return not gone
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
@@ -2578,11 +2593,24 @@ class LinuxDriver:
             if live is not None and callable(getattr(self, "_remember_popover_cover", None)):
                 self._remember_popover_cover(live, far)
             return far
+        supplied = live is not None
+        probe = getattr(self, "effect_snapshot", self.snapshot)
         if live is None:
-            probe = getattr(self, "effect_snapshot", self.snapshot)
             live = probe(snap.scope, snap.app)
         try:
-            resolved = observe.rematch_ref(snap, ref, live)
+            try:
+                resolved = observe.rematch_ref(snap, ref, live)
+            except ComputerUseError as exc:
+                # Firefox rebuilds a just-unhidden subtree (an aria dialog
+                # shown and focused on load), so one read can miss a node
+                # whose issued accessible is still alive. Read once more
+                # only then; a gone node stays not_found (#1392 CI).
+                if (supplied or exc.code is not ErrorCode.STALE_REF
+                        or exc.detail.get("reason") != "not_found"
+                        or not LinuxDriver._issued_alive(self, snap, ref)):
+                    raise
+                live = probe(snap.scope, snap.app)
+                resolved = observe.rematch_ref(snap, ref, live)
             # Role/name/path are only anchors within the issuing native
             # window and document. Browser titles deliberately are not file
             # identities, so the shared matcher alone cannot bind a tab.
@@ -4358,6 +4386,8 @@ class LinuxDriver:
                 peers = {}
         try:
             self._visible_action(element, "Set value")
+            if handle is not None:
+                self._refuse_input_off_target(element, handle)
             return self._apply_set_value(element, value, handle)
         except ComputerUseError as exc:
             self._refuse_changed_peers(handle, peers, element, exc)
@@ -5698,6 +5728,29 @@ class LinuxDriver:
                 detail={"ref": element.ref, "reason": "modal_boundary_unavailable"},
             ) from exc
 
+    def _refuse_input_off_target(self, element: Element, handle) -> None:
+        """#1392: last modal check before text reaches the resolved target.
+
+        The resolved accessible must not sit behind an open modal, wherever
+        keyboard focus is (``outside_active_modal``): a click into a dialog
+        field must not let a held page-field ref through. Keyboard focus on
+        the target or a descendant is confirmed by each focus branch above
+        (``_confirm_focus_on_target``); this read does not wait or regrab.
+        An unreadable boundary refuses.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            self._run(lambda: _atspi.refuse_outside_modal(handle))
+        except ComputerUseError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "Cannot establish the target's modal boundary; no input was sent",
+                detail={"ref": element.ref, "reason": "modal_boundary_unavailable"},
+            ) from exc
+
     def _type_into_unguarded(self, element: Element, text: str) -> int:
         """Type ``text`` into ``element`` only after focus is confirmed on it.
 
@@ -5820,6 +5873,7 @@ class LinuxDriver:
                 gecko_append = self._run(lambda: _atspi.gecko_plain_entry(handle))
         if handle is not issued:
             self._refuse_focus_handoff_into_modal(element, issued, handle)
+        self._refuse_input_off_target(element, handle)
         self._focused_editable = handle
         append_state = None
         if self._run(lambda: _atspi.append_target_entry(handle)):

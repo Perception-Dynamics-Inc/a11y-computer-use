@@ -4515,8 +4515,12 @@ class Runtime:
         the agent now acts on and the matches named by their issued refs.
         """
         matches = list(matches)
+        read = snap
+        snap, matches = self._keep_held_numbers(snap, matches)
         issued = self._note_issued(snap, {el.ref for el in matches}, preserve_identity=True)
         if issued is snap:
+            if snap is not read and getattr(self, "_current", None) is read:
+                self._current = snap
             return snap, matches
         mapping = {
             old.ref: new.ref for old, new in zip(snap.elements, issued.elements)
@@ -4531,6 +4535,89 @@ class Runtime:
             moved.append(replace(el, ref=ref, parent=parent,
                                  snapshot_id=index[ref].snapshot_id if ref in index else el.snapshot_id))
         return issued, moved
+
+    def _keep_held_numbers(self, snap: Snapshot, matches) -> tuple[Snapshot, list]:
+        """Show an unchanged control under the ref it already holds (#1392).
+
+        ``find`` and ``scroll_to_find`` read a different slice of the tree
+        than the last snapshot, so their numbering can shift: an unchanged
+        button issued as ``e31`` is read as ``e154`` while ``e31`` lands on
+        another node. Issuing that read would refuse the held ``e31`` and
+        hand out a second number for the same control. A match that is
+        the same native node as exactly one held, unrefused ref, with the
+        same role, name, row, document and modal state, is renamed to that
+        ref. Whatever the read numbered with it takes a fresh number, so no
+        held ref ever names another element. Anything else is unchanged and
+        goes through the identity rule as before.
+        """
+        matches = list(matches)
+        anchors = getattr(self, "_issued_anchors", None) or {}
+        last = getattr(self, "_last_issued", None)
+        if (not matches or not anchors or last is None
+                or getattr(last, "app", None) != getattr(snap, "app", None)):
+            return snap, matches
+        refused = set(getattr(self, "_changed_snapshot_refs", {}) or ())
+
+        def key(el):
+            return (el.node_identity, el.role, el.title, el.row_identity,
+                    el.document_id, bool(el.blocked_by_modal))
+
+        wanted = {key(el) for el in matches if el.node_identity}
+        if not wanted:
+            return snap, matches
+        held: dict[tuple, list[str]] = {}
+        indexes: dict[str, dict] = {}
+        for ref, source in anchors.items():
+            if ref in refused or observe.is_pinned_ref(ref):
+                continue
+            index = indexes.get(source.snapshot_id)
+            if index is None:
+                index = indexes[source.snapshot_id] = {el.ref: el for el in source.elements}
+            was = index.get(ref)
+            if was is None or not was.node_identity:
+                continue
+            k = key(was)
+            if k in wanted:
+                held.setdefault(k, []).append(ref)
+        present = {el.ref: el for el in snap.elements}
+        counts: dict[tuple, int] = {}
+        for el in snap.elements:
+            if el.node_identity:
+                k = key(el)
+                if k in wanted:
+                    counts[k] = counts.get(k, 0) + 1
+        mapping: dict[str, str] = {}
+        for el in matches:
+            if not el.node_identity:
+                continue
+            k = key(el)
+            refs = held.get(k, ())
+            # One node, one holder, one occurrence in this read: anything
+            # ambiguous keeps the identity rule's answer.
+            if len(refs) != 1 or counts.get(k) != 1 or refs[0] == el.ref:
+                continue
+            target = refs[0]
+            if target in mapping.values():
+                continue
+            mapping[el.ref] = target
+        if not mapping:
+            return snap, matches
+        taken = set(present) | set(anchors) | refused | set(getattr(self, "_reissued_refs", {}) or ())
+        top = max((int(r[1:]) for r in taken | set(mapping.values())
+                   if r[:1] == "e" and r[1:].isdigit() and not observe.is_pinned_ref(r)), default=0)
+        for target in list(mapping.values()):
+            if target in present and target not in mapping:
+                top += 1
+                mapping[target] = f"e{top}"
+        renamed = observe.rename_refs(snap, mapping)
+        index = {el.ref: el for el in renamed.elements}
+        moved = []
+        for el in matches:
+            ref = mapping.get(el.ref, el.ref)
+            parent = mapping.get(el.parent, el.parent) if el.parent else el.parent
+            moved.append(replace(el, ref=ref, parent=parent,
+                                 snapshot_id=index[ref].snapshot_id if ref in index else el.snapshot_id))
+        return renamed, moved
 
     def _reissue_changed_refs(self, snap: Snapshot, reissue: dict[str, tuple],
                               anchors: dict[str, Snapshot],
