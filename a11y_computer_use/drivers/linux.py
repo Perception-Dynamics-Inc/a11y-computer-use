@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
@@ -1376,6 +1377,28 @@ def _missing_atspi_bindings(exc: BaseException) -> ComputerUseError:
             "error": str(exc),
         },
     )
+
+
+_QT_EDIT_LOG = logging.getLogger("a11y_computer_use.qt_edit")
+
+
+@contextmanager
+def _qt_edit_timing(op: str, ref):
+    """One debug line per Qt line-edit set_value/type (#1418) with phase seconds."""
+    phases: dict[str, float] = {}
+    start = time.perf_counter()
+    try:
+        yield phases
+    finally:
+        if _QT_EDIT_LOG.isEnabledFor(logging.DEBUG):
+            _QT_EDIT_LOG.debug(
+                "qt edit phases op=%s ref=%s focus=%.3fs select=%.3fs keys=%.3fs "
+                "readback=%.3fs restore=%.3fs total=%.3fs",
+                op, ref, phases.get("focus", 0.0), phases.get("select", 0.0),
+                phases.get("keys", 0.0), phases.get("readback", 0.0),
+                phases.get("restore", 0.0),
+                phases.get("pre", 0.0) + time.perf_counter() - start,
+            )
 
 
 class LinuxDriver:
@@ -5833,6 +5856,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._focused_editable = None
+        type_started = time.perf_counter()
         if element.secure:
             raise _secure_focus_error("the requested ref is a password field")
         self._check_modal_target(element)
@@ -5939,7 +5963,10 @@ class LinuxDriver:
         self._refuse_input_off_target(element, handle)
         self._focused_editable = handle
         append_state = None
-        if self._run(lambda: _atspi.append_target_entry(handle)):
+        # #1418: a Qt line edit decides replace-or-append from its own
+        # selection in qt_line_edit_keys, so its selection is not collapsed.
+        qt_edit = self._run(lambda: _atspi.qt_line_edit(handle))
+        if not qt_edit and self._run(lambda: _atspi.append_target_entry(handle)):
             # Focus selects a GTK entry's whole text, and the insert would
             # replace it. A ref type appends: drop that selection first, and
             # refuse rather than type when it cannot be dropped (#1232).
@@ -5968,14 +5995,18 @@ class LinuxDriver:
             peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
         except Exception:
             peers = {}
-        if self._run(lambda: _atspi.qt_line_edit(handle)):
-            # #1418: keys, not EditableText, so Qt emits textEdited. A ref
-            # type into a single-line entry appends at the end (documented).
-            try:
-                count = self._run(lambda: _atspi.qt_line_edit_keys(handle, text, append=True))
-            except ComputerUseError as exc:
-                self._refuse_changed_peers(handle, peers, element, exc)
-                raise
+        if qt_edit:
+            # #1418: keys, not EditableText, so Qt emits textEdited. A
+            # non-empty selection is replaced, as a keyboard would; with a
+            # bare caret the ref type presses End and appends.
+            with _qt_edit_timing("type", element.ref) as phases:
+                phases["focus"] = phases["pre"] = time.perf_counter() - type_started
+                try:
+                    count = self._run(lambda: _atspi.qt_line_edit_keys(
+                        handle, text, append=True, phases=phases))
+                except ComputerUseError as exc:
+                    self._refuse_changed_peers(handle, peers, element, exc)
+                    raise
             self._raise_if_peers_changed(handle, peers, element)
             return count
         try:
@@ -6125,13 +6156,17 @@ class LinuxDriver:
 
         if _on_wayland():
             raise _wayland_input_error("set_value on a Qt line edit")
-        self._run(lambda: _atspi.grab_focus(handle))
-        if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
-            self.click(element)
+        with _qt_edit_timing("set_value", element.ref) as phases:
+            t0 = time.perf_counter()
+            self._run(lambda: _atspi.grab_focus(handle))
             if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
-                raise self._focus_lost_on(element)
-        self._refuse_input_off_target(element, handle)
-        self._run(lambda: _atspi.qt_line_edit_keys(handle, value, replace=True))
+                self.click(element)
+                if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                    raise self._focus_lost_on(element)
+            self._refuse_input_off_target(element, handle)
+            phases["focus"] = time.perf_counter() - t0
+            self._run(lambda: _atspi.qt_line_edit_keys(
+                handle, value, replace=True, phases=phases))
         self._focused_editable = handle
         return True
 
@@ -6416,10 +6451,14 @@ class LinuxDriver:
                 raise _wayland_input_error("type into a Qt line edit")
             if text.endswith("\n") and "\n" not in text[:-1] and "\t" not in text:
                 # Return is sent only after the text itself read back.
-                self._run(lambda: _atspi.qt_line_edit_keys(handle, text[:-1], replace=False))
-                self._run(lambda: _atspi._chord_into_target(handle, "Return"))
+                with _qt_edit_timing("type", None) as phases:
+                    self._run(lambda: _atspi.qt_line_edit_keys(
+                        handle, text[:-1], replace=False, phases=phases))
+                    self._run(lambda: _atspi._chord_into_target(handle, "Return"))
                 return len(text)
-            return self._run(lambda: _atspi.qt_line_edit_keys(handle, text, replace=False))
+            with _qt_edit_timing("type", None) as phases:
+                return self._run(lambda: _atspi.qt_line_edit_keys(
+                    handle, text, replace=False, phases=phases))
         if handle is not None:
             try:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))

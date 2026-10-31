@@ -324,3 +324,70 @@ def test_ref_type_appends_at_the_end_even_when_the_caret_is_mid_text(monkeypatch
     field.text, field.caret, field.sel = "abc", 1, (1, 1)    # a click left the caret mid-text
     assert drv.type_into(_element(), "Z") == 1
     assert field.text == "abcZ" and field.keys == ["End", "Z"]
+
+
+def _ref_type_driver(monkeypatch, f):
+    drv = _driver(monkeypatch, f)
+    for name, value in (("drawing_text_editable", False), ("math_command_editable", False),
+                        ("gtk4_entry_needs_pointer_focus", False), ("gecko_entry_caret_to_end", None),
+                        ("gecko_plain_entry", False), ("_chromium_app", False),
+                        ("changed_peer_fields", [])):
+        monkeypatch.setattr(_atspi, name, (lambda v: lambda *a, **k: v)(value))
+
+    def append_target_entry(acc):
+        # The GTK rule (#1232) collapses a whole selection; a Qt line edit
+        # must never reach it, or a caller's ctrl+a would be lost.
+        raise AssertionError("append_target_entry consulted for a Qt line edit")
+    monkeypatch.setattr(_atspi, "append_target_entry", append_target_entry)
+    monkeypatch.setattr(_atspi, "_refuse_chromium_tab_text", lambda *a: None, raising=False)
+    monkeypatch.setattr(linux.LinuxDriver, "_refuse_hidden", lambda self, *a: None)
+    return drv
+
+
+def test_ref_type_after_ctrl_a_replaces_the_whole_field(monkeypatch, field):
+    drv = _ref_type_driver(monkeypatch, field)
+    field.chord("ctrl+a")                       # the caller's own select-all
+    field.keys.clear()
+    assert drv.type_into(_element(), "#00ff00") == 7
+    assert field.text == "#00ff00" and field.edited == ["#00ff00"]
+    assert field.keys == ["#00ff00"], "End must not be pressed over a selection"
+
+
+def test_ref_type_replaces_a_partial_selection(monkeypatch, field):
+    drv = _ref_type_driver(monkeypatch, field)
+    field.text, field.caret, field.sel = "#ff0000", 3, (1, 3)   # "ff" selected
+    assert drv.type_into(_element(), "00") == 2
+    assert field.text == "#000000" and field.keys == ["00"]
+
+
+def test_ref_type_with_a_bare_caret_appends_after_end(monkeypatch, field):
+    drv = _ref_type_driver(monkeypatch, field)
+    field.text, field.caret, field.sel = "#ff00", 2, (2, 2)
+    assert drv.type_into(_element(), "00") == 2
+    assert field.text == "#ff0000" and field.keys == ["End", "00"]
+
+
+def test_ref_type_into_an_unfocused_field_focuses_then_appends(monkeypatch, field):
+    drv = _ref_type_driver(monkeypatch, field)
+    focus = {"on": False}
+
+    def grab(acc):
+        focus["on"] = True          # Qt's setFocus keeps the caret, no select-all
+        return True
+    monkeypatch.setattr(_atspi, "grab_focus", grab)
+    monkeypatch.setattr(_atspi, "_focus_on_target", lambda acc: focus["on"])
+    monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda acc: focus["on"])
+    field.text, field.caret, field.sel = "abc", 0, (0, 0)
+    assert drv.type_into(_element(), "d") == 1
+    assert focus["on"] and field.text == "abcd" and field.keys == ["End", "d"]
+
+
+def test_qt_edit_logs_one_phase_timing_line(monkeypatch, field, caplog):
+    import logging
+    drv = _driver(monkeypatch, field)
+    with caplog.at_level(logging.DEBUG, logger="a11y_computer_use.qt_edit"):
+        drv.set_value(_element(), "#00ff00")
+    lines = [r.getMessage() for r in caplog.records if r.name == "a11y_computer_use.qt_edit"]
+    assert len(lines) == 1
+    for part in ("op=set_value", "focus=", "select=", "keys=", "readback=", "restore=", "total="):
+        assert part in lines[0], lines[0]

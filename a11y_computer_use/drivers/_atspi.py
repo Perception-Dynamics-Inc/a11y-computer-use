@@ -10518,14 +10518,16 @@ def _qt_restore(acc, before: str) -> bool:
         return False
 
 
-def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = False) -> int:
+def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = False,
+                      phases: dict | None = None) -> int:
     """Type ``text`` into a focused Qt line edit as real key events (#1418).
 
     ``replace`` selects the whole text with ctrl+a first and requires the
     selection to read back as the whole value before any character is
-    sent. ``append`` (a ref ``type``) moves the caret to the end with End
-    and requires it there with no selection, matching the documented ref
-    type semantics for a single-line entry. Otherwise the keys land at the
+    sent. ``append`` (a ref ``type``) reads the selection before any key:
+    a non-empty selection is replaced, as a keyboard would; only a bare
+    caret is moved to the end with End (required to read back there) so the
+    text appends. Otherwise the keys land at the
     caret, replacing an existing selection the way a keyboard does.
 
     Success is an exact read-back only. Keys pass through the field's
@@ -10536,7 +10538,16 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
     hasAcceptableInput state for a QLineEdit, so an exact read-back of an
     intermediate value (for example "#00f" in QColorDialog) is the limit
     of what can be checked.
+
+    ``phases`` (optional) collects seconds spent in select, keys, readback
+    and restore for the caller's one-line debug timing.
     """
+    if phases is None:
+        phases = {}
+
+    def tick(name, t0):
+        phases[name] = phases.get(name, 0.0) + time.perf_counter() - t0
+
     if "\n" in text or "\r" in text or "\t" in text:
         raise _text_mismatch(
             "single_line_field",
@@ -10564,7 +10575,9 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
     before, caret, start, end = state
 
     def refuse(reason, message, keys_sent, **detail):
+        t0 = time.perf_counter()
         restored = _qt_restore(acc, before)
+        tick("restore", t0)
         return _text_mismatch(
             reason,
             message + ("; the original text was restored" if restored
@@ -10577,13 +10590,16 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
             **detail,
         )
 
+    t_sel = time.perf_counter()
     if replace and before:
         if not _qt_select_whole(acc):
             raise refuse("selection_not_whole",
                          "ctrl+a did not select the field's whole text; no characters were typed",
                          ["ctrl+a"], actual=_full_text(acc))
         start, end = 0, len(before)
-    elif append and (caret != len(before) or start != end):
+    elif append and start == end and caret != len(before):
+        # A bare caret: a ref type appends. A non-empty selection read here,
+        # before any key, is replaced instead, so End is never pressed over it.
         _chord_into_target(acc, "End")
         if _qt_wait_state(acc, lambda s: s[0] == before and s[1] == len(before)
                           and s[2] == s[3]) is None:
@@ -10591,12 +10607,14 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
                          "End did not put the caret at the end of the text; no characters were typed",
                          ["End"], actual=_full_text(acc))
         caret, start, end = len(before), len(before), len(before)
+    tick("select", t_sel)
     if start != end:
         want = before[:start] + text + before[end:]
     elif replace:
         want = text
     else:
         want = before[:caret] + text + before[caret:]
+    t_keys = time.perf_counter()
     if text:
         try:
             _type_into_target(acc, text)
@@ -10605,15 +10623,21 @@ def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = F
 
             if isinstance(exc, ComputerUseError) and isinstance(exc.detail, dict):
                 if exc.detail.get("input_sent") is not False:
+                    t0 = time.perf_counter()
                     exc.detail["restored"] = _qt_restore(acc, before)
+                    tick("restore", t0)
                     exc.detail["original"] = before
             raise
+    tick("keys", t_keys)
+    t_read = time.perf_counter()
     got = _full_text(acc)
     for _ in range(_QT_KEY_EDIT_POLLS):
         if got == want:
+            tick("readback", t_read)
             return len(text)
         time.sleep(_QT_KEY_EDIT_PAUSE_S)
         got = _full_text(acc)
+    tick("readback", t_read)
     if got == want:
         return len(text)
     raise refuse(
