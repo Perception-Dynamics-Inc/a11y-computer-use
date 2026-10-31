@@ -4473,6 +4473,12 @@ class LinuxDriver:
                 role=element.role,
             )
         self._focused_editable = handle
+        rendered = getattr(success, "css_rendered", None)
+        if isinstance(rendered, str):
+            # CSS text-transform (#1388): the DOM value equals ``value`` and
+            # the snapshot shows its painted case. Judge against that read.
+            self._type_expected = rendered
+            return True
         return success
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
@@ -5897,6 +5903,14 @@ class LinuxDriver:
                 # a newline here, so the judge does not require the same
                 # separator character the field stored.
                 self._type_expected = _atspi._field_text_for_type(after, text)
+            return len(text)
+        if chrome and self._run(
+            lambda: _atspi.css_transformed_type_confirms(handle, before, after, text)
+        ) is not None:
+            # CSS text-transform (#1388): the read-back is the painted case of
+            # the field, and the DOM value holds ``text`` exactly. The outcome
+            # compares the same rendered read, so it is the expected string.
+            self._type_expected = _atspi._field_text_for_type(after, text)
             return len(text)
         if writer_doc is not None:
             shown = self._run(

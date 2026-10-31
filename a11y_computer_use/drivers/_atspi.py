@@ -11121,6 +11121,170 @@ def _focus_and_replace(acc, text: str) -> bool:
     return _confirm_text_landed(acc, text)
 
 
+# CSS text-transform (#1388). Chrome publishes a field's *rendered* text
+# over AT-SPI: an ``uppercase`` input whose DOM value is "hello world" reads
+# "HELLO WORLD". These helpers never relax the general read-back check. They
+# run only after it failed, only on a Chromium field, and only when the
+# rendered text is exactly a CSS case transform of the expected value. The
+# value is then read from the DOM itself: Ctrl+A in a Chromium input or
+# textarea publishes the field's value (not its painted glyphs) as the X11
+# PRIMARY selection. A read is accepted only when PRIMARY changed from a
+# fresh nonce, so a stale selection can never confirm a write.
+_PRIMARY_POLLS = 10
+_PRIMARY_PAUSE_S = 0.03
+
+
+def _css_capitalize(text: str) -> str:
+    """CSS ``text-transform: capitalize``: the first letter of each word upper-cased."""
+    return re.sub(r"(^|[^\w'\u2019])(\w)", lambda m: m.group(1) + m.group(2).upper(), text)
+
+
+def css_case_variants(text: str) -> tuple[str, ...]:
+    """The renderings ``uppercase``, ``lowercase`` and ``capitalize`` give ``text``."""
+    return (text.upper(), text.lower(), _css_capitalize(text))
+
+
+def css_case_rendering(rendered: str | None, value: str | None) -> bool:
+    """True when ``rendered`` differs from ``value`` only by a CSS case transform.
+
+    Equal strings are not a transform (there is nothing to explain), and any
+    other difference (a missing, extra or changed character) is not either.
+    """
+    if rendered is None or value is None or rendered == value:
+        return False
+    return rendered in css_case_variants(value)
+
+
+def _primary_tool() -> tuple[list[str], list[str]] | None:
+    import shutil
+
+    if shutil.which("xclip"):
+        return (["xclip", "-selection", "primary", "-i"],
+                ["xclip", "-selection", "primary", "-o"])
+    if shutil.which("xsel"):
+        return ["xsel", "--primary", "--input"], ["xsel", "--primary", "--output"]
+    return None
+
+
+def _read_primary(read_cmd: list[str]) -> str | None:
+    try:
+        done = subprocess.run(read_cmd, capture_output=True, timeout=5, check=False)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        return done.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def chromium_dom_text(acc) -> str | None:
+    """The DOM value of a focused Chromium input or textarea, or ``None``.
+
+    PRIMARY is set to a nonce, Ctrl+A is pressed on ``acc`` only while focus
+    is confirmed on it, and the whole-value selection is confirmed before
+    PRIMARY is read. The caret and selection captured before are put back
+    with no keys. ``None`` (unverified) when this is not Chromium on X11, no
+    xclip/xsel is installed, focus or the selection is not confirmed, or
+    PRIMARY never left the nonce. Typing nothing and deleting nothing, it
+    only replaces the X11 PRIMARY selection, which any select-all does.
+    """
+    if acc is None or not _chromium_app(acc) or not _x11_keys_available():
+        return None
+    tool = _primary_tool()
+    if tool is None:
+        return None
+    write_cmd, read_cmd = tool
+    import secrets
+
+    nonce = "a11y-dom-read-" + secrets.token_hex(8)
+    try:
+        subprocess.run(write_cmd, input=nonce.encode(), stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5, check=False)
+    except Exception:
+        return None
+    if _read_primary(read_cmd) != nonce:
+        return None
+    saved = _capture_text_points(acc)
+    try:
+        from a11y_computer_use.drivers import _linux_ime
+
+        _linux_ime.require_no_composition()
+        _chord_into_target(acc, "ctrl+a")
+        _confirm_select_all(acc)
+        for poll in range(_PRIMARY_POLLS):
+            got = _read_primary(read_cmd)
+            if got is not None and got != nonce:
+                return got
+            if poll + 1 < _PRIMARY_POLLS:
+                time.sleep(_PRIMARY_PAUSE_S)
+        return None
+    except ComputerUseError:
+        return None
+    finally:
+        _restore_text_points(saved)
+
+
+class _CssTransformedWrite(int):
+    """A confirmed write whose AT-SPI read-back is its CSS case rendering.
+
+    ``css_rendered`` is that read-back, so the outcome judge can compare the
+    same rendered string a snapshot shows (#1388).
+    """
+
+    css_rendered: str = ""
+
+    @classmethod
+    def of(cls, rendered: str) -> "_CssTransformedWrite":
+        done = cls(1)
+        done.css_rendered = rendered
+        return done
+
+
+def css_transformed_value_confirms(acc, rendered: str | None, value: str) -> bool:
+    """Whether a whole-field write of ``value`` holds although the read-back differs.
+
+    Only when ``rendered`` is exactly a CSS case transform of ``value`` on a
+    Chromium field. Then the DOM value has to equal ``value`` exactly, and
+    the rendering has to be a case transform of that DOM value.
+    """
+    if not css_case_rendering(rendered, value) or not _chromium_app(acc):
+        return False
+    dom = chromium_dom_text(acc)
+    return dom == value and css_case_rendering(rendered, dom)
+
+
+def css_transformed_type_confirms(acc, before: str | None, after: str | None, text: str) -> str | None:
+    """The DOM value when typed ``text`` landed in a CSS case-transformed field, else ``None``.
+
+    ``before`` and ``after`` are the rendered read-backs. ``after`` has to be
+    a case variant of the rendered ``before`` with ``text`` (case-folded)
+    inserted, and the DOM value has to hold ``text`` exactly at one place,
+    with the rest case-folding to the rendered ``before``. The rendering has
+    to be a CSS case transform of that DOM value.
+    """
+    if after is None or not text or not _chromium_app(acc):
+        return None
+    prior = before or ""
+    folded = text.casefold()
+    after_f = after.casefold()
+    if len(after_f) != len(prior.casefold()) + len(folded) or folded not in after_f:
+        return None
+    if not any(after in css_case_variants(prior[:i] + text + prior[i:]) for i in range(len(prior) + 1)):
+        return None
+    dom = chromium_dom_text(acc)
+    if dom is None or not css_case_rendering(after, dom):
+        return None
+    start = dom.find(text)
+    while start >= 0:
+        rest = dom[:start] + dom[start + len(text):]
+        if rest.casefold() == prior.casefold():
+            return dom
+        start = dom.find(text, start + 1)
+    return None
+
+
 def _replace_with_keys(acc, text: str) -> bool:
     """Clear the field and type ``text``. Used when EditableText is missing.
 
@@ -11147,6 +11311,14 @@ def _replace_with_keys(acc, text: str) -> bool:
     # when the engine cannot be switched, this refuses before any key is sent.
     with _linux_ime.ascii_passthrough(text + current):
         if not _text_is_blank(current):
+            if _chromium_app(acc) and css_case_variants(current) != (current,) * 3:
+                # The read is the rendered text; a CSS case transform would
+                # make a restore type the painted case back as the value
+                # (#1388). Restore the DOM value when the rendering is a case
+                # transform of it; otherwise keep the read as before.
+                dom = chromium_dom_text(acc)
+                if css_case_rendering(current, dom):
+                    original = dom
             _x11_select_all_and_delete(acc)
             if not _wait_until_gone(acc):
                 _restore_text(acc, original)
@@ -11156,6 +11328,9 @@ def _replace_with_keys(acc, text: str) -> bool:
         _type_into_target(acc, text)
         if _confirm_text(acc, text):
             return True
+        rendered = _full_text(acc)
+        if css_transformed_value_confirms(acc, rendered, text):
+            return _CssTransformedWrite.of(rendered)
         _restore_text(acc, original)
     return False
 
@@ -18695,7 +18870,9 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
             raise
         if not ok:
             _restore_text_points(saved)
-    return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
+    if getattr(ok, "private_text_verified", False) is True or isinstance(ok, _CssTransformedWrite):
+        return ok
+    return bool(ok)
 
 
 def refuse_open_composition(acc) -> None:
