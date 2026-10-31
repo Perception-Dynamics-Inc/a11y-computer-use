@@ -38,6 +38,9 @@ def focus_driver(monkeypatch):
     # This fixture models an editor with no native terminal focused.
     monkeypatch.setattr(_atspi, "_focused_node", lambda app: (None, False))
     monkeypatch.setattr(_atspi, "focused_text", lambda app: None)
+    # The #1392 pre-input modal read on this synthetic handle must not load
+    # the platform's PyGObject binding (absent on macOS/Windows CI).
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", lambda *a, **k: False)
     fake_input = types.ModuleType("a11y_computer_use.drivers._linux_input")
     fake_input.held = lambda modifiers: nullcontext()
     fake_input.click = lambda *args, **kwargs: None

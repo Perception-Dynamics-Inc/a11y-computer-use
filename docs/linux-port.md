@@ -1424,15 +1424,16 @@ run another Collection query or traverse unseen table rows (#1045). An iframe
 URL alone does not establish top-document navigation. This does not change
 modal input policy.
 
-When hiding or clipping siblings renumbers surviving controls (#1110), a public
-snapshot rebinds the printed refs if each shifted control has a unique matching
-native node in the preceding snapshot and its issued semantics and ancestry
-remain unchanged. An unnamed noninteractive scroll wrapper may collapse when
-its scrollbar disappears (#1130); a surviving native control then binds to the
-snapshot that just issued its new ref. Named, actionable, modal, document and
-row boundaries remain significant. Previously refused controls and recycled row identities cannot
-supply this continuity. Internal effect reads do not rebind refs. Callers must use
-the refs from the latest public observation.
+Refs keep the readable `eN` form, but each number is bound to the element's
+native identity at the snapshot that issued it (#1386). A later observation never
+gives an issued number to a different element: when a tree change would put
+another control at that position (a `showModal()` dialog, a newly opened menu or
+popover, renumbered survivors after hiding or clipping siblings, #1110/#1130/#1142),
+the other control is issued a fresh number, and the old number is refused as
+`stale_ref` (`target_changed`) before any click, typing or value write. A control
+that only moved keeps the number it was already issued; a control that was
+renamed in place (same native node) keeps its number. `find` and `scroll_to_find`
+apply the same check. Callers must use the refs from the latest public observation.
 
 A standalone Chrome/AT-SPI check (not a pytest live file) opens a native modal
 from an iframe and verifies both snapshot modes send no input for the old ref:

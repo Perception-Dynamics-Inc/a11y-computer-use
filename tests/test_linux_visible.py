@@ -150,6 +150,9 @@ def test_type_into_ref_announces_type_not_typed_text(monkeypatch):
     monkeypatch.setattr(_atspi, "grab_focus", lambda h: True)
     monkeypatch.setattr(_atspi, "_confirm_focus_on_target", lambda h: True)
     monkeypatch.setattr(_atspi, "peer_field_texts", lambda h: {})
+    # The #1392 pre-input modal read on this synthetic handle must not load
+    # the platform's PyGObject binding (absent on macOS/Windows CI).
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", lambda *a, **k: False)
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     monkeypatch.setattr(driver, "_type_confirmed_handle", lambda h, t: len(t))
     monkeypatch.setattr(driver, "_raise_if_peers_changed", lambda *args: None)

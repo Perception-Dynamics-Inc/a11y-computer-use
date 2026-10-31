@@ -24780,6 +24780,151 @@ def test_deep_firefox_frame_showing_and_date_segment_guard():
     assert _atspi._frame_hierarchy_showing(leaf) is True
 
 
+# #1386 / #1392: a held page ref must not rebind to a dialog control.
+
+def _ref_of(snap, node):
+    return next(el for el in snap.elements if el.title == node.name)
+
+
+def test_held_ref_rebound_into_dialog_after_modal_opens_is_refused(modal_boundary_tree):
+    """Chrome drops a page field behind showModal(); the rematch must not bind
+    the held ref to the dialog's same-named control (#1392)."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    inside.name = bg.name
+    frame.children.remove(modal)
+    before = driver.snapshot(Scope.WINDOW, "modal-test")
+    held = _ref_of(before, bg)
+    frame.children.remove(bg)
+    bg.states.add("DEFUNCT")
+    frame.children.append(modal)
+    modal.parent = frame
+    for _ in range(5):
+        with pytest.raises(ComputerUseError) as caught:
+            driver.resolve_ref(before, held.ref)
+        assert caught.value.detail["reason"] == "outside_active_modal"
+    assert calls == []
+
+
+def test_held_ref_alive_behind_modal_is_refused_on_rebind(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_rebound_behind_modal(
+            snap, _ref_of(snap, bg).ref, _ref_of(snap, bg), snap, _ref_of(snap, inside), inside)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+
+
+def test_rebind_check_allows_same_node_and_no_modal(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    el = _ref_of(snap, inside)
+    driver._refuse_rebound_behind_modal(snap, el.ref, el, snap, el, inside)
+    frame.children.remove(modal)
+    plain = driver.snapshot(Scope.WINDOW, "modal-test")
+    other = _Acc("push button", name="Other")
+    _adopt(frame, other)
+    b = _ref_of(plain, bg)
+    driver._refuse_rebound_behind_modal(plain, b.ref, b, plain, b, other)
+
+
+def test_rebind_check_fails_closed_when_boundary_unreadable(modal_boundary_tree, monkeypatch):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    b = _ref_of(snap, bg)
+    def boom(*a, **k):
+        raise RuntimeError("dbus gone")
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", boom)
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_rebound_behind_modal(snap, b.ref, b, snap, _ref_of(snap, inside), inside)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_focus_handoff_into_modal(b, bg, inside)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+
+
+def test_focus_handoff_into_dialog_is_refused_before_keys(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    b = _ref_of(snap, bg)
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_focus_handoff_into_modal(b, bg, inside)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+    bg.states.add("DEFUNCT")
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_focus_handoff_into_modal(b, bg, inside)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+    i = _ref_of(snap, inside)
+    driver._refuse_focus_handoff_into_modal(i, inside, inside)
+    twin = _Acc("push button", name="Twin")
+    _adopt(modal, twin)
+    driver._refuse_focus_handoff_into_modal(i, inside, twin)
+
+
+def test_same_accessible_and_inside_open_modal(modal_boundary_tree):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    assert _atspi.same_accessible(bg, bg) and not _atspi.same_accessible(bg, inside)
+    assert _atspi.inside_open_modal(inside) and not _atspi.inside_open_modal(bg)
+
+
+def test_pre_key_check_refuses_target_behind_modal_wherever_focus_is(
+    modal_boundary_tree, monkeypatch,
+):
+    """#1392: a click focused the dialog field; a held page-field ref is
+    refused before keys whatever holds focus, and a dialog ref still works."""
+    from a11y_computer_use.drivers import _atspi_events
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    # No event stream here: rediscover modals on every read.
+    monkeypatch.setattr(_atspi_events, "modal_cache_ready", lambda: False)
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    b, i = _ref_of(snap, bg), _ref_of(snap, inside)
+    for focused in (inside, bg):
+        focused.states.add("FOCUSED")
+        with pytest.raises(ComputerUseError) as caught:
+            driver._refuse_input_off_target(b, bg)
+        assert caught.value.detail["reason"] == "outside_active_modal"
+        focused.states.discard("FOCUSED")
+    driver._refuse_input_off_target(i, inside)
+    frame.children.remove(modal)
+    modal.parent = None
+    driver._refuse_input_off_target(b, bg)
+
+
+def test_pre_key_check_fails_closed(modal_boundary_tree, monkeypatch):
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    i = _ref_of(snap, inside)
+    monkeypatch.setattr(_atspi, "refuse_outside_modal", lambda acc: (_ for _ in ()).throw(RuntimeError("x")))
+    with pytest.raises(ComputerUseError) as caught:
+        driver._refuse_input_off_target(i, inside)
+    assert caught.value.detail["reason"] == "modal_boundary_unavailable"
+
+
+def test_resolve_rereads_once_when_a_live_node_was_missed(modal_boundary_tree, monkeypatch):
+    """#1392 CI: one live read that misses a node whose issued accessible is
+    alive is read again once; a gone node is not_found after one read."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    snap = driver.snapshot(Scope.WINDOW, "modal-test")
+    i = _ref_of(snap, inside)
+    real = driver.snapshot
+    reads = []
+
+    def probe(scope, app):
+        reads.append(1)
+        got = real(scope, app)
+        if len(reads) == 1:
+            return __import__("dataclasses").replace(got, elements=tuple(
+                el for el in got.elements if el.title not in {inside.name, modal.name, bg.name}))
+        return got
+
+    monkeypatch.setattr(driver, "effect_snapshot", probe, raising=False)
+    assert driver.resolve_ref(snap, i.ref).title == inside.name
+    assert len(reads) == 2
+    reads.clear()
+    inside.states.add("DEFUNCT")
+    with pytest.raises(ComputerUseError) as caught:
+        driver.resolve_ref(snap, i.ref)
+    assert caught.value.code is ErrorCode.STALE_REF and len(reads) == 1
+
 def test_chromium_long_page_modal_scan_skips_the_row_table(monkeypatch):
     """#1396: no dialog on a 5,000-row page is answered without the Collection."""
     app, frame, document, target, reads = _long_chrome_page(monkeypatch)
