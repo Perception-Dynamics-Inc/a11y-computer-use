@@ -22445,6 +22445,30 @@ def _occluder_haspopup(node) -> bool:
     return value.strip().lower() not in {"", "false", "0"}
 
 
+def _occluder_owns_target_menu(opener, chain) -> bool:
+    """True when the target sits inside the showing menu ``opener`` opened.
+
+    An opener without ``aria-controls`` (the WAI-ARIA APG menubar) has no
+    ``controller_for`` relation, but its menu is structurally owned: a
+    child of the opener, or a sibling under the opener's parent. Decide by
+    the target's own ancestor chain, so a menu elsewhere on the page that
+    this opener opened is still unlocated and fails closed (#1412).
+    """
+    opener_key = _ancestor_key(opener)
+    parent = _safe(lambda: _call_first(opener, ("get_parent", "getParent")))
+    owner_keys = {opener_key}
+    if parent is not None:
+        owner_keys.add(_ancestor_key(parent))
+    for index, node in enumerate(chain[:-1]):
+        if _ancestor_key(node) == opener_key:
+            return False  # the target is the opener itself or inside it
+        if (_role_name(node) in _OCCLUDER_MENU_ROLES
+                and _state_has(node, "SHOWING")
+                and _ancestor_key(chain[index + 1]) in owner_keys):
+            return True
+    return False
+
+
 def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
     """A showing menu over (x, y) that does not contain ``acc`` (#1387).
 
@@ -22551,6 +22575,8 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
         menus = [m for m in _safe(lambda o=opener: _relation_targets(o, "controller_for")) or []
                  if _role_name(m) in _OCCLUDER_MENU_ROLES | {"list box"}]
         if not menus:
+            if _occluder_owns_target_menu(opener, chain):
+                continue  # the target is inside this opener's own menu (#1412)
             return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
         candidates.extend(menus)
     if not candidates:
