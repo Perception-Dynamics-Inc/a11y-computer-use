@@ -2725,7 +2725,7 @@ class LinuxDriver:
             # accessors cannot establish that libatspi reads are available.
             return None
         focus_handle = observe.ax_handle_for(focused.snapshot_id, focused.ref) if focused else None
-        evidence = self._run(lambda: _atspi.retry_evidence(action, handle, focus_handle))
+        evidence = self._run(lambda: _atspi.retry_evidence(action, handle, focus_handle, snapshot.pid))
         from a11y_computer_use.drivers import _cdp_forms, _page_health
         from a11y_computer_use.outcome import RetryEvidence
         # A confirmed-unchanged readable signal keeps suspected_noop unless the

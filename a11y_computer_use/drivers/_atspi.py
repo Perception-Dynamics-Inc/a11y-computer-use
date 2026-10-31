@@ -14786,7 +14786,7 @@ def focused_type_selection(app: str) -> tuple:
     return (text, span)
 
 
-def retry_evidence(action, target, focus):
+def retry_evidence(action, target, focus, pid=None):
     """Read retry signals with the native application child cache bypassed."""
     from a11y_computer_use.schema import Click, Element, KeyChord
 
@@ -14796,7 +14796,7 @@ def retry_evidence(action, target, focus):
     ref_click = isinstance(action, Click) and isinstance(action.target, Element)
     if target is None or not (formatting or ref_click):
         return None
-    return _without_child_cache(target, lambda: _retry_evidence(action, target, focus))
+    return _without_child_cache(target, lambda: _retry_evidence(action, target, focus, pid))
 
 
 class _ReadBudget:
@@ -14809,14 +14809,34 @@ class _ReadBudget:
     thread spent runnable but not running (schedstat run-queue wait) is
     credited back, so the cap measures the read itself. The cap is unchanged
     on a quiet host, and where schedstat is unreadable nothing is credited.
+
+    Every read is a synchronous round trip answered by the application's
+    main thread, so on a busy host the reply also waits for that thread to
+    get a CPU. Its run-queue wait is CPU it was denied, not work for this
+    read, and was the residual flip to unverifiable on a second Chrome click
+    (Chrome's browser main thread queued behind the CI load). With ``pid``
+    that wait is credited too. The total credit stays capped at half the
+    elapsed time, and a blocked or hung application is sleeping, not
+    runnable, so it is never credited and still runs out.
     """
 
-    __slots__ = ("limit", "start", "wait0")
+    __slots__ = ("limit", "start", "wait0", "pid", "peer0")
 
-    def __init__(self, limit: float) -> None:
+    def __init__(self, limit: float, pid: int | None = None) -> None:
         self.limit = limit
-        self.start = time.monotonic()
+        self.pid = pid if type(pid) is int and pid > 0 else None
+        self.peer0 = self._peer_runq_wait(self.pid) if self.pid else None
         self.wait0 = self._runq_wait()
+        self.start = time.monotonic()
+
+    @staticmethod
+    def _peer_runq_wait(pid: int) -> float | None:
+        """Run-queue wait of ``pid``'s main thread, in seconds, or None."""
+        try:
+            with open(f"/proc/{pid}/schedstat", encoding="ascii") as handle:
+                return int(handle.read().split()[1]) / 1e9
+        except (OSError, ValueError, IndexError):
+            return None
 
     @staticmethod
     def _runq_wait() -> float | None:
@@ -14833,9 +14853,14 @@ class _ReadBudget:
         waited = self._runq_wait()
         credit = 0.0
         if waited is not None and self.wait0 is not None and waited >= self.wait0:
-            # Never credit more than half the elapsed time: a read that was
-            # mostly waiting on the application still runs out.
-            credit = min(waited - self.wait0, elapsed / 2)
+            credit = waited - self.wait0
+        if self.pid is not None and self.peer0 is not None:
+            peer = self._peer_runq_wait(self.pid)
+            if peer is not None and peer >= self.peer0:
+                credit += peer - self.peer0
+        # Never credit more than half the elapsed time: a read that was
+        # mostly waiting on the application still runs out.
+        credit = min(credit, elapsed / 2)
         return elapsed - credit >= self.limit
 
 
@@ -14851,7 +14876,7 @@ def _state_flag_name(flag) -> str:
     return name if isinstance(name, str) else str(flag)
 
 
-def _retry_evidence(action, target, focus):
+def _retry_evidence(action, target, focus, pid=None):
     """Scoped evidence for formatting and inert labels; unknown elsewhere.
 
     No Collection query, whole-window traversal, hit test, or focus-discovery
@@ -14865,7 +14890,7 @@ def _retry_evidence(action, target, focus):
 
     if target is None:
         return None
-    budget = _ReadBudget(0.04)
+    budget = _ReadBudget(0.04, pid)
     formatting = isinstance(action, KeyChord) and action.chord.casefold() in {
         "ctrl+b", "ctrl+i", "ctrl+u", "cmd+b", "cmd+i", "cmd+u",
     }
