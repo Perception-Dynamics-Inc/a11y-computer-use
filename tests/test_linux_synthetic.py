@@ -25184,3 +25184,77 @@ def test_chromium_menu_occluder_other_open_menu_over_item_covers(monkeypatch):
     overlay.parent = document
     document.children.append(overlay)
     assert _atspi.chromium_menu_occluder(bold, 10, 10) == ("menu", "Context")
+
+
+def _apg_menubar_with_bounds(monkeypatch):
+    """#1417: the #1412 menubar with real bounds; Format drops below the bar."""
+    app, document, menubar, opener, menu, bold, recent, page_button = _apg_menubar(monkeypatch)
+    file_opener = menubar.children[0]
+    help_opener = _GeckoNode("menu item", "Help", ("SHOWING", "VISIBLE"))
+    help_opener.actions = ["click"]
+    help_opener.attributes = {"haspopup": "true"}
+    help_opener.application = app
+    help_opener.parent = menubar
+    menubar.children.append(help_opener)
+    rects = {
+        id(menubar): (0, 0, 300, 20),
+        id(file_opener): (0, 0, 40, 20),
+        id(opener): (40, 0, 60, 20),
+        id(help_opener): (100, 0, 40, 20),
+        id(menu): (40, 20, 200, 100),
+        id(bold): (40, 20, 200, 20),
+        id(recent): (40, 40, 200, 20),
+        id(page_button): (50, 60, 80, 20),
+    }
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: rects.get(id(node)))
+    return app, document, menubar, opener, menu, file_opener, help_opener, page_button, rects
+
+
+def test_chromium_menu_occluder_sibling_menubar_items_not_covered(monkeypatch):
+    """#1417: File and Help beside the open Format menu are not covered by it."""
+    app, document, menubar, opener, menu, file_item, help_item, page_button, rects = \
+        _apg_menubar_with_bounds(monkeypatch)
+    assert _atspi.chromium_menu_occluder(file_item) is None
+    assert _atspi.chromium_menu_occluder(help_item) is None
+    assert _atspi.chromium_menu_occluder(file_item, 20, 10) is None
+    # A page target really under the open menu is still refused.
+    occluder = _atspi.chromium_menu_occluder(page_button)
+    assert occluder is not None and "Format" in occluder[1]
+
+
+def test_chromium_menu_occluder_sibling_under_popup_bounds_covered(monkeypatch):
+    """#1417: a sibling item the open menu's real bounds overlap is still covered."""
+    app, document, menubar, opener, menu, file_item, help_item, page_button, rects = \
+        _apg_menubar_with_bounds(monkeypatch)
+    rects[id(menu)] = (90, 0, 200, 100)  # a menu drawn over Help
+    assert _atspi.chromium_menu_occluder(help_item) == ("menu", "Format")
+    assert _atspi.chromium_menu_occluder(file_item) is None
+    # Unreadable menu bounds fail closed.
+    del rects[id(menu)]
+    assert _atspi.chromium_menu_occluder(file_item) is not None
+
+
+def test_chromium_menu_occluder_sibling_other_open_menu_covers(monkeypatch):
+    """#1417: a different open menu over a sibling item is still refused."""
+    app, document, menubar, opener, menu, file_item, help_item, page_button, rects = \
+        _apg_menubar_with_bounds(monkeypatch)
+    overlay = _GeckoNode("menu", "Context", ("SHOWING", "VISIBLE"))
+    overlay.application = app
+    overlay.parent = document
+    document.children.append(overlay)
+    rects[id(overlay)] = (0, 0, 60, 60)
+    assert _atspi.chromium_menu_occluder(file_item) == ("menu", "Context")
+
+
+def test_chromium_menu_occluder_sibling_unlocated_menu_fails_closed(monkeypatch):
+    """#1417: with the opener's own menu not located, a sibling still fails closed."""
+    app, document, menubar, opener, menu, file_item, help_item, page_button, rects = \
+        _apg_menubar_with_bounds(monkeypatch)
+    menubar.children.remove(menu)
+    occluder = _atspi.chromium_menu_occluder(file_item)
+    assert occluder is not None and "unreadable" in occluder[1]
+    # A non-menuitem on the bar is not a sibling item either.
+    menubar.children.insert(1, menu)
+    file_item.role = "push button"
+    occluder = _atspi.chromium_menu_occluder(file_item)
+    assert occluder is not None and "unreadable" in occluder[1]
