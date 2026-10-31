@@ -161,6 +161,7 @@ _NO_RETRY = frozenset({
     "user_active",
     "busy",
     "closed",
+    "invalid_value",
 })
 
 

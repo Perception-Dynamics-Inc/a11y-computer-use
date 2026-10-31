@@ -11400,6 +11400,48 @@ def _read_primary(read_cmd: list[str]) -> str | None:
         return None
 
 
+_NOT_POPUP = object()
+_HEX_VALUE = re.compile(r"#?[0-9A-Fa-f]*")
+
+
+def _colour_popup_dom_value(acc):
+    """The DOM value of a Chrome colour-picker popup input, ``None``, or ``_NOT_POPUP``.
+
+    The popup (color_picker.js) is a page popup: a select-all there does not
+    reach the X11 PRIMARY selection, so the PRIMARY read polled to its limit
+    and came back unread on every call. A refused write paid that several
+    times (the initial read, the rollback write's check and its confirmation,
+    and the retry they forced), and the restore could never confirm (#1394).
+
+    The value is read from the input itself instead. CSS can make an input's
+    rendered text differ from its value only by text-transform (case,
+    full-width) or text-security (masking). None of them yields a string with
+    no cased letters from a different value, so a rendered read without cased
+    letters (the channel fields: digits and ``%``) is the DOM value. A read
+    with cased letters (the hex field) or no read at all is unknown: ``None``.
+    """
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        return _NOT_POPUP
+    if (str(attrs.get("tag") or "").lower() != "input"
+            or str(attrs.get("id") or "") not in _CHROME_COLOR_FIELDS):
+        return _NOT_POPUP
+    now = _full_text(acc)
+    if not isinstance(now, str):
+        return None
+    if str(attrs.get("id")) == "hexValueContainer" and _HEX_VALUE.fullmatch(now):
+        # A case transform changes only the case of ASCII hex digits, and a
+        # full-width or masking transform leaves no ASCII hex, so the DOM value
+        # is this text up to case. Colour hex is case-insensitive: the value is
+        # given in canonical lowercase, and a restore types and compares that.
+        return now.lower()
+    # ASCII only: a full-width transform renders "10" as "\uff11\uff10".
+    if not now.isascii() or any(ch.lower() != ch or ch.upper() != ch for ch in now):
+        return None
+    return now
+
+
 def chromium_dom_text(acc) -> str | None:
     """The DOM value of a focused Chromium input or textarea, or ``None``.
 
@@ -11411,7 +11453,12 @@ def chromium_dom_text(acc) -> str | None:
     PRIMARY never left the nonce. Typing nothing and deleting nothing, it
     only replaces the X11 PRIMARY selection, which any select-all does.
     """
-    if acc is None or not _chromium_app(acc) or not _x11_keys_available():
+    if acc is None or not _chromium_app(acc):
+        return None
+    scoped = _colour_popup_dom_value(acc)
+    if scoped is not _NOT_POPUP:
+        return scoped
+    if not _x11_keys_available():
         return None
     tool = _primary_tool()
     if tool is None:
@@ -11503,12 +11550,16 @@ def chromium_replace_dom_text(acc, target: str) -> bool:
 
     try:
         with _linux_ime.ascii_passthrough(target):
-            if not _text_is_blank(_full_text(acc)):
-                _x11_select_all_and_delete(acc)
-                if not _wait_until_gone(acc):
-                    return False
-            else:
-                grab_focus(acc)
+            # Always clear: a blank read here can be the popup re-rendering
+            # after its commit, and typing into the field it then shows again
+            # appended to it (Green "7" + "10" = "710", #1394). Ctrl+A is
+            # confirmed to cover the value before the BackSpace.
+            _x11_select_all_and_delete(acc)
+            if not _wait_until_gone(acc):
+                return False
+            # Nothing is typed unless the field is still empty right before.
+            if target and not _text_is_blank(_full_text(acc)):
+                return False
             if target:
                 _type_into_target(acc, target)
     except ComputerUseError:
@@ -11580,11 +11631,21 @@ def _replace_with_keys(acc, text: str) -> bool:
     dom_original = False
     from a11y_computer_use.drivers import _linux_ime
 
-    def rollback() -> None:
-        if dom_original:
-            chromium_replace_dom_text(acc, original)
-        else:
-            _restore_text(acc, original)
+    def rollback() -> bool:
+        # Every refusal puts the original back and confirms it. On Chromium
+        # only the DOM value confirms (#1394): the rendered read can be a CSS
+        # case rendering, or lag behind a colour-picker channel's own parse.
+        for _ in range(_ROLLBACK_ATTEMPTS):
+            try:
+                if chrome:
+                    chromium_replace_dom_text(acc, original)
+                else:
+                    _restore_text(acc, original)
+            except ComputerUseError:
+                pass
+            if _rollback_confirmed(acc, original, chrome):
+                return True
+        return False
 
     # One engine switch covers the clear, the write and a restore (#1219). The
     # original is typed back if the write fails, so it must be typeable too:
@@ -11609,7 +11670,7 @@ def _replace_with_keys(acc, text: str) -> bool:
             dom_original = chrome
         try:
             _type_into_target(acc, text)
-            if _confirm_text(acc, text):
+            if _confirm_text(acc, text) or _hex_colour_confirmed(acc, text):
                 return True
             rendered = _full_text(acc)
             if css_transformed_value_confirms(acc, rendered, text):
@@ -11617,8 +11678,132 @@ def _replace_with_keys(acc, text: str) -> bool:
         except ComputerUseError:
             rollback()
             raise
-        rollback()
+        restored = rollback()
+    if chrome:
+        # Keys reached the page: its input listeners already ran, so this is
+        # not a clean refusal even when the field reads the old text (#1394).
+        raise _keyed_write_mismatch(acc, text, original, restored=restored)
     return False
+
+
+_ROLLBACK_ATTEMPTS = 2
+
+
+def _rollback_confirmed(acc, original: str | None, chrome: bool) -> bool:
+    """Whether the field holds ``original`` again; on Chromium the DOM value decides.
+
+    The rendered read never confirms a Chromium field by itself: under CSS
+    text-transform it can match while the DOM value is wrong (#1388). A blank
+    original is confirmed by a blank field (no case rendering of "" is text).
+    """
+    if original is None:
+        return False
+    if chrome:
+        if _text_is_blank(original):
+            return _text_is_blank(_full_text(acc)) and not chromium_dom_text(acc)
+        return chromium_dom_text(acc) == original
+    now = _full_text(acc)
+    return now == original or _texts_match(now, original)
+
+
+def _keyed_write_mismatch(acc, text: str, original: str | None, *, restored: bool | None = None):
+    """A failed write whose keys were already sent, reported as ``partial``.
+
+    ``restored`` is the confirmed rollback result; when not given it is
+    checked here, by the DOM value on Chromium.
+    """
+    now = _full_text(acc)
+    if restored is None:
+        restored = _rollback_confirmed(acc, original, _chromium_app(acc))
+    evidence = (
+        f"keys for {text!r} were sent and the field did not keep them; the page "
+        "may have received input events"
+        + ("; the original text was typed back" if restored
+           else f"; the field now reads {_excerpt(now)!r}, not the original {_excerpt(original)!r}")
+        + ". No commit key was sent"
+    )
+    return _text_mismatch(
+        "text_mismatch",
+        f"the value read back does not match {text!r}; input was sent to the page",
+        input_sent=True,
+        restored=bool(restored),
+        outcome="partial",
+        next=["ref"],
+        evidence=evidence,
+    )
+
+
+# Chromium's <input type=color> popup (color_picker.js): channel inputs by DOM id.
+_CHROME_COLOR_FIELDS = {
+    "rValueContainer": ("int", 255),
+    "gValueContainer": ("int", 255),
+    "bValueContainer": ("int", 255),
+    "hValueContainer": ("int", 359),
+    "sValueContainer": ("pct", 100),
+    "lValueContainer": ("pct", 100),
+    "hexValueContainer": ("hex", 0),
+}
+
+
+def _invalid_value_reason(attrs: dict, text: str) -> str | None:
+    """Why ``text`` cannot be held by a web input with these attributes, or None."""
+    if str(attrs.get("tag") or "").lower() != "input":
+        return None
+    kind = _CHROME_COLOR_FIELDS.get(str(attrs.get("id") or ""))
+    if kind is not None:
+        form, top = kind
+        if form == "hex":
+            if not re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+                return "a hex colour field takes #rrggbb"
+        else:
+            m = re.fullmatch(r"(\d{1,3})" + ("%?" if form == "pct" else ""), text)
+            if m is None or int(m.group(1)) > top:
+                return (f"a colour channel field takes a whole number 0-{top}"
+                        + ("%" if form == "pct" else ""))
+    raw = str(attrs.get("maxlength") or "").strip()
+    if raw.isdigit() and _utf16_length(text) > int(raw):
+        return f"the field holds at most {int(raw)} characters"
+    return None
+
+
+def _hex_colour_confirmed(acc, text: str) -> bool:
+    """The colour picker's hex field reads back ``text`` up to letter case.
+
+    The popup shows its hex input upper-cased, and hex digits name the same
+    colour in either case, so ``#00FF0A`` confirms a write of ``#00ff0a``.
+    Any other field, or any other difference, does not confirm.
+    """
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", text or ""):
+        return False
+    if str(_get_attributes(acc).get("id") or "") != "hexValueContainer" or not _chromium_app(acc):
+        return False
+    now = _full_text(acc)
+    return isinstance(now, str) and now.lower() == text.lower()
+
+
+def _refuse_invalid_field_value(acc, text: str) -> None:
+    """Refuse, before any focus, write, or key, a value the web field cannot hold.
+
+    A Chromium input with ``maxlength`` truncates typed text, and the colour
+    picker's channel fields parse what they get on every keystroke, so a
+    hex string typed into "Red channel" sent the page a different colour
+    while the write was refused (#1394).
+    """
+    if not isinstance(text, str) or not _chromium_app(acc):
+        return
+    why = _invalid_value_reason(_get_attributes(acc), text)
+    if why is None:
+        return
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{text!r} is not a valid value for this field: {why}; nothing was sent",
+        detail={
+            "platform": "linux",
+            "reason": "invalid_value",
+            "outcome": "refused",
+            "evidence": f"{why}; no key or write was sent",
+        },
+    )
 
 
 def _restore_text(acc, original: str | None) -> None:
@@ -19144,6 +19329,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     no keys. Success leaves the caret where the write put it.
     """
     _refuse_gecko_date_segment_replace(acc)
+    _refuse_invalid_field_value(acc, text)
     _refuse_chromium_tab_text(acc, text)
     _refuse_drawing_multiline_value(acc, text)
     _refuse_model_editor_replace(acc)
