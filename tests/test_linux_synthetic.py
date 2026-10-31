@@ -25115,3 +25115,72 @@ def test_chromium_snapshot_root_waits_while_chrome_rebuilds_a_blank_tree(monkeyp
         _atspi._BROWSER_BAR_PIDS.clear()
         _atspi._BROWSER_BAR_CLEARED.clear()
         _atspi._CHROME_REBUILDING.clear()
+
+
+def _apg_menubar(monkeypatch):
+    """#1412: APG menubar, openers with no aria-controls, Format menu open."""
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    def item(name, states=("SHOWING", "VISIBLE")):
+        node = _GeckoNode("menu item", name, states)
+        node.actions = ["click"]
+        return node
+    file_opener = item("File")
+    file_opener.attributes = {"haspopup": "true"}
+    fmt_opener = item("Format", ("SHOWING", "VISIBLE", "EXPANDED"))
+    fmt_opener.attributes = {"haspopup": "true"}
+    bold, recent = item("Bold"), item("Recent")
+    fmt_menu = _GeckoNode("menu", "Format", ("SHOWING", "VISIBLE"), [bold, recent])
+    file_menu = _GeckoNode("menu", "File", (), [item("New doc", ())])
+    menubar = _GeckoNode("menu bar", "", ("SHOWING", "VISIBLE"),
+                         [file_opener, file_menu, fmt_opener, fmt_menu])
+    page_button = _GeckoNode("push button", "Save", ("SHOWING", "VISIBLE"))
+    page_button.actions = ["click"]
+    document = _GeckoNode("document web", "menubar", ("SHOWING", "VISIBLE"),
+                          [menubar, page_button])
+    frame = _GeckoNode("frame", "menubar - Google Chrome", ("SHOWING", "VISIBLE"), [document])
+    app.children = [frame]
+    frame.parent = app
+    stack = [frame]
+    while stack:
+        node = stack.pop()
+        node.application = app
+        stack.extend(node.children)
+    monkeypatch.setattr(_atspi, "_relation_targets", lambda node, kind: [])
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: (0, 0, 400, 300))
+    return app, document, menubar, fmt_opener, fmt_menu, bold, recent, page_button
+
+
+def test_chromium_menu_occluder_item_in_own_openers_menu_is_not_covered(monkeypatch):
+    """#1412: an item in the open menu is not covered by that menu's own opener."""
+    app, document, menubar, opener, menu, bold, recent, page_button = _apg_menubar(monkeypatch)
+    assert _atspi.chromium_menu_occluder(bold) is None
+    assert _atspi.chromium_menu_occluder(recent, 10, 10) is None
+    # A page target under the open menu is still refused (fail closed).
+    occluder = _atspi.chromium_menu_occluder(page_button)
+    assert occluder is not None and "Format" in occluder[1]
+    # A hidden menu in the chain does not count as the opener's open menu.
+    menu.states.discard("SHOWING")
+    assert _atspi.chromium_menu_occluder(bold) is not None
+
+
+def test_chromium_menu_occluder_other_unlocatable_opener_still_covers(monkeypatch):
+    """#1412: a second expanded opener whose menu is not the target's still fails closed."""
+    app, document, menubar, opener, menu, bold, recent, page_button = _apg_menubar(monkeypatch)
+    other = _GeckoNode("push button", "Actions", ("SHOWING", "EXPANDED"))
+    other.attributes = {"haspopup": "menu"}
+    other.application = app
+    other.parent = document
+    document.children.insert(0, other)
+    occluder = _atspi.chromium_menu_occluder(bold)
+    assert occluder is not None and "Actions" in occluder[1]
+
+
+def test_chromium_menu_occluder_other_open_menu_over_item_covers(monkeypatch):
+    """#1412: a different showing menu over the item is still refused."""
+    app, document, menubar, opener, menu, bold, recent, page_button = _apg_menubar(monkeypatch)
+    overlay = _GeckoNode("menu", "Context", ("SHOWING", "VISIBLE"))
+    overlay.application = app
+    overlay.parent = document
+    document.children.append(overlay)
+    assert _atspi.chromium_menu_occluder(bold, 10, 10) == ("menu", "Context")

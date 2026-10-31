@@ -15293,3 +15293,92 @@ def test_linux_chrome_media_controls_hidden_refs_printed_after_act(tmp_path) -> 
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_linux_chrome_aria_menubar_without_aria_controls_items_click(tmp_path) -> None:
+    """#1412: an item in an open APG menubar menu is not covered by its opener.
+
+    Live Chrome. The openers have no ``aria-controls``, so the opener has no
+    ``controller_for`` relation. Clicking Bold in the open Format menu must
+    run it, not be refused ``occluded_target`` by the Format opener. A page
+    button under the open menu is still refused and nothing reaches it.
+    """
+    import re
+
+    html = (
+        "<!doctype html><html><head><title>menubar</title><style>"
+        "ul{list-style:none;margin:0;padding:0}"
+        "[role=menubar]>li{display:inline-block;position:relative}"
+        "[role=menu]{position:absolute;top:24px;left:0;background:#fff;"
+        "border:1px solid #000;width:200px;z-index:5}"
+        "[role=menu][hidden]{display:none}"
+        "#under{position:absolute;top:40px;left:8px;width:120px}"
+        "</style></head><body>"
+        "<ul role=menubar aria-label=Edit>"
+        "<li role=none><a role=menuitem href=# id=fmt aria-haspopup=true aria-expanded=false>Format</a>"
+        "<ul role=menu id=fm aria-label=Format hidden>"
+        "<li role=none><a role=menuitem href=# id=bold>Bold</a></li>"
+        "<li role=none><a role=menuitem href=# id=ital>Italic</a></li>"
+        "</ul></li></ul>"
+        "<button id=under>Under menu</button><script>"
+        "fmt.onclick=e=>{e.preventDefault();fm.hidden=false;"
+        "fmt.setAttribute('aria-expanded','true')};"
+        "bold.onclick=e=>{e.preventDefault();document.title='bold:on'};"
+        "under.onclick=()=>{document.title='under:clicked'};"
+        "</script></body></html>"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "menubar1412", html)
+    try:
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if "Format" in _titles(shot):
+                    break
+            time.sleep(0.3)
+        else:
+            raise AssertionError("Chrome did not show the menubar")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+
+        def window_title() -> str:
+            return " ".join(el.title or "" for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+                            if el.role == "AXWindow")
+
+        found = runtime.find("chrome", text="Format", role="menuitem")
+        opener = re.search(r"\b(e\d+) menuitem \"Format\"", found)
+        assert opener, found
+        runtime.click(opener.group(1))
+        for _ in range(20):
+            found = runtime.find("chrome", text="Bold", role="menuitem")
+            bold = re.search(r"\b(e\d+) menuitem \"Bold\"", found)
+            if bold:
+                break
+            time.sleep(0.2)
+        assert bold, found
+        runtime.click(bold.group(1))
+        for _ in range(20):
+            if "bold:on" in window_title():
+                break
+            time.sleep(0.2)
+        assert "bold:on" in window_title()
+        # Reopen: a page button the open menu covers is still refused.
+        runtime.click(opener.group(1))
+        found = runtime.find("chrome", text="Under menu")
+        under = re.search(r"\b(e\d+) button \"Under menu\"", found)
+        assert under, found
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.click(under.group(1))
+        assert "occluded_target" in str(exc.value) or "covered" in str(exc.value)
+        assert "under:clicked" not in window_title()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
