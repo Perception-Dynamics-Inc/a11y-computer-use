@@ -2682,6 +2682,84 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     assert clock["t"] < 1015.0
 
 
+def test_scroll_to_find_reports_a_chrome_tree_still_rebuilding(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    After a reload Chrome's tree stays blank and the driver says it is still
+    rebuilding. Those reads are not frame waits. The search keeps waiting
+    within its own bound, never wheels the blank frame, and then says
+    page_tree_rebuilding instead of an empty 'not found after 0 scroll(s)'.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    calls = {"snap": 0, "probe": 0, "reconnect": 0}
+    scrolled: list[str] = []
+    poisoned = {"on": False}
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            calls["snap"] += 1
+            if poisoned["on"]:
+                return _empty_cached_frame()
+            return _short_overflow_list(169)
+
+        def scroll(self, target, **kw):
+            scrolled.append(f"{target.role}:{target.ref}")
+
+        def supports_in_page_find(self, _app):
+            return True
+
+        def find_bar_focused(self, _app):
+            return poisoned.get("bar", False)
+
+        def key_chord(self, chord, **_kw):
+            if chord == "ctrl+f":
+                poisoned["on"] = True
+                poisoned["bar"] = True
+            if chord == "Escape":
+                poisoned["bar"] = False
+
+        def type_text(self, text, **_kw):
+            pass
+
+        def latch_chromium_find(self, app):
+            return True
+
+        def chrome_page_rebuilding(self, app):
+            calls["probe"] += 1
+            return True
+
+        def chrome_reconnect_hung(self, app):
+            calls["reconnect"] += 1
+            return False
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.google.Chrome"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(server.time, "sleep", sleep)
+
+    out = rt.scroll_to_find(
+        "app", text="ROW-0300", direction="down", max_scrolls=60, budget_s=15,
+    )
+    assert out.startswith("page_tree_rebuilding after 0 scroll(s)"), out
+    assert "not found after" not in out
+    assert scrolled == []
+    assert calls["probe"] == 3
+    # One reconnect in the retry, not one per snapshot.
+    assert calls["reconnect"] == 1
+
+
 def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome page.
 
