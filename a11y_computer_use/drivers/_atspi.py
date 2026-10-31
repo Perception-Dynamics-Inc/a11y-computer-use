@@ -10679,6 +10679,33 @@ def _selection_covers_value(acc) -> bool | None:
     return start == 0 and end == count
 
 
+def _transformed_selection_covers_value(acc) -> bool:
+    """A whole-value selection of a CSS case-transformed Chromium field (#1388).
+
+    Chromium counts the rendered text (``STRASSE``, 7) but publishes the
+    selection in DOM offsets (``straße``, 0..6). The selection counts as the
+    whole value only when it starts at 0, X11 PRIMARY holds exactly as many
+    characters as it spans, and that text could render as the field's text.
+    """
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    selections = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    if not isinstance(selections, int) or isinstance(selections, bool) or selections <= 0:
+        return False
+    _caret, start, end = _caret_and_selection(acc, count)
+    if start != 0 or not isinstance(end, int) or end <= 0 or end == count:
+        return False
+    tool = _primary_tool()
+    if tool is None:
+        return False
+    selected = _read_primary(tool[1])
+    if selected is None or len(selected) != end:
+        return False
+    return css_case_rendering(_full_text(acc), selected)
+
+
 def _confirm_select_all(acc) -> None:
     """Refuse before any delete when Ctrl+A did not select the whole value (#1225).
 
@@ -10691,7 +10718,7 @@ def _confirm_select_all(acc) -> None:
         return
     for poll in range(_SELECT_ALL_POLLS):
         covered = _selection_covers_value(acc)
-        if covered is None or covered:
+        if covered is None or covered or _transformed_selection_covers_value(acc):
             return
         if poll + 1 < _SELECT_ALL_POLLS:
             time.sleep(_SELECT_ALL_PAUSE_S)
@@ -11140,6 +11167,226 @@ def _focus_and_replace(acc, text: str) -> bool:
     return _confirm_text_landed(acc, text)
 
 
+# CSS text-transform (#1388). Chrome publishes a field's *rendered* text
+# over AT-SPI: an ``uppercase`` input whose DOM value is "hello world" reads
+# "HELLO WORLD". These helpers never relax the general read-back check. They
+# run only after it failed, only on a Chromium field, and only when the
+# rendered text is exactly a CSS case transform of the expected value. The
+# value is then read from the DOM itself: Ctrl+A in a Chromium input or
+# textarea publishes the field's value (not its painted glyphs) as the X11
+# PRIMARY selection. A read is accepted only when PRIMARY changed from a
+# fresh nonce, so a stale selection can never confirm a write.
+_PRIMARY_POLLS = 10
+_PRIMARY_PAUSE_S = 0.03
+
+
+def _case_shape_key(text: str) -> str:
+    """A loose key for "these could be the same text in another case".
+
+    Only a trigger for reading the DOM, never a reason to accept: NFKC folds
+    ligatures (``\ufb01`` -> ``fi``) and digraphs, ``casefold`` maps ``\u00df``
+    to ``ss``, and the Turkish dotted/dotless i both become ``i``.
+    """
+    import unicodedata
+
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    folded = folded.replace("i\u0307", "i").replace("\u0131", "i")
+    return unicodedata.normalize("NFKC", folded)
+
+
+def css_case_rendering(rendered: str | None, value: str | None) -> bool:
+    """True when ``rendered`` differs from ``value`` but could be a case rendering of it.
+
+    The comparison is loose on purpose (CSS case mapping is locale-aware and
+    not one-to-one), so it only decides whether the DOM value is read. A
+    write is accepted only when that DOM value equals the request exactly.
+    """
+    if rendered is None or value is None or rendered == value:
+        return False
+    return _case_shape_key(rendered) == _case_shape_key(value)
+
+
+def _primary_tool() -> tuple[list[str], list[str]] | None:
+    import shutil
+
+    if shutil.which("xclip"):
+        return (["xclip", "-selection", "primary", "-i"],
+                ["xclip", "-selection", "primary", "-o"])
+    if shutil.which("xsel"):
+        return ["xsel", "--primary", "--input"], ["xsel", "--primary", "--output"]
+    return None
+
+
+def _read_primary(read_cmd: list[str]) -> str | None:
+    try:
+        done = subprocess.run(read_cmd, capture_output=True, timeout=5, check=False)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        return done.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def chromium_dom_text(acc) -> str | None:
+    """The DOM value of a focused Chromium input or textarea, or ``None``.
+
+    PRIMARY is set to a nonce, Ctrl+A is pressed on ``acc`` only while focus
+    is confirmed on it, and the whole-value selection is confirmed before
+    PRIMARY is read. The caret and selection captured before are put back
+    with no keys. ``None`` (unverified) when this is not Chromium on X11, no
+    xclip/xsel is installed, focus or the selection is not confirmed, or
+    PRIMARY never left the nonce. Typing nothing and deleting nothing, it
+    only replaces the X11 PRIMARY selection, which any select-all does.
+    """
+    if acc is None or not _chromium_app(acc) or not _x11_keys_available():
+        return None
+    tool = _primary_tool()
+    if tool is None:
+        return None
+    write_cmd, read_cmd = tool
+    import secrets
+
+    nonce = "a11y-dom-read-" + secrets.token_hex(8)
+    try:
+        subprocess.run(write_cmd, input=nonce.encode(), stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5, check=False)
+    except Exception:
+        return None
+    if _read_primary(read_cmd) != nonce:
+        return None
+    saved = _capture_text_points(acc)
+    try:
+        from a11y_computer_use.drivers import _linux_ime
+
+        _linux_ime.require_no_composition()
+        _chord_into_target(acc, "ctrl+a")
+        _confirm_select_all(acc)
+        for poll in range(_PRIMARY_POLLS):
+            got = _read_primary(read_cmd)
+            if got is not None and got != nonce:
+                return got
+            if poll + 1 < _PRIMARY_POLLS:
+                time.sleep(_PRIMARY_PAUSE_S)
+        return None
+    except ComputerUseError:
+        return None
+    finally:
+        _restore_text_points(saved)
+
+
+class _CssTransformedWrite(int):
+    """A confirmed write whose AT-SPI read-back is its CSS case rendering.
+
+    ``css_rendered`` is that read-back, so the outcome judge can compare the
+    same rendered string a snapshot shows (#1388).
+    """
+
+    css_rendered: str = ""
+
+    @classmethod
+    def of(cls, rendered: str) -> "_CssTransformedWrite":
+        done = cls(1)
+        done.css_rendered = rendered
+        return done
+
+
+def css_transformed_value_confirms(acc, rendered: str | None, value: str) -> bool:
+    """Whether a whole-field write of ``value`` holds although the read-back differs.
+
+    The DOM value is read only on Chromium when ``rendered`` could be a case
+    rendering of ``value``, and the write holds only when it equals ``value``
+    exactly.
+    """
+    if not css_case_rendering(rendered, value) or not _chromium_app(acc):
+        return False
+    return chromium_dom_text(acc) == value
+
+
+def dom_holds_typed(dom: str | None, before: str | None, text: str) -> bool:
+    """Whether the DOM value is the prior field with ``text`` inserted exactly once.
+
+    ``text`` has to appear verbatim. The rest is compared to the rendered
+    ``before`` loosely, because that is all that was read before typing.
+    """
+    return _typed_rest(dom, before, text) is not None
+
+
+def _typed_rest(dom: str | None, before: str | None, text: str) -> str | None:
+    if dom is None or not text:
+        return None
+    prior = _case_shape_key(before or "")
+    start = dom.find(text)
+    while start >= 0:
+        rest = dom[:start] + dom[start + len(text):]
+        if _case_shape_key(rest) == prior:
+            return rest
+        start = dom.find(text, start + 1)
+    return None
+
+
+def chromium_replace_dom_text(acc, target: str) -> bool:
+    """Make a Chromium field hold exactly ``target``; True only when the DOM confirms it."""
+    from a11y_computer_use.drivers import _linux_ime
+
+    try:
+        with _linux_ime.ascii_passthrough(target):
+            if not _text_is_blank(_full_text(acc)):
+                _x11_select_all_and_delete(acc)
+                if not _wait_until_gone(acc):
+                    return False
+            else:
+                grab_focus(acc)
+            if target:
+                _type_into_target(acc, target)
+    except ComputerUseError:
+        return False
+    if not target:
+        return _text_is_blank(_full_text(acc))
+    return chromium_dom_text(acc) == target
+
+
+def css_transformed_type_confirms(acc, before: str | None, after: str | None, text: str) -> str | None:
+    """The DOM value when typed ``text`` landed exactly in a Chromium field, else ``None``.
+
+    The DOM is read when the rendered ``after`` could be ``before`` with
+    ``text`` inserted in another case; it has to hold ``text`` verbatim.
+    """
+    if after is None or not text or not _chromium_app(acc):
+        return None
+    prior = before or ""
+    key = _case_shape_key(after)
+    if not any(_case_shape_key(prior[:i] + text + prior[i:]) == key for i in range(len(prior) + 1)):
+        return None
+    dom = chromium_dom_text(acc)
+    return dom if dom_holds_typed(dom, before, text) else None
+
+
+def undo_chromium_type(acc, before: str | None, text: str) -> bool:
+    """Take refused typed ``text`` back out of a Chromium field; True only when confirmed.
+
+    The field is set to the DOM value without the typed text when it is
+    there verbatim once, or to empty when it was blank before. Otherwise the
+    prior value is unknown and nothing more is typed.
+    """
+    dom = chromium_dom_text(acc)
+    if dom is None:
+        if not _text_is_blank(before or ""):
+            return False
+        target = ""
+    else:
+        target = _typed_rest(dom, before, text)
+        if target is None:
+            if not _text_is_blank(before or ""):
+                return False
+            target = ""
+        if dom == target:
+            return True
+    return chromium_replace_dom_text(acc, target)
+
+
 def _replace_with_keys(acc, text: str) -> bool:
     """Clear the field and type ``text``. Used when EditableText is missing.
 
@@ -11159,23 +11406,48 @@ def _replace_with_keys(acc, text: str) -> bool:
     if current is None or not _x11_keys_available():
         return False
     original = current
+    chrome = _chromium_app(acc)
+    dom_original = False
     from a11y_computer_use.drivers import _linux_ime
+
+    def rollback() -> None:
+        if dom_original:
+            chromium_replace_dom_text(acc, original)
+        else:
+            _restore_text(acc, original)
 
     # One engine switch covers the clear, the write and a restore (#1219). The
     # original is typed back if the write fails, so it must be typeable too:
     # when the engine cannot be switched, this refuses before any key is sent.
     with _linux_ime.ascii_passthrough(text + current):
         if not _text_is_blank(current):
+            if chrome:
+                # The read is the rendered text. Under CSS text-transform a
+                # restore would type the painted case back as the value
+                # (#1388), so the DOM value is what is restored.
+                dom = chromium_dom_text(acc)
+                if dom == text:
+                    return _CssTransformedWrite.of(current)
+                if dom is not None:
+                    original, dom_original = dom, True
             _x11_select_all_and_delete(acc)
             if not _wait_until_gone(acc):
-                _restore_text(acc, original)
+                rollback()
                 return False
         else:
             grab_focus(acc)
-        _type_into_target(acc, text)
-        if _confirm_text(acc, text):
-            return True
-        _restore_text(acc, original)
+            dom_original = chrome
+        try:
+            _type_into_target(acc, text)
+            if _confirm_text(acc, text):
+                return True
+            rendered = _full_text(acc)
+            if css_transformed_value_confirms(acc, rendered, text):
+                return _CssTransformedWrite.of(rendered)
+        except ComputerUseError:
+            rollback()
+            raise
+        rollback()
     return False
 
 
@@ -18714,7 +18986,9 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
             raise
         if not ok:
             _restore_text_points(saved)
-    return ok if getattr(ok, "private_text_verified", False) is True else bool(ok)
+    if getattr(ok, "private_text_verified", False) is True or isinstance(ok, _CssTransformedWrite):
+        return ok
+    return bool(ok)
 
 
 def refuse_open_composition(acc) -> None:
@@ -21786,55 +22060,165 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     return False
 
 
-def chromium_menu_occluder(acc, x: int, y: int):
-    """A showing page menu over (x, y) that does not contain ``acc`` (#1387).
+_OCCLUDER_MENU_ROLES = frozenset({"menu", "popup menu"})
+_OCCLUDER_POPUP_CONTENT = frozenset({"menu", "popup menu", "menu bar", "list box"})
+_OCCLUDER_NODE_BUDGET = 160
+_OCCLUDER_DEPTH = 3
+_OCCLUDER_WIDE = 48
+UNKNOWN_MENU_STATE = ("unknown", "(menu state could not be read)")
 
-    Chromium answers AT-SPI hit tests from a cache of its last hover result
-    while the point stays inside that node's bounds, so a menu opened over
-    the target keeps reporting the target. One Collection query for showing
-    menus in the target's document reads the real overlay. Returns the
-    menu's (role, name), None when nothing covers the point, or the
-    document's when a showing menu has no readable bounds (fail closed).
+
+def _occluder_children(node, cap: int):
+    """Up to ``cap`` children of ``node``; None when the count is unreadable
+    or the node is wider than ``cap`` (a long list is never walked)."""
+    count = _raw_child_count(node)
+    if not isinstance(count, int) or count < 0:
+        return None
+    if count > cap:
+        return []
+    kids = []
+    for index in range(count):
+        kid = _safe(lambda i=index: _child_at(node, i))
+        if kid is not None:
+            kids.append(kid)
+    return kids
+
+
+def _occluder_haspopup(node) -> bool:
+    value = str((_safe(lambda: _get_attributes(node)) or {}).get("haspopup", "") or "")
+    return value.strip().lower() not in {"", "false", "0"}
+
+
+def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
+    """A showing menu over (x, y) that does not contain ``acc`` (#1387).
+
+    Chromium answers AT-SPI hit tests from a cache of its last hover result,
+    so a menu opened over the target keeps reporting the target. This reads
+    only the places an open menu lives, never the whole document (#1396: a
+    Collection query over a 5,000-row page times out):
+
+    * Chrome's popup windows: the application's other top-level frames or
+      windows that are showing and hold a menu, menu bar or list box (the
+      native right-click menu, <select> popups).
+    * Page overlays: showing menu nodes near the top of the document (a
+      bounded walk that never descends into a container wider than
+      ``_OCCLUDER_WIDE``), and the menus that an expanded ``haspopup``
+      opener there controls.
+
+    Returns the menu's (role, name), ``UNKNOWN_MENU_STATE`` when the open
+    menu state cannot be determined at all, or None when no menu covers the
+    point. A showing menu whose bounds cannot be read covers (fail closed),
+    and so does an expanded haspopup opener whose menu cannot be located.
+    A slow or failed read on part of the page is not a menu: with no popup
+    window and no expanded opener there is positive evidence none is open.
+
+    Without (x, y) the target's own on-screen center is the point, for the
+    node-bound paths (doAction, CDP, focus by ref). When the target's bounds
+    cannot be read, any showing menu outside it covers it.
     """
     if acc is None or not _chromium_app(acc):
         return None
-    document = None
+    document = frame = None
     chain = []  # pinned while keys are compared: they may be id()-based
     for node in _ancestor_chain(acc):
         chain.append(node)
         role = _role_name(node)
-        if role in {"document web", "document frame"}:
+        if document is None and role in {"document web", "document frame"}:
             document = node
+        elif role in {"frame", "window"}:
+            frame = node
             break
-        if role in {"frame", "window", "application"}:
+        elif role == "application":
             break
     if document is None:
         return None
-    try:
-        Atspi = _atspi()
-        coll = _call_first(document, ("get_collection_iface", "get_collection"))
-        roles = [r for r in (getattr(Atspi.Role, "MENU", None),
-                             getattr(Atspi.Role, "POPUP_MENU", None)) if r is not None]
-        if coll is None or not roles:
-            return None
-        states = Atspi.StateSet.new([Atspi.StateType.SHOWING])
-        mt = Atspi.CollectionMatchType
-        rule = Atspi.MatchRule.new(
-            states, mt.ALL, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
-        )
-        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 8, True)
-    except Exception:  # noqa: BLE001 - fakes and GTK expose no Collection
-        return None
     keys = {_ancestor_key(node) for node in chain}
-    for menu in hits or []:
+    candidates: list = []
+    windows_known = True
+    app = _safe(lambda: _application_of(acc))
+    tops = _occluder_children(app, 32) if app is not None else None
+    if tops is None:
+        windows_known = False
+    frame_key = _ancestor_key(frame) if frame is not None else None
+    for top in tops or []:
+        if frame_key is not None and _ancestor_key(top) == frame_key:
+            continue
+        role = _role_name(top)
+        if role in _OCCLUDER_MENU_ROLES:
+            if _state_has(top, "SHOWING"):
+                candidates.append(top)
+            continue
+        # Chrome's native context menu is a separate nameless top-level
+        # "frame" holding a "menu bar" (views MenuRunner); GTK builds use
+        # "window". Bubbles and omnibox frames hold no menu and are skipped.
+        if role not in {"window", "frame"} or not _state_has(top, "SHOWING"):
+            continue
+        queue = [(top, 0)]
+        while queue:
+            node, depth = queue.pop(0)
+            kids = _occluder_children(node, 8) if depth < 2 else []
+            if kids is None:
+                candidates.append(top)  # a showing popup that cannot be read
+                break
+            if any(_role_name(kid) in _OCCLUDER_POPUP_CONTENT for kid in kids):
+                candidates.append(top)
+                break
+            queue.extend((kid, depth + 1) for kid in kids)
+    page_errors = False
+    openers: list = []
+    budget = _OCCLUDER_NODE_BUDGET
+    queue = [(document, 0)]
+    while queue and budget > 0:
+        node, depth = queue.pop(0)
+        kids = _occluder_children(node, _OCCLUDER_WIDE)
+        if kids is None:
+            page_errors = True
+            continue
+        for kid in kids:
+            budget -= 1
+            if budget < 0:
+                break
+            if _ancestor_key(kid) in keys:
+                if depth + 1 < _OCCLUDER_DEPTH:
+                    queue.append((kid, depth + 1))
+                continue
+            role = _role_name(kid)
+            if role in _OCCLUDER_MENU_ROLES:
+                if _state_has(kid, "SHOWING"):
+                    candidates.append(kid)
+                continue
+            if _state_has(kid, "EXPANDED") and _occluder_haspopup(kid):
+                openers.append(kid)
+            if depth + 1 < _OCCLUDER_DEPTH:
+                queue.append((kid, depth + 1))
+    for opener in openers:
+        menus = [m for m in _safe(lambda o=opener: _relation_targets(o, "controller_for")) or []
+                 if _role_name(m) in _OCCLUDER_MENU_ROLES | {"list box"}]
+        if not menus:
+            return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
+        candidates.extend(menus)
+    if not candidates:
+        if not windows_known and page_errors:
+            return UNKNOWN_MENU_STATE
+        return None
+    if x is None or y is None:
+        own = _raw_rect(acc, "SCREEN")
+        if own is not None and own[2] > 0 and own[3] > 0:
+            x, y = int(own[0] + own[2] // 2), int(own[1] + own[3] // 2)
+        else:
+            x = y = None
+    for menu in candidates:
         if _ancestor_key(menu) in keys:
             continue  # the target is inside this menu
+        role = _role_name(menu)
+        label = ("menu", _node_name(menu) or "Chrome popup menu") \
+            if role in {"frame", "window"} else (role or "menu", _node_name(menu))
         box = _raw_rect(menu, "SCREEN")
-        if box is None:
-            return _role_name(document), _node_name(document)
+        if box is None or x is None:
+            return label
         left, top, width, height = box
         if width > 0 and height > 0 and left <= x < left + width and top <= y < top + height:
-            return _role_name(menu), _node_name(menu)
+            return label
     return None
 
 
@@ -24059,6 +24443,11 @@ def _modal_collection(root, *, split: bool = False):
     cached = _structural_collection_lookup(root, split)
     if cached is not None:
         return cached
+    if not split and _role_name(root) in {"document web", "document frame"} \
+            and _chromium_app(root):
+        shallow = _chromium_shallow_modal_scan(root)
+        if shallow is not None:
+            return shallow
     generation = _structural_generation()
     result = _modal_collection_once(root, split=split)
     if result is not _COLLECTION_TIMEOUT:
@@ -24071,6 +24460,59 @@ def _modal_collection(root, *, split: bool = False):
 
 
 _COLLECTION_TIMEOUT = object()
+
+_MODAL_RULE_ROLES = frozenset({"dialog", "alert", "window", "frame", "file chooser"})
+# Containers whose children are data rows, not hosts for a dialog: a long
+# table, grid or list is summarized by its role instead of being walked.
+_ROW_CONTAINER_ROLES = frozenset({"table", "tree table", "grid", "list box", "list", "tree"})
+_ROW_ROLES = frozenset({"table row", "row", "list item", "tree item", "option"})
+_SHALLOW_MODAL_BUDGET = 120
+_SHALLOW_MODAL_WIDE = 48
+
+
+def _chromium_shallow_modal_scan(document):
+    """Dialog-role nodes of a Chromium page from a bounded walk, or None.
+
+    #1396: a document-wide Collection query on a 5,000-row page times out,
+    and the input was refused as ``modal_boundary_busy`` although no dialog
+    was open. The walk reads at most ``_SHALLOW_MODAL_BUDGET`` nodes and
+    does not descend into a wide row container (table, grid, list) whose
+    first and last children are rows. It is a complete answer only when
+    every other node was read: any read failure, other wide container, or
+    budget overrun returns None, and the caller runs the full Collection
+    query (failing closed as before when that cannot answer).
+    """
+    found: list = []
+    queue = deque([document])
+    pinned = []
+    read = 0
+    while queue:
+        node = queue.popleft()
+        pinned.append(node)
+        count = _raw_child_count(node)
+        if not isinstance(count, int) or count < 0:
+            return None
+        if count > _SHALLOW_MODAL_WIDE:
+            if _role_name(node) not in _ROW_CONTAINER_ROLES:
+                return None
+            ends = [_safe(lambda i=i: _child_at(node, i)) for i in (0, count - 1)]
+            if any(end is None or _role_name(end) not in _ROW_ROLES for end in ends):
+                return None
+            continue
+        for index in range(count):
+            read += 1
+            if read > _SHALLOW_MODAL_BUDGET:
+                return None
+            child = _safe(lambda i=index: _child_at(node, i))
+            if child is None:
+                return None
+            role = _role_name(child)
+            if not role:
+                return None
+            if role in _MODAL_RULE_ROLES:
+                found.append(child)
+            queue.append(child)
+    return found
 
 # Complete role-query results per subtree, valid while no event could have
 # added or removed a dialog-role node (#1368). Re-querying a 5,000-row page

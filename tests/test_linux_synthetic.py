@@ -17471,7 +17471,12 @@ def test_chromium_transform_click_requires_native_hit(monkeypatch, hit_kind):
 
 
 def _menu_collection(monkeypatch, document, menus, rects):
-    """Fake Collection: ``document`` reports ``menus`` as its showing menus."""
+    """``menus`` are showing overlays under ``document``. A document-wide
+    Collection query for menus is recorded: the occluder must never make one
+    (#1396: it times out on a long page)."""
+    for menu in menus:
+        menu.parent = document
+        document.children.append(menu)
     queries = []
     fake = _NS(
         Role=_NS(MENU="menu", POPUP_MENU="popup menu"),
@@ -17514,6 +17519,7 @@ def test_chromium_ref_click_refuses_target_under_open_page_menu(monkeypatch, cas
     rects = {menu: {"covering": (100, 120, 200, 60), "contains_target": (100, 120, 200, 60),
                     "elsewhere": (400, 400, 100, 100), "no_bounds": None,
                     "none": (100, 120, 200, 60)}[case]}
+    rects[target] = (22, 115, 280, 40)  # the target's own box, read on the action paths
     queries = _menu_collection(monkeypatch, document, [] if case == "none" else [menu], rects)
     # The stale cached hit test still reports the target at its own center.
     hits = []
@@ -17538,15 +17544,215 @@ def test_chromium_ref_click_refuses_target_under_open_page_menu(monkeypatch, cas
         assert exc.value.detail["reason"] == "occluded_target"
         assert exc.value.detail["outcome"] == "refused"
         assert not clicks and not hits
-        if case == "covering":
-            assert "menu 'File menu'" in str(exc.value)
+        # Unreadable bounds name the menu, not the document (#1387).
+        assert "menu 'File menu'" in str(exc.value)
+        assert "document web" not in str(exc.value)
     else:
         driver.click(element)
         assert clicks == [((162, 135), {"button": "left", "count": 1})]
         assert len(hits) == 1
-    # One bounded Collection query for showing menus, no tree walk.
-    assert queries == [(("showing",), ["menu", "popup menu"], 8)]
+    # Scoped reads only: no document-wide Collection query (#1396).
+    assert queries == []
     assert not target.pressed
+
+
+def _covered_chromium_target(monkeypatch, role, covered=True):
+    _frame, panel, target, text = _chrome_collapsed_panel()
+    document = panel.parent
+    target.states.add("SHOWING")
+    text.parent = target
+    menu = _GeckoNode("menu", "Row menu", ("SHOWING", "VISIBLE"))
+    menu.application = target.application
+    menu.parent = document
+    box = (100, 120, 200, 60) if covered else (400, 400, 100, 100)
+    queries = _menu_collection(monkeypatch, document, [menu],
+                               {menu: box, target: (105, 115, 115, 40)})
+    element = Element("e1", role, target.name, None,
+                      Bounds(0, 105, 115, 115, 40), "files", clickable=True, editable=role == "AXTextField")
+    observe._register_epoch(element.snapshot_id, {}, {element.ref: target})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    fired = []
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *a: fired.append("raise"))
+    monkeypatch.setattr(driver, "_visible_action", lambda *a: None)
+    from a11y_computer_use.drivers import _cdp_forms
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda *a, **k: fired.append("cdp") or True)
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda *a, **k: fired.append("cdp_write") or None)
+    for name in ("do_press", "grab_focus", "_do_action_named"):
+        monkeypatch.setattr(_atspi, name, lambda *a, _n=name, **k: fired.append(_n) or True)
+    monkeypatch.setattr(_atspi, "chromium_page_button", lambda h: True)
+    return driver, element, target, fired, queries
+
+
+from a11y_computer_use.schema import MouseButton  # noqa: E402
+
+_ACTION_PATHS = {
+    "press_row": ("AXRow", lambda d, e: d.press_element(e)),
+    "press_checkbox_cdp": ("AXCheckBox", lambda d, e: d.press_element(e)),
+    "button_action": ("AXButton", lambda d, e: d.click_button_action(
+        e, button=MouseButton.LEFT, count=1, modifiers=())),
+    "button_context_menu": ("AXButton", lambda d, e: d.click_button_action(
+        e, button=MouseButton.RIGHT, count=1, modifiers=())),
+    "set_value": ("AXTextField", lambda d, e: d.set_value(e, "hello")),
+}
+
+
+@pytest.mark.parametrize("path", sorted(_ACTION_PATHS))
+def test_chromium_covered_target_refused_on_every_action_path(monkeypatch, path):
+    """#1387: doAction, CDP, button actions and focus-by-ref share the occluder gate."""
+    role, act = _ACTION_PATHS[path]
+    driver, element, target, fired, queries = _covered_chromium_target(monkeypatch, role)
+    with pytest.raises(ComputerUseError) as exc:
+        act(driver, element)
+    assert exc.value.code == ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "occluded_target"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "menu 'Row menu'" in str(exc.value)
+    assert fired == [] and not target.pressed
+    assert queries == []
+
+
+@pytest.mark.parametrize("failure", ["target_bounds", "menu_bounds", "state_unknown", "checker"])
+def test_chromium_action_path_occluder_fails_closed(monkeypatch, failure):
+    driver, element, target, fired, _q = _covered_chromium_target(monkeypatch, "AXRow", covered=False)
+    document = target
+    while _atspi._role_name(document) != "document web":
+        document = document.parent
+    reason = "occluded_target"
+    if failure == "target_bounds":
+        real = _atspi._raw_rect
+        monkeypatch.setattr(_atspi, "_raw_rect",
+                            lambda n, c: None if n is target else real(n, c))
+    elif failure == "menu_bounds":
+        real = _atspi._raw_rect
+        monkeypatch.setattr(_atspi, "_raw_rect",
+                            lambda n, c: None if n.role == "menu" else real(n, c))
+    elif failure == "state_unknown":
+        # Neither the popup windows nor the page can be read: no evidence
+        # either way, so refuse as unverified (not as covered by a menu).
+        document.children = [n for n in document.children if n.role != "menu"]
+        document.get_child_count = lambda: -1
+        target.application.get_child_count = lambda: -1
+        reason = "occlusion_unverified"
+    else:
+        def boom(*a, **k):
+            raise RuntimeError("dbus")
+        monkeypatch.setattr(_atspi, "chromium_menu_occluder", boom)
+        reason = "occlusion_unverified"
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == reason
+    assert exc.value.detail["outcome"] == "refused"
+    if reason == "occlusion_unverified":
+        assert "unreadable open menus" not in str(exc.value)
+        assert exc.value.detail["retryable"] is True
+    assert fired == [] and not target.pressed
+
+
+def test_chromium_uncovered_target_action_path_not_refused(monkeypatch):
+    driver, element, target, fired, queries = _covered_chromium_target(
+        monkeypatch, "AXCheckBox", covered=False)
+    assert driver.press_element(element) is True
+    assert fired == ["cdp"] and queries == []
+
+
+def _long_chrome_page(monkeypatch, rows=5000):
+    """#1396: a 5,000-row table, no menus, and a Collection that times out."""
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    trs = []
+    for i in range(1, rows + 1):
+        button = _GeckoNode("push button", f"edit {i}", ("SHOWING", "VISIBLE"))
+        button.actions = ["click"]
+        trs.append(_GeckoNode("table row", "", ("SHOWING",), [
+            _GeckoNode("table cell", f"ROW-{i:04d}"), _GeckoNode("table cell", "", (), [button])]))
+    table = _GeckoNode("table", "", ("SHOWING",), trs)
+    document = _GeckoNode("document web", "rowtable", ("SHOWING", "VISIBLE"), [table])
+    frame = _GeckoNode("frame", "rowtable - Google Chrome", ("SHOWING", "VISIBLE"), [document])
+    app.children = [frame]
+    frame.parent = app
+    reads = []
+    real_count = _GeckoNode.get_child_count
+
+    def counted(self):
+        reads.append(self)
+        return real_count(self)
+
+    monkeypatch.setattr(_GeckoNode, "get_child_count", counted)
+    stack = [frame]
+    while stack:
+        node = stack.pop()
+        node.application = app
+        stack.extend(node.children)
+
+    def timeout(*a):
+        raise RuntimeError("timeout from dbind")
+
+    document.get_collection_iface = lambda: _NS(get_matches=timeout)
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: (184, 382, 64, 21))
+    target = trs[min(299, rows - 1)].children[1].children[0]
+    return app, frame, document, target, reads
+
+
+def test_chromium_menu_occluder_long_page_without_menu_is_cheap(monkeypatch):
+    """#1396: no menu open on a 5,000-row page is not 'unreadable open menus'."""
+    app, frame, document, target, reads = _long_chrome_page(monkeypatch)
+    assert _atspi.chromium_menu_occluder(target) is None
+    assert _atspi.chromium_menu_occluder(target, 216, 391) is None
+    # Only the window list, the document and the table itself are read:
+    # the 5,000-row table is never walked.
+    assert len(reads) <= 8
+
+
+def test_chromium_menu_occluder_partial_read_failure_with_no_menu_evidence(monkeypatch):
+    """A failed page read is not a menu when no popup window or opener exists."""
+    app, frame, document, target, reads = _long_chrome_page(monkeypatch, rows=40)
+    table = document.children[0]
+    table.get_child_count = lambda: -1  # e.g. a dbind timeout on this subtree
+    assert _atspi.chromium_menu_occluder(target) is None
+
+
+def test_chromium_menu_occluder_finds_popup_window_menu(monkeypatch):
+    app, frame, document, target, _reads = _long_chrome_page(monkeypatch, rows=40)
+    # Chrome's native right-click menu, as read live: a nameless top-level
+    # frame > menu bar > panel, beside a bubble frame that holds no menu.
+    menu = _GeckoNode("menu bar", "", ("SHOWING",), [_GeckoNode("panel", "", ("SHOWING",))])
+    popup = _GeckoNode("frame", "", ("SHOWING", "VISIBLE"), [menu])
+    bubble = _GeckoNode("frame", "", ("SHOWING",), [_GeckoNode("panel", "", ("SHOWING",))])
+    for node in (popup, bubble):
+        node.application = app
+        node.parent = app
+    app.children.extend([bubble, popup])
+    assert _atspi.chromium_menu_occluder(target) == ("menu", "Chrome popup menu")
+    app.children.remove(popup)
+    assert _atspi.chromium_menu_occluder(target) is None
+    app.children.append(popup)
+    hidden = _GeckoNode("window", "", ("VISIBLE",), [_GeckoNode("menu", "old")])
+    app.children[-1] = hidden
+    assert _atspi.chromium_menu_occluder(target) is None
+
+
+@pytest.mark.parametrize("menu_found", [True, False])
+def test_chromium_menu_occluder_expanded_haspopup_opener(monkeypatch, menu_found):
+    """An expanded haspopup opener's menu covers; an unlocatable one fails closed."""
+    app, frame, document, target, _reads = _long_chrome_page(monkeypatch, rows=40)
+    opener = _GeckoNode("push button", "Actions", ("SHOWING", "EXPANDED"))
+    opener.attributes = {"haspopup": "menu"}
+    opener.application = app
+    opener.parent = document
+    document.children.insert(0, opener)
+    menu = _GeckoNode("menu", "Actions menu", ("SHOWING",))
+    menu.application = app
+    # The menu sits deep in the page, past the bounded walk.
+    monkeypatch.setattr(_atspi, "_relation_targets",
+                        lambda node, kind: [menu] if menu_found and node is opener else [])
+    occluder = _atspi.chromium_menu_occluder(target)
+    if menu_found:
+        assert occluder == ("menu", "Actions menu")
+    else:
+        assert occluder[0] == "push button" and "Actions" in occluder[1]
+    opener.states.discard("EXPANDED")
+    assert _atspi.chromium_menu_occluder(target) is None
 
 
 def test_chromium_menu_occluder_ignores_native_apps(monkeypatch):
@@ -24172,9 +24378,15 @@ def test_find_root_binds_a_registrant_of_another_user_never(fake_atspi, monkeypa
 
 
 def _chromium_table_under_timeout(monkeypatch, replies):
-    """A Chromium document holding a 5000-row table whose Collection replies come from ``replies``."""
+    """A Chromium document holding a 5000-child container whose Collection replies come from ``replies``.
+
+    The container is a plain section, so the bounded page scan (#1396) cannot
+    rule out a dialog inside it and the boundary depends on the Collection.
+    A row table is answered by that scan instead: see
+    ``test_chromium_long_page_modal_scan_skips_the_row_table``.
+    """
     document = _Acc("document web")
-    table = _Acc("table")
+    table = _Acc("section")
     table.get_child_count = lambda: 5000
     table.get_child_at_index = lambda i: pytest.fail("must not walk a table that cannot fit")
     _adopt(document, table)
@@ -24712,3 +24924,37 @@ def test_resolve_rereads_once_when_a_live_node_was_missed(modal_boundary_tree, m
     with pytest.raises(ComputerUseError) as caught:
         driver.resolve_ref(snap, i.ref)
     assert caught.value.code is ErrorCode.STALE_REF and len(reads) == 1
+
+def test_chromium_long_page_modal_scan_skips_the_row_table(monkeypatch):
+    """#1396: no dialog on a 5,000-row page is answered without the Collection."""
+    app, frame, document, target, reads = _long_chrome_page(monkeypatch)
+    assert _atspi._chromium_shallow_modal_scan(document) == []
+    assert _atspi._modal_collection(document) == []
+    assert len(reads) <= 4
+
+
+def test_chromium_shallow_modal_scan_finds_a_page_dialog(monkeypatch):
+    app, frame, document, target, _reads = _long_chrome_page(monkeypatch, rows=60)
+    dialog = _GeckoNode("dialog", "Confirm", ("SHOWING", "MODAL"))
+    dialog.parent = document
+    document.children.append(dialog)
+    assert _atspi._chromium_shallow_modal_scan(document) == [dialog]
+
+
+@pytest.mark.parametrize("failure", ["wide_div", "unreadable", "row_ends"])
+def test_chromium_shallow_modal_scan_cannot_tell(monkeypatch, failure):
+    """No complete answer falls back to the Collection query (fail closed)."""
+    app, frame, document, target, _reads = _long_chrome_page(monkeypatch, rows=60)
+    table = document.children[0]
+    if failure == "wide_div":
+        table.role = "section"
+    elif failure == "unreadable":
+        table.get_child_count = lambda: -1
+    else:
+        table.children[-1].role = "section"  # a non-row child: could host a dialog
+    assert _atspi._chromium_shallow_modal_scan(document) is None
+    # The full query then times out: busy, not "no modal".
+    monkeypatch.setattr(_atspi, "_ping_answers", lambda node: True)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: (_ for _ in ()).throw(RuntimeError("timeout")))
+    _atspi._modal_collection_state.busy = False
+    assert _atspi._modal_collection(document) is None

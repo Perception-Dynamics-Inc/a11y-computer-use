@@ -3242,22 +3242,51 @@ class LinuxDriver:
             return
         raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _refuse_chromium_occluded(self, element: Element, handle,
+                                  x: int | None = None, y: int | None = None) -> None:
+        """Refuse any Chromium ref action on a target an open page menu covers.
+
+        Runs before every activation path (pointer, doAction, CDP, focus by
+        ref) and before any side effect (#1387). Without (x, y) the target's
+        own center is checked. A check that raises fails closed.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None or not isinstance(element, Element):
+            return
+        try:
+            occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
+        except Exception:  # noqa: BLE001 - an unreadable check refuses
+            occluder = _atspi.UNKNOWN_MENU_STATE
+        if occluder is None:
+            return
+        if tuple(occluder) == _atspi.UNKNOWN_MENU_STATE:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{element.ref} ({element.role} {element.title!r}): Chrome did not answer "
+                "whether a menu covers it; nothing was sent",
+                detail={
+                    "ref": element.ref, "reason": "occlusion_unverified", "outcome": "refused",
+                    "retryable": True,
+                    "hint": "Retry; if a menu is open, close it (Escape) first.",
+                },
+            )
+        where = "at the click point" if x is not None else ""
+        raise ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{element.ref} ({element.role} {element.title!r}) is covered {where} "
+            f"by {occluder[0]} {occluder[1]!r}; nothing was sent".replace("  ", " "),
+            detail={
+                "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
+                "hint": "Close the menu (Escape) or act on the menu item instead.",
+            },
+        )
+
     def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int) -> None:
         """Refuse page ref clicks whose native hit test cannot confirm the target."""
         from a11y_computer_use.drivers import _atspi
 
-        occluder = self._run(lambda: _atspi.chromium_menu_occluder(handle, x, y))
-        if occluder is not None:
-            raise ComputerUseError(
-                ErrorCode.STALE_REF,
-                f"{element.ref} ({element.role} {element.title!r}) is covered at the click "
-                f"point by {occluder[0]} {occluder[1]!r}; "
-                "no click was sent",
-                detail={
-                    "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
-                    "hint": "Close the menu (Escape) or act on the menu item instead.",
-                },
-            )
+        self._refuse_chromium_occluded(element, handle, x, y)
         if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
@@ -3768,6 +3797,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if not self._run(lambda: _atspi.chromium_page_button(handle)):
             return None
+        self._refuse_chromium_occluded(element, handle)
         self._verify_chromium_row_target(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_unverified_pdf_thumbnail(element, handle)
@@ -3935,6 +3965,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _cdp_forms
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_chromium_occluded(element, handle)
         self._refuse_hidden(element, handle)
         self._refuse_calendar_click(element, handle)
         self._refuse_expander_click(element, handle)
@@ -4372,6 +4403,7 @@ class LinuxDriver:
         self._check_readback = None
         self._check_modal_target(element)
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        self._refuse_chromium_occluded(element, handle)
         if handle is not None:
             # Before the window is raised, the field focused or a DOM write made:
             # any of them can commit or cancel an open composition (#1219).
@@ -4642,6 +4674,12 @@ class LinuxDriver:
                 role=element.role,
             )
         self._focused_editable = handle
+        rendered = getattr(success, "css_rendered", None)
+        if isinstance(rendered, str):
+            # CSS text-transform (#1388): the DOM value equals ``value`` and
+            # the snapshot shows its painted case. Judge against that read.
+            self._type_expected = rendered
+            return True
         return success
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
@@ -4692,6 +4730,7 @@ class LinuxDriver:
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_chromium_occluded(target, handle)
             self._verify_chromium_row_target(target, handle)
             self._refuse_calendar_click(target, handle)
             self._refuse_expander_click(target, handle)
@@ -6128,6 +6167,28 @@ class LinuxDriver:
                 # separator character the field stored.
                 self._type_expected = _atspi._field_text_for_type(after, text)
             return len(text)
+        if chrome and self._run(
+            lambda: _atspi.css_transformed_type_confirms(handle, before, after, text)
+        ) is not None:
+            # CSS text-transform (#1388): the read-back is the painted case of
+            # the field, and the DOM value holds ``text`` exactly. The outcome
+            # compares the same rendered read, so it is the expected string.
+            self._type_expected = _atspi._field_text_for_type(after, text)
+            return len(text)
+        if chrome:
+            # Refused: take the text back out so a retry cannot double it, or
+            # say it was sent and could not be removed (#1388).
+            removed = bool(self._run(lambda: _atspi.undo_chromium_type(handle, before, text)))
+            raise _atspi._text_mismatch(
+                "text_mismatch",
+                f"the text read back does not contain {text!r}"
+                + ("; the typed text was removed" if removed else
+                   "; the keys were sent and could not be removed, so do not type it again"),
+                expected=text,
+                actual=after,
+                input_sent=True,
+                text_removed=removed,
+            )
         if writer_doc is not None:
             shown = self._run(
                 lambda: _atspi.poll_writer_document(writer_doc, writer_before, text)
