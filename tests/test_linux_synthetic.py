@@ -19827,13 +19827,64 @@ def test_native_modal_sibling_blocks_background_snapshot(modal_boundary_tree):
     assert next(el for el in restored.elements if el.title == bg.name).actionable
 
 
-def test_modal_boundary_refuses_truncated_target_ancestry(modal_boundary_tree):
-    driver, frame, bg, modal, inside, calls = modal_boundary_tree
-    wrapper = bg
-    for _ in range(40):
+def _bury(node, depth):
+    """Wrap ``node`` in ``depth`` nested panels; return the outermost one."""
+    wrapper = node
+    for _ in range(depth):
         wrapper = _adopt(_Acc("panel"), wrapper)
-    frame.children[0] = wrapper
-    wrapper.parent = frame
+    return wrapper
+
+
+def _rehome(parent, old, new):
+    parent.children[parent.children.index(old)] = new
+    new.parent = parent
+
+
+def test_modal_boundary_refuses_deep_background_target(modal_boundary_tree):
+    """#1381: a complete 40+ deep ancestry behind an open modal is outside it."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    _rehome(frame, bg, _bury(bg, 40))
+    assert len(_atspi._modal_ancestry(bg)) > 32
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.refuse_outside_modal(bg)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+    with pytest.raises(ComputerUseError) as caught:
+        _atspi.refuse_outside_modal(bg, frame)
+    assert caught.value.detail["reason"] == "outside_active_modal"
+    assert calls == []
+
+
+def test_modal_boundary_allows_deep_target_inside_modal(modal_boundary_tree):
+    """#1381: a control 40+ accessibles deep inside the active modal is inside it."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    _rehome(modal, inside, _bury(inside, 40))
+    assert len(_atspi._modal_ancestry(inside)) > 32
+    assert _atspi.refuse_outside_modal(inside) is True
+    assert _atspi.refuse_outside_modal(inside, frame) is True
+    assert not _atspi.outside_modals(inside, [modal], cache={})
+    assert not _atspi.outside_modals(inside, [modal])
+
+
+def test_modal_boundary_allows_deep_target_without_modal(modal_boundary_tree):
+    """#1381: no modal open, 40+ deep controls are not refused."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    _rehome(frame, bg, _bury(bg, 40))
+    assert _atspi.refuse_outside_modal(bg) is False
+
+
+@pytest.mark.parametrize("break_kind", ["cycle", "backstop"])
+def test_modal_boundary_still_fails_closed_on_incomplete_ancestry(
+        modal_boundary_tree, monkeypatch, break_kind):
+    """An ancestry read that never reaches a parentless root is not 'no modal'."""
+    driver, frame, bg, modal, inside, calls = modal_boundary_tree
+    frame.children.remove(modal)
+    outer = _bury(bg, 40)
+    _rehome(frame, bg, outer)
+    if break_kind == "cycle":
+        frame.parent = outer  # The reported chain loops instead of ending.
+    else:
+        monkeypatch.setattr(_atspi, "_MODAL_ANCESTRY_MAX", 20)
     with pytest.raises(ComputerUseError) as caught:
         _atspi.refuse_outside_modal(bg)
     assert caught.value.detail["reason"] == "modal_boundary_unavailable"

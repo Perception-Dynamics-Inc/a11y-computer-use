@@ -24237,32 +24237,39 @@ def active_modals(root, *, fallback: bool = True, point=None) -> list:
 
 def modal_document(modal):
     """The reported web document owning a page modal, if any."""
-    return next((node for node in _ancestor_chain(modal)
+    return next((node for node in _modal_ancestry(modal)
                  if _role_name(node) in {"document web", "document frame"}), None)
+
+
+# Runaway backstop for the modal guard's ancestor walk (#1381); see
+# `_modal_ancestry`. Real trees end far below it. Reaching it is an
+# incomplete read and fails closed; it never means "no modal".
+_MODAL_ANCESTRY_MAX = 4096
 
 
 def _modal_chain(acc, cache):
     """Reuse reported ancestry only during one read-only snapshot traversal."""
     if cache is None:
-        return list(_ancestor_chain(acc))
+        return _modal_ancestry(acc)
+    limit = _MODAL_ANCESTRY_MAX
     chain = []
     keys = []
     seen = set()
     node = acc
-    while node is not None and len(chain) < 32:
+    while node is not None and len(chain) < limit:
         key = _ancestor_key(node)
         if key in seen:
             break
         seen.add(key)
         if key in cache:
-            chain.extend(cache[key][:32 - len(chain)])
+            chain.extend(cache[key][:limit - len(chain)])
             break
         chain.append(node)
         keys.append(key)
         node = _parent_of(node)
     # Cache only complete acyclic paths; bounded/cyclic ancestry must be
     # re-read from each target, just like the uncached guard.
-    if node is None or (_ancestor_key(node) in cache and len(chain) < 32):
+    if node is None or (_ancestor_key(node) in cache and len(chain) < limit):
         # Values retain wrappers, including fallback id() identities. Only
         # the newly read prefix needs entries: cached ancestors already have
         # theirs, and re-keying the whole chain made each node O(depth).
@@ -24543,11 +24550,30 @@ def refuse_unexposed_native_modal(acc) -> None:
                 "next": ["window list", "key Return / Escape, or click(x, y) inside the dialog"]})
 
 
+def _modal_ancestry(acc) -> list:
+    """``acc`` and every reported parent up to the root, for the modal guard.
+
+    Membership in a modal is decided by the target's full ancestry (#1381).
+    Chromium pages and docked DevTools put controls 40+ accessibles below
+    the desktop, so the generic 32-node walk cut them off. This walk only
+    stops at a parentless root, a self-parent or a repeated node (cycle).
+    `_MODAL_ANCESTRY_MAX` is a runaway backstop, not a depth policy:
+    a chain that hits it, or a cycle, still has a parent after its last
+    node, and every caller treats that as an incomplete read and refuses.
+    """
+    return list(_ancestor_chain(acc, _MODAL_ANCESTRY_MAX))
+
+
+def _modal_ancestry_complete(chain) -> bool:
+    """True only when ``chain`` ends at a node that reports no parent."""
+    return bool(chain) and _parent_of(chain[-1]) is None
+
+
 def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, point=None) -> bool:
     """Refuse before input when the addressed accessible is outside a modal."""
     if root is None:
-        chain = list(_ancestor_chain(acc))
-        if chain and _parent_of(chain[-1]) is not None:
+        chain = _modal_ancestry(acc)
+        if chain and not _modal_ancestry_complete(chain):
             raise ComputerUseError(ErrorCode.UNSUPPORTED,
                 "Cannot establish the target window's modal boundary; no input was sent",
                 detail={"reason": "modal_boundary_unavailable"})
@@ -24586,7 +24612,7 @@ def refuse_outside_modal(acc, root=None, *, modal_cache: dict | None = None, poi
                 # An approximate hit with browser ancestry cannot authorize
                 # input at a point inside the page behind its modal.
                 if not any(_ancestor_key(n) == _ancestor_key(modal)
-                           for n in _ancestor_chain(acc)):
+                           for n in _modal_ancestry(acc)):
                     point_blocked = True
             applicable.append(modal)
         modals = applicable
