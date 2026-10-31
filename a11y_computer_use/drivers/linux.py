@@ -4593,6 +4593,12 @@ class LinuxDriver:
                 role=element.role,
             )
         self._focused_editable = handle
+        rendered = getattr(success, "css_rendered", None)
+        if isinstance(rendered, str):
+            # CSS text-transform (#1388): the DOM value equals ``value`` and
+            # the snapshot shows its painted case. Judge against that read.
+            self._type_expected = rendered
+            return True
         return success
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
@@ -6019,6 +6025,28 @@ class LinuxDriver:
                 # separator character the field stored.
                 self._type_expected = _atspi._field_text_for_type(after, text)
             return len(text)
+        if chrome and self._run(
+            lambda: _atspi.css_transformed_type_confirms(handle, before, after, text)
+        ) is not None:
+            # CSS text-transform (#1388): the read-back is the painted case of
+            # the field, and the DOM value holds ``text`` exactly. The outcome
+            # compares the same rendered read, so it is the expected string.
+            self._type_expected = _atspi._field_text_for_type(after, text)
+            return len(text)
+        if chrome:
+            # Refused: take the text back out so a retry cannot double it, or
+            # say it was sent and could not be removed (#1388).
+            removed = bool(self._run(lambda: _atspi.undo_chromium_type(handle, before, text)))
+            raise _atspi._text_mismatch(
+                "text_mismatch",
+                f"the text read back does not contain {text!r}"
+                + ("; the typed text was removed" if removed else
+                   "; the keys were sent and could not be removed, so do not type it again"),
+                expected=text,
+                actual=after,
+                input_sent=True,
+                text_removed=removed,
+            )
         if writer_doc is not None:
             shown = self._run(
                 lambda: _atspi.poll_writer_document(writer_doc, writer_before, text)
