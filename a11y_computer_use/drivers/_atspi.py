@@ -21786,70 +21786,165 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     return False
 
 
-def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
-    """A showing page menu over (x, y) that does not contain ``acc`` (#1387).
+_OCCLUDER_MENU_ROLES = frozenset({"menu", "popup menu"})
+_OCCLUDER_POPUP_CONTENT = frozenset({"menu", "popup menu", "menu bar", "list box"})
+_OCCLUDER_NODE_BUDGET = 160
+_OCCLUDER_DEPTH = 3
+_OCCLUDER_WIDE = 48
+UNKNOWN_MENU_STATE = ("unknown", "(menu state could not be read)")
 
-    Chromium answers AT-SPI hit tests from a cache of its last hover result
-    while the point stays inside that node's bounds, so a menu opened over
-    the target keeps reporting the target. One Collection query for showing
-    menus in the target's document reads the real overlay. Returns the
-    menu's (role, name), or None when nothing covers the point. A showing
-    menu whose bounds cannot be read is reported as covering (fail closed),
-    and so is any showing menu when the matches cannot be read.
+
+def _occluder_children(node, cap: int):
+    """Up to ``cap`` children of ``node``; None when the count is unreadable
+    or the node is wider than ``cap`` (a long list is never walked)."""
+    count = _raw_child_count(node)
+    if not isinstance(count, int) or count < 0:
+        return None
+    if count > cap:
+        return []
+    kids = []
+    for index in range(count):
+        kid = _safe(lambda i=index: _child_at(node, i))
+        if kid is not None:
+            kids.append(kid)
+    return kids
+
+
+def _occluder_haspopup(node) -> bool:
+    value = str((_safe(lambda: _get_attributes(node)) or {}).get("haspopup", "") or "")
+    return value.strip().lower() not in {"", "false", "0"}
+
+
+def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
+    """A showing menu over (x, y) that does not contain ``acc`` (#1387).
+
+    Chromium answers AT-SPI hit tests from a cache of its last hover result,
+    so a menu opened over the target keeps reporting the target. This reads
+    only the places an open menu lives, never the whole document (#1396: a
+    Collection query over a 5,000-row page times out):
+
+    * Chrome's popup windows: the application's other top-level frames or
+      windows that are showing and hold a menu, menu bar or list box (the
+      native right-click menu, <select> popups).
+    * Page overlays: showing menu nodes near the top of the document (a
+      bounded walk that never descends into a container wider than
+      ``_OCCLUDER_WIDE``), and the menus that an expanded ``haspopup``
+      opener there controls.
+
+    Returns the menu's (role, name), ``UNKNOWN_MENU_STATE`` when the open
+    menu state cannot be determined at all, or None when no menu covers the
+    point. A showing menu whose bounds cannot be read covers (fail closed),
+    and so does an expanded haspopup opener whose menu cannot be located.
+    A slow or failed read on part of the page is not a menu: with no popup
+    window and no expanded opener there is positive evidence none is open.
 
     Without (x, y) the target's own on-screen center is the point, for the
-    node-bound paths (doAction, CDP, focus by ref) that send no pointer
-    input but must not act on a covered control either (#1387). When the
-    target's bounds cannot be read, any showing menu outside it covers it.
+    node-bound paths (doAction, CDP, focus by ref). When the target's bounds
+    cannot be read, any showing menu outside it covers it.
     """
     if acc is None or not _chromium_app(acc):
         return None
-    document = None
+    document = frame = None
     chain = []  # pinned while keys are compared: they may be id()-based
     for node in _ancestor_chain(acc):
         chain.append(node)
         role = _role_name(node)
-        if role in {"document web", "document frame"}:
+        if document is None and role in {"document web", "document frame"}:
             document = node
+        elif role in {"frame", "window"}:
+            frame = node
             break
-        if role in {"frame", "window", "application"}:
+        elif role == "application":
             break
     if document is None:
         return None
-    try:
-        Atspi = _atspi()
-        coll = _call_first(document, ("get_collection_iface", "get_collection"))
-        roles = [r for r in (getattr(Atspi.Role, "MENU", None),
-                             getattr(Atspi.Role, "POPUP_MENU", None)) if r is not None]
-        if coll is None or not roles:
-            return None
-        states = Atspi.StateSet.new([Atspi.StateType.SHOWING])
-        mt = Atspi.CollectionMatchType
-        rule = Atspi.MatchRule.new(
-            states, mt.ALL, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
-        )
-    except Exception:  # noqa: BLE001 - fakes and GTK expose no Collection
-        return None
-    try:
-        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 8, True)
-    except Exception:  # noqa: BLE001 - a Collection that cannot answer fails closed
-        return "menu", "(unreadable open menus)"
     keys = {_ancestor_key(node) for node in chain}
+    candidates: list = []
+    windows_known = True
+    app = _safe(lambda: _application_of(acc))
+    tops = _occluder_children(app, 32) if app is not None else None
+    if tops is None:
+        windows_known = False
+    frame_key = _ancestor_key(frame) if frame is not None else None
+    for top in tops or []:
+        if frame_key is not None and _ancestor_key(top) == frame_key:
+            continue
+        role = _role_name(top)
+        if role in _OCCLUDER_MENU_ROLES:
+            if _state_has(top, "SHOWING"):
+                candidates.append(top)
+            continue
+        # Chrome's native context menu is a separate nameless top-level
+        # "frame" holding a "menu bar" (views MenuRunner); GTK builds use
+        # "window". Bubbles and omnibox frames hold no menu and are skipped.
+        if role not in {"window", "frame"} or not _state_has(top, "SHOWING"):
+            continue
+        queue = [(top, 0)]
+        while queue:
+            node, depth = queue.pop(0)
+            kids = _occluder_children(node, 8) if depth < 2 else []
+            if kids is None:
+                candidates.append(top)  # a showing popup that cannot be read
+                break
+            if any(_role_name(kid) in _OCCLUDER_POPUP_CONTENT for kid in kids):
+                candidates.append(top)
+                break
+            queue.extend((kid, depth + 1) for kid in kids)
+    page_errors = False
+    openers: list = []
+    budget = _OCCLUDER_NODE_BUDGET
+    queue = [(document, 0)]
+    while queue and budget > 0:
+        node, depth = queue.pop(0)
+        kids = _occluder_children(node, _OCCLUDER_WIDE)
+        if kids is None:
+            page_errors = True
+            continue
+        for kid in kids:
+            budget -= 1
+            if budget < 0:
+                break
+            if _ancestor_key(kid) in keys:
+                if depth + 1 < _OCCLUDER_DEPTH:
+                    queue.append((kid, depth + 1))
+                continue
+            role = _role_name(kid)
+            if role in _OCCLUDER_MENU_ROLES:
+                if _state_has(kid, "SHOWING"):
+                    candidates.append(kid)
+                continue
+            if _state_has(kid, "EXPANDED") and _occluder_haspopup(kid):
+                openers.append(kid)
+            if depth + 1 < _OCCLUDER_DEPTH:
+                queue.append((kid, depth + 1))
+    for opener in openers:
+        menus = [m for m in _safe(lambda o=opener: _relation_targets(o, "controller_for")) or []
+                 if _role_name(m) in _OCCLUDER_MENU_ROLES | {"list box"}]
+        if not menus:
+            return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
+        candidates.extend(menus)
+    if not candidates:
+        if not windows_known and page_errors:
+            return UNKNOWN_MENU_STATE
+        return None
     if x is None or y is None:
         own = _raw_rect(acc, "SCREEN")
         if own is not None and own[2] > 0 and own[3] > 0:
             x, y = int(own[0] + own[2] // 2), int(own[1] + own[3] // 2)
         else:
             x = y = None
-    for menu in hits or []:
+    for menu in candidates:
         if _ancestor_key(menu) in keys:
             continue  # the target is inside this menu
+        role = _role_name(menu)
+        label = ("menu", _node_name(menu) or "Chrome popup menu") \
+            if role in {"frame", "window"} else (role or "menu", _node_name(menu))
         box = _raw_rect(menu, "SCREEN")
         if box is None or x is None:
-            return _role_name(menu) or "menu", _node_name(menu)
+            return label
         left, top, width, height = box
         if width > 0 and height > 0 and left <= x < left + width and top <= y < top + height:
-            return _role_name(menu), _node_name(menu)
+            return label
     return None
 
 
@@ -24074,6 +24169,11 @@ def _modal_collection(root, *, split: bool = False):
     cached = _structural_collection_lookup(root, split)
     if cached is not None:
         return cached
+    if not split and _role_name(root) in {"document web", "document frame"} \
+            and _chromium_app(root):
+        shallow = _chromium_shallow_modal_scan(root)
+        if shallow is not None:
+            return shallow
     generation = _structural_generation()
     result = _modal_collection_once(root, split=split)
     if result is not _COLLECTION_TIMEOUT:
@@ -24086,6 +24186,59 @@ def _modal_collection(root, *, split: bool = False):
 
 
 _COLLECTION_TIMEOUT = object()
+
+_MODAL_RULE_ROLES = frozenset({"dialog", "alert", "window", "frame", "file chooser"})
+# Containers whose children are data rows, not hosts for a dialog: a long
+# table, grid or list is summarized by its role instead of being walked.
+_ROW_CONTAINER_ROLES = frozenset({"table", "tree table", "grid", "list box", "list", "tree"})
+_ROW_ROLES = frozenset({"table row", "row", "list item", "tree item", "option"})
+_SHALLOW_MODAL_BUDGET = 120
+_SHALLOW_MODAL_WIDE = 48
+
+
+def _chromium_shallow_modal_scan(document):
+    """Dialog-role nodes of a Chromium page from a bounded walk, or None.
+
+    #1396: a document-wide Collection query on a 5,000-row page times out,
+    and the input was refused as ``modal_boundary_busy`` although no dialog
+    was open. The walk reads at most ``_SHALLOW_MODAL_BUDGET`` nodes and
+    does not descend into a wide row container (table, grid, list) whose
+    first and last children are rows. It is a complete answer only when
+    every other node was read: any read failure, other wide container, or
+    budget overrun returns None, and the caller runs the full Collection
+    query (failing closed as before when that cannot answer).
+    """
+    found: list = []
+    queue = deque([document])
+    pinned = []
+    read = 0
+    while queue:
+        node = queue.popleft()
+        pinned.append(node)
+        count = _raw_child_count(node)
+        if not isinstance(count, int) or count < 0:
+            return None
+        if count > _SHALLOW_MODAL_WIDE:
+            if _role_name(node) not in _ROW_CONTAINER_ROLES:
+                return None
+            ends = [_safe(lambda i=i: _child_at(node, i)) for i in (0, count - 1)]
+            if any(end is None or _role_name(end) not in _ROW_ROLES for end in ends):
+                return None
+            continue
+        for index in range(count):
+            read += 1
+            if read > _SHALLOW_MODAL_BUDGET:
+                return None
+            child = _safe(lambda i=index: _child_at(node, i))
+            if child is None:
+                return None
+            role = _role_name(child)
+            if not role:
+                return None
+            if role in _MODAL_RULE_ROLES:
+                found.append(child)
+            queue.append(child)
+    return found
 
 # Complete role-query results per subtree, valid while no event could have
 # added or removed a dialog-role node (#1368). Re-querying a 5,000-row page
