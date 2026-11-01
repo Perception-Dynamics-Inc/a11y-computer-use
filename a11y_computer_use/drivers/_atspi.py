@@ -19206,6 +19206,14 @@ def _refuse_model_editor_replace(acc) -> None:
     or its formatting. Match exact class tokens reported by AT-SPI, including
     empty editors, rather than treating every ARIA textbox as a model editor.
     """
+    if code_editor_container(acc) is not None:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "set_value cannot replace a code editor's model through its hidden input "
+            "textarea; nothing was changed. Click the editor, select the text with "
+            "keyboard shortcuts, then use type; its result is reported unverified",
+            detail={"reason": "code_editor_replace_unsafe", "unchanged": True},
+        )
     if not _model_editor_surface(acc):
         return
     raise ComputerUseError(
@@ -22652,26 +22660,126 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     if document is None:
         return None
     target_key = _ancestor_key(acc)
+    editor = code_editor_container(acc)
     node = document
     seen: set[object] = set()
     pinned = []
+    # A hit inside the textarea's own code editor is accepted only at the
+    # deepest node: a shallower in-editor hit can still descend onto a
+    # find or suggest widget, which refuses.
+    in_editor = False
     for _ in range(32):
         key = _ancestor_key(node)
         if key in seen:
-            return False
+            return in_editor
         seen.add(key)
         pinned.append(node)
         comp = _component(node)
         if comp is None:
-            return False
+            return in_editor
         hit = _hit_at(comp, x, y)
         if hit is None:
-            return False
+            return in_editor
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
             return True
+        if editor is not None:
+            if _hit_in_code_editor(hit, editor):
+                in_editor = True
+                node = hit
+                continue
+            if in_editor:
+                return False
         if _chromium_select_option_at_point(acc, hit, x, y):
             return True
         node = hit
+    return False
+
+
+# Hidden input textarea class -> its editor's container class (#1424).
+# Monaco and Ace keep a 1x1 textarea at the caret under their own line
+# overlays, so the native hit lands on the overlay, never on the textarea.
+_CODE_EDITOR_INPUTS = {
+    "inputarea": "monaco-editor",       # Monaco / VS Code
+    "ace_text-input": "ace_editor",     # Ace
+}
+_CODE_EDITOR_CONTAINERS = frozenset(_CODE_EDITOR_INPUTS.values())
+# A control inside the editor box (find widget, suggest list, hover links)
+# is a different target: a hit on it is never the editor's text surface.
+_CODE_EDITOR_FOREIGN_ROLES = frozenset({
+    "push button", "toggle button", "check box", "radio button", "entry",
+    "password text", "combo box", "link", "list box", "list", "list item",
+    "menu", "menu item", "popup menu", "option", "slider", "spin button",
+    "tool bar", "dialog", "alert",
+})
+
+
+def _class_tokens(acc) -> set[str]:
+    attrs = _safe(lambda: _get_attributes(acc)) or {}
+    return set(str(attrs.get("class") or "").split())
+
+
+def code_editor_container(acc):
+    """The Monaco or Ace container of a hidden code-editor textarea, else None.
+
+    Only the editor's own input textarea qualifies (exact class token), and
+    the container is its nearest ancestor with the matching container class.
+    """
+    if acc is None:
+        return None
+    classes = _class_tokens(acc)
+    wanted = {_CODE_EDITOR_INPUTS[c] for c in classes if c in _CODE_EDITOR_INPUTS}
+    if not wanted:
+        return None
+    for index, node in enumerate(_ancestor_chain(acc, limit=40)):
+        if index == 0:
+            continue
+        role = _role_name(node)
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            return None
+        if _class_tokens(node) & wanted:
+            return node
+    return None
+
+
+# Allowlist: the editor's own text and line layers (#1424). Overlay and
+# content widgets (suggest, find, hover, parameter hints, autocomplete,
+# search, tooltip) are plain divs, so roles cannot tell them apart.
+_CODE_EDITOR_TEXT_LAYERS = {
+    "monaco-editor": frozenset({"view-lines", "view-line", "lines-content"}),
+    "ace_editor": frozenset({"ace_content", "ace_text-layer", "ace_line", "ace_cursor-layer"}),
+}
+_CODE_EDITOR_WIDGETS = frozenset({
+    "suggest-widget", "find-widget", "monaco-hover", "parameter-hints-widget",
+    "context-view", "overlayWidgets", "contentWidgets", "monaco-list",
+    "ace_autocomplete", "ace_search", "ace_tooltip",
+})
+
+
+def _hit_in_code_editor(hit, container) -> bool:
+    """True only when ``hit`` is in ``container``'s own text or line layer.
+
+    Walking up from the hit to the exact container (key identity), a text
+    layer node must be seen. Any editor widget class, a foreign control
+    role, or another code-editor container on the way refuses the hit.
+    """
+    container_key = _ancestor_key(container)
+    layers = frozenset().union(*(
+        _CODE_EDITOR_TEXT_LAYERS[c] for c in _class_tokens(container) if c in _CODE_EDITOR_TEXT_LAYERS
+    ))
+    in_layer = False
+    for node in _ancestor_chain(hit, limit=40):
+        if _ancestor_key(node) == container_key:
+            return in_layer
+        classes = _class_tokens(node)
+        if classes & _CODE_EDITOR_WIDGETS or classes & _CODE_EDITOR_CONTAINERS:
+            return False
+        role = _role_name(node)
+        if role in _CODE_EDITOR_FOREIGN_ROLES:
+            return False
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            return False
+        if classes & layers:
+            in_layer = True
     return False
 
 
