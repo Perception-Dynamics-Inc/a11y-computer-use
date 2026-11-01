@@ -1629,7 +1629,17 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi
 
-        parents = list(getattr(getattr(self, "_last_accessor", None), "hidden_parents", None) or ())
+        accessor = getattr(self, "_last_accessor", None)
+        # A child the walk read but the per-parent cap folded is hidden from
+        # the plain find too. Its name is already in hand: no IPC (#1433).
+        from a11y_computer_use.observe import _fold_seeks
+
+        needles = _fold_seeks(text)
+        for title in getattr(accessor, "capped_titles", None) or ():
+            folded = title.replace("\u00a0", " ").casefold()
+            if any(needle in folded for needle in needles):
+                return True
+        parents = list(getattr(accessor, "hidden_parents", None) or ())
         if not parents:
             return False
         run = getattr(self, "_run", None) or (lambda fn: fn())
@@ -2511,6 +2521,36 @@ class LinuxDriver:
             detail={"ref": ref, "reason": reason, "outcome": "refused"},
         )
 
+    def _resolve_capped_child(self, snap: Snapshot, ref: str, anchor: Element,
+                              live: Snapshot) -> Element | None:
+        """The issued child itself, when the live walk's cap folded it (#1433).
+
+        A Qt list of 48 swatches keeps 24 in a plain snapshot, so a ref from
+        an armed read has no live counterpart and the label matcher reports
+        ``title_changed`` against a nearby namesake-less sibling. The exact
+        object is checked instead: its bus name and path, its parent's, its
+        current name and SHOWING. A node that is gone, renamed or reparented,
+        or that the live tree still lists, is not recovered here.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        identity = tuple(anchor.node_identity or ())
+        parent = snap.element(anchor.parent) if anchor.parent else None
+        parent_identity = tuple(getattr(parent, "node_identity", ()) or ())
+        if not identity or not parent_identity:
+            return None
+        if any(tuple(el.node_identity or ()) == identity for el in live.elements):
+            return None  # listed: the matcher's verdict on it stands
+        if not any(tuple(el.node_identity or ()) == parent_identity for el in live.elements):
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return None
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        ok = run(lambda: _atspi.capped_child_check(handle, identity, parent_identity, anchor.title))
+        return anchor if ok else None
+
     def _refuse_rebound_behind_modal(self, snap: Snapshot, ref: str, anchor: Element,
                                      live: Snapshot, resolved: Element, handle) -> None:
         """Refuse a ref the rematch moved onto another node across a modal (#1386).
@@ -2672,6 +2712,12 @@ class LinuxDriver:
             self._resolved_click_snapshot = (resolved, live)
             return resolved
         except ComputerUseError as exc:
+            if (exc.code is ErrorCode.STALE_REF
+                    and exc.detail.get("reason") in {"not_found", "title_changed"}
+                    and live.app == snap.app and live.pid == snap.pid):
+                capped = LinuxDriver._resolve_capped_child(self, snap, ref, snap.element(ref), live)
+                if capped is not None:
+                    return capped
             if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
                 anchor = snap.element(ref)
                 # GTK can retain or flatten an unnamed group as transient
