@@ -25,6 +25,7 @@ from dataclasses import replace
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from a11y_computer_use import timing
 from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
@@ -1599,6 +1600,7 @@ class LinuxDriver:
         return root
 
     # -- observe (AT-SPI2) --------------------------------------------------
+    @timing.snapshot_span
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
         """Pruned snapshot of ``app``.
 
@@ -2882,6 +2884,7 @@ class LinuxDriver:
     #: Reason for a refused type whose keys may still land (#1190).
     TYPE_BUSY_REASON = "page busy, input may land later; re-observe before retrying"
 
+    @timing.span("driver")
     def type_into(self, element: Element, text: str) -> int:
         """Type into ``element``; see ``_type_into_unguarded`` and ``_busy_page_guard``."""
         from a11y_computer_use import observe
@@ -4421,6 +4424,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         return handle is not None and self._run(lambda: _atspi.text_visibility_unknown(handle))
 
+    @timing.span("driver")
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi

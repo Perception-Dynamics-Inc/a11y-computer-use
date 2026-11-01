@@ -64,6 +64,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
+from a11y_computer_use import timing
 from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, outcome, reporting, safety
 from a11y_computer_use.untrusted import (
     DomainPolicy,
@@ -3012,6 +3013,7 @@ class Runtime:
             return safety.menu_path(snap, target)
         return None
 
+    @timing.span('gate')
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
         input_target=None, no_input: bool = False,
@@ -3131,6 +3133,7 @@ class Runtime:
     # resolved a target folder waits, and only until the file appears.
     _DRAG_DROP_SETTLE_S = 0.4
 
+    @timing.span('capture')
     def _freeze(self, snap: "Snapshot") -> dict:
         """Fingerprints of ``snap``, taken now so a later in-place edit cannot move them."""
         pid = snap.pid
@@ -3172,6 +3175,7 @@ class Runtime:
             observe.touch_epoch(epoch)
         return snapped
 
+    @timing.span('capture')
     def _capture(self, app: str | None = None, *, targeted: bool = False) -> dict | None:
         """The tree immediately before this action, and whether its pid is alive.
 
@@ -3385,6 +3389,7 @@ class Runtime:
                 self._action_baseline = {"token": id(current), "app": app, "capture": None}
         return verdict
 
+    @timing.span('judge')
     def _judge_mutation(
         self,
         app: str | None,
@@ -3992,6 +3997,7 @@ class Runtime:
             return None
         return found if isinstance(found, str) else None
 
+    @timing.span('conclude')
     def _conclude(
         self,
         text: str,
@@ -4931,6 +4937,7 @@ class Runtime:
             self._audit_stale(kind, ref, exc)
             raise
 
+    @timing.span('resolve')
     def _resolve(
         self, ref: str, kind: str, *, live_snapshot: Snapshot | None = None,
     ) -> tuple[Snapshot, Element]:
@@ -5049,6 +5056,7 @@ class Runtime:
             return None
         return anchor, snap.app or self._frontmost(), bounds
 
+    @timing.span('resolve')
     def _target(
         self,
         ref: str | None,
@@ -6934,6 +6942,7 @@ class Runtime:
 
     # -- action tools -----------------------------------------------------------
 
+    @timing.call('click', ref_pos=1)
     @_serialized
     def click(
         self,
@@ -8151,6 +8160,7 @@ class Runtime:
             had_ref=True, previous=previous,
         )
 
+    @timing.call('type_text', ref_pos=3)
     @_serialized
     def type_text(self, text: str, app: str | None = None, ref: str | None = None) -> str:
         app = _optional_app_arg(app, "type")
@@ -8747,6 +8757,7 @@ class Runtime:
                                  min(timeout_s, remaining_s))
         raise ValueError(f"unknown step '{do}' — use click/hover/type/key/scroll/drag/wait_for")
 
+    @timing.call('set_value', ref_pos=1)
     @_serialized
     def set_value(self, ref: str, value: str) -> str:
         """Set an editable element's value directly via the a11y API (one op),
