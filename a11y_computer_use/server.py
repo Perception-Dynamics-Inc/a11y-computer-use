@@ -8141,6 +8141,12 @@ class Runtime:
                 had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
             )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        if getattr(self.driver, "_code_editor_typed", False):
+            self.driver._code_editor_typed = False
+            note.append(
+                " at the editor's current caret; effect unverified: the code editor's "
+                "model is not readable through its hidden input"
+            )
         dependent = getattr(self.driver, "_qt_dependent_changes", None)
         if isinstance(dependent, list) and dependent:
             # #1420: other fields the app changed in reaction to the edit.
