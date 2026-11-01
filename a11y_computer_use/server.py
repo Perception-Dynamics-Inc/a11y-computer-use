@@ -2168,6 +2168,13 @@ class Runtime:
     #: snapshot before it while the current app is not re-observed (#836).
     _last_issued: "Snapshot | None" = None
     _foreign_issued: "Snapshot | None" = None
+    # Refs the latest observation explicitly returned (find), None for a full snapshot.
+    _issued_refs: "set[str] | None" = None
+    #: The app the agent last focused with ``app(focus)``, until the next
+    #: snapshot. Refs of another app's snapshot are not resolved meanwhile (#1330).
+    _focus_intent: str | None = None
+    _focus_intent_names: tuple[str, ...] = ()
+    _front_at_issue: tuple[str, int | None] | None = None
     # Defaults support lightweight __new__ test doubles. Every initialized
     # Runtime has its own lock and lifecycle state below.
     _operation_lock = RLock()
@@ -4490,7 +4497,16 @@ class Runtime:
             snap = self._reissue_changed_refs(snap, reissue, anchors, changed, keep_number)
         self._changed_snapshot_refs = changed
         self._issued_anchors = anchors
+        if refs is None:
+            self._issued_refs = None
+        elif last is not None and app and getattr(last, "app", None) == app and self._issued_refs is not None:
+            self._issued_refs = self._issued_refs | set(refs)
+        else:
+            self._issued_refs = set(refs)
         self._last_issued = snap
+        self._focus_intent = None
+        self._focus_intent_names = ()
+        self._front_at_issue = self._front_identity()
         if last is None or not app or not getattr(last, "app", None):
             self._foreign_issued = None
         elif last.app != app:
@@ -4834,7 +4850,157 @@ class Runtime:
             foreign.element(ref)
         except KeyError:
             return None
+        # The current app's own fresh find returned this ref: the agent read
+        # it there, so it is that app's (the Tester's A8/V1/V2 false refusal).
+        shown = getattr(self, "_issued_refs", None)
+        if shown is not None and ref in shown:
+            return None
         return foreign
+
+    def _refuse_cross_app_ref(self, ref: str, kind: str) -> None:
+        """Refuse a ref the agent may mean for a different app (#1330).
+
+        Refs restart in every snapshot, so the latest snapshot resolves a ref
+        copied from another app's snapshot to whatever shares its number,
+        such as Writer's Form menu for a Mousepad text area. An AX press or a
+        click on an uncovered point would then act in the wrong app, so this
+        runs before any resolution or input, whatever is under the point:
+
+        * after ``app(focus)`` named another app than the snapshot that would
+          resolve the ref, until that app is observed;
+        * when an earlier snapshot of another app also issued the ref and the
+          current app has not been re-observed (the #836 ambiguity), whether
+          or not another window covers the point. A drag keeps its own rule.
+        """
+        if not isinstance(ref, str) or ocr.is_ocr_ref(ref):
+            return
+        current = getattr(self, "_current", None)
+        if current is None:
+            return
+        here = getattr(current, "app", None)
+        intent = getattr(self, "_focus_intent", None)
+        focused: str | None = None
+        if intent:
+            names = getattr(self, "_focus_intent_names", ()) or (intent,)
+            # An app-less snapshot cannot show the ref is the focused app's.
+            if not here or not any(_same_app(n, here) for n in names):
+                focused = intent
+        if focused is None:
+            focused = self._front_moved_away(current)
+            if focused is not None and self._resolves_apps():
+                # The browser driver's bound tab: keep its per-action
+                # recheck contract (FOCUS_CHANGED), raised before resolving.
+                err = ComputerUseError(
+                    ErrorCode.FOCUS_CHANGED,
+                    f"the frontmost app is now {focused}, not the gated {here}; "
+                    f"re-observe and retry",
+                    detail={"gated_app": here, "frontmost_app": focused},
+                )
+                self._audit_stale(kind, ref, err)
+                raise err
+        if focused is not None:
+            err = ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"{ref} belongs to the {here or 'app-less'} snapshot {current.snapshot_id}, but "
+                f"{focused} was focused after it; refs restart in every snapshot, so the "
+                f"{ {'typetext': 'text input', 'setvalue': 'value'}.get(kind, kind)} "
+                f"was not sent. Snapshot {focused} (find or desktop_snapshot) and use its refs",
+                detail={
+                    "ref": ref,
+                    "reason": "other_app_focused",
+                    "focused_app": focused,
+                    "current_app": here,
+                    "current_snapshot": current.snapshot_id,
+                    "outcome": "refused",
+                },
+            )
+            self._audit_stale(kind, ref, err)
+            raise err
+        # A drag has its own rule: two refs are refused, and a source ref
+        # with the other app's x,y is the documented cross-app route (#836).
+        foreign = self._other_app_snapshot(ref) if kind != "drag" else None
+        if foreign is not None:
+            err = self._other_snapshot_error(ref, foreign, f"the {kind}")
+            self._audit_stale(kind, ref, err)
+            raise err
+
+    def _note_window_focus(self, owner: str) -> None:
+        """Track ``window raise``/``window focus`` like ``app(focus)`` (#1330).
+
+        Raising a window of the current snapshot's app (by name, or by the
+        frontmost pid for an interpreter-hosted app) returns focus to it, so
+        its refs act again; raising another app's window refuses them until
+        that app is observed.
+        """
+        current = getattr(self, "_current", None)
+        here = getattr(current, "app", None) if current is not None else None
+        front = self._front_identity()
+        back = bool(here) and (
+            _same_app(owner, here)
+            or (front is not None and front[1] is not None
+                and front[1] == getattr(current, "pid", None))
+        )
+        if back:
+            self._focus_intent = None
+            self._focus_intent_names = ()
+        else:
+            self._focus_intent = owner
+            self._focus_intent_names = (owner,)
+        self._front_at_issue = front
+
+    def _front_identity(self) -> tuple[str, int | None] | None:
+        """(app id, pid) of the frontmost app, or None when unknown.
+
+        Linux reads the active window's owner pid from the X server (XRes)
+        when it can, so an interpreter-hosted app (comm ``python3``) is still
+        matched to its own snapshot by pid.
+        """
+        try:
+            if self._resolves_apps():
+                app_id, pid = self.driver.frontmost_app()
+            elif sys.platform == "darwin":
+                app_id, pid = safety.frontmost_app()
+            elif sys.platform.startswith("linux"):
+                from a11y_computer_use.drivers import _linux_system
+
+                app_id, pid = _linux_system.frontmost_app_identity()
+            else:
+                app_id, pid = _frontmost_bundle(), None
+        except Exception:  # noqa: BLE001 - no evidence is not a change
+            return None
+        if not app_id or app_id == "unknown":
+            return None
+        return str(app_id), (int(pid) if isinstance(pid, int) and pid > 0 else None)
+
+    def _front_moved_away(self, current: Snapshot) -> str | None:
+        """The app now frontmost, when focus moved off the snapshot's app.
+
+        Catches every way of switching apps the Runtime did not record:
+        window focus, alt+tab, a launch, a coordinate click, or an app
+        raising itself (#1330). Only a change since the refs were issued (or
+        since app(focus)) counts, so acting on a background app's snapshot
+        stays allowed while the user's frontmost app is unchanged.
+        """
+        base = getattr(self, "_front_at_issue", None)
+        if base is None:
+            return None
+        now = self._front_identity()
+        if now is None:
+            return None
+
+        def same(a: tuple[str, int | None], b: tuple[str, int | None]) -> bool:
+            if a[1] is not None and b[1] is not None:
+                return a[1] == b[1]
+            return _same_app(a[0], b[0])
+
+        if same(now, base):
+            return None
+        here, pid = current.app, current.pid
+        if pid is not None and now[1] is not None and now[1] == pid:
+            return None
+        if here and _same_app(now[0], here):
+            return None
+        return now[0]
 
     def _other_snapshot_error(self, ref: str, foreign: Snapshot, verb: str) -> ComputerUseError:
         """``stale_ref`` for a ref that an earlier snapshot of another app issued."""
@@ -4942,6 +5108,7 @@ class Runtime:
         ordinary live resolution and the act-time security checks. A drag may
         share its source's live tree with the destination before any input.
         """
+        self._refuse_cross_app_ref(ref, kind)
         snap, anchor = self._anchor_audited(ref, kind)
         if kind == "typetext" and anchor.secure:
             self._record_failure(
@@ -9037,6 +9204,8 @@ class Runtime:
         budget_s = float(budget_s)
         self.driver.ensure_trusted()
         _running, bundle = self._resolve_app(app)
+        if ref is not None:
+            self._refuse_cross_app_ref(ref, "scroll")
         pinned = self._anchor_audited(ref, "scroll") if ref is not None else None
         horizontal = direction in ("left", "right")
         dy = 5 if direction in ("down", "right") else -5
@@ -10980,6 +11149,11 @@ class Runtime:
             return self._wait_frontmost(bundle, self.APP_FOCUS_WAIT_S, pid)
 
         front = self._run_gated(AppOp(verb=verb, app=bundle), bundle, focus)
+        # The latest snapshot may be another app's: its refs must not act
+        # here until this app is observed (#1330).
+        self._focus_intent = bundle
+        self._focus_intent_names = tuple(n for n in (bundle, name) if n)
+        self._front_at_issue = self._front_identity()
         if front:
             cover = self._window_cover(name, bundle)
             if cover:
@@ -11275,6 +11449,8 @@ class Runtime:
                 method(int(window_id))
 
         self._run_gated(op, owner_name, act)
+        if verb in (WindowVerb.RAISE, WindowVerb.FOCUS):
+            self._note_window_focus(owner_name)
         if verb is WindowVerb.MOVE:
             text = f"moved window {window_id} to ({x}, {y}) ({owner_name})"
         elif verb is WindowVerb.RESIZE:
