@@ -7967,3 +7967,27 @@ def test_ref_click_logs_phase_timing_in_one_debug_line(tmp_path, monkeypatch, ca
         r"click phases ref=e2 escape=\d+\.\d{3}s occluder=\d+\.\d{3}s "
         r"hit_test=\d+\.\d{3}s action=\d+\.\d{3}s total=\d+\.\d{3}s$", lines[0],
     ), lines[0]
+
+
+def test_ref_click_logs_one_timing_line_whose_spans_sum_to_total(tmp_path, monkeypatch, caplog) -> None:
+    """The whole Runtime.click call is timed: resolve, capture, gate, conclude + unaccounted."""
+    import logging
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    driver.click = lambda target, **kwargs: None
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+    with caplog.at_level(logging.DEBUG, logger="a11y_computer_use.timing"):
+        rt.call_tool("click", {"ref": "e2"})
+    lines = [r.getMessage() for r in caplog.records if r.name == "a11y_computer_use.timing"]
+    assert len(lines) == 1, lines
+    m = re.match(r"timing tool=click ref=e2 total=(\d+\.\d{3})s((?: [a-z_]+=\d+\.\d{3}s)*)"
+                 r" unaccounted=(-?\d+\.\d{3})s nested=\S+ marks=\S+ nodes=\S+$", lines[0])
+    assert m, lines[0]
+    top = dict(re.findall(r" ([a-z_]+)=(\d+\.\d{3})s", m[2]))
+    for name in ("resolve", "capture", "gate", "conclude"):
+        assert name in top, lines[0]
+    assert abs(sum(map(float, top.values())) + float(m[3]) - float(m[1])) <= 0.003 * (len(top) + 1)
