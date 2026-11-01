@@ -9646,27 +9646,25 @@ class Runtime:
                 # An opaque drawing area cannot expose a confirming match.
                 # Native Find may still select document text, so refusing
                 # must happen before Ctrl+F or any query text is injected.
-                # An opaque region wholly outside the anchor's box is not a
-                # surface Find could hit unseen: Chrome lists a section
-                # clipped below a scroll container as a childless generic
-                # node because its content was pruned as off screen (#1435).
-                # Scrolling it in re-reads it, and a region that is still
-                # opaque on screen is refused then. Without both boxes the
-                # region still counts (fail closed).
+                # An opaque region wholly outside the box of an ancestor that
+                # holds it (up to and including the anchor) is clipped by that
+                # scroll container, not a surface Find could hit unseen.
+                # Chrome lists a section clipped below an overflow container
+                # as a childless generic node because its content was pruned
+                # as off screen (#1435). This holds for a container anchor and
+                # for the page root, whose box still contains the section.
+                # Ancestors without a box are not evidence; a region with no
+                # box, or not clipped by any boxed ancestor, still counts.
                 shot = self._current
-                anchor_box = anchor.bounds
 
-                def clipped_out(region: Element) -> bool:
-                    box = region.bounds
-                    if box is None or anchor_box is None:
-                        return False
-                    if box.display_id != anchor_box.display_id:
+                def outside(box, outer) -> bool:
+                    if box is None or outer is None or box.display_id != outer.display_id:
                         return False
                     slack = 2
-                    overlap_x = (min(box.x + box.width, anchor_box.x + anchor_box.width)
-                                 - max(box.x, anchor_box.x))
-                    overlap_y = (min(box.y + box.height, anchor_box.y + anchor_box.height)
-                                 - max(box.y, anchor_box.y))
+                    overlap_x = (min(box.x + box.width, outer.x + outer.width)
+                                 - max(box.x, outer.x))
+                    overlap_y = (min(box.y + box.height, outer.y + outer.height)
+                                 - max(box.y, outer.y))
                     return overlap_x <= slack or overlap_y <= slack
 
                 if shot is not None:
@@ -9674,13 +9672,14 @@ class Runtime:
                     for el in shot.elements:
                         if el.role != "opaque_region":
                             continue
-                        if el.ref != anchor.ref and clipped_out(el):
-                            continue
                         seen: set[str] = set()
                         node = el
+                        clipped = False
                         while node.ref not in seen:
                             seen.add(node.ref)
-                            if node.ref == anchor.ref:
+                            if node is not el and outside(el.bounds, node.bounds):
+                                clipped = True
+                            if node.ref == anchor.ref and not clipped:
                                 raise ComputerUseError(
                                     ErrorCode.UNSUPPORTED,
                                     "cannot verify an in-app find in an opaque container; "

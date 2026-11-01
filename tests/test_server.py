@@ -7969,13 +7969,14 @@ def test_ref_click_logs_phase_timing_in_one_debug_line(tmp_path, monkeypatch, ca
     ), lines[0]
 
 
-def _sections_snapshot(sid: str, *, found: bool, second_y: int = 518, anchor_bounds=True) -> Snapshot:
+def _sections_snapshot(sid: str, *, found: bool, second_y: int = 518, anchor_bounds=True,
+                       box_y: int = 257) -> Snapshot:
     """#1435: a Chrome overflow-y container of tall <section> blocks.
 
     Sections below the container's clip are childless generic nodes, so the
     snapshot lists them as opaque_region outside the container's box.
     """
-    box = Bounds(0, 21, 257, 422, 262) if anchor_bounds else None
+    box = Bounds(0, 21, box_y, 422, 262) if anchor_bounds else None
     els = [
         Element(ref="win", role="AXWindow", title="t", value=None,
                 bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id=sid),
@@ -8064,5 +8065,35 @@ def test_scroll_to_find_still_refuses_visible_opaque_region(monkeypatch, case) -
     with pytest.raises(ComputerUseError) as caught:
         rt.scroll_to_find("chrome", text="Open section 9", ref="e37", max_scrolls=8)
     assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "opaque_find_unverifiable"
+    assert inputs == []
+
+
+def test_scroll_to_find_page_root_scrolls_past_clipped_opaque_sections(monkeypatch) -> None:
+    """#1435 live geometry with no ref: the page root's 700px box still holds
+    the clipped sections (y=356/616), but the scroll container that holds them
+    clips them out, so they are not an opaque find surface."""
+    inputs = []
+    snaps = [_sections_snapshot("s0", found=False, box_y=95, second_y=356),
+             _sections_snapshot("s1", found=True, box_y=95)]
+    rt = _sections_runtime(monkeypatch, snaps, inputs)
+    # Live Chrome wheels the page root here (Tester, 1c2064ac): pin it.
+    from a11y_computer_use import server
+    monkeypatch.setattr(server, "_scroll_anchor", lambda snap: snap.element("doc"))
+    out = rt.scroll_to_find("chrome", text="Open section 9", max_scrolls=8)
+    assert "Open section 9" in out
+    assert "scroll" in inputs
+
+
+def test_scroll_to_find_page_root_still_refuses_visible_opaque_region(monkeypatch) -> None:
+    """#1435: with no ref, an opaque region inside its container's box is refused."""
+    inputs = []
+    snap = _sections_snapshot("s0", found=False, box_y=95, second_y=200)
+    rt = _sections_runtime(monkeypatch, [snap], inputs)
+    # Live Chrome wheels the page root here (Tester, 1c2064ac): pin it.
+    from a11y_computer_use import server
+    monkeypatch.setattr(server, "_scroll_anchor", lambda snap: snap.element("doc"))
+    with pytest.raises(ComputerUseError) as caught:
+        rt.scroll_to_find("chrome", text="Open section 9", max_scrolls=8)
     assert caught.value.detail["reason"] == "opaque_find_unverifiable"
     assert inputs == []
