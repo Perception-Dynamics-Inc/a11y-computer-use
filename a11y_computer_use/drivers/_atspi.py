@@ -11346,7 +11346,57 @@ def _focus_on_target(acc) -> bool | None:
         return True
     if _descendant_focused(acc):
         return True
+    if _active_descendant_focused(acc):
+        return True
     return False
+
+
+_ACTIVE_DESCENDANT_ROLES = frozenset({
+    "list item", "option", "table row", "row", "tree item", "menu item", "table cell",
+})
+
+
+def _active_descendant_focused(acc) -> bool:
+    """True when Chrome's focus is the target's ``aria-activedescendant`` (#1430).
+
+    With ``aria-activedescendant`` set, Chrome moves AT-SPI ``FOCUSED`` to
+    the active option while DOM focus and the caret stay in the input. Only
+    a Chromium editable counts, and only an option-like node inside a popup
+    the input itself controls or owns (CONTROLLER_FOR / NODE_PARENT_OF). A
+    focused node anywhere else is still focus loss.
+    """
+    if not _chromium_app(acc) or not _state_has(acc, "EDITABLE"):
+        return False
+    for kind in ("controller_for", "node_parent_of"):
+        try:
+            popups = _relation_targets(acc, kind)
+        except Exception:  # noqa: BLE001 - unreadable relations are not focus
+            continue
+        for popup in popups[:4]:
+            for hit in _focused_accessibles(popup, limit=2):
+                if hit is None or _ancestor_key(hit) == _ancestor_key(popup):
+                    continue
+                if _role_name(hit) in _ACTIVE_DESCENDANT_ROLES:
+                    return True
+    return False
+
+
+def _partial_type_error(acc, sent: int, total: int):
+    """Focus loss after ``sent`` keystrokes: say so, with the field's value."""
+    shown = _safe(lambda: _readable_text(acc))
+    message = (
+        f"typed {sent} of {total} characters, then focus left the target; "
+        f"the rest was not sent. Current value: {shown!r}"
+        if shown is not None else
+        f"typed {sent} of {total} characters, then focus left the target; "
+        "the rest was not sent. The current value could not be read"
+    )
+    err = _focus_lost_error(message)
+    err.detail.update({
+        "partial": True, "sent": sent,
+        "requested": total, "value": shown, "next": [],
+    })
+    return err
 
 
 def _confirm_focus_on_target(acc) -> bool:
@@ -11417,12 +11467,10 @@ def _type_into_target(acc, text: str) -> None:
     sent = False
     # One engine switch for the whole string, not one per character (#1219).
     with _linux_ime.ascii_passthrough(text):
-        for ch in text:
+        for count, ch in enumerate(text):
             if _focus_on_target(acc) is False:
                 if sent:
-                    raise _focus_lost_error(
-                        "focus left the target; stopped before the next keystroke"
-                    )
+                    raise _partial_type_error(acc, count, len(text))
                 raise _focus_lost_error("focus is not on the target; nothing was typed")
             _type_string(ch)
             sent = True

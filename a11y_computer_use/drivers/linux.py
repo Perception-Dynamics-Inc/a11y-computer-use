@@ -4695,6 +4695,10 @@ class LinuxDriver:
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_LOST or context is None:
                     raise
+                # #1430: keys already landed. A remount retry would double
+                # them, and its refusal would say nothing was typed.
+                if (exc.detail or {}).get("sent"):
+                    raise
                 handle = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
                 )
@@ -6047,6 +6051,10 @@ class LinuxDriver:
                 count = self._type_confirmed_handle(handle, text)
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                    raise
+                # #1430: keys already landed. A remount retry would double
+                # them, and its refusal would say nothing was typed.
+                if (exc.detail or {}).get("sent"):
                     raise
                 replacement = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
