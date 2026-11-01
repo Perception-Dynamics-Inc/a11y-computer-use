@@ -22497,23 +22497,45 @@ def code_editor_container(acc):
     return None
 
 
-def _hit_in_code_editor(hit, container) -> bool:
-    """True when ``hit`` is the editor's own surface inside ``container``.
+# Allowlist: the editor's own text and line layers (#1424). Overlay and
+# content widgets (suggest, find, hover, parameter hints, autocomplete,
+# search, tooltip) are plain divs, so roles cannot tell them apart.
+_CODE_EDITOR_TEXT_LAYERS = {
+    "monaco-editor": frozenset({"view-lines", "view-line", "lines-content"}),
+    "ace_editor": frozenset({"ace_content", "ace_text-layer", "ace_line", "ace_cursor-layer"}),
+}
+_CODE_EDITOR_WIDGETS = frozenset({
+    "suggest-widget", "find-widget", "monaco-hover", "parameter-hints-widget",
+    "context-view", "overlayWidgets", "contentWidgets", "monaco-list",
+    "ace_autocomplete", "ace_search", "ace_tooltip",
+})
 
-    The exact container must be in the hit's ancestry. A foreign control,
-    or another code-editor container (a nested or diff editor), between
-    the hit and the container refuses the hit.
+
+def _hit_in_code_editor(hit, container) -> bool:
+    """True only when ``hit`` is in ``container``'s own text or line layer.
+
+    Walking up from the hit to the exact container (key identity), a text
+    layer node must be seen. Any editor widget class, a foreign control
+    role, or another code-editor container on the way refuses the hit.
     """
     container_key = _ancestor_key(container)
+    layers = frozenset().union(*(
+        _CODE_EDITOR_TEXT_LAYERS[c] for c in _class_tokens(container) if c in _CODE_EDITOR_TEXT_LAYERS
+    ))
+    in_layer = False
     for node in _ancestor_chain(hit, limit=40):
         if _ancestor_key(node) == container_key:
-            return True
-        if _role_name(node) in _CODE_EDITOR_FOREIGN_ROLES:
+            return in_layer
+        classes = _class_tokens(node)
+        if classes & _CODE_EDITOR_WIDGETS or classes & _CODE_EDITOR_CONTAINERS:
             return False
-        if _class_tokens(node) & _CODE_EDITOR_CONTAINERS:
+        role = _role_name(node)
+        if role in _CODE_EDITOR_FOREIGN_ROLES:
             return False
-        if _role_name(node) in {"document web", "document frame", "frame", "window", "application"}:
+        if role in {"document web", "document frame", "frame", "window", "application"}:
             return False
+        if classes & layers:
+            in_layer = True
     return False
 
 
