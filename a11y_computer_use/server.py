@@ -9646,11 +9646,35 @@ class Runtime:
                 # An opaque drawing area cannot expose a confirming match.
                 # Native Find may still select document text, so refusing
                 # must happen before Ctrl+F or any query text is injected.
+                # An opaque region wholly outside the anchor's box is not a
+                # surface Find could hit unseen: Chrome lists a section
+                # clipped below a scroll container as a childless generic
+                # node because its content was pruned as off screen (#1435).
+                # Scrolling it in re-reads it, and a region that is still
+                # opaque on screen is refused then. Without both boxes the
+                # region still counts (fail closed).
                 shot = self._current
+                anchor_box = anchor.bounds
+
+                def clipped_out(region: Element) -> bool:
+                    box = region.bounds
+                    if box is None or anchor_box is None:
+                        return False
+                    if box.display_id != anchor_box.display_id:
+                        return False
+                    slack = 2
+                    overlap_x = (min(box.x + box.width, anchor_box.x + anchor_box.width)
+                                 - max(box.x, anchor_box.x))
+                    overlap_y = (min(box.y + box.height, anchor_box.y + anchor_box.height)
+                                 - max(box.y, anchor_box.y))
+                    return overlap_x <= slack or overlap_y <= slack
+
                 if shot is not None:
                     by_ref = {el.ref: el for el in shot.elements}
                     for el in shot.elements:
                         if el.role != "opaque_region":
+                            continue
+                        if el.ref != anchor.ref and clipped_out(el):
                             continue
                         seen: set[str] = set()
                         node = el
