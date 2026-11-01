@@ -11381,6 +11381,81 @@ def _active_descendant_focused(acc) -> bool:
     return False
 
 
+# A combobox popup rebuilds while it filters. For a moment Chrome can mark
+# the listbox itself focused, an option that is not linked from the input
+# yet, or nothing at all, while DOM focus never left the input (#1430).
+_COMBOBOX_RECONFIRM_POLLS = 6
+_COMBOBOX_RECONFIRM_DELAY_S = 0.025
+
+
+def _combobox_popups(acc) -> list:
+    if not _chromium_app(acc) or not _state_has(acc, "EDITABLE"):
+        return []
+    popups: list = []
+    for kind in ("controller_for", "node_parent_of"):
+        try:
+            popups.extend(_relation_targets(acc, kind)[:4])
+        except Exception:  # noqa: BLE001 - unreadable relations are not focus
+            continue
+    return popups
+
+
+def _within(node, keys: set, limit: int = 64) -> bool:
+    for _ in range(limit):
+        if node is None:
+            return False
+        if _ancestor_key(node) in keys:
+            return True
+        node = _parent_of(node)
+    return False
+
+
+def _web_document_of(acc, limit: int = 256):
+    node = _parent_of(acc)
+    for _ in range(limit):
+        if node is None:
+            return None
+        if _role_name(node) in ("document web", "document frame"):
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def _reconfirm_combobox_focus(acc) -> bool:
+    """Fresh focus reads before a Chromium combobox is declared focus-lost.
+
+    Only a combobox input (a Chromium editable that controls or owns a
+    popup) is re-checked. Each poll re-reads the input's own FOCUSED state
+    and its active descendant, then the focused nodes in its web document:
+    * focus on a node outside the input and its popups is a real loss and
+      returns False at once (the guard is unchanged);
+    * focus on the popup itself or anywhere inside it, an unlinked option,
+      or no focused node at all is the popup rebuilding, so poll again.
+    Focus that stays inside the popup counts as the input's. Focus that is
+    still on an unlinked option or on nothing once the polls run out is a loss.
+    """
+    popups = _combobox_popups(acc)
+    if not popups:
+        return False
+    for attempt in range(_COMBOBOX_RECONFIRM_POLLS):
+        if attempt:
+            time.sleep(_COMBOBOX_RECONFIRM_DELAY_S)
+        if _focus_on_target(acc):
+            return True
+        popups = _combobox_popups(acc) or popups
+        keys = {_ancestor_key(p) for p in popups} | {_ancestor_key(acc)}
+        doc = _web_document_of(acc)
+        hits = [h for h in _focused_accessibles(doc, limit=4) if h is not None
+                and (doc is None or _ancestor_key(h) != _ancestor_key(doc))]
+        inside = [h for h in hits if _within(h, keys)]
+        if hits and len(inside) == len(hits):
+            return True
+        stray = [h for h in hits if h not in inside]
+        if any(_role_name(h) not in _ACTIVE_DESCENDANT_ROLES for h in stray):
+            return False  # focus moved to another control: real loss
+    return False
+
+
 def _partial_type_error(acc, sent: int, total: int):
     """Focus loss after ``sent`` keystrokes: say so, with the field's value."""
     shown = _safe(lambda: _readable_text(acc))
@@ -11468,7 +11543,8 @@ def _type_into_target(acc, text: str) -> None:
     # One engine switch for the whole string, not one per character (#1219).
     with _linux_ime.ascii_passthrough(text):
         for count, ch in enumerate(text):
-            if _focus_on_target(acc) is False:
+            if _focus_on_target(acc) is False and not (
+                    sent and _reconfirm_combobox_focus(acc)):
                 if sent:
                     raise _partial_type_error(acc, count, len(text))
                 raise _focus_lost_error("focus is not on the target; nothing was typed")
