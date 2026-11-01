@@ -6359,6 +6359,27 @@ class LinuxDriver:
             # to the app/payload so Runtime cannot compare a different cell.
             self._opaque_toolbar_type = (app_id, text)
             return len(text)
+        if handle is not None and self._run(
+            lambda: _atspi.code_editor_container(handle) is not None
+        ):
+            # Monaco and Ace consume and rewrite their hidden textarea, and
+            # auto-close or auto-indent. Its text is not the editor model,
+            # so it is no read-back (#1424). Send keys only to the focused
+            # input and report the effect unverified.
+            if _on_wayland():
+                raise _wayland_input_error("type_text (code editor)")
+            if self._run(lambda: _atspi._focus_on_target(handle)) is not True:
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    "the code editor's input does not have keyboard focus; nothing was typed",
+                    detail={"reason": "focus_lost", "unchanged": True},
+                )
+            self._refuse_xtest_password_focus()
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.type_string(text)
+            self._type_unverified = True
+            return len(text)
         if app_id:
             # The find field latches this process even when the open bar is
             # not in a snapshot. scroll_to_find types and closes it first.
