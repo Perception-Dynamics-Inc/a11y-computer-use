@@ -7967,3 +7967,133 @@ def test_ref_click_logs_phase_timing_in_one_debug_line(tmp_path, monkeypatch, ca
         r"click phases ref=e2 escape=\d+\.\d{3}s occluder=\d+\.\d{3}s "
         r"hit_test=\d+\.\d{3}s action=\d+\.\d{3}s total=\d+\.\d{3}s$", lines[0],
     ), lines[0]
+
+
+def _sections_snapshot(sid: str, *, found: bool, second_y: int = 518, anchor_bounds=True,
+                       box_y: int = 257) -> Snapshot:
+    """#1435: a Chrome overflow-y container of tall <section> blocks.
+
+    Sections below the container's clip are childless generic nodes, so the
+    snapshot lists them as opaque_region outside the container's box.
+    """
+    box = Bounds(0, 21, box_y, 422, 262) if anchor_bounds else None
+    els = [
+        Element(ref="win", role="AXWindow", title="t", value=None,
+                bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id=sid),
+        Element(ref="doc", role="AXWebArea", title="t", value=None,
+                bounds=Bounds(0, 0, 100, 1000, 700), snapshot_id=sid, parent="win"),
+        Element(ref="e37", role="AXGroup", title="Sections", value=None,
+                bounds=box, snapshot_id=sid, parent="doc"),
+    ]
+    if found:
+        els.append(Element(ref="b9", role="AXButton", title="Open section 9", value=None,
+                           bounds=Bounds(0, 150, 370, 120, 30), snapshot_id=sid,
+                           parent="e37", clickable=True))
+    else:
+        els += [
+            Element(ref="b1", role="AXButton", title="Open section 1", value=None,
+                    bounds=Bounds(0, 150, 370, 120, 30), snapshot_id=sid,
+                    parent="e37", clickable=True),
+            Element(ref="o2", role="opaque_region", title="", value=None,
+                    bounds=Bounds(0, 21, second_y, 405, 261), snapshot_id=sid,
+                    parent="e37", clickable=True),
+            Element(ref="o3", role="opaque_region", title="", value=None,
+                    bounds=Bounds(0, 21, second_y + 261, 405, 261), snapshot_id=sid,
+                    parent="e37", clickable=True),
+        ]
+    return Snapshot(snapshot_id=sid, scope=Scope.WINDOW, app="chrome", pid=1, created_at=0.0,
+                    displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els))
+
+
+def _sections_runtime(monkeypatch, snaps, inputs):
+    from a11y_computer_use import server
+
+    state = {"i": 0}
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snaps[min(state["i"], len(snaps) - 1)]
+
+        def resolve_ref(self, old, ref, **kwargs):
+            return snaps[min(state["i"], len(snaps) - 1)].element(ref)
+
+        def key_chord(self, chord, **_kw):
+            inputs.append(chord)
+
+        def type_text(self, text, **_kw):
+            inputs.append(text)
+
+        def scroll(self, target, **kwargs):
+            inputs.append("scroll")
+            state["i"] += 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._current = snaps[0]
+    rt._anchor_audited = lambda ref, kind: (rt._current, rt._current.element(ref))
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "com.google.Chrome"))
+    return rt
+
+
+def test_scroll_to_find_scrolls_container_with_clipped_opaque_sections(monkeypatch) -> None:
+    """#1435: off-screen sections clipped below the container are not an
+    opaque surface; the container scrolls and the re-read finds the button."""
+    inputs = []
+    snaps = [_sections_snapshot("s0", found=False), _sections_snapshot("s1", found=True)]
+    rt = _sections_runtime(monkeypatch, snaps, inputs)
+    out = rt.scroll_to_find("chrome", text="Open section 9", ref="e37", max_scrolls=8)
+    assert "Open section 9" in out
+    assert "scroll" in inputs
+
+
+@pytest.mark.parametrize("case", ["visible", "no_anchor_box"])
+def test_scroll_to_find_still_refuses_visible_opaque_region(monkeypatch, case) -> None:
+    """#1435 limit: an opaque region inside the container's box, or a
+    container with no box to compare, is still refused before any input."""
+    from a11y_computer_use import server  # noqa: F401
+
+    inputs = []
+    snap = (_sections_snapshot("s0", found=False, second_y=400) if case == "visible"
+            else _sections_snapshot("s0", found=False, anchor_bounds=False))
+    rt = _sections_runtime(monkeypatch, [snap], inputs)
+    with pytest.raises(ComputerUseError) as caught:
+        rt.scroll_to_find("chrome", text="Open section 9", ref="e37", max_scrolls=8)
+    assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "opaque_find_unverifiable"
+    assert inputs == []
+
+
+def test_scroll_to_find_page_root_scrolls_past_clipped_opaque_sections(monkeypatch) -> None:
+    """#1435 live geometry with no ref: the page root's 700px box still holds
+    the clipped sections (y=356/616), but the scroll container that holds them
+    clips them out, so they are not an opaque find surface."""
+    inputs = []
+    snaps = [_sections_snapshot("s0", found=False, box_y=95, second_y=356),
+             _sections_snapshot("s1", found=True, box_y=95)]
+    rt = _sections_runtime(monkeypatch, snaps, inputs)
+    # Live Chrome wheels the page root here (Tester, 1c2064ac): pin it.
+    from a11y_computer_use import server
+    monkeypatch.setattr(server, "_scroll_anchor", lambda snap: snap.element("doc"))
+    out = rt.scroll_to_find("chrome", text="Open section 9", max_scrolls=8)
+    assert "Open section 9" in out
+    assert "scroll" in inputs
+
+
+def test_scroll_to_find_page_root_still_refuses_visible_opaque_region(monkeypatch) -> None:
+    """#1435: with no ref, an opaque region inside its container's box is refused."""
+    inputs = []
+    snap = _sections_snapshot("s0", found=False, box_y=95, second_y=200)
+    rt = _sections_runtime(monkeypatch, [snap], inputs)
+    # Live Chrome wheels the page root here (Tester, 1c2064ac): pin it.
+    from a11y_computer_use import server
+    monkeypatch.setattr(server, "_scroll_anchor", lambda snap: snap.element("doc"))
+    with pytest.raises(ComputerUseError) as caught:
+        rt.scroll_to_find("chrome", text="Open section 9", max_scrolls=8)
+    assert caught.value.detail["reason"] == "opaque_find_unverifiable"
+    assert inputs == []
