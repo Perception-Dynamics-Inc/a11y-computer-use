@@ -1379,6 +1379,28 @@ def _missing_atspi_bindings(exc: BaseException) -> ComputerUseError:
     )
 
 
+_QT_EDIT_LOG = logging.getLogger("a11y_computer_use.qt_edit")
+
+
+@contextmanager
+def _qt_edit_timing(op: str, ref):
+    """One debug line per Qt line-edit set_value/type (#1418) with phase seconds."""
+    phases: dict[str, float] = {}
+    start = time.perf_counter()
+    try:
+        yield phases
+    finally:
+        if _QT_EDIT_LOG.isEnabledFor(logging.DEBUG):
+            _QT_EDIT_LOG.debug(
+                "qt edit phases op=%s ref=%s focus=%.3fs select=%.3fs keys=%.3fs "
+                "readback=%.3fs restore=%.3fs total=%.3fs",
+                op, ref, phases.get("focus", 0.0), phases.get("select", 0.0),
+                phases.get("keys", 0.0), phases.get("readback", 0.0),
+                phases.get("restore", 0.0),
+                phases.get("pre", 0.0) + time.perf_counter() - start,
+            )
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -1400,12 +1422,14 @@ class LinuxDriver:
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
+        self._qt_dependent_changes: list[str] = []
         # Impress or Draw frame text from before a type, and whether that
         # frame could be read. The outcome judge consumes these once.
         self._drawing_type_before: str | None = None
         self._drawing_type_state: str | None = None
         self._opaque_toolbar_type: tuple[str, str] | None = None
         self._type_unverified: bool = False
+        self._code_editor_typed: bool = False
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
@@ -1605,7 +1629,17 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi
 
-        parents = list(getattr(getattr(self, "_last_accessor", None), "hidden_parents", None) or ())
+        accessor = getattr(self, "_last_accessor", None)
+        # A child the walk read but the per-parent cap folded is hidden from
+        # the plain find too. Its name is already in hand: no IPC (#1433).
+        from a11y_computer_use.observe import _fold_seeks
+
+        needles = _fold_seeks(text)
+        for title in getattr(accessor, "capped_titles", None) or ():
+            folded = title.replace("\u00a0", " ").casefold()
+            if any(needle in folded for needle in needles):
+                return True
+        parents = list(getattr(accessor, "hidden_parents", None) or ())
         if not parents:
             return False
         run = getattr(self, "_run", None) or (lambda fn: fn())
@@ -2487,6 +2521,36 @@ class LinuxDriver:
             detail={"ref": ref, "reason": reason, "outcome": "refused"},
         )
 
+    def _resolve_capped_child(self, snap: Snapshot, ref: str, anchor: Element,
+                              live: Snapshot) -> Element | None:
+        """The issued child itself, when the live walk's cap folded it (#1433).
+
+        A Qt list of 48 swatches keeps 24 in a plain snapshot, so a ref from
+        an armed read has no live counterpart and the label matcher reports
+        ``title_changed`` against a nearby namesake-less sibling. The exact
+        object is checked instead: its bus name and path, its parent's, its
+        current name and SHOWING. A node that is gone, renamed or reparented,
+        or that the live tree still lists, is not recovered here.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        identity = tuple(anchor.node_identity or ())
+        parent = snap.element(anchor.parent) if anchor.parent else None
+        parent_identity = tuple(getattr(parent, "node_identity", ()) or ())
+        if not identity or not parent_identity:
+            return None
+        if any(tuple(el.node_identity or ()) == identity for el in live.elements):
+            return None  # listed: the matcher's verdict on it stands
+        if not any(tuple(el.node_identity or ()) == parent_identity for el in live.elements):
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return None
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        ok = run(lambda: _atspi.capped_child_check(handle, identity, parent_identity, anchor.title))
+        return anchor if ok else None
+
     def _refuse_rebound_behind_modal(self, snap: Snapshot, ref: str, anchor: Element,
                                      live: Snapshot, resolved: Element, handle) -> None:
         """Refuse a ref the rematch moved onto another node across a modal (#1386).
@@ -2737,6 +2801,12 @@ class LinuxDriver:
             self._resolved_click_snapshot = (resolved, live)
             return resolved
         except ComputerUseError as exc:
+            if (exc.code is ErrorCode.STALE_REF
+                    and exc.detail.get("reason") in {"not_found", "title_changed"}
+                    and live.app == snap.app and live.pid == snap.pid):
+                capped = LinuxDriver._resolve_capped_child(self, snap, ref, snap.element(ref), live)
+                if capped is not None:
+                    return capped
             if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
                 anchor = snap.element(ref)
                 # GTK can retain or flatten an unnamed group as transient
@@ -4038,6 +4108,56 @@ class LinuxDriver:
             detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
         )
 
+    def _refuse_code_editor_input_click(self, element: Element, handle) -> None:
+        """Refuse a click on Monaco's or Ace's hidden caret textarea (#1424).
+
+        The 1x1-3x1 input sits at the caret, so its centre can be on the
+        next line (Ace) or under a widget. A pointer press there moves the
+        caret or hits the widget, and grab_focus is not proven to keep the
+        caret. The ref has no faithful click point, so nothing is sent.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None or self._run(lambda: _atspi.code_editor_container(handle)) is None:
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} is a code editor's hidden caret input; it has no faithful click "
+            "point, so no click was sent. Click the editor text by coordinates to place "
+            "the caret, then type",
+            detail={"ref": element.ref, "role": element.role,
+                    "reason": "code_editor_hidden_input", "unchanged": True},
+        )
+
+    def _type_code_editor_input(self, element: Element, handle, text: str) -> int:
+        """Keys at the current caret of a focused Monaco/Ace input, unverified.
+
+        No pointer press and no grab_focus (either can move the caret). The
+        textarea's text is not the editor model, so it is no read-back: the
+        result is reported unverifiable.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if self._run(lambda: _atspi._focus_on_target(handle)) is not True:
+            raise ComputerUseError(
+                ErrorCode.FOCUS_LOST,
+                f"{element.ref} is a code editor's hidden input without keyboard focus; "
+                "nothing was typed. Click the editor text by coordinates where the caret "
+                "should go, then type",
+                detail={"ref": element.ref, "role": element.role,
+                        "reason": "code_editor_focus_required", "unchanged": True},
+            )
+        if _on_wayland():
+            raise _wayland_input_error("type (code editor)")
+        self._refuse_xtest_password_focus()
+        from a11y_computer_use.drivers import _linux_input
+
+        self._focused_editable = handle
+        _linux_input.type_string(text.replace("\r\n", "\n"))
+        self._type_unverified = True
+        self._code_editor_typed = True
+        return len(text)
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -4057,6 +4177,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         self._refuse_chromium_occluded(element, handle)
         self._refuse_hidden(element, handle)
+        self._refuse_code_editor_input_click(element, handle)
         self._refuse_calendar_click(element, handle)
         self._refuse_expander_click(element, handle)
         self._refuse_gnumeric_go_jump(element, handle)
@@ -4457,19 +4578,25 @@ class LinuxDriver:
         if exc.detail.get("reason") == "focus_lost":
             exc.detail["changed_fields"] = changed[:8]
             return
-        raise ComputerUseError(
-            ErrorCode.FOCUS_LOST,
-            "set_value stopped because another field changed",
-            detail={
-                "ref": element.ref,
-                "role": element.role,
-                "reason": "focus_lost",
-                "outcome": "refused",
-                "next": ["ref", "cdp"],
-                "changed_fields": changed[:8],
-                "evidence": "another field changed during set_value",
-            },
-        ) from exc
+        detail = {
+            "ref": element.ref,
+            "role": element.role,
+            "reason": "focus_lost",
+            "outcome": "refused",
+            "next": ["ref", "cdp"],
+            "changed_fields": changed[:8],
+            "evidence": "another field changed during set_value",
+        }
+        # Keep what the first refusal knew: whether keys were sent, what
+        # the target held and whether it was restored (#1420 review).
+        for key in ("input_sent", "keys_sent", "original", "restored", "expected", "actual"):
+            if isinstance(exc.detail, dict) and key in exc.detail:
+                detail[key] = exc.detail[key]
+        message = "set_value stopped because another field changed"
+        if "restored" in detail:
+            message += ("; the original text was restored" if detail["restored"]
+                        else "; the original text could not be restored, check the field")
+        raise ComputerUseError(ErrorCode.FOCUS_LOST, message, detail=detail) from exc
 
     def text_visibility_unknown(self, element: Element) -> bool:
         """Whether this write needs private verification and a redacted receipt."""
@@ -4724,6 +4851,10 @@ class LinuxDriver:
         if self._run(lambda: _atspi._blocks_text_replace(handle)):
             restore()
             raise _not_editable(element)
+        if self._run(lambda: _atspi.qt_line_edit(handle)):
+            # #1418: Qt emits textEdited only for keyboard input, so an
+            # EditableText write can change the text while the app ignores it.
+            return self._set_qt_line_edit(element, handle, value)
         context = self._run(lambda: _atspi.web_entry_context(handle))
         if context is not None and self._run(lambda: (
             _atspi.chromium_nested_web_entry(handle)
@@ -4750,6 +4881,10 @@ class LinuxDriver:
                 success = self._run(lambda: _atspi.set_text(handle, value))
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                    raise
+                # #1430: keys already landed. A remount retry would double
+                # them, and its refusal would say nothing was typed.
+                if (exc.detail or {}).get("sent"):
                     raise
                 handle = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
@@ -4928,6 +5063,7 @@ class LinuxDriver:
         )
         px, py = self._pointer(x, y) if office_pointer else (x, y)
         if isinstance(target, Element):
+            self._refuse_code_editor_input_click(target, handle)
             self._verify_chromium_pointer_target(target, handle, x, y)
         if notification is not None and not self._run(
             lambda: _atspi.notification_pointer_target(handle, notification, px, py)
@@ -5919,6 +6055,10 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._focused_editable = None
+        self._type_unverified = False
+        self._code_editor_typed = False
+        self._qt_dependent_changes = []
+        type_started = time.perf_counter()
         if element.secure:
             raise _secure_focus_error("the requested ref is a password field")
         self._check_modal_target(element)
@@ -5937,8 +6077,11 @@ class LinuxDriver:
         # Ref typing goes through type_into, not type_text; announce here so
         # type(ref=...) shows the same overlay as click/scroll/set_value.
         self._visible_action(element, "Type")
+        if self._run(lambda: _atspi.code_editor_container(handle)) is not None:
+            return self._type_code_editor_input(element, handle, text)
         context = self._run(lambda: _atspi.web_entry_context(handle))
         gecko_append = False
+        chrome_selection = None
         if (element.role in {"AXTextField", "AXTextArea", "AXSearchField"}
                 and self._run(lambda: _atspi._chromium_app(handle))):
             if context is not None:
@@ -5949,10 +6092,21 @@ class LinuxDriver:
                 ))
                 if _page_health.probe(pid, title, url) is False:
                     raise _page_health.refusal()
-            # Accessibility focus bypasses page pointer handlers, including
-            # custom-value radios. Use the geometry-checked pointer path.
-            self.click(element)
-            if context is not None:
+            # #1425: a focused field holding a selection (the caller's
+            # ctrl+a) keeps it. The pointer press below collapsed it, so the
+            # text appended ("QQ" -> "QQhello") and the caret judge passed.
+            # Typing replaces a selection, as the keyboard does, and only an
+            # exact read-back of that replacement is a success.
+            if self._run(lambda: _atspi._focus_on_target(handle)):
+                chrome_selection = self._run(lambda: _atspi.entry_text_and_selection(handle))
+            if chrome_selection is None:
+                # Accessibility focus bypasses page pointer handlers, including
+                # custom-value radios. Use the geometry-checked pointer path.
+                self.click(element)
+            if chrome_selection is not None:
+                if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                    raise self._focus_lost_on(element)
+            elif context is not None:
                 # One wait checks the original entry and a detached remount.
                 # Do not re-grab focus after the requested pointer press.
                 try:
@@ -6025,7 +6179,10 @@ class LinuxDriver:
         self._refuse_input_off_target(element, handle)
         self._focused_editable = handle
         append_state = None
-        if self._run(lambda: _atspi.append_target_entry(handle)):
+        # #1418: a Qt line edit decides replace-or-append from its own
+        # selection in qt_line_edit_keys, so its selection is not collapsed.
+        qt_edit = self._run(lambda: _atspi.qt_line_edit(handle))
+        if not qt_edit and self._run(lambda: _atspi.append_target_entry(handle)):
             # Focus selects a GTK entry's whole text, and the insert would
             # replace it. A ref type appends: drop that selection first, and
             # refuse rather than type when it cannot be dropped (#1232).
@@ -6042,7 +6199,20 @@ class LinuxDriver:
                 # Judge the read-back against an append. A write that loses
                 # or splits the prior text still fails this check.
                 append_state = (append_state[0], len(append_state[0]))
-        if append_state is None and context is not None and self._run(
+        if chrome_selection is not None:
+            # Re-read just before the keys: the selection must still be the
+            # one seen, or typing would not replace what the caller selected.
+            now = self._run(lambda: _atspi.entry_text_and_selection(handle))
+            if now != chrome_selection:
+                raise _atspi._text_mismatch(
+                    "selection_lost",
+                    "the field's selection changed before typing, so the text would "
+                    "not replace it; nothing was typed",
+                    expected=chrome_selection[0],
+                    actual=self._run(lambda: _atspi._full_text(handle)),
+                    input_sent=False,
+                )
+        if chrome_selection is None and append_state is None and context is not None and self._run(
             lambda: _atspi._chromium_app(handle)
         ):
             # Chrome web entries keep the caret the pointer press placed. A
@@ -6054,11 +6224,32 @@ class LinuxDriver:
             peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
         except Exception:
             peers = {}
+        if qt_edit:
+            # #1418: keys, not EditableText, so Qt emits textEdited. A
+            # non-empty selection is replaced and a bare caret inserts at
+            # its offset, as a keyboard would.
+            with _qt_edit_timing("type", element.ref) as phases:
+                phases["focus"] = phases["pre"] = time.perf_counter() - type_started
+                try:
+                    count = self._run(lambda: _atspi.qt_line_edit_keys(
+                        handle, text, append=True, phases=phases))
+                except ComputerUseError as exc:
+                    self._refuse_changed_peers(handle, peers, element, exc)
+                    raise
+            self._record_qt_dependent_peers(handle, peers, element)
+            return count
         try:
             try:
-                count = self._type_confirmed_handle(handle, text)
+                if chrome_selection is not None:
+                    count = self._type_chrome_selection_keys(handle, element, text)
+                else:
+                    count = self._type_confirmed_handle(handle, text)
             except ComputerUseError as exc:
-                if exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                if chrome_selection is not None or exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                    raise
+                # #1430: keys already landed. A remount retry would double
+                # them, and its refusal would say nothing was typed.
+                if (exc.detail or {}).get("sent"):
                     raise
                 replacement = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
@@ -6074,6 +6265,25 @@ class LinuxDriver:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
         self._raise_if_peers_changed(handle, peers, element)
+        if chrome_selection is not None:
+            prior, sel_start, sel_end = chrome_selection
+            want = prior[:sel_start] + text.replace("\r\n", "\n") + prior[sel_end:]
+            got = self._run(lambda: _atspi._full_text(handle))
+            for _ in range(10):
+                if got == want:
+                    break
+                time.sleep(0.05)
+                got = self._run(lambda: _atspi._full_text(handle))
+            if got != want:
+                raise _atspi._text_mismatch(
+                    "selection_not_replaced",
+                    f"the field read {got!r}, not the selection replaced by the text "
+                    f"({want!r}); the keys were sent, so check the field before typing again",
+                    expected=want,
+                    actual=got,
+                    input_sent=True,
+                )
+            self._type_expected = want
         if (
             append_state is not None and append_state[0]
             and not self._run(
@@ -6188,6 +6398,33 @@ class LinuxDriver:
                     "expected": want, "actual": got},
         )
 
+    def _set_qt_line_edit(self, element: Element, handle, value: str) -> bool:
+        """Replace a Qt line edit's text with real key events (#1418).
+
+        Focus the field (AT-SPI focus, then the geometry-checked pointer
+        press when that does not take), require focus before any key,
+        select all and confirm the selection covers the value, then type.
+        Success is the exact read-back after keyboard input, which is the
+        path that fires Qt's ``textEdited``; EditableText is never used.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if _on_wayland():
+            raise _wayland_input_error("set_value on a Qt line edit")
+        with _qt_edit_timing("set_value", element.ref) as phases:
+            t0 = time.perf_counter()
+            self._run(lambda: _atspi.grab_focus(handle))
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                self.click(element)
+                if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                    raise self._focus_lost_on(element)
+            self._refuse_input_off_target(element, handle)
+            phases["focus"] = time.perf_counter() - t0
+            self._run(lambda: _atspi.qt_line_edit_keys(
+                handle, value, replace=True, phases=phases))
+        self._focused_editable = handle
+        return True
+
     def _focus_lost_on(self, element: Element) -> ComputerUseError:
         return ComputerUseError(
             ErrorCode.FOCUS_LOST,
@@ -6227,6 +6464,53 @@ class LinuxDriver:
                 "evidence": "another field changed during type",
             },
         )
+
+    def _type_chrome_selection_keys(self, handle, element: Element, text: str) -> int:
+        """Replace a Chrome field's selection with real keys, only while it has focus.
+
+        #1425 (1 of 7 QQ runs on aa771304): the caller's ctrl+a had left the
+        document with no focused element, yet the field still read FOCUSED and
+        selected, so the pointer press was skipped. The text then went through
+        AT-SPI EditableText, which writes the value without focus and without
+        input events, and the value read-back matched. Keys reach only the
+        element that really has focus, so a field that lost it keeps its text
+        and the exact read-back after this refuses. Focus is read fresh here;
+        an unreadable focus is not focus.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        text = text.replace("\r\n", "\n")
+        if not text:
+            return 0
+        if self._run(lambda: _atspi._focus_on_target(handle)) is not True:
+            raise self._focus_lost_on(element)
+        if not self._run(lambda: _atspi._x11_keys_available()):
+            raise _wayland_input_error("type")
+        self._run(lambda: _atspi._type_into_target(handle, text))
+        return len(text)
+
+    def _record_qt_dependent_peers(self, handle, peers: dict, element: Element) -> None:
+        """After an exact Qt read-back, record peers that changed; never refuse.
+
+        The target's exact read-back proves the keys reached the target, so
+        a peer that changed with it (QColorDialog's spin boxes, a field that
+        mirrors another) is the app reacting to the edit, not a misdirected
+        keystroke (#1420 review). The changes are reported in the result as
+        ``dependent_fields_changed`` and in one debug line.
+        """
+        self._qt_dependent_changes = []
+        if handle is None or not peers:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
+        except Exception:
+            return
+        self._qt_dependent_changes = list(changed[:8])
+        if changed:
+            _QT_EDIT_LOG.debug("qt edit dependent fields changed ref=%s %s",
+                               element.ref, changed[:8])
 
     def _type_confirmed_handle(self, handle, text: str) -> int:
         """Insert ``text`` into a handle whose focus was already confirmed."""
@@ -6463,6 +6747,20 @@ class LinuxDriver:
             if status != "skip":
                 self._drawing_type_state = status
                 self._drawing_type_before = "" if shown is None else shown
+        if handle is not None and self._run(lambda: _atspi.qt_line_edit(handle)):
+            # #1418: a Qt line edit applies only keyboard edits (textEdited).
+            if _on_wayland():
+                raise _wayland_input_error("type into a Qt line edit")
+            if text.endswith("\n") and "\n" not in text[:-1] and "\t" not in text:
+                # Return is sent only after the text itself read back.
+                with _qt_edit_timing("type", None) as phases:
+                    self._run(lambda: _atspi.qt_line_edit_keys(
+                        handle, text[:-1], replace=False, phases=phases))
+                    self._run(lambda: _atspi._chord_into_target(handle, "Return"))
+                return len(text)
+            with _qt_edit_timing("type", None) as phases:
+                return self._run(lambda: _atspi.qt_line_edit_keys(
+                    handle, text, replace=False, phases=phases))
         if handle is not None:
             try:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))
@@ -8070,6 +8368,27 @@ class LinuxDriver:
             return bool(self._run(lambda: _linux_menus.escape_reaches_menu(root)))
         except Exception:
             return True
+
+    def menu_contains_target(self, app: str, element: Element) -> bool | None:
+        """Whether ``element`` lives inside the open menu bar of ``app`` (#1413).
+
+        False when there is no handle or no menu bar. None when the tree
+        could not be read, so the caller refuses rather than send Escape.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            return False
+        if handle is None:
+            return False
+        try:
+            root = self._menu_root(app)
+            return bool(self._run(lambda: _linux_menus.target_in_menu_bar(root, handle)))
+        except Exception:
+            return None
 
     def target_vanished(self, element: Element) -> bool:
         """True when ``element``'s accessible is gone and must not be clicked.

@@ -418,6 +418,7 @@ def _act_mcp_result(payload: str):
     )
 
 
+_CLICK_LOG = logging.getLogger("a11y_computer_use.click")
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -5809,6 +5810,31 @@ class Runtime:
             return ""
         if not state or not state.get("open"):
             return ""
+        target = getattr(self, "_dismiss_target", None)
+        contains_fn = getattr(self.driver, "menu_contains_target", None)
+        if isinstance(target, Element) and callable(contains_fn):
+            # A target inside the open menu chain is clicked where it is.
+            # Escape would close the menu that holds it (#1413).
+            try:
+                inside = contains_fn(app, target)
+            except Exception:
+                inside = None
+            if inside is None:
+                path = [str(part) for part in (state.get("path") or [])]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "could not tell whether the target is inside the open menu; Escape was not sent",
+                    detail={
+                        "ref": target.ref,
+                        "reason": "menu_dismiss_blocked",
+                        "outcome": "refused",
+                        "path": path,
+                        "next": ["ref"],
+                        "evidence": "Escape could close the menu that holds the target, so nothing was sent",
+                    },
+                )
+            if inside:
+                return ""
         safe_fn = getattr(self.driver, "menu_escape_safe", None)
         if callable(safe_fn):
             try:
@@ -5838,7 +5864,7 @@ class Runtime:
             return ""
         return f" (closed open menu {' > '.join(str(t) for t in path)} first)" if path else ""
 
-    def _refuse_vanished_target(self, element: Element) -> None:
+    def _refuse_vanished_target(self, element: Element, sent: str = "") -> None:
         """Refuse when ``element`` disappeared before the pointer or the keys.
 
         The action has not been sent. A driver without this check, or a
@@ -5854,6 +5880,23 @@ class Runtime:
         if not gone:
             return
         title = f" {element.title!r}" if element.title else ""
+        if sent:
+            # A key already went out (#1413): say so, never "nothing was sent".
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}{title}) vanished after {sent} was sent; "
+                "the click was not sent",
+                detail={
+                    "ref": element.ref,
+                    "role": element.role,
+                    "reason": "target_vanished",
+                    "outcome": "refused",
+                    "sent": [sent],
+                    "next": ["ref"],
+                    "evidence": f"{sent} was sent first and {element.ref} was gone afterwards; "
+                                "the action itself was not sent",
+                },
+            )
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             f"{element.ref} ({element.role}{title}) vanished before the action; nothing was sent",
@@ -7026,8 +7069,33 @@ class Runtime:
         offscreen_tab: list[Element] = []
         # The re-resolved ref after raising its app over another app's window.
         raised: list[Element] = []
+        # Debug-level phase timing for the ref click path, one line per click:
+        # Escape-dismiss check, occluder checks, hit test, and the action.
+        phases: dict[str, float] = {}
+
+        @contextmanager
+        def phase(name: str):
+            start = time.perf_counter()
+            try:
+                yield
+            finally:
+                phases[name] = phases.get(name, 0.0) + time.perf_counter() - start
 
         def execute() -> None:
+            start = time.perf_counter()
+            try:
+                execute_body()
+            finally:
+                if _CLICK_LOG.isEnabledFor(logging.DEBUG):
+                    _CLICK_LOG.debug(
+                        "click phases ref=%s escape=%.3fs occluder=%.3fs hit_test=%.3fs action=%.3fs total=%.3fs",
+                        getattr(target, "ref", None),
+                        phases.get("escape", 0.0), phases.get("occluder", 0.0),
+                        phases.get("hit_test", 0.0), phases.get("action", 0.0),
+                        time.perf_counter() - start,
+                    )
+
+        def execute_body() -> None:
             nonlocal before, selection_before, selection_target, toggle_probe
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
@@ -7049,14 +7117,21 @@ class Runtime:
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, act)
             if isinstance(act, Element):
-                cover = self._popover_cover(act, refresh=True)
+                with phase("occluder"):
+                    cover = self._popover_cover(act, refresh=True)
                 if cover:
                     raise _not_visible(act.ref, "covered", act.bounds, f"the ref is covered by {cover}")
-            menu_note.append(self._dismiss_open_menu(app))
+            self._dismiss_target = act  # the menu chain holding it is kept (#1413)
+            try:
+                with phase("escape"):
+                    menu_note.append(self._dismiss_open_menu(app))
+            finally:
+                self._dismiss_target = None
             if isinstance(act, Element):
-                self._refuse_vanished_target(act)
+                self._refuse_vanished_target(act, "Escape" if menu_note[-1] else "")
                 sibling_cover = getattr(self.driver, "same_app_window_cover", None)
-                cover = sibling_cover(act, app) if sibling_cover is not None else None
+                with phase("occluder"):
+                    cover = sibling_cover(act, app) if sibling_cover is not None else None
                 if cover:
                     raise ComputerUseError(
                         ErrorCode.UNSUPPORTED,
@@ -7097,7 +7172,9 @@ class Runtime:
             if plain:
                 if callable(probe_toggle):
                     toggle_probe = probe_toggle(act)
-                if self.driver.press_element(act):
+                with phase("action"):
+                    pressed = self.driver.press_element(act)
+                if pressed:
                     return  # activated via AX — the user's cursor never moved
                 toggle_probe = None
             if plain and dialogs_before is not None:
@@ -7126,6 +7203,7 @@ class Runtime:
             # point, so the hit-test runs right before them; an AXPress above
             # addressed the element itself and needs no such guard (#11).
             # A text ref uses the control's box, not the line-wide text box.
+            hit_start = time.perf_counter()
             if isinstance(act, Element):
                 self._refuse_center_off_display(act)
                 self._refuse_center_outside_window(
@@ -7139,7 +7217,10 @@ class Runtime:
                     ref if act is target else None,
                 )
             try:
-                self._recheck_target(app, act)
+                try:
+                    self._recheck_target(app, act)
+                finally:
+                    phases["hit_test"] = phases.get("hit_test", 0.0) + time.perf_counter() - hit_start
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_CHANGED or not isinstance(act, Element):
                     raise
@@ -7171,10 +7252,11 @@ class Runtime:
             # effect, and the receipt below names the actual mechanism.
             button_action = getattr(self.driver, "click_button_action", None)
             if isinstance(act, Element) and button_action is not None:
-                mechanism = button_action(
-                    act, button=parsed_button, count=count, modifiers=mods,
-                    allow_action=PREFER_AX_ACTIONS,
-                )
+                with phase("action"):
+                    mechanism = button_action(
+                        act, button=parsed_button, count=count, modifiers=mods,
+                        allow_action=PREFER_AX_ACTIONS,
+                    )
                 if mechanism is not None:
                     button_mechanism.append(mechanism)
                     return
@@ -7191,7 +7273,8 @@ class Runtime:
                 selection_before = selection_reader(act)
             if callable(probe_toggle):
                 toggle_probe = probe_toggle(act)
-            self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
+            with phase("action"):
+                self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
         # Read the folder location before the click. A side-pane selection
@@ -8109,8 +8192,12 @@ class Runtime:
             self._reject_domain(Click(target=live), app=gate)
             self._refuse_disabled(live, verb="type")
             self._guard_user(gate)
-            note.append(self._dismiss_open_menu(gate))
-            self._refuse_vanished_target(live)
+            self._dismiss_target = live  # the menu chain holding it is kept (#1413)
+            try:
+                note.append(self._dismiss_open_menu(gate))
+            finally:
+                self._dismiss_target = None
+            self._refuse_vanished_target(live, "Escape" if note[-1] else "")
             try:
                 return self._deliver_type_at_ref(live, text)
             except ComputerUseError as exc:
@@ -8123,6 +8210,16 @@ class Runtime:
                 had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
             )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        if getattr(self.driver, "_code_editor_typed", False):
+            self.driver._code_editor_typed = False
+            note.append(
+                " at the editor's current caret; effect unverified: the code editor's "
+                "model is not readable through its hidden input"
+            )
+        dependent = getattr(self.driver, "_qt_dependent_changes", None)
+        if isinstance(dependent, list) and dependent:
+            # #1420: other fields the app changed in reaction to the edit.
+            note.append("; dependent_fields_changed: " + "; ".join(map(str, dependent)))
         return self._conclude(
             f"typed {shown} characters into {ref}{''.join(note)}",
             tool="type", app=gate, before=before, element=live, requested=text,
@@ -12281,7 +12378,8 @@ def build_server(
         argument is invalid_arguments and no text is sent. A ref type into
         a single-line entry appends at the end of its text: focus selects
         the whole text in GTK, and that selection is dropped, never typed
-        over (use set_value to replace). With app=<bundle
+        over (use set_value to replace). A Qt line edit is the exception: a
+        non-empty selection there is replaced, and a bare caret inserts at the caret, as real typing does. With app=<bundle
         id or name> on macOS the keystrokes are addressed to that app's
         process: it need not be frontmost, nothing is activated, and the
         user's screen stays where it is. On Linux, app= resolves that app's

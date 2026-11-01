@@ -7946,3 +7946,24 @@ def test_a_number_is_never_moved_onto_a_different_non_control_element(
             assert caught.value.detail["reason"] == "target_changed"
             assert caught.value.detail["anchor"]["title"] == title
         assert mocked_driver["click"] == []
+
+
+def test_ref_click_logs_phase_timing_in_one_debug_line(tmp_path, monkeypatch, caplog) -> None:
+    """A ref click logs Escape-dismiss, occluder, hit test and action timing in one line."""
+    import logging
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    driver.click = lambda target, **kwargs: None
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+    with caplog.at_level(logging.DEBUG, logger="a11y_computer_use.click"):
+        rt.call_tool("click", {"ref": "e2"})
+    lines = [r.getMessage() for r in caplog.records if r.name == "a11y_computer_use.click"]
+    assert len(lines) == 1, lines
+    assert re.search(
+        r"click phases ref=e2 escape=\d+\.\d{3}s occluder=\d+\.\d{3}s "
+        r"hit_test=\d+\.\d{3}s action=\d+\.\d{3}s total=\d+\.\d{3}s$", lines[0],
+    ), lines[0]

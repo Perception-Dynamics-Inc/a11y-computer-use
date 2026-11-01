@@ -2615,8 +2615,15 @@ def _prune_inner(
         else:
             cap = MAX_CHILDREN
         if len(kept) > cap:
+            before = kept
             kept, dropped = _cap_children(kept, cap, _child_seek_needle(accessor))
             elided += dropped
+            # A plain find did not keep these; let it know their names so it
+            # re-reads armed instead of reporting them absent (#1433).
+            note_capped = getattr(accessor, "note_capped", None)
+            if callable(note_capped):
+                kept_ids = {id(c) for c in kept}
+                note_capped([c for c in before if id(c) not in kept_ids])
 
     # A table can publish only the on-screen band. The rest are still its
     # children; the count is what ``… N more`` and expand(ref) page from.
@@ -2945,6 +2952,18 @@ def _cap_children(
     ranked = sorted(range(len(kept)), key=rank)
     winners = sorted(ranked[:cap])
     return [kept[i] for i in winners], len(kept) - cap
+
+
+def capped_titles(nodes: list[_PNode]) -> list[str]:
+    """Every name in the subtrees the per-parent cap folded (#1433)."""
+    out: list[str] = []
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if node.raw.title:
+            out.append(node.raw.title)
+        stack.extend(node.children)
+    return out
 
 
 def _keep_priority(node: _PNode) -> int:

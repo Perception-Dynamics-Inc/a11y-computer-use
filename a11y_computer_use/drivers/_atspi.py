@@ -23,6 +23,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
 import html
 import math
 import os
@@ -4656,6 +4657,8 @@ class ATSPIAccessor:
         #: ``(parent, fetched, total)`` for each parent read past its fetch
         #: window, so ``find`` can scan the rest by name without a re-walk.
         self.hidden_parents: list[tuple[object, int, int]] = []
+        # Names the pruner's per-parent cap folded away (#1433).
+        self.capped_titles: list[str] = []
         # Expand-page nodes the pruner must keep even when their box is
         # below the viewport. Empty on a normal snapshot.
         self._page_keep: set[object] = set()
@@ -5297,6 +5300,12 @@ class ATSPIAccessor:
             return browser_frame_view(node, self._browser_chrome_cache, role_str=role_str)
         except Exception:
             return False
+
+    def note_capped(self, nodes) -> None:
+        """Record names of children the pruner's per-parent cap dropped."""
+        from a11y_computer_use.observe import capped_titles
+
+        self.capped_titles.extend(capped_titles(nodes))
 
     def _note_unlisted(self, node: object, count: int) -> None:
         if count > 0:
@@ -10434,6 +10443,236 @@ def entry_text_and_caret(acc) -> tuple[str, int] | None:
     return text, caret
 
 
+def entry_text_and_selection(acc) -> tuple[str, int, int] | None:
+    """(text, selection start, selection end) of an entry with a non-empty
+    selection, read fresh; None when there is none or it cannot be read."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    if nchars != len(text):
+        return None
+    _caret, start, end = _caret_and_selection(acc, nchars)
+    if start == end:
+        return None
+    return text, start, end
+
+
+_QT_KEY_EDIT_POLLS = 10
+_QT_KEY_EDIT_PAUSE_S = 0.05
+
+
+def qt_line_edit(acc) -> bool:
+    """A Qt single-line editable text field (QLineEdit, #1418).
+
+    Qt emits ``textEdited`` only for keyboard input. An AT-SPI EditableText
+    write changes the text without it, and widgets that listen only to user
+    edits (QColorDialog's "HTML:" field) ignore the value.
+
+    Real Qt 6 (6.11/6.12, probed over the AT-SPI bus) exposes a QLineEdit as
+    role ``text`` with EDITABLE, ENABLED, FOCUSABLE, SENSITIVE, SHOWING and
+    VISIBLE, and with neither SINGLE_LINE nor MULTI_LINE; QPlainTextEdit and
+    QTextEdit add MULTI_LINE. A read-only QLineEdit keeps EDITABLE and adds
+    READ_ONLY. The application's toolkit name is ``Qt``. So a single-line Qt
+    field is "not MULTI_LINE", never "has SINGLE_LINE". A password field
+    (masked text) stays on the older path: its read-back cannot be checked.
+    """
+    if acc is None or not _qt_app(acc):
+        return False
+    if _role_name(acc) not in {"text", "entry"}:
+        return False
+    if not _state_has(acc, "EDITABLE") or _state_has(acc, "MULTI_LINE"):
+        return False
+    if _state_has(acc, "READ_ONLY"):
+        return False
+    if _editable_iface(acc) is None:
+        return False
+    return not bool(_safe(lambda: is_secure(acc)))
+
+
+def _qt_text_state(acc) -> tuple[str, int, int, int] | None:
+    """(text, caret, selection start, selection end) read fresh, else None."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    # Qt counts and offsets are UTF-16 code units: "a😀b" is 4 units, 3
+    # Python characters (the CI live failure on bb9b7f4a). Offsets are
+    # converted to Python indices; one inside a surrogate pair is unreadable.
+    if nchars != _utf16_length(text):
+        return None
+    caret, start, end = _caret_and_selection(acc, nchars)
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (caret, start, end)):
+        return None
+    if nchars != len(text):
+        try:
+            caret, start, end = (_qt_python_offset(text, v) for v in (caret, start, end))
+        except Exception:
+            return None
+    return text, caret, start, end
+
+
+def _qt_wait_state(acc, ok) -> tuple[str, int, int, int] | None:
+    """Poll the field until ``ok(state)``; the last state read, or None."""
+    state = None
+    for _ in range(_QT_KEY_EDIT_POLLS):
+        state = _qt_text_state(acc)
+        if state is not None and ok(state):
+            return state
+        time.sleep(_QT_KEY_EDIT_PAUSE_S)
+    return None
+
+
+def _qt_select_whole(acc) -> bool:
+    """ctrl+a, then True only when the selection reads back as the whole text."""
+    _chord_into_target(acc, "ctrl+a")
+    return _qt_wait_state(
+        acc, lambda s: s[0] == "" or (s[2], s[3]) == (0, len(s[0]))) is not None
+
+
+def _qt_restore(acc, before: str) -> bool:
+    """Put ``before`` back with the same real-key path; True when it reads back.
+
+    ctrl+a has to select the whole current text before anything is typed;
+    an empty original is restored with BackSpace over that selection.
+    """
+    try:
+        if _full_text(acc) == before:
+            return True
+        if not _qt_select_whole(acc):
+            return False
+        if before:
+            _type_into_target(acc, before)
+        elif _full_text(acc):
+            _chord_into_target(acc, "BackSpace")
+        return _qt_wait_state(acc, lambda s: s[0] == before) is not None
+    except Exception:
+        return False
+
+
+def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = False,
+                      phases: dict | None = None) -> int:
+    """Type ``text`` into a focused Qt line edit as real key events (#1418).
+
+    ``replace`` selects the whole text with ctrl+a first and requires the
+    selection to read back as the whole value before any character is
+    sent. Otherwise (``append``, a ref ``type``, or a ref-less type) the
+    selection and caret are read before any key and the keys land there, as
+    real typing does: a non-empty selection is replaced, and a bare caret
+    inserts at its offset, so the expected read-back is the original with
+    the text inserted at the caret (#1420 review). ``append`` is kept for
+    callers and no longer moves the caret.
+
+    Success is an exact read-back only. Keys pass through the field's
+    validator and input mask, so a rejected or truncated value reads back
+    differently and is refused. After any refusal once keys were sent, the
+    original text is put back through ctrl+a and typing, and ``restored``
+    reports whether it read back. AT-SPI exposes no validator, mask or
+    hasAcceptableInput state for a QLineEdit, so an exact read-back of an
+    intermediate value (for example "#00f" in QColorDialog) is the limit
+    of what can be checked.
+
+    ``phases`` (optional) collects seconds spent in select, keys, readback
+    and restore for the caller's one-line debug timing.
+    """
+    if phases is None:
+        phases = {}
+
+    def tick(name, t0):
+        phases[name] = phases.get(name, 0.0) + time.perf_counter() - t0
+
+    if "\n" in text or "\r" in text or "\t" in text:
+        raise _text_mismatch(
+            "single_line_field",
+            "a Qt single-line field cannot hold a newline or tab; nothing was typed",
+            expected=text,
+            input_sent=False,
+        )
+    if not _x11_keys_available():
+        from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "a Qt line edit only applies keyboard edits, and X11 key input is "
+            "unavailable; nothing was written",
+            detail={"platform": "linux", "reason": "qt_key_input_unavailable",
+                    "outcome": "refused", "input_sent": False},
+        )
+    state = _qt_text_state(acc)
+    if state is None:
+        raise _text_mismatch(
+            "text_unreadable",
+            "the Qt field's text and caret could not be read; nothing was typed",
+            input_sent=False,
+        )
+    before, caret, start, end = state
+
+    def refuse(reason, message, keys_sent, **detail):
+        t0 = time.perf_counter()
+        restored = _qt_restore(acc, before)
+        tick("restore", t0)
+        return _text_mismatch(
+            reason,
+            message + ("; the original text was restored" if restored
+                       else "; the original text could not be restored, check the field"),
+            expected=detail.pop("expected", text),
+            input_sent=True,
+            keys_sent=keys_sent,
+            original=before,
+            restored=restored,
+            **detail,
+        )
+
+    t_sel = time.perf_counter()
+    if replace and before:
+        if not _qt_select_whole(acc):
+            raise refuse("selection_not_whole",
+                         "ctrl+a did not select the field's whole text; no characters were typed",
+                         ["ctrl+a"], actual=_full_text(acc))
+        start, end = 0, len(before)
+    tick("select", t_sel)
+    if start != end:
+        want = before[:start] + text + before[end:]
+    elif replace:
+        want = text
+    else:
+        want = before[:caret] + text + before[caret:]
+    t_keys = time.perf_counter()
+    if text:
+        try:
+            _type_into_target(acc, text)
+        except Exception as exc:
+            from a11y_computer_use.schema import ComputerUseError
+
+            if isinstance(exc, ComputerUseError) and isinstance(exc.detail, dict):
+                if exc.detail.get("input_sent") is not False:
+                    t0 = time.perf_counter()
+                    exc.detail["restored"] = _qt_restore(acc, before)
+                    tick("restore", t0)
+                    exc.detail["original"] = before
+            raise
+    tick("keys", t_keys)
+    t_read = time.perf_counter()
+    got = _full_text(acc)
+    for _ in range(_QT_KEY_EDIT_POLLS):
+        if got == want:
+            tick("readback", t_read)
+            return len(text)
+        time.sleep(_QT_KEY_EDIT_PAUSE_S)
+        got = _full_text(acc)
+    tick("readback", t_read)
+    if got == want:
+        return len(text)
+    raise refuse(
+        "text_mismatch",
+        f"the Qt field read {_excerpt(got)!r} after the keys, not {_excerpt(want)!r} "
+        "(its validator or input mask did not accept the value)",
+        ["ctrl+a", text] if replace and before else [text],
+        expected=want,
+        actual=got,
+    )
+
+
 def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
     """Whether the field still holds its prior text around the typed text.
 
@@ -11115,7 +11354,132 @@ def _focus_on_target(acc) -> bool | None:
         return True
     if _descendant_focused(acc):
         return True
+    if _active_descendant_focused(acc):
+        return True
     return False
+
+
+_ACTIVE_DESCENDANT_ROLES = frozenset({
+    "list item", "option", "table row", "row", "tree item", "menu item", "table cell",
+})
+
+
+def _active_descendant_focused(acc) -> bool:
+    """True when Chrome's focus is the target's ``aria-activedescendant`` (#1430).
+
+    With ``aria-activedescendant`` set, Chrome moves AT-SPI ``FOCUSED`` to
+    the active option while DOM focus and the caret stay in the input. Only
+    a Chromium editable counts, and only an option-like node inside a popup
+    the input itself controls or owns (CONTROLLER_FOR / NODE_PARENT_OF). A
+    focused node anywhere else is still focus loss.
+    """
+    if not _chromium_app(acc) or not _state_has(acc, "EDITABLE"):
+        return False
+    for kind in ("controller_for", "node_parent_of"):
+        try:
+            popups = _relation_targets(acc, kind)
+        except Exception:  # noqa: BLE001 - unreadable relations are not focus
+            continue
+        for popup in popups[:4]:
+            for hit in _focused_accessibles(popup, limit=2):
+                if hit is None or _ancestor_key(hit) == _ancestor_key(popup):
+                    continue
+                if _role_name(hit) in _ACTIVE_DESCENDANT_ROLES:
+                    return True
+    return False
+
+
+# A combobox popup rebuilds while it filters. For a moment Chrome can mark
+# the listbox itself focused, an option that is not linked from the input
+# yet, or nothing at all, while DOM focus never left the input (#1430).
+_COMBOBOX_RECONFIRM_POLLS = 6
+_COMBOBOX_RECONFIRM_DELAY_S = 0.025
+
+
+def _combobox_popups(acc) -> list:
+    if not _chromium_app(acc) or not _state_has(acc, "EDITABLE"):
+        return []
+    popups: list = []
+    for kind in ("controller_for", "node_parent_of"):
+        try:
+            popups.extend(_relation_targets(acc, kind)[:4])
+        except Exception:  # noqa: BLE001 - unreadable relations are not focus
+            continue
+    return popups
+
+
+def _within(node, keys: set, limit: int = 64) -> bool:
+    for _ in range(limit):
+        if node is None:
+            return False
+        if _ancestor_key(node) in keys:
+            return True
+        node = _parent_of(node)
+    return False
+
+
+def _web_document_of(acc, limit: int = 256):
+    node = _parent_of(acc)
+    for _ in range(limit):
+        if node is None:
+            return None
+        if _role_name(node) in ("document web", "document frame"):
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def _reconfirm_combobox_focus(acc) -> bool:
+    """Fresh focus reads before a Chromium combobox is declared focus-lost.
+
+    Only a combobox input (a Chromium editable that controls or owns a
+    popup) is re-checked. Each poll re-reads the input's own FOCUSED state
+    and its active descendant, then the focused nodes in its web document:
+    * focus on a node outside the input and its popups is a real loss and
+      returns False at once (the guard is unchanged);
+    * focus on the popup itself or anywhere inside it, an unlinked option,
+      or no focused node at all is the popup rebuilding, so poll again.
+    Focus that stays inside the popup counts as the input's. Focus that is
+    still on an unlinked option or on nothing once the polls run out is a loss.
+    """
+    popups = _combobox_popups(acc)
+    if not popups:
+        return False
+    for attempt in range(_COMBOBOX_RECONFIRM_POLLS):
+        if attempt:
+            time.sleep(_COMBOBOX_RECONFIRM_DELAY_S)
+        if _focus_on_target(acc):
+            return True
+        popups = _combobox_popups(acc) or popups
+        keys = {_ancestor_key(p) for p in popups} | {_ancestor_key(acc)}
+        doc = _web_document_of(acc)
+        hits = [h for h in _focused_accessibles(doc, limit=4) if h is not None
+                and (doc is None or _ancestor_key(h) != _ancestor_key(doc))]
+        inside = [h for h in hits if _within(h, keys)]
+        if hits and len(inside) == len(hits):
+            return True
+        stray = [h for h in hits if h not in inside]
+        if any(_role_name(h) not in _ACTIVE_DESCENDANT_ROLES for h in stray):
+            return False  # focus moved to another control: real loss
+    return False
+
+
+def _partial_type_error(acc, sent: int, total: int):
+    """Focus loss after ``sent`` keystrokes: say so, with the field's value."""
+    shown = _safe(lambda: _readable_text(acc))
+    message = (
+        f"typed {sent} of {total} characters, then focus left the target; "
+        f"the rest was not sent. Current value: {shown!r}"
+        if shown is not None else
+        f"typed {sent} of {total} characters, then focus left the target; "
+        "the rest was not sent. The current value could not be read"
+    )
+    err = _focus_lost_error(message)
+    err.detail.update({
+        "partial": True, "sent": sent,
+        "requested": total, "value": shown, "next": [],
+    })
+    return err
 
 
 def _confirm_focus_on_target(acc) -> bool:
@@ -11186,12 +11550,11 @@ def _type_into_target(acc, text: str) -> None:
     sent = False
     # One engine switch for the whole string, not one per character (#1219).
     with _linux_ime.ascii_passthrough(text):
-        for ch in text:
-            if _focus_on_target(acc) is False:
+        for count, ch in enumerate(text):
+            if _focus_on_target(acc) is False and not (
+                    sent and _reconfirm_combobox_focus(acc)):
                 if sent:
-                    raise _focus_lost_error(
-                        "focus left the target; stopped before the next keystroke"
-                    )
+                    raise _partial_type_error(acc, count, len(text))
                 raise _focus_lost_error("focus is not on the target; nothing was typed")
             _type_string(ch)
             sent = True
@@ -16846,6 +17209,9 @@ def _clear_number_input(acc) -> bool:
     return False
 
 
+_PEER_LOG = logging.getLogger("a11y_computer_use.peer_fields")
+
+
 _TRACKED_FIELD_ROLES = frozenset({
     "entry", "password text", "combo box", "spin button",
 })
@@ -16870,6 +17236,13 @@ def _under_target(node, target) -> bool:
     """True when ``node`` is ``target`` or sits inside it."""
     current = node
     target_sid = _stable_id(target) or ""
+    if target_sid and _qt_app(target):
+        # Qt 6 derives accessible-id from the objectName/class chain, so two
+        # sibling QLineEdits without object names share one id: the Echo
+        # field's Mirror was taken for the target itself and never tracked
+        # as a peer (#1420 review). Qt objects keep a stable bus path, so
+        # only identity counts there.
+        target_sid = ""
     target_role = _role_name(target)
     for _ in range(10):
         if current is None:
@@ -16887,7 +17260,8 @@ def _field_walk_root(acc):
     """The document or frame that holds ``acc`` and its sibling fields."""
     node = acc
     document = None
-    frame = acc
+    frame = None
+    top = None
     seen_keys: set = set()
     for _ in range(_FULL_ANCESTRY_MAX):
         if node is not None:
@@ -16900,13 +17274,21 @@ def _field_walk_root(acc):
             break
         role = _role_name(parent)
         if role == "application":
+            top = node
             break
         if role in {"document web", "document frame"}:
             document = parent
         if role in {"frame", "window", "dialog"}:
             frame = parent
         node = parent
-    return document or frame
+    if document is not None or frame is not None:
+        return document or frame
+    # A frameless top level, e.g. a bare QWidget exposed as 'filler' right
+    # under 'application' (#1420 review): its fields are peers too. Never the
+    # target itself, and never the whole application.
+    if top is not None and top is not acc:
+        return top
+    return None
 
 
 def _collect_peer_fields(acc) -> dict[str, str]:
@@ -16948,9 +17330,15 @@ def _collect_peer_fields(acc) -> dict[str, str]:
 def peer_field_texts(acc) -> dict[str, str]:
     """Peer field text before a set_value. Empty when the tree cannot be read."""
     try:
-        return _collect_peer_fields(acc)
+        found = _collect_peer_fields(acc)
     except Exception:
+        _PEER_LOG.debug("peer field snapshot failed")
         return {}
+    if not found:
+        root = _field_walk_root(acc) if acc is not None else None
+        _PEER_LOG.debug("peer field snapshot empty root=%s",
+                        _role_name(root) if root is not None else None)
+    return found
 
 
 def changed_peer_fields(acc, before: dict) -> list[str]:
@@ -16965,7 +17353,10 @@ def changed_peer_fields(acc, before: dict) -> list[str]:
         return []
     changed: list[str] = []
     for key, old in before.items():
-        if key not in after or after[key] == old:
+        if key not in after:
+            _PEER_LOG.debug("peer field missing after edit key=%s", key)
+            continue
+        if after[key] == old:
             continue
         new = after[key]
         changed.append(f"{key}: {old!r} -> {new!r}"[:180])
@@ -18947,6 +19338,14 @@ def _refuse_model_editor_replace(acc) -> None:
     or its formatting. Match exact class tokens reported by AT-SPI, including
     empty editors, rather than treating every ARIA textbox as a model editor.
     """
+    if code_editor_container(acc) is not None:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "set_value cannot replace a code editor's model through its hidden input "
+            "textarea; nothing was changed. Click the editor, select the text with "
+            "keyboard shortcuts, then use type; its result is reported unverified",
+            detail={"reason": "code_editor_replace_unsafe", "unchanged": True},
+        )
     if not _model_editor_surface(acc):
         return
     raise ComputerUseError(
@@ -20606,6 +21005,30 @@ def far_pin(handle):
     if entry is None or (key[0] == "id" and entry[0] is not handle):
         return None
     return entry[1:]
+
+
+def capped_child_check(handle, identity: tuple, parent_identity: tuple, title: str) -> bool:
+    """True when ``handle`` is still the exact issued child, under its name.
+
+    For a child the pruner's per-parent cap folded out of a later snapshot
+    (#1433). Identity is the bus name and object path of the child and of
+    its parent, never an index. Reads the child's state, name and parent.
+    """
+    if handle is None or not identity or not parent_identity:
+        return False
+    if _atspi_wrapper_key(handle) != tuple(identity):
+        return False
+    if accessible_gone(handle):
+        return False
+    try:
+        if not _state_has(handle, "SHOWING"):
+            return False
+    except Exception:
+        return False
+    if (_node_name(handle) or "") != (title or ""):
+        return False
+    parent = _parent_of(handle)
+    return parent is not None and _atspi_wrapper_key(parent) == tuple(parent_identity)
 
 
 def far_child_check(handle, pin=None) -> str | None:
@@ -22393,26 +22816,126 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     if document is None:
         return None
     target_key = _ancestor_key(acc)
+    editor = code_editor_container(acc)
     node = document
     seen: set[object] = set()
     pinned = []
+    # A hit inside the textarea's own code editor is accepted only at the
+    # deepest node: a shallower in-editor hit can still descend onto a
+    # find or suggest widget, which refuses.
+    in_editor = False
     for _ in range(32):
         key = _ancestor_key(node)
         if key in seen:
-            return False
+            return in_editor
         seen.add(key)
         pinned.append(node)
         comp = _component(node)
         if comp is None:
-            return False
+            return in_editor
         hit = _hit_at(comp, x, y)
         if hit is None:
-            return False
+            return in_editor
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
             return True
+        if editor is not None:
+            if _hit_in_code_editor(hit, editor):
+                in_editor = True
+                node = hit
+                continue
+            if in_editor:
+                return False
         if _chromium_select_option_at_point(acc, hit, x, y):
             return True
         node = hit
+    return False
+
+
+# Hidden input textarea class -> its editor's container class (#1424).
+# Monaco and Ace keep a 1x1 textarea at the caret under their own line
+# overlays, so the native hit lands on the overlay, never on the textarea.
+_CODE_EDITOR_INPUTS = {
+    "inputarea": "monaco-editor",       # Monaco / VS Code
+    "ace_text-input": "ace_editor",     # Ace
+}
+_CODE_EDITOR_CONTAINERS = frozenset(_CODE_EDITOR_INPUTS.values())
+# A control inside the editor box (find widget, suggest list, hover links)
+# is a different target: a hit on it is never the editor's text surface.
+_CODE_EDITOR_FOREIGN_ROLES = frozenset({
+    "push button", "toggle button", "check box", "radio button", "entry",
+    "password text", "combo box", "link", "list box", "list", "list item",
+    "menu", "menu item", "popup menu", "option", "slider", "spin button",
+    "tool bar", "dialog", "alert",
+})
+
+
+def _class_tokens(acc) -> set[str]:
+    attrs = _safe(lambda: _get_attributes(acc)) or {}
+    return set(str(attrs.get("class") or "").split())
+
+
+def code_editor_container(acc):
+    """The Monaco or Ace container of a hidden code-editor textarea, else None.
+
+    Only the editor's own input textarea qualifies (exact class token), and
+    the container is its nearest ancestor with the matching container class.
+    """
+    if acc is None:
+        return None
+    classes = _class_tokens(acc)
+    wanted = {_CODE_EDITOR_INPUTS[c] for c in classes if c in _CODE_EDITOR_INPUTS}
+    if not wanted:
+        return None
+    for index, node in enumerate(_ancestor_chain(acc, limit=40)):
+        if index == 0:
+            continue
+        role = _role_name(node)
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            return None
+        if _class_tokens(node) & wanted:
+            return node
+    return None
+
+
+# Allowlist: the editor's own text and line layers (#1424). Overlay and
+# content widgets (suggest, find, hover, parameter hints, autocomplete,
+# search, tooltip) are plain divs, so roles cannot tell them apart.
+_CODE_EDITOR_TEXT_LAYERS = {
+    "monaco-editor": frozenset({"view-lines", "view-line", "lines-content"}),
+    "ace_editor": frozenset({"ace_content", "ace_text-layer", "ace_line", "ace_cursor-layer"}),
+}
+_CODE_EDITOR_WIDGETS = frozenset({
+    "suggest-widget", "find-widget", "monaco-hover", "parameter-hints-widget",
+    "context-view", "overlayWidgets", "contentWidgets", "monaco-list",
+    "ace_autocomplete", "ace_search", "ace_tooltip",
+})
+
+
+def _hit_in_code_editor(hit, container) -> bool:
+    """True only when ``hit`` is in ``container``'s own text or line layer.
+
+    Walking up from the hit to the exact container (key identity), a text
+    layer node must be seen. Any editor widget class, a foreign control
+    role, or another code-editor container on the way refuses the hit.
+    """
+    container_key = _ancestor_key(container)
+    layers = frozenset().union(*(
+        _CODE_EDITOR_TEXT_LAYERS[c] for c in _class_tokens(container) if c in _CODE_EDITOR_TEXT_LAYERS
+    ))
+    in_layer = False
+    for node in _ancestor_chain(hit, limit=40):
+        if _ancestor_key(node) == container_key:
+            return in_layer
+        classes = _class_tokens(node)
+        if classes & _CODE_EDITOR_WIDGETS or classes & _CODE_EDITOR_CONTAINERS:
+            return False
+        role = _role_name(node)
+        if role in _CODE_EDITOR_FOREIGN_ROLES:
+            return False
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            return False
+        if classes & layers:
+            in_layer = True
     return False
 
 
@@ -22443,6 +22966,77 @@ def _occluder_children(node, cap: int):
 def _occluder_haspopup(node) -> bool:
     value = str((_safe(lambda: _get_attributes(node)) or {}).get("haspopup", "") or "")
     return value.strip().lower() not in {"", "false", "0"}
+
+
+def _occluder_owns_target_menu(opener, chain) -> bool:
+    """True when the target sits inside the showing menu ``opener`` opened.
+
+    An opener without ``aria-controls`` (the WAI-ARIA APG menubar) has no
+    ``controller_for`` relation, but its menu is structurally owned: a
+    child of the opener, or a sibling under the opener's parent. Decide by
+    the target's own ancestor chain, so a menu elsewhere on the page that
+    this opener opened is still unlocated and fails closed (#1412).
+    """
+    opener_key = _ancestor_key(opener)
+    parent = _safe(lambda: _call_first(opener, ("get_parent", "getParent")))
+    owner_keys = {opener_key}
+    if parent is not None:
+        owner_keys.add(_ancestor_key(parent))
+    for index, node in enumerate(chain[:-1]):
+        if _ancestor_key(node) == opener_key:
+            return False  # the target is the opener itself or inside it
+        if (_role_name(node) in _OCCLUDER_MENU_ROLES
+                and _state_has(node, "SHOWING")
+                and _ancestor_key(chain[index + 1]) in owner_keys):
+            return True
+    return False
+
+
+def _occluder_menubar_of(chain):
+    """Key of the nearest ``menu bar`` above ``chain[0]``, None when a menu
+    lies in between (the node is inside a dropdown, not on the bar)."""
+    for node in chain[1:]:
+        role = _role_name(node)
+        if role == "menu bar":
+            return _ancestor_key(node)
+        if role in _OCCLUDER_MENU_ROLES or role in {"document web", "document frame"}:
+            return None
+    return None
+
+
+def _occluder_sibling_bar_menus(opener, chain):
+    """The opener's own showing menus when the target is a sibling item on
+    the same menu bar (#1417), else None.
+
+    An APG opener without ``aria-controls`` has no ``controller_for``, but
+    its menu is structurally owned: a child of the opener or a sibling under
+    the opener's parent. A top-level sibling item is outside that menu, so
+    the menu covers it only where its real bounds overlap the point; the
+    caller checks those bounds. None (fail closed) when the target is not a
+    menu item on the opener's bar or the opener's menu cannot be located.
+    """
+    if not chain or _role_name(chain[0]) != "menu item":
+        return None
+    opener_key = _ancestor_key(opener)
+    if _ancestor_key(chain[0]) == opener_key:
+        return None
+    bar = _occluder_menubar_of(chain)
+    if bar is None:
+        return None
+    opener_chain = list(_ancestor_chain(opener))
+    if _occluder_menubar_of(opener_chain) != bar:
+        return None
+    parent = _safe(lambda: _call_first(opener, ("get_parent", "getParent")))
+    menus = []
+    for owner in (opener, parent):
+        if owner is None:
+            continue
+        kids = _occluder_children(owner, _OCCLUDER_WIDE)
+        if kids is None:
+            return None
+        menus.extend(kid for kid in kids
+                     if _role_name(kid) in _OCCLUDER_MENU_ROLES and _state_has(kid, "SHOWING"))
+    return menus or None
 
 
 def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
@@ -22551,6 +23145,12 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
         menus = [m for m in _safe(lambda o=opener: _relation_targets(o, "controller_for")) or []
                  if _role_name(m) in _OCCLUDER_MENU_ROLES | {"list box"}]
         if not menus:
+            if _occluder_owns_target_menu(opener, chain):
+                continue  # the target is inside this opener's own menu (#1412)
+            own = _occluder_sibling_bar_menus(opener, chain)
+            if own:
+                candidates.extend(own)  # bounds decide, below (#1417)
+                continue
             return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
         candidates.extend(menus)
     if not candidates:
