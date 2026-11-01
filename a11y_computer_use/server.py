@@ -8141,6 +8141,10 @@ class Runtime:
                 had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
             )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        dependent = getattr(self.driver, "_qt_dependent_changes", None)
+        if isinstance(dependent, list) and dependent:
+            # #1420: other fields the app changed in reaction to the edit.
+            note.append("; dependent_fields_changed: " + "; ".join(map(str, dependent)))
         return self._conclude(
             f"typed {shown} characters into {ref}{''.join(note)}",
             tool="type", app=gate, before=before, element=live, requested=text,
@@ -12299,7 +12303,8 @@ def build_server(
         argument is invalid_arguments and no text is sent. A ref type into
         a single-line entry appends at the end of its text: focus selects
         the whole text in GTK, and that selection is dropped, never typed
-        over (use set_value to replace). With app=<bundle
+        over (use set_value to replace). A Qt line edit is the exception: a
+        non-empty selection there is replaced, and a bare caret inserts at the caret, as real typing does. With app=<bundle
         id or name> on macOS the keystrokes are addressed to that app's
         process: it need not be frontmost, nothing is activated, and the
         user's screen stays where it is. On Linux, app= resolves that app's

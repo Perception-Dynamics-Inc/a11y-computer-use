@@ -23,6 +23,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
 import html
 import math
 import os
@@ -10449,6 +10450,221 @@ def entry_text_and_selection(acc) -> tuple[str, int, int] | None:
     return text, start, end
 
 
+_QT_KEY_EDIT_POLLS = 10
+_QT_KEY_EDIT_PAUSE_S = 0.05
+
+
+def qt_line_edit(acc) -> bool:
+    """A Qt single-line editable text field (QLineEdit, #1418).
+
+    Qt emits ``textEdited`` only for keyboard input. An AT-SPI EditableText
+    write changes the text without it, and widgets that listen only to user
+    edits (QColorDialog's "HTML:" field) ignore the value.
+
+    Real Qt 6 (6.11/6.12, probed over the AT-SPI bus) exposes a QLineEdit as
+    role ``text`` with EDITABLE, ENABLED, FOCUSABLE, SENSITIVE, SHOWING and
+    VISIBLE, and with neither SINGLE_LINE nor MULTI_LINE; QPlainTextEdit and
+    QTextEdit add MULTI_LINE. A read-only QLineEdit keeps EDITABLE and adds
+    READ_ONLY. The application's toolkit name is ``Qt``. So a single-line Qt
+    field is "not MULTI_LINE", never "has SINGLE_LINE". A password field
+    (masked text) stays on the older path: its read-back cannot be checked.
+    """
+    if acc is None or not _qt_app(acc):
+        return False
+    if _role_name(acc) not in {"text", "entry"}:
+        return False
+    if not _state_has(acc, "EDITABLE") or _state_has(acc, "MULTI_LINE"):
+        return False
+    if _state_has(acc, "READ_ONLY"):
+        return False
+    if _editable_iface(acc) is None:
+        return False
+    return not bool(_safe(lambda: is_secure(acc)))
+
+
+def _qt_text_state(acc) -> tuple[str, int, int, int] | None:
+    """(text, caret, selection start, selection end) read fresh, else None."""
+    text = _full_text(acc)
+    nchars = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if text is None or not isinstance(nchars, int) or isinstance(nchars, bool):
+        return None
+    # Qt counts and offsets are UTF-16 code units: "a😀b" is 4 units, 3
+    # Python characters (the CI live failure on bb9b7f4a). Offsets are
+    # converted to Python indices; one inside a surrogate pair is unreadable.
+    if nchars != _utf16_length(text):
+        return None
+    caret, start, end = _caret_and_selection(acc, nchars)
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (caret, start, end)):
+        return None
+    if nchars != len(text):
+        try:
+            caret, start, end = (_qt_python_offset(text, v) for v in (caret, start, end))
+        except Exception:
+            return None
+    return text, caret, start, end
+
+
+def _qt_wait_state(acc, ok) -> tuple[str, int, int, int] | None:
+    """Poll the field until ``ok(state)``; the last state read, or None."""
+    state = None
+    for _ in range(_QT_KEY_EDIT_POLLS):
+        state = _qt_text_state(acc)
+        if state is not None and ok(state):
+            return state
+        time.sleep(_QT_KEY_EDIT_PAUSE_S)
+    return None
+
+
+def _qt_select_whole(acc) -> bool:
+    """ctrl+a, then True only when the selection reads back as the whole text."""
+    _chord_into_target(acc, "ctrl+a")
+    return _qt_wait_state(
+        acc, lambda s: s[0] == "" or (s[2], s[3]) == (0, len(s[0]))) is not None
+
+
+def _qt_restore(acc, before: str) -> bool:
+    """Put ``before`` back with the same real-key path; True when it reads back.
+
+    ctrl+a has to select the whole current text before anything is typed;
+    an empty original is restored with BackSpace over that selection.
+    """
+    try:
+        if _full_text(acc) == before:
+            return True
+        if not _qt_select_whole(acc):
+            return False
+        if before:
+            _type_into_target(acc, before)
+        elif _full_text(acc):
+            _chord_into_target(acc, "BackSpace")
+        return _qt_wait_state(acc, lambda s: s[0] == before) is not None
+    except Exception:
+        return False
+
+
+def qt_line_edit_keys(acc, text: str, *, replace: bool = False, append: bool = False,
+                      phases: dict | None = None) -> int:
+    """Type ``text`` into a focused Qt line edit as real key events (#1418).
+
+    ``replace`` selects the whole text with ctrl+a first and requires the
+    selection to read back as the whole value before any character is
+    sent. Otherwise (``append``, a ref ``type``, or a ref-less type) the
+    selection and caret are read before any key and the keys land there, as
+    real typing does: a non-empty selection is replaced, and a bare caret
+    inserts at its offset, so the expected read-back is the original with
+    the text inserted at the caret (#1420 review). ``append`` is kept for
+    callers and no longer moves the caret.
+
+    Success is an exact read-back only. Keys pass through the field's
+    validator and input mask, so a rejected or truncated value reads back
+    differently and is refused. After any refusal once keys were sent, the
+    original text is put back through ctrl+a and typing, and ``restored``
+    reports whether it read back. AT-SPI exposes no validator, mask or
+    hasAcceptableInput state for a QLineEdit, so an exact read-back of an
+    intermediate value (for example "#00f" in QColorDialog) is the limit
+    of what can be checked.
+
+    ``phases`` (optional) collects seconds spent in select, keys, readback
+    and restore for the caller's one-line debug timing.
+    """
+    if phases is None:
+        phases = {}
+
+    def tick(name, t0):
+        phases[name] = phases.get(name, 0.0) + time.perf_counter() - t0
+
+    if "\n" in text or "\r" in text or "\t" in text:
+        raise _text_mismatch(
+            "single_line_field",
+            "a Qt single-line field cannot hold a newline or tab; nothing was typed",
+            expected=text,
+            input_sent=False,
+        )
+    if not _x11_keys_available():
+        from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "a Qt line edit only applies keyboard edits, and X11 key input is "
+            "unavailable; nothing was written",
+            detail={"platform": "linux", "reason": "qt_key_input_unavailable",
+                    "outcome": "refused", "input_sent": False},
+        )
+    state = _qt_text_state(acc)
+    if state is None:
+        raise _text_mismatch(
+            "text_unreadable",
+            "the Qt field's text and caret could not be read; nothing was typed",
+            input_sent=False,
+        )
+    before, caret, start, end = state
+
+    def refuse(reason, message, keys_sent, **detail):
+        t0 = time.perf_counter()
+        restored = _qt_restore(acc, before)
+        tick("restore", t0)
+        return _text_mismatch(
+            reason,
+            message + ("; the original text was restored" if restored
+                       else "; the original text could not be restored, check the field"),
+            expected=detail.pop("expected", text),
+            input_sent=True,
+            keys_sent=keys_sent,
+            original=before,
+            restored=restored,
+            **detail,
+        )
+
+    t_sel = time.perf_counter()
+    if replace and before:
+        if not _qt_select_whole(acc):
+            raise refuse("selection_not_whole",
+                         "ctrl+a did not select the field's whole text; no characters were typed",
+                         ["ctrl+a"], actual=_full_text(acc))
+        start, end = 0, len(before)
+    tick("select", t_sel)
+    if start != end:
+        want = before[:start] + text + before[end:]
+    elif replace:
+        want = text
+    else:
+        want = before[:caret] + text + before[caret:]
+    t_keys = time.perf_counter()
+    if text:
+        try:
+            _type_into_target(acc, text)
+        except Exception as exc:
+            from a11y_computer_use.schema import ComputerUseError
+
+            if isinstance(exc, ComputerUseError) and isinstance(exc.detail, dict):
+                if exc.detail.get("input_sent") is not False:
+                    t0 = time.perf_counter()
+                    exc.detail["restored"] = _qt_restore(acc, before)
+                    tick("restore", t0)
+                    exc.detail["original"] = before
+            raise
+    tick("keys", t_keys)
+    t_read = time.perf_counter()
+    got = _full_text(acc)
+    for _ in range(_QT_KEY_EDIT_POLLS):
+        if got == want:
+            tick("readback", t_read)
+            return len(text)
+        time.sleep(_QT_KEY_EDIT_PAUSE_S)
+        got = _full_text(acc)
+    tick("readback", t_read)
+    if got == want:
+        return len(text)
+    raise refuse(
+        "text_mismatch",
+        f"the Qt field read {_excerpt(got)!r} after the keys, not {_excerpt(want)!r} "
+        "(its validator or input mask did not accept the value)",
+        ["ctrl+a", text] if replace and before else [text],
+        expected=want,
+        actual=got,
+    )
+
+
 def entry_kept_prior_text(acc, before: tuple[str, int], typed: str) -> bool:
     """Whether the field still holds its prior text around the typed text.
 
@@ -16861,6 +17077,9 @@ def _clear_number_input(acc) -> bool:
     return False
 
 
+_PEER_LOG = logging.getLogger("a11y_computer_use.peer_fields")
+
+
 _TRACKED_FIELD_ROLES = frozenset({
     "entry", "password text", "combo box", "spin button",
 })
@@ -16885,6 +17104,13 @@ def _under_target(node, target) -> bool:
     """True when ``node`` is ``target`` or sits inside it."""
     current = node
     target_sid = _stable_id(target) or ""
+    if target_sid and _qt_app(target):
+        # Qt 6 derives accessible-id from the objectName/class chain, so two
+        # sibling QLineEdits without object names share one id: the Echo
+        # field's Mirror was taken for the target itself and never tracked
+        # as a peer (#1420 review). Qt objects keep a stable bus path, so
+        # only identity counts there.
+        target_sid = ""
     target_role = _role_name(target)
     for _ in range(10):
         if current is None:
@@ -16902,7 +17128,8 @@ def _field_walk_root(acc):
     """The document or frame that holds ``acc`` and its sibling fields."""
     node = acc
     document = None
-    frame = acc
+    frame = None
+    top = None
     seen_keys: set = set()
     for _ in range(_FULL_ANCESTRY_MAX):
         if node is not None:
@@ -16915,13 +17142,21 @@ def _field_walk_root(acc):
             break
         role = _role_name(parent)
         if role == "application":
+            top = node
             break
         if role in {"document web", "document frame"}:
             document = parent
         if role in {"frame", "window", "dialog"}:
             frame = parent
         node = parent
-    return document or frame
+    if document is not None or frame is not None:
+        return document or frame
+    # A frameless top level, e.g. a bare QWidget exposed as 'filler' right
+    # under 'application' (#1420 review): its fields are peers too. Never the
+    # target itself, and never the whole application.
+    if top is not None and top is not acc:
+        return top
+    return None
 
 
 def _collect_peer_fields(acc) -> dict[str, str]:
@@ -16963,9 +17198,15 @@ def _collect_peer_fields(acc) -> dict[str, str]:
 def peer_field_texts(acc) -> dict[str, str]:
     """Peer field text before a set_value. Empty when the tree cannot be read."""
     try:
-        return _collect_peer_fields(acc)
+        found = _collect_peer_fields(acc)
     except Exception:
+        _PEER_LOG.debug("peer field snapshot failed")
         return {}
+    if not found:
+        root = _field_walk_root(acc) if acc is not None else None
+        _PEER_LOG.debug("peer field snapshot empty root=%s",
+                        _role_name(root) if root is not None else None)
+    return found
 
 
 def changed_peer_fields(acc, before: dict) -> list[str]:
@@ -16980,7 +17221,10 @@ def changed_peer_fields(acc, before: dict) -> list[str]:
         return []
     changed: list[str] = []
     for key, old in before.items():
-        if key not in after or after[key] == old:
+        if key not in after:
+            _PEER_LOG.debug("peer field missing after edit key=%s", key)
+            continue
+        if after[key] == old:
             continue
         new = after[key]
         changed.append(f"{key}: {old!r} -> {new!r}"[:180])
