@@ -8997,6 +8997,65 @@ def _chrome_table_failure(driver, proc, shot, *, phase, samples) -> str:
     return json.dumps(evidence, default=str, ensure_ascii=True)
 
 
+def _chrome_atspi_root_counts(pid):
+    """Read Chrome's AT-SPI app roots straight off the a11y bus (#1242).
+
+    Independent of the driver and its caches: ask the session bus for the
+    a11y bus address, list the registry's applications, and report each
+    app with ``pid``'s ChildCount. Diagnostic only; never raises.
+    """
+    try:
+        from gi.repository import Gio, GLib
+
+        session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        address = session.call_sync(
+            "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress",
+            None, GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 2000, None,
+        ).unpack()[0]
+        bus = Gio.DBusConnection.new_for_address_sync(
+            address,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None,
+        )
+
+        def prop(name, path, iface, key):
+            return bus.call_sync(
+                name, path, "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", (iface, key)), GLib.VariantType.new("(v)"),
+                Gio.DBusCallFlags.NONE, 2000, None,
+            ).unpack()[0]
+
+        apps = bus.call_sync(
+            "org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root",
+            "org.a11y.atspi.Accessible", "GetChildren", None,
+            GLib.VariantType.new("(a(so))"), Gio.DBusCallFlags.NONE, 2000, None,
+        ).unpack()[0]
+        out = []
+        for name, path in apps:
+            row = {"bus_name": name, "path": path}
+            try:
+                row["pid"] = bus.call_sync(
+                    "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+                    GLib.Variant("(s)", (name,)), GLib.VariantType.new("(u)"),
+                    Gio.DBusCallFlags.NONE, 2000, None,
+                ).unpack()[0]
+            except Exception as exc:
+                row["pid"] = f"{type(exc).__name__}: {exc}"
+            if row["pid"] != pid:
+                continue
+            for key in ("Name", "ChildCount"):
+                try:
+                    row[key] = prop(name, path, "org.a11y.atspi.Accessible", key)
+                except Exception as exc:
+                    row[key] = f"{type(exc).__name__}: {exc}"
+            out.append(row)
+        return {"registry_apps": len(apps), "chrome_roots": out}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_path) -> None:
     """Find row 300 of a long document table and click that row's button.
 
@@ -9036,16 +9095,46 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
     )
     profile = tmp_path / "chrome-rowtable-profile"
     profile.mkdir()
+    from pathlib import Path
+
+    # #1242 diagnostics: Chrome's accessibility logging goes to a file that
+    # CI uploads as an artifact on failure (A11Y_DIAG_DIR). No behaviour flag.
+    diag_dir = Path(os.environ.get("A11Y_DIAG_DIR") or tmp_path) / "chrome-1242"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    chrome_log = diag_dir / "chrome-stderr.log"
+    root_counts: list[dict] = []
+    log_file = open(chrome_log, "wb")
     proc = subprocess.Popen(
         [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
             "--password-store=basic",
+            "--enable-logging=stderr", "--v=0",
+            "--vmodule=*accessibility*=1,*atk*=1,*atspi*=1",
             f"--user-data-dir={profile}", "--window-size=1000,700",
             page.resolve().as_uri(),
         ],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=log_file,
     )
+
+    def record_roots(phase: str) -> None:
+        root_counts.append({"phase": phase, "t": round(time.monotonic(), 3),
+                            **_chrome_atspi_root_counts(proc.pid)})
+
+    def diag_tail() -> str:
+        import json
+
+        record_roots("failure")
+        (diag_dir / "atspi-root-counts.json").write_text(json.dumps(root_counts, indent=1))
+        try:
+            log_file.flush()
+            tail = chrome_log.read_bytes()[-4000:].decode("utf-8", "replace")
+        except Exception as exc:
+            tail = f"{type(exc).__name__}: {exc}"
+        return json.dumps({"atspi_root_counts": root_counts,
+                           "chrome_log": str(chrome_log), "chrome_log_tail": tail},
+                          default=str, ensure_ascii=True)
+
     try:
         def wait_at_top(timeout: float, phase: str) -> None:
             started = time.monotonic()
@@ -9079,6 +9168,7 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
             )
             raise AssertionError(
                 f"Chrome did not show the top of the table without ROW-0300: {shown}; {evidence}"
+                f"; diag {diag_tail()}"
             )
 
         wait_at_top(45, "initial launch")
@@ -9087,7 +9177,9 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
         for _pass in range(4):
             if _pass:
                 runtime.key("f5")
+                record_roots(f"after F5 {_pass}")
                 wait_at_top(30, f"reload {_pass}")
+            record_roots(f"at top, pass {_pass}")
             found = runtime.scroll_to_find(
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
                 budget_s=90,
@@ -9121,8 +9213,13 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
             assert clicked is not None, driver.windows()
             seen += 1
         assert seen == 4
+    except AssertionError as exc:
+        if "; diag {" in str(exc):
+            raise
+        raise AssertionError(f"{exc}; diag {diag_tail()}") from exc
     finally:
         _stop(proc)
+        log_file.close()
 
 
 def test_linux_chrome_folded_table_find_and_expand(tmp_path) -> None:
