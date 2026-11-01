@@ -4657,6 +4657,8 @@ class ATSPIAccessor:
         #: ``(parent, fetched, total)`` for each parent read past its fetch
         #: window, so ``find`` can scan the rest by name without a re-walk.
         self.hidden_parents: list[tuple[object, int, int]] = []
+        # Names the pruner's per-parent cap folded away (#1433).
+        self.capped_titles: list[str] = []
         # Expand-page nodes the pruner must keep even when their box is
         # below the viewport. Empty on a normal snapshot.
         self._page_keep: set[object] = set()
@@ -5298,6 +5300,12 @@ class ATSPIAccessor:
             return browser_frame_view(node, self._browser_chrome_cache, role_str=role_str)
         except Exception:
             return False
+
+    def note_capped(self, nodes) -> None:
+        """Record names of children the pruner's per-parent cap dropped."""
+        from a11y_computer_use.observe import capped_titles
+
+        self.capped_titles.extend(capped_titles(nodes))
 
     def _note_unlisted(self, node: object, count: int) -> None:
         if count > 0:
@@ -20873,6 +20881,30 @@ def far_pin(handle):
     if entry is None or (key[0] == "id" and entry[0] is not handle):
         return None
     return entry[1:]
+
+
+def capped_child_check(handle, identity: tuple, parent_identity: tuple, title: str) -> bool:
+    """True when ``handle`` is still the exact issued child, under its name.
+
+    For a child the pruner's per-parent cap folded out of a later snapshot
+    (#1433). Identity is the bus name and object path of the child and of
+    its parent, never an index. Reads the child's state, name and parent.
+    """
+    if handle is None or not identity or not parent_identity:
+        return False
+    if _atspi_wrapper_key(handle) != tuple(identity):
+        return False
+    if accessible_gone(handle):
+        return False
+    try:
+        if not _state_has(handle, "SHOWING"):
+            return False
+    except Exception:
+        return False
+    if (_node_name(handle) or "") != (title or ""):
+        return False
+    parent = _parent_of(handle)
+    return parent is not None and _atspi_wrapper_key(parent) == tuple(parent_identity)
 
 
 def far_child_check(handle, pin=None) -> str | None:
