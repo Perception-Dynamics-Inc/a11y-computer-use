@@ -12194,6 +12194,21 @@ def _keyed_write_mismatch(acc, text: str, original: str | None, *, restored: boo
             next=["type", "ref"],
             evidence=evidence,
         )
+    if not restored:
+        # The field holds neither the typed value (or its formatted or
+        # truncated form, kept earlier) nor its original: the page put
+        # something else there, e.g. "zzz". That is a failure, not progress.
+        return _text_mismatch(
+            "text_mismatch",
+            f"set_value could not set {text!r}: the field now reads {_excerpt(now)!r}, "
+            "which is not the value sent; input was sent to the page. Retry with "
+            "type(ref) and check the field before submitting",
+            input_sent=True,
+            restored=False,
+            outcome="refused",
+            next=["type", "ref"],
+            evidence=evidence,
+        )
     return _text_mismatch(
         "text_mismatch",
         f"the value read back does not match {text!r}; input was sent to the page",

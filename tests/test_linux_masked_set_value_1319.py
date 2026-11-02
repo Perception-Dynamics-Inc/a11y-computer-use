@@ -114,3 +114,26 @@ def test_formatted_render_with_a_different_dom_value_is_not_kept(monkeypatch):
         _atspi._replace_with_keys(object(), "5551234567")
     assert exc.value.detail["outcome"] != "confirmed"
     assert field.dom_writes == [""]
+
+
+def test_field_that_forces_another_value_fails_closed_with_type_guidance(monkeypatch):
+    """A page that rewrites any input to "zzz" and keeps it (#1445 tester)."""
+    field = _Field("zzz")
+    _wire(monkeypatch, field)
+
+    def sticky(acc, value):
+        field.dom_writes.append(value)
+        field.text = "zzz"
+        return True
+
+    monkeypatch.setattr(_atspi, "chromium_replace_dom_text", sticky)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi._replace_with_keys(object(), "hello")
+    detail = exc.value.detail
+    assert field.text == "zzz"
+    assert detail["reason"] == "text_mismatch"
+    assert detail["outcome"] == "refused"
+    assert detail["input_sent"] is True
+    assert detail["restored"] is False
+    assert "type" in detail["next"]
+    assert "type(ref)" in str(exc.value)
