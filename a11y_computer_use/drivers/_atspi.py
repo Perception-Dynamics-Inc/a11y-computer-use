@@ -26800,3 +26800,71 @@ def scroll_to_point(acc, x: int, y: int) -> bool:
         return False
     coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
     return bool(_call_first(comp, ("scroll_to_point",), coord, int(x), int(y), default=False))
+
+
+def chromium_document_miss(acc, x: int, y: int) -> bool:
+    """True when Chromium's document hit test answers (x, y) with no page node.
+
+    Chromium can answer ``get_accessible_at_point`` on the ``document web``
+    with the document itself (or nothing) at a point over its content: an
+    opacity-0 checkbox (#1468), or a field under a fixed banner (#1346).
+    That answer names no element, so it is a miss, not a cover and not a
+    hit on the ref.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    document = _chromium_document_of(acc)
+    if document is None:
+        return False
+    comp = _component(document)
+    if comp is None:
+        return False
+    hit = _hit_at(comp, x, y)
+    return hit is None or _ancestor_key(hit) == _ancestor_key(document)
+
+
+_GEOMETRY_SKIP_ROLES = frozenset({
+    "document web", "document frame", "frame", "window", "application",
+    "scroll pane", "internal frame",
+})
+
+
+def geometry_cover_at(acc, candidates, x: int, y: int):
+    """A showing page node, unrelated to ``acc``, whose box holds (x, y).
+
+    For when the hit test misses (`chromium_document_miss`). A node that is
+    neither an ancestor nor a descendant of ``acc`` and still contains the
+    point is drawn over it: a sticky header, fixed banner or dialog. The
+    outermost such node is returned; None when there is none.
+    """
+    target_keys = {_ancestor_key(node) for node in _ancestor_chain(acc)}
+    target_key = _ancestor_key(acc)
+    found = []
+    for node in candidates:
+        if node is None:
+            continue
+        role = _role_name(node)
+        if role in _GEOMETRY_SKIP_ROLES or _ancestor_key(node) in target_keys:
+            continue
+        chain = list(_ancestor_chain(node))
+        if any(_ancestor_key(parent) == target_key for parent in chain):
+            continue  # inside the ref itself
+        if not _state_has(node, "SHOWING"):
+            continue
+        pos, size = _extents(node)
+        if pos is None or size is None:
+            continue
+        if pos[0] <= x < pos[0] + size[0] and pos[1] <= y < pos[1] + size[1]:
+            found.append((node, {_ancestor_key(p) for p in chain if p is not node}))
+    keys = {_ancestor_key(node) for node, _ in found}
+    for node, parents in found:
+        if not parents & keys:
+            return node
+    return found[0][0] if found else None
+
+
+def checked_state(acc) -> bool | None:
+    try:
+        return _state_has(acc, "CHECKED")
+    except Exception:
+        return None

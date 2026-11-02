@@ -3566,8 +3566,16 @@ class LinuxDriver:
             cover, center = self._cover_now(handle)
         except Exception:  # noqa: BLE001 - the usual verified click still checks the hit
             return False
-        if cover is None or cover is _atspi.COVER_CLEAR:
+        if cover is _atspi.COVER_CLEAR:
             return False
+        via_geometry = False
+        if cover is None:
+            cover = self._geometry_cover(element, handle, center)
+            if cover is None:
+                return False
+            via_geometry = True
+            if cover is _atspi.COVER_CLEAR:
+                return self._focus_without_pointer(handle)
         last_cover = cover
 
         def placements():
@@ -3589,6 +3597,12 @@ class LinuxDriver:
             deadline = time.monotonic() + self._COVER_SETTLE_S
             while True:
                 cover, center = self._cover_now(handle)
+                if via_geometry and cover is None:
+                    cover = self._geometry_cover(element, handle, center)
+                    if cover is _atspi.COVER_CLEAR:
+                        if self._focus_without_pointer(handle):
+                            return True
+                        break
                 if cover is _atspi.COVER_CLEAR and center is not None:
                     from a11y_computer_use.drivers import _linux_input
 
@@ -3604,6 +3618,88 @@ class LinuxDriver:
                     break
                 time.sleep(0.05)
         raise self._covered_field_error(element, last_cover, handle)
+
+    def _geometry_cover(self, element: Element, handle, center):
+        """When the hit test misses at ``center``: the overlay from the snapshot's boxes.
+
+        None when the hit test did not miss (the answer is just unknown, and
+        the usual verified path decides). A miss with no unrelated snapshot
+        node over the point is `_atspi.COVER_CLEAR`; otherwise the covering
+        node (#1346, #1468).
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if center is None:
+            return None
+        x, y = center
+        try:
+            # Two misses in a row: the first answer at a point is a guess.
+            for _ in range(2):
+                if not self._run(lambda: _atspi.chromium_document_miss(handle, x, y)):
+                    return None
+            held = list(observe._HANDLES.get(element.snapshot_id, {}).values())[:600]
+            cover = self._run(lambda: _atspi.geometry_cover_at(handle, held, x, y))
+        except Exception:  # noqa: BLE001 - unknown keeps the usual verified path
+            return None
+        return _atspi.COVER_CLEAR if cover is None else cover
+
+    def _focus_without_pointer(self, handle) -> bool:
+        """Focus a field through AT-SPI and confirm it; the caller types and reads back."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not self._run(lambda: _atspi.grab_focus(handle)):
+            return False
+        for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
+            if self._run(lambda: _atspi._focus_on_target(handle)) is True:
+                self._focused_editable = handle
+                return True
+            if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
+                time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
+        return False
+
+    _MISS_CHECK_ROLES = frozenset({"AXCheckBox", "AXRadioButton", "AXSwitch"})
+
+    def _click_on_document_miss(self, element: Element, handle, x: int, y: int) -> bool:
+        """A plain click whose hit test names only the document (#1468).
+
+        The ref is pressed through its own AT-SPI action instead of the
+        pointer. A checkbox or radio must then read a changed CHECKED state,
+        or this refuses (the action ran: no pointer input follows). A node
+        drawn over the point in the snapshot's geometry refuses
+        ``covered_by_overlay``. False when the hit test did not miss, so the
+        verified pointer path decides.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        cover = self._geometry_cover(element, handle, (x, y))
+        if cover is None:
+            return False
+        if cover is not _atspi.COVER_CLEAR:
+            raise self._covered_field_error(element, cover, handle, verb="click")
+        checkable = element.role in self._MISS_CHECK_ROLES
+        before = self._run(lambda: _atspi.checked_state(handle)) if checkable else None
+        names = frozenset({"check", "uncheck", "toggle", "click", "press", "activate", "jump"})
+        if not self._run(lambda: _atspi._do_action_named(handle, names)):
+            return False
+        if not checkable:
+            return True
+        for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
+            now = self._run(lambda: _atspi.checked_state(handle))
+            if before is not None and now is not None and now != before:
+                return True
+            if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
+                time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role} {element.title!r}) was pressed through its "
+            "accessibility action (the page hit test names no element there), but its "
+            "checked state did not change; no pointer click was sent",
+            detail={
+                "ref": element.ref, "reason": "state_unchanged", "outcome": "unconfirmed",
+                "hint": "Take a fresh snapshot and read the checkbox state before acting again.",
+            },
+        )
 
     def _ref_for_node(self, element: Element, node) -> str | None:
         """The ref the snapshot holding ``element`` gave ``node``, if any."""
@@ -3621,7 +3717,8 @@ class LinuxDriver:
             return None
         return None
 
-    def _covered_field_error(self, element: Element, cover, handle) -> ComputerUseError:
+    def _covered_field_error(self, element: Element, cover, handle, *,
+                             verb: str = "type") -> ComputerUseError:
         from a11y_computer_use.drivers import _atspi
 
         try:
@@ -3635,18 +3732,19 @@ class LinuxDriver:
         if control and control_ref:
             hint = (f"Dismiss the covering {what} first: click {control_ref} "
                     f"({control!r}) by ref, or press Escape; then take a fresh snapshot "
-                    "and type again.")
+                    f"and {verb} again.")
         elif control:
             hint = (f"Dismiss the covering {what} first: find its {control!r} control "
                     "and click it by ref, or press Escape; then take a fresh snapshot "
-                    "and type again.")
+                    f"and {verb} again.")
         else:
             hint = (f"Dismiss or close the covering {what} first (click its close control "
-                    "by ref, or press Escape); then take a fresh snapshot and type again.")
+                    f"by ref, or press Escape); then take a fresh snapshot and {verb} again.")
         return ComputerUseError(
             ErrorCode.STALE_REF,
             f"{held} ({element.role} {element.title!r}) is covered by {what} and could not "
-            "be scrolled clear of it; nothing was typed",
+            "be scrolled clear of it; nothing was "
+            + ("typed" if verb == "type" else "sent"),
             detail={
                 "ref": held, "reason": "covered_by_overlay", "outcome": "refused",
                 "cover": {"role": role, "name": name, "control": control,
@@ -5310,6 +5408,13 @@ class LinuxDriver:
         px, py = self._pointer(x, y) if office_pointer else (x, y)
         if isinstance(target, Element):
             self._refuse_code_editor_input_click(target, handle)
+            if (
+                handle is not None and button is MouseButton.LEFT and count == 1
+                and not modifiers and notification is None
+                and target.role in self._MISS_CHECK_ROLES
+                and self._click_on_document_miss(target, handle, x, y)
+            ):
+                return None
             self._verify_chromium_pointer_target(target, handle, x, y)
         if notification is not None and not self._run(
             lambda: _atspi.notification_pointer_target(handle, notification, px, py)
