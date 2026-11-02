@@ -23221,6 +23221,35 @@ def _occluder_owns_target_menu(opener, chain) -> bool:
     return False
 
 
+def _occluder_sole_menu_owner(opener, openers, candidates, chain, x, y, page_errors) -> bool:
+    """True when ``opener`` is the only open menu opener and the target's
+    own showing menu is the only menu open, so it is the opener's menu.
+
+    A portal menu (rendered at the end of ``<body>``) from an opener with no
+    ``aria-controls`` is neither a child nor a sibling of it, so
+    ``_occluder_owns_target_menu`` cannot see the ownership (#1470). With
+    exactly one expanded haspopup opener, exactly one showing menu (the one
+    holding the target) and the click point inside that menu, there is no
+    other menu it could have opened. Zero or several open menus, an
+    unreadable part of the page, or a point outside the menu fail closed.
+    """
+    if page_errors or len(openers) != 1 or openers[0] is not opener or candidates:
+        return False
+    menus = [node for node in chain[1:]
+             if _role_name(node) in _OCCLUDER_MENU_ROLES and _state_has(node, "SHOWING")]
+    if len(menus) != 1:
+        return False
+    rect = _raw_rect(menus[0], "SCREEN")
+    if rect is None or rect[2] <= 0 or rect[3] <= 0:
+        return False
+    if x is None or y is None:
+        own = _raw_rect(chain[0], "SCREEN")
+        if own is None or own[2] <= 0 or own[3] <= 0:
+            return False
+        x, y = own[0] + own[2] // 2, own[1] + own[3] // 2
+    return rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3]
+
+
 def _occluder_menubar_of(chain):
     """Key of the nearest ``menu bar`` above ``chain[0]``, None when a menu
     lies in between (the node is inside a dropdown, not on the bar)."""
@@ -23376,6 +23405,8 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
         if not menus:
             if _occluder_owns_target_menu(opener, chain):
                 continue  # the target is inside this opener's own menu (#1412)
+            if _occluder_sole_menu_owner(opener, openers, candidates, chain, x, y, page_errors):
+                continue  # the only open menu is the target's, so it is this opener's (#1470)
             own = _occluder_sibling_bar_menus(opener, chain)
             if own:
                 candidates.extend(own)  # bounds decide, below (#1417)
