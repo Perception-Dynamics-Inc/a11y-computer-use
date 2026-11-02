@@ -9293,6 +9293,7 @@ class Runtime:
             find_tried = False
             table_jumped = False
             buffer_tried = False
+            exact_tried = False
             frame_latched = False
             frame_waits = 0
             rebuild_waits = 0
@@ -9997,6 +9998,28 @@ class Runtime:
                         snap = later
                 if matches:
                     shown = visible_matches(snap)
+                    if (
+                        shown and issued == 0 and text and not exact_tried
+                        and not horizontal and hasattr(self.driver, "_exact_seek")
+                        and not any(observe._folded_title(el.title or "")
+                                    == observe._folded_title(text) for el in shown)
+                    ):
+                        # Only on-screen substring hits, such as prose that
+                        # mentions the control. A node named exactly ``text``
+                        # elsewhere in the document wins: reveal it and
+                        # search again (#1438). No exact name: unchanged.
+                        exact_tried = True
+                        self.driver._exact_seek = text.strip()
+                        self.driver._exact_revealed = False
+                        try:
+                            self.driver.snapshot(Scope(scope), bundle)
+                        finally:
+                            self.driver._exact_seek = None
+                        if self.driver._exact_revealed:
+                            self.driver._exact_revealed = False
+                            issued += 1
+                            stalls = 0
+                            continue
                     if shown and issued == 0:
                         # Ctrl+F can land the row before a wheel is counted.
                         # The report is still one step, not a row that was
