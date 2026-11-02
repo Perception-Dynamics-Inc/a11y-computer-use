@@ -201,3 +201,113 @@ def test_click_fallback_is_limited_to_checkable_roles():
 
     src = inspect.getsource(LinuxDriver.click)
     assert "target.role in self._MISS_CHECK_ROLES" in src
+
+
+def test_full_viewport_landmark_names_its_accept_button_from_the_snapshot(miss, monkeypatch):
+    """Live #1466: the landmark 'Cookie consent' was named with control_ref null.
+    The snapshot's own refs inside the overlay name e32, accept first."""
+    page = MissPage(banner="full")
+    page.cookie.role, page.cookie.name = "landmark", "Cookie consent"
+    settings = N("link", "Cookie settings")
+    settings.parent = page.cookie
+    page.cookie.children.insert(1, settings)
+    miss.page_box["page"] = page
+    monkeypatch.setitem(observe._HANDLES, "snap-1346", _handles(page, {"e31": settings}))
+    real = _atspi._bounded_descendants
+    # The live walk below the landmark found no named button.
+    monkeypatch.setattr(_atspi, "_bounded_descendants",
+                        lambda acc, limit=48: [acc] if acc is page.cookie else real(acc, limit=limit))
+    with pytest.raises(ComputerUseError) as raised:
+        miss._click_clear_of_overlay(_element("Qty 9"), page.rows[9])
+    cover = raised.value.detail["cover"]
+    assert cover["name"] == "Cookie consent"
+    assert cover["control_ref"] == "e32" and cover["control"] == "Accept cookies"
+    assert cover["controls"] == ["e31 ('Cookie settings')"]
+    assert "click e32 ('Accept cookies') by ref" in raised.value.detail["hint"]
+    assert miss.clicks == [] and miss.focus["grabs"] == 0
+
+
+def test_dismiss_rank_matches_whole_words():
+    assert _atspi._dismiss_rank("Accept cookies") < _atspi._dismiss_rank("Cookie settings")
+    assert _atspi._dismiss_rank("Cookie settings") == len(_atspi._DISMISS_WORDS)
+
+
+class ToggleAll:
+    """TodoMVC's 'Mark all as complete': a 2x1 opacity-0 checkbox under its label."""
+
+    def __init__(self):
+        self.doc = N("document web", "Todos")
+        self.section = N("section", "", self.doc)
+        self.check = N("check box", "Mark all as complete", self.section)
+        self.label = N("label", "Mark all as complete", self.section)
+        self.text = N("static", "Mark all as complete", self.label)
+        self.checked = False
+
+
+@pytest.fixture
+def toggle_all(driver, monkeypatch):
+    box = ToggleAll()
+    boxes = {id(box.doc): ((0, 0), (1280, 800)), id(box.section): ((300, 200), (680, 60)),
+             id(box.check): ((330, 230), (2, 1)), id(box.label): ((310, 215), (60, 34)),
+             id(box.text): ((310, 215), (60, 34))}
+    actions = []
+    monkeypatch.setattr(_atspi, "_hit_at", lambda comp, x, y: box.text)
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, **_: boxes[id(acc)])
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: name == "SHOWING")
+    monkeypatch.setattr(_atspi, "checked_state", lambda acc: box.checked)
+    monkeypatch.setattr(_atspi, "_FOCUS_CONFIRM_PAUSE_S", 0.0)
+    rel = {(id(box.label), "label_for"): [box.check], (id(box.check), "labelled_by"): [box.label]}
+    monkeypatch.setattr(_atspi, "_relation_targets",
+                        lambda acc, kind: rel.get((id(acc), kind), []))
+
+    def act(acc, names):
+        actions.append(acc)
+        if box.works and "check" in names:
+            box.checked = not box.checked
+        return True
+
+    monkeypatch.setattr(_atspi, "_do_action_named", act)
+    box.works = True
+    monkeypatch.setitem(observe._HANDLES, "snap-1468",
+                        {"e27": box.section, "e28": box.check, "e29": box.label})
+    driver.box, driver.actions = box, actions
+    return driver
+
+
+def _toggle_all() -> Element:
+    return Element("e28", "AXCheckBox", "Mark all as complete", None, Bounds(0, 330, 230, 2, 1),
+                   "snap-1468", clickable=True, enabled=True)
+
+
+def test_toggle_all_under_its_own_label_is_checked_through_its_action(toggle_all):
+    """Live #1468: the hit names the label, so it was neither a miss nor the box,
+    and the click refused hit_test_unverified 5/5."""
+    assert toggle_all._click_on_document_miss(_toggle_all(), toggle_all.box.check, 331, 230) is True
+    assert toggle_all.box.checked is True and toggle_all.actions == [toggle_all.box.check]
+    assert toggle_all.clicks == []
+
+
+def test_toggle_all_whose_state_does_not_change_is_unconfirmed(toggle_all):
+    toggle_all.box.works = False
+    with pytest.raises(ComputerUseError) as raised:
+        toggle_all._click_on_document_miss(_toggle_all(), toggle_all.box.check, 331, 230)
+    assert raised.value.detail["outcome"] == "unconfirmed"
+    assert toggle_all.clicks == []
+
+
+def test_a_label_of_another_control_is_not_the_targets_label(toggle_all, monkeypatch):
+    monkeypatch.setattr(_atspi, "_relation_targets", lambda acc, kind: [])
+    assert toggle_all._click_on_document_miss(_toggle_all(), toggle_all.box.check, 331, 230) is False
+    assert toggle_all.actions == [] and toggle_all.clicks == []
+
+
+def test_a_toggle_button_is_read_back_by_pressed(toggle_all, monkeypatch):
+    pressed = {"on": False}
+    monkeypatch.setattr(_atspi, "_state_has",
+                        lambda acc, name: name == "SHOWING" or (name == "PRESSED" and pressed["on"]))
+    monkeypatch.setattr(_atspi, "checked_state", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_do_action_named",
+                        lambda acc, names: pressed.update(on=True) or True)
+    el = Element("e28", "AXToggleButton", "Mark all as complete", None, Bounds(0, 330, 230, 2, 1),
+                 "snap-1468", clickable=True, enabled=True)
+    assert toggle_all._click_on_document_miss(el, toggle_all.box.check, 331, 230) is True

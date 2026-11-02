@@ -3658,7 +3658,7 @@ class LinuxDriver:
                 time.sleep(_atspi._FOCUS_CONFIRM_PAUSE_S)
         return False
 
-    _MISS_CHECK_ROLES = frozenset({"AXCheckBox", "AXRadioButton", "AXSwitch"})
+    _MISS_CHECK_ROLES = frozenset({"AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggleButton"})
 
     def _click_on_document_miss(self, element: Element, handle, x: int, y: int) -> bool:
         """A plain click whose hit test names only the document (#1468).
@@ -3672,20 +3672,24 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi
 
+        checkable = element.role in self._MISS_CHECK_ROLES
         cover = self._geometry_cover(element, handle, (x, y))
         if cover is None:
-            return False
+            # A hidden checkbox under its own <label for> (#1468 toggle-all):
+            # the hit names the label. Act on the box itself and read back.
+            if not (checkable and self._run(lambda: _atspi.chromium_label_hit(handle, x, y))):
+                return False
+            cover = _atspi.COVER_CLEAR
         if cover is not _atspi.COVER_CLEAR:
             raise self._covered_field_error(element, cover, handle, verb="click")
-        checkable = element.role in self._MISS_CHECK_ROLES
-        before = self._run(lambda: _atspi.checked_state(handle)) if checkable else None
+        before = self._run(lambda: _atspi.miss_toggle_state(handle)) if checkable else None
         names = frozenset({"check", "uncheck", "toggle", "click", "press", "activate", "jump"})
         if not self._run(lambda: _atspi._do_action_named(handle, names)):
             return False
         if not checkable:
             return True
         for attempt in range(_atspi._FOCUS_CONFIRM_POLLS):
-            now = self._run(lambda: _atspi.checked_state(handle))
+            now = self._run(lambda: _atspi.miss_toggle_state(handle))
             if before is not None and now is not None and now != before:
                 return True
             if attempt + 1 < _atspi._FOCUS_CONFIRM_POLLS:
@@ -3693,8 +3697,8 @@ class LinuxDriver:
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             f"{element.ref} ({element.role} {element.title!r}) was pressed through its "
-            "accessibility action (the page hit test names no element there), but its "
-            "checked state did not change; no pointer click was sent",
+            "accessibility action (the page hit test names no element there, or only "
+            "its label), but its checked or pressed state did not change; no pointer click was sent",
             detail={
                 "ref": element.ref, "reason": "state_unchanged", "outcome": "unconfirmed",
                 "hint": "Take a fresh snapshot and read the checkbox state before acting again.",
@@ -3727,12 +3731,27 @@ class LinuxDriver:
         except Exception:  # noqa: BLE001 - the refusal stands without a name
             role, name, control, control_node = "element", "", "", None
         control_ref = self._ref_for_node(element, control_node) if control else None
+        others: list[str] = []
+        try:
+            from a11y_computer_use import observe
+
+            handles = list(observe._HANDLES.get(element.snapshot_id, {}).items())[:600]
+            ranked = self._run(lambda: _atspi.cover_controls(cover, handle, handles))
+        except Exception:  # noqa: BLE001 - the walk's own control stands
+            ranked = []
+        if ranked:
+            # Snapshot refs inside the overlay, accept/close/dismiss first:
+            # the live walk can miss a container's button (#1466).
+            control_ref, control = ranked[0][0], ranked[0][1]
+            others = [f"{ref} ({label!r})" for ref, label, _n in ranked[1:4]]
         held = LinuxDriver._caller_ref(self, element)
         what = f"{role} {name!r}" if name else role
         if control and control_ref:
             hint = (f"Dismiss the covering {what} first: click {control_ref} "
                     f"({control!r}) by ref, or press Escape; then take a fresh snapshot "
                     f"and {verb} again.")
+            if others:
+                hint += " Its other controls: " + ", ".join(others) + "."
         elif control:
             hint = (f"Dismiss the covering {what} first: find its {control!r} control "
                     "and click it by ref, or press Escape; then take a fresh snapshot "
@@ -3748,7 +3767,8 @@ class LinuxDriver:
             detail={
                 "ref": held, "reason": "covered_by_overlay", "outcome": "refused",
                 "cover": {"role": role, "name": name, "control": control,
-                          "control_ref": control_ref},
+                          "control_ref": control_ref,
+                          **({"controls": others} if others else {})},
                 "hint": hint,
             },
         )

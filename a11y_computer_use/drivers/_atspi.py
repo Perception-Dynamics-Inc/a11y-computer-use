@@ -26750,15 +26750,8 @@ def chromium_cover_at(acc, x: int, y: int):
     return deepest
 
 
-def cover_description(cover, acc) -> tuple[str, str, str, object]:
-    """(role, name, dismiss control name, control node) of the overlay holding ``cover``.
-
-    The overlay is the outermost ancestor of ``cover`` under the document
-    that does not also contain ``acc``: the header or banner itself, not
-    one word inside it. With no name of its own, it is named by the first
-    named button, link or text inside it. The dismiss control is the first
-    named button or link inside it ("" when it has none).
-    """
+def cover_overlay(cover, acc):
+    """The outermost ancestor of ``cover`` under the document not holding ``acc``."""
     target_keys = {_ancestor_key(node) for node in _ancestor_chain(acc)}
     overlay = cover
     for node in _ancestor_chain(cover):
@@ -26768,6 +26761,72 @@ def cover_description(cover, acc) -> tuple[str, str, str, object]:
         if _ancestor_key(node) in target_keys:
             break
         overlay = node
+    return overlay
+
+
+_DISMISS_WORDS = ("accept", "close", "dismiss", "got it", "agree", "allow", "ok", "continue",
+                  "reject", "decline", "deny", "no thanks", "skip", "cancel")
+_COVER_CONTROL_ROLES = frozenset({"push button", "toggle button", "link"})
+
+
+def _control_label(node) -> str:
+    """A button's name, or its first named text child when the name is empty."""
+    label = _node_name(node)
+    if label:
+        return label
+    for child in _bounded_descendants(node, limit=8)[1:]:
+        if _role_name(child) in {"static", "label", "text"}:
+            label = _node_name(child)
+            if label:
+                return label
+    return ""
+
+
+def _dismiss_rank(label: str) -> int:
+    import re
+
+    low = label.casefold()
+    for rank, word in enumerate(_DISMISS_WORDS):
+        if re.search(rf"\b{re.escape(word)}\b", low):
+            return rank
+    return len(_DISMISS_WORDS)
+
+
+def cover_controls(cover, acc, candidates) -> list[tuple[str, object, object]]:
+    """Actionable descendants of the overlay over ``acc``, from snapshot handles.
+
+    ``candidates`` maps snapshot refs to their live handles. Returns
+    ``(ref, label, node)`` for each button or link inside the overlay,
+    accept / close / dismiss names first, then snapshot order (#1466: a
+    full-viewport landmark named only itself, not its Accept button).
+    """
+    overlay = cover_overlay(cover, acc)
+    if overlay is None:
+        return []
+    key = _ancestor_key(overlay)
+    found = []
+    for order, (ref, node) in enumerate(candidates):
+        if node is None or _role_name(node) not in _COVER_CONTROL_ROLES:
+            continue
+        if not any(_ancestor_key(parent) == key for parent in _ancestor_chain(node)):
+            continue
+        label = _control_label(node)
+        if label:
+            found.append((_dismiss_rank(label), order, ref, label, node))
+    found.sort(key=lambda item: item[:2])
+    return [(ref, label, node) for _r, _o, ref, label, node in found]
+
+
+def cover_description(cover, acc) -> tuple[str, str, str, object]:
+    """(role, name, dismiss control name, control node) of the overlay holding ``cover``.
+
+    The overlay is the outermost ancestor of ``cover`` under the document
+    that does not also contain ``acc``: the header or banner itself, not
+    one word inside it. With no name of its own, it is named by the first
+    named button, link or text inside it. The dismiss control is the first
+    named button or link inside it ("" when it has none).
+    """
+    overlay = cover_overlay(cover, acc)
     role = _role_name(overlay) or "element"
     name = _node_name(overlay)
     control = ""
@@ -26863,8 +26922,41 @@ def geometry_cover_at(acc, candidates, x: int, y: int):
     return found[0][0] if found else None
 
 
-def checked_state(acc) -> bool | None:
+def miss_toggle_state(acc) -> tuple[bool, bool] | None:
+    """(CHECKED, PRESSED) of a checkbox, switch or toggle; None when unreadable."""
     try:
-        return _state_has(acc, "CHECKED")
+        return checked_state(acc), _state_has(acc, "PRESSED")
     except Exception:
         return None
+
+
+def chromium_label_hit(acc, x: int, y: int) -> bool:
+    """True when the document's settled hit at (x, y) is ``acc``'s own label.
+
+    TodoMVC's 'Mark all as complete' is a 2x1 opacity-0 checkbox whose
+    ``<label for>`` is drawn over it: the hit names the label, not the
+    document and not the box, so it was neither a miss nor a hit (#1468).
+    The label is matched by a LABEL_FOR / LABELLED_BY relation only.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    document = _chromium_document_of(acc)
+    comp = _component(document) if document is not None else None
+    if comp is None:
+        return False
+    hit = None
+    for _ in range(2):  # the first answer at a point is a box-only guess
+        hit = _hit_at(comp, x, y)
+    if hit is None:
+        return False
+    target = _ancestor_key(acc)
+    labels = {_ancestor_key(node) for node in _relation_targets(acc, "labelled_by")}
+    for node in _ancestor_chain(hit):
+        key = _ancestor_key(node)
+        if key == _ancestor_key(document):
+            return False
+        if key in labels:
+            return True
+        if any(_ancestor_key(t) == target for t in _relation_targets(node, "label_for")):
+            return True
+    return False
