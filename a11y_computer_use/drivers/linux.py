@@ -3535,13 +3535,27 @@ class LinuxDriver:
                 return answer
             return ("node", _atspi._ancestor_key(answer))
 
-        previous = self._run(lambda: _atspi.chromium_cover_at(handle, x, y))
+        # Live Chrome (#1466) can answer the field twice at a point and the
+        # landmark drawn over it on the third read. A cover is settled by
+        # two agreeing reads; clear needs three, so that flip is seen. When
+        # the reads never settle, a landmark among them is the cover:
+        # disagreement is never clear.
+        answers = [self._run(lambda: _atspi.chromium_cover_at(handle, x, y))]
+        run = 1
         for _ in range(self._COVER_READS - 1):
             time.sleep(self._COVER_READ_GAP_S)
             answer = self._run(lambda: _atspi.chromium_cover_at(handle, x, y))
-            if key(answer) == key(previous):
+            run = run + 1 if key(answer) == key(answers[-1]) else 1
+            answers.append(answer)
+            if any(_atspi.cover_is_landmark(a) for a in answers) and len(
+                {key(a) for a in answers}
+            ) > 1:
+                continue
+            if run >= (3 if answer is _atspi.COVER_CLEAR else 2):
                 return answer, center
-            previous = answer
+        for answer in answers:
+            if _atspi.cover_is_landmark(answer):
+                return answer, center
         return None, center
 
     def _click_clear_of_overlay(self, element: Element, handle) -> bool:
@@ -3677,7 +3691,12 @@ class LinuxDriver:
         if cover is None:
             # A hidden checkbox under its own <label for> (#1468 toggle-all):
             # the hit names the label. Act on the box itself and read back.
-            if not (checkable and self._run(lambda: _atspi.chromium_label_hit(handle, x, y))):
+            # Or another row's <label> with no relation to the box (#1466
+            # live): the box's own action, never the point.
+            if not (checkable and (
+                self._run(lambda: _atspi.chromium_label_hit(handle, x, y))
+                or self._run(lambda: _atspi.chromium_foreign_hit(handle, x, y))
+            )):
                 return False
             cover = _atspi.COVER_CLEAR
         if cover is not _atspi.COVER_CLEAR:

@@ -311,3 +311,97 @@ def test_a_toggle_button_is_read_back_by_pressed(toggle_all, monkeypatch):
     el = Element("e28", "AXToggleButton", "Mark all as complete", None, Bounds(0, 330, 230, 2, 1),
                  "snap-1468", clickable=True, enabled=True)
     assert toggle_all._click_on_document_miss(el, toggle_all.box.check, 331, 230) is True
+
+
+# --- #1466 live shapes (Tester evidence @ d2a13c06) -------------------------
+
+
+def _chrome_landmark(page):
+    """The live tree: landmark 'Cookie consent' > static, button, button."""
+    page.cookie.role, page.cookie.name = "landmark", "Cookie consent"
+    accept = page.cookie.children[-1]
+    accept.role = "button"
+    reject = N("button", "Reject", page.cookie)
+    return accept, reject
+
+
+def test_chrome_role_button_inside_the_landmark_is_named_as_its_control(miss, monkeypatch):
+    page = MissPage(banner="full")
+    accept, reject = _chrome_landmark(page)
+    miss.page_box["page"] = page
+    monkeypatch.setitem(observe._HANDLES, "snap-1346",
+                        _handles(page, {"e32": accept, "e33": reject}))
+    with pytest.raises(ComputerUseError) as raised:
+        miss._click_clear_of_overlay(_element("Qty 9"), page.rows[9])
+    cover = raised.value.detail["cover"]
+    assert cover["name"] == "Cookie consent"
+    assert cover["control_ref"] == "e32" and cover["control"] == "Accept cookies"
+    assert cover["controls"] == ["e33 ('Reject')"]
+    assert "click e32 ('Accept cookies') by ref" in raised.value.detail["hint"]
+    assert miss.clicks == [] and miss.focus["grabs"] == 0
+
+
+@pytest.mark.parametrize("pattern", [
+    "clear,clear,landmark",          # live: the field twice, then the landmark
+    "clear,landmark,clear,landmark",  # alternating
+])
+def test_probes_that_disagree_with_a_landmark_are_covered_never_clear(driver, monkeypatch, pattern):
+    page = Page(banner="full", scroll=0)
+    _chrome_landmark(page)
+    driver.page_box["page"] = page
+    seq = [_atspi.COVER_CLEAR if p == "clear" else page.cookie for p in pattern.split(",")]
+    answers = iter(seq + seq + seq)
+    monkeypatch.setattr(_atspi, "chromium_cover_at", lambda acc, x, y: next(answers))
+    answer, _center = driver._cover_now(page.rows[9])
+    assert answer is page.cookie
+
+
+def test_steady_clear_probes_are_still_clear(driver, monkeypatch):
+    page = Page(banner=None, scroll=0)
+    driver.page_box["page"] = page
+    monkeypatch.setattr(_atspi, "chromium_cover_at", lambda acc, x, y: _atspi.COVER_CLEAR)
+    assert driver._cover_now(page.rows[9])[0] is _atspi.COVER_CLEAR
+
+
+@pytest.fixture
+def sibling_label(toggle_all, monkeypatch):
+    """Live todo.html: the hit at e28's centre is row 1's <label>, no relations."""
+    box = toggle_all.box
+    row = N("list item", "", box.doc)
+    other = N("label", "", row)
+    boxes = {id(box.doc): ((0, 0), (1280, 800)), id(box.section): ((300, 120), (680, 60)),
+             id(box.check): ((368, 191), (2, 1)), id(box.label): ((310, 135), (60, 34)),
+             id(box.text): ((310, 135), (60, 34)), id(row): ((364, 188), (551, 59)),
+             id(other): ((364, 188), (551, 59))}
+    monkeypatch.setattr(_atspi, "_hit_at", lambda comp, x, y: other)
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, **_: boxes[id(acc)])
+    monkeypatch.setattr(_atspi, "_relation_targets", lambda acc, kind: [])
+    toggle_all.other = other
+    return toggle_all
+
+
+def test_sibling_row_label_hit_checks_the_box_through_its_own_action(sibling_label):
+    el = Element("e28", "AXCheckBox", "Mark all as complete", None, Bounds(0, 368, 191, 2, 1),
+                 "snap-1468", clickable=True, enabled=True)
+    assert sibling_label._click_on_document_miss(el, sibling_label.box.check, 369, 191) is True
+    assert sibling_label.box.checked is True
+    assert sibling_label.actions == [sibling_label.box.check]
+    assert sibling_label.clicks == []
+
+
+def test_sibling_row_label_hit_without_a_state_change_is_unconfirmed(sibling_label):
+    sibling_label.box.works = False
+    el = Element("e28", "AXCheckBox", "Mark all as complete", None, Bounds(0, 368, 191, 2, 1),
+                 "snap-1468", clickable=True, enabled=True)
+    with pytest.raises(ComputerUseError) as raised:
+        sibling_label._click_on_document_miss(el, sibling_label.box.check, 369, 191)
+    assert raised.value.detail["outcome"] == "unconfirmed"
+    assert sibling_label.clicks == []
+
+
+def test_a_non_label_node_drawn_over_the_box_is_not_a_foreign_hit(sibling_label, monkeypatch):
+    sibling_label.other.role = "section"
+    el = Element("e28", "AXCheckBox", "Mark all as complete", None, Bounds(0, 368, 191, 2, 1),
+                 "snap-1468", clickable=True, enabled=True)
+    assert sibling_label._click_on_document_miss(el, sibling_label.box.check, 369, 191) is False
+    assert sibling_label.actions == [] and sibling_label.clicks == []

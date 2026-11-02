@@ -26689,7 +26689,19 @@ def click_window_state(target) -> str | None:
 # #1346: a page overlay (sticky header, fixed cookie banner) over a ref.
 _COVER_NAMED_ROLES = frozenset({
     "push button", "toggle button", "link", "heading", "label", "static",
+    # Chrome's own AT-SPI role names (#1466 live: 'Accept cookies' is 'button').
+    "button", "check box", "checkbox",
 })
+
+
+def cover_is_landmark(answer) -> bool:
+    """A `chromium_cover_at` node answer that is a landmark or inside one."""
+    if answer is None or answer is COVER_CLEAR:
+        return False
+    try:
+        return any(_role_name(node) == "landmark" for node in _ancestor_chain(answer))
+    except Exception:  # noqa: BLE001 - an unreadable node is not a landmark
+        return False
 
 
 def _chromium_document_of(acc):
@@ -26766,7 +26778,11 @@ def cover_overlay(cover, acc):
 
 _DISMISS_WORDS = ("accept", "close", "dismiss", "got it", "agree", "allow", "ok", "continue",
                   "reject", "decline", "deny", "no thanks", "skip", "cancel")
-_COVER_CONTROL_ROLES = frozenset({"push button", "toggle button", "link"})
+_COVER_CONTROL_ROLES = frozenset({
+    "push button", "toggle button", "link",
+    # Chrome's own AT-SPI role names (#1466 live evidence).
+    "button", "check box", "checkbox",
+})
 
 
 def _control_label(node) -> str:
@@ -26928,6 +26944,45 @@ def miss_toggle_state(acc) -> tuple[bool, bool] | None:
         return checked_state(acc), _state_has(acc, "PRESSED")
     except Exception:
         return None
+
+
+def chromium_foreign_hit(acc, x: int, y: int) -> bool:
+    """True when the settled hit at (x, y) is another page node, not a cover.
+
+    #1466 live: TodoMVC's 2x1 'Mark all as complete' checkbox centre lies
+    inside the first todo row's ``<label>``, which has no LABEL_FOR /
+    LABELLED_BY relation to it. A ``label`` hit that is not ``acc`` or a
+    descendant counts; any other node counts only when its box does not
+    hold ``acc``'s centre, so it is not drawn over ``acc``. The document
+    itself, ``acc`` and its descendants never count. The caller presses
+    ``acc`` through its own action and reads its state back; the point is
+    never clicked.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    document = _chromium_document_of(acc)
+    comp = _component(document) if document is not None else None
+    if comp is None:
+        return False
+    hits = [_hit_at(comp, x, y) for _ in range(2)]  # the first is a guess
+    if hits[1] is None or _ancestor_key(hits[0]) != _ancestor_key(hits[1]):
+        return False
+    hit = hits[1]
+    target = _ancestor_key(acc)
+    if _ancestor_key(hit) == _ancestor_key(document):
+        return False
+    if any(_ancestor_key(node) == target for node in _ancestor_chain(hit)):
+        return False
+    if _role_name(hit) == "label":
+        return True
+    pos, size = _extents(hit)
+    if pos is None or size is None:
+        return False
+    tpos, tsize = _extents(acc)
+    if tpos is None or tsize is None:
+        return False
+    cx, cy = tpos[0] + tsize[0] / 2, tpos[1] + tsize[1] / 2
+    return not (pos[0] <= cx < pos[0] + size[0] and pos[1] <= cy < pos[1] + size[1])
 
 
 def chromium_label_hit(acc, x: int, y: int) -> bool:
