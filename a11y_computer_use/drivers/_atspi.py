@@ -4657,6 +4657,8 @@ class ATSPIAccessor:
         #: ``(parent, fetched, total)`` for each parent read past its fetch
         #: window, so ``find`` can scan the rest by name without a re-walk.
         self.hidden_parents: list[tuple[object, int, int]] = []
+        # Names the pruner's per-parent cap folded away (#1433).
+        self.capped_titles: list[str] = []
         # Expand-page nodes the pruner must keep even when their box is
         # below the viewport. Empty on a normal snapshot.
         self._page_keep: set[object] = set()
@@ -5298,6 +5300,12 @@ class ATSPIAccessor:
             return browser_frame_view(node, self._browser_chrome_cache, role_str=role_str)
         except Exception:
             return False
+
+    def note_capped(self, nodes) -> None:
+        """Record names of children the pruner's per-parent cap dropped."""
+        from a11y_computer_use.observe import capped_titles
+
+        self.capped_titles.extend(capped_titles(nodes))
 
     def _note_unlisted(self, node: object, count: int) -> None:
         if count > 0:
@@ -11346,7 +11354,132 @@ def _focus_on_target(acc) -> bool | None:
         return True
     if _descendant_focused(acc):
         return True
+    if _active_descendant_focused(acc):
+        return True
     return False
+
+
+_ACTIVE_DESCENDANT_ROLES = frozenset({
+    "list item", "option", "table row", "row", "tree item", "menu item", "table cell",
+})
+
+
+def _active_descendant_focused(acc) -> bool:
+    """True when Chrome's focus is the target's ``aria-activedescendant`` (#1430).
+
+    With ``aria-activedescendant`` set, Chrome moves AT-SPI ``FOCUSED`` to
+    the active option while DOM focus and the caret stay in the input. Only
+    a Chromium editable counts, and only an option-like node inside a popup
+    the input itself controls or owns (CONTROLLER_FOR / NODE_PARENT_OF). A
+    focused node anywhere else is still focus loss.
+    """
+    if not _chromium_app(acc) or not _state_has(acc, "EDITABLE"):
+        return False
+    for kind in ("controller_for", "node_parent_of"):
+        try:
+            popups = _relation_targets(acc, kind)
+        except Exception:  # noqa: BLE001 - unreadable relations are not focus
+            continue
+        for popup in popups[:4]:
+            for hit in _focused_accessibles(popup, limit=2):
+                if hit is None or _ancestor_key(hit) == _ancestor_key(popup):
+                    continue
+                if _role_name(hit) in _ACTIVE_DESCENDANT_ROLES:
+                    return True
+    return False
+
+
+# A combobox popup rebuilds while it filters. For a moment Chrome can mark
+# the listbox itself focused, an option that is not linked from the input
+# yet, or nothing at all, while DOM focus never left the input (#1430).
+_COMBOBOX_RECONFIRM_POLLS = 6
+_COMBOBOX_RECONFIRM_DELAY_S = 0.025
+
+
+def _combobox_popups(acc) -> list:
+    if not _chromium_app(acc) or not _state_has(acc, "EDITABLE"):
+        return []
+    popups: list = []
+    for kind in ("controller_for", "node_parent_of"):
+        try:
+            popups.extend(_relation_targets(acc, kind)[:4])
+        except Exception:  # noqa: BLE001 - unreadable relations are not focus
+            continue
+    return popups
+
+
+def _within(node, keys: set, limit: int = 64) -> bool:
+    for _ in range(limit):
+        if node is None:
+            return False
+        if _ancestor_key(node) in keys:
+            return True
+        node = _parent_of(node)
+    return False
+
+
+def _web_document_of(acc, limit: int = 256):
+    node = _parent_of(acc)
+    for _ in range(limit):
+        if node is None:
+            return None
+        if _role_name(node) in ("document web", "document frame"):
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def _reconfirm_combobox_focus(acc) -> bool:
+    """Fresh focus reads before a Chromium combobox is declared focus-lost.
+
+    Only a combobox input (a Chromium editable that controls or owns a
+    popup) is re-checked. Each poll re-reads the input's own FOCUSED state
+    and its active descendant, then the focused nodes in its web document:
+    * focus on a node outside the input and its popups is a real loss and
+      returns False at once (the guard is unchanged);
+    * focus on the popup itself or anywhere inside it, an unlinked option,
+      or no focused node at all is the popup rebuilding, so poll again.
+    Focus that stays inside the popup counts as the input's. Focus that is
+    still on an unlinked option or on nothing once the polls run out is a loss.
+    """
+    popups = _combobox_popups(acc)
+    if not popups:
+        return False
+    for attempt in range(_COMBOBOX_RECONFIRM_POLLS):
+        if attempt:
+            time.sleep(_COMBOBOX_RECONFIRM_DELAY_S)
+        if _focus_on_target(acc):
+            return True
+        popups = _combobox_popups(acc) or popups
+        keys = {_ancestor_key(p) for p in popups} | {_ancestor_key(acc)}
+        doc = _web_document_of(acc)
+        hits = [h for h in _focused_accessibles(doc, limit=4) if h is not None
+                and (doc is None or _ancestor_key(h) != _ancestor_key(doc))]
+        inside = [h for h in hits if _within(h, keys)]
+        if hits and len(inside) == len(hits):
+            return True
+        stray = [h for h in hits if h not in inside]
+        if any(_role_name(h) not in _ACTIVE_DESCENDANT_ROLES for h in stray):
+            return False  # focus moved to another control: real loss
+    return False
+
+
+def _partial_type_error(acc, sent: int, total: int):
+    """Focus loss after ``sent`` keystrokes: say so, with the field's value."""
+    shown = _safe(lambda: _readable_text(acc))
+    message = (
+        f"typed {sent} of {total} characters, then focus left the target; "
+        f"the rest was not sent. Current value: {shown!r}"
+        if shown is not None else
+        f"typed {sent} of {total} characters, then focus left the target; "
+        "the rest was not sent. The current value could not be read"
+    )
+    err = _focus_lost_error(message)
+    err.detail.update({
+        "partial": True, "sent": sent,
+        "requested": total, "value": shown, "next": [],
+    })
+    return err
 
 
 def _confirm_focus_on_target(acc) -> bool:
@@ -11417,12 +11550,11 @@ def _type_into_target(acc, text: str) -> None:
     sent = False
     # One engine switch for the whole string, not one per character (#1219).
     with _linux_ime.ascii_passthrough(text):
-        for ch in text:
-            if _focus_on_target(acc) is False:
+        for count, ch in enumerate(text):
+            if _focus_on_target(acc) is False and not (
+                    sent and _reconfirm_combobox_focus(acc)):
                 if sent:
-                    raise _focus_lost_error(
-                        "focus left the target; stopped before the next keystroke"
-                    )
+                    raise _partial_type_error(acc, count, len(text))
                 raise _focus_lost_error("focus is not on the target; nothing was typed")
             _type_string(ch)
             sent = True
@@ -19206,6 +19338,14 @@ def _refuse_model_editor_replace(acc) -> None:
     or its formatting. Match exact class tokens reported by AT-SPI, including
     empty editors, rather than treating every ARIA textbox as a model editor.
     """
+    if code_editor_container(acc) is not None:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "set_value cannot replace a code editor's model through its hidden input "
+            "textarea; nothing was changed. Click the editor, select the text with "
+            "keyboard shortcuts, then use type; its result is reported unverified",
+            detail={"reason": "code_editor_replace_unsafe", "unchanged": True},
+        )
     if not _model_editor_surface(acc):
         return
     raise ComputerUseError(
@@ -20865,6 +21005,30 @@ def far_pin(handle):
     if entry is None or (key[0] == "id" and entry[0] is not handle):
         return None
     return entry[1:]
+
+
+def capped_child_check(handle, identity: tuple, parent_identity: tuple, title: str) -> bool:
+    """True when ``handle`` is still the exact issued child, under its name.
+
+    For a child the pruner's per-parent cap folded out of a later snapshot
+    (#1433). Identity is the bus name and object path of the child and of
+    its parent, never an index. Reads the child's state, name and parent.
+    """
+    if handle is None or not identity or not parent_identity:
+        return False
+    if _atspi_wrapper_key(handle) != tuple(identity):
+        return False
+    if accessible_gone(handle):
+        return False
+    try:
+        if not _state_has(handle, "SHOWING"):
+            return False
+    except Exception:
+        return False
+    if (_node_name(handle) or "") != (title or ""):
+        return False
+    parent = _parent_of(handle)
+    return parent is not None and _atspi_wrapper_key(parent) == tuple(parent_identity)
 
 
 def far_child_check(handle, pin=None) -> str | None:
@@ -22652,26 +22816,126 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
     if document is None:
         return None
     target_key = _ancestor_key(acc)
+    editor = code_editor_container(acc)
     node = document
     seen: set[object] = set()
     pinned = []
+    # A hit inside the textarea's own code editor is accepted only at the
+    # deepest node: a shallower in-editor hit can still descend onto a
+    # find or suggest widget, which refuses.
+    in_editor = False
     for _ in range(32):
         key = _ancestor_key(node)
         if key in seen:
-            return False
+            return in_editor
         seen.add(key)
         pinned.append(node)
         comp = _component(node)
         if comp is None:
-            return False
+            return in_editor
         hit = _hit_at(comp, x, y)
         if hit is None:
-            return False
+            return in_editor
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
             return True
+        if editor is not None:
+            if _hit_in_code_editor(hit, editor):
+                in_editor = True
+                node = hit
+                continue
+            if in_editor:
+                return False
         if _chromium_select_option_at_point(acc, hit, x, y):
             return True
         node = hit
+    return False
+
+
+# Hidden input textarea class -> its editor's container class (#1424).
+# Monaco and Ace keep a 1x1 textarea at the caret under their own line
+# overlays, so the native hit lands on the overlay, never on the textarea.
+_CODE_EDITOR_INPUTS = {
+    "inputarea": "monaco-editor",       # Monaco / VS Code
+    "ace_text-input": "ace_editor",     # Ace
+}
+_CODE_EDITOR_CONTAINERS = frozenset(_CODE_EDITOR_INPUTS.values())
+# A control inside the editor box (find widget, suggest list, hover links)
+# is a different target: a hit on it is never the editor's text surface.
+_CODE_EDITOR_FOREIGN_ROLES = frozenset({
+    "push button", "toggle button", "check box", "radio button", "entry",
+    "password text", "combo box", "link", "list box", "list", "list item",
+    "menu", "menu item", "popup menu", "option", "slider", "spin button",
+    "tool bar", "dialog", "alert",
+})
+
+
+def _class_tokens(acc) -> set[str]:
+    attrs = _safe(lambda: _get_attributes(acc)) or {}
+    return set(str(attrs.get("class") or "").split())
+
+
+def code_editor_container(acc):
+    """The Monaco or Ace container of a hidden code-editor textarea, else None.
+
+    Only the editor's own input textarea qualifies (exact class token), and
+    the container is its nearest ancestor with the matching container class.
+    """
+    if acc is None:
+        return None
+    classes = _class_tokens(acc)
+    wanted = {_CODE_EDITOR_INPUTS[c] for c in classes if c in _CODE_EDITOR_INPUTS}
+    if not wanted:
+        return None
+    for index, node in enumerate(_ancestor_chain(acc, limit=40)):
+        if index == 0:
+            continue
+        role = _role_name(node)
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            return None
+        if _class_tokens(node) & wanted:
+            return node
+    return None
+
+
+# Allowlist: the editor's own text and line layers (#1424). Overlay and
+# content widgets (suggest, find, hover, parameter hints, autocomplete,
+# search, tooltip) are plain divs, so roles cannot tell them apart.
+_CODE_EDITOR_TEXT_LAYERS = {
+    "monaco-editor": frozenset({"view-lines", "view-line", "lines-content"}),
+    "ace_editor": frozenset({"ace_content", "ace_text-layer", "ace_line", "ace_cursor-layer"}),
+}
+_CODE_EDITOR_WIDGETS = frozenset({
+    "suggest-widget", "find-widget", "monaco-hover", "parameter-hints-widget",
+    "context-view", "overlayWidgets", "contentWidgets", "monaco-list",
+    "ace_autocomplete", "ace_search", "ace_tooltip",
+})
+
+
+def _hit_in_code_editor(hit, container) -> bool:
+    """True only when ``hit`` is in ``container``'s own text or line layer.
+
+    Walking up from the hit to the exact container (key identity), a text
+    layer node must be seen. Any editor widget class, a foreign control
+    role, or another code-editor container on the way refuses the hit.
+    """
+    container_key = _ancestor_key(container)
+    layers = frozenset().union(*(
+        _CODE_EDITOR_TEXT_LAYERS[c] for c in _class_tokens(container) if c in _CODE_EDITOR_TEXT_LAYERS
+    ))
+    in_layer = False
+    for node in _ancestor_chain(hit, limit=40):
+        if _ancestor_key(node) == container_key:
+            return in_layer
+        classes = _class_tokens(node)
+        if classes & _CODE_EDITOR_WIDGETS or classes & _CODE_EDITOR_CONTAINERS:
+            return False
+        role = _role_name(node)
+        if role in _CODE_EDITOR_FOREIGN_ROLES:
+            return False
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            return False
+        if classes & layers:
+            in_layer = True
     return False
 
 

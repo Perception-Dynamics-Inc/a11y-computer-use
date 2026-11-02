@@ -1430,6 +1430,7 @@ class LinuxDriver:
         self._drawing_type_state: str | None = None
         self._opaque_toolbar_type: tuple[str, str] | None = None
         self._type_unverified: bool = False
+        self._code_editor_typed: bool = False
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
@@ -1630,7 +1631,17 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi
 
-        parents = list(getattr(getattr(self, "_last_accessor", None), "hidden_parents", None) or ())
+        accessor = getattr(self, "_last_accessor", None)
+        # A child the walk read but the per-parent cap folded is hidden from
+        # the plain find too. Its name is already in hand: no IPC (#1433).
+        from a11y_computer_use.observe import _fold_seeks
+
+        needles = _fold_seeks(text)
+        for title in getattr(accessor, "capped_titles", None) or ():
+            folded = title.replace("\u00a0", " ").casefold()
+            if any(needle in folded for needle in needles):
+                return True
+        parents = list(getattr(accessor, "hidden_parents", None) or ())
         if not parents:
             return False
         run = getattr(self, "_run", None) or (lambda fn: fn())
@@ -2512,6 +2523,36 @@ class LinuxDriver:
             detail={"ref": ref, "reason": reason, "outcome": "refused"},
         )
 
+    def _resolve_capped_child(self, snap: Snapshot, ref: str, anchor: Element,
+                              live: Snapshot) -> Element | None:
+        """The issued child itself, when the live walk's cap folded it (#1433).
+
+        A Qt list of 48 swatches keeps 24 in a plain snapshot, so a ref from
+        an armed read has no live counterpart and the label matcher reports
+        ``title_changed`` against a nearby namesake-less sibling. The exact
+        object is checked instead: its bus name and path, its parent's, its
+        current name and SHOWING. A node that is gone, renamed or reparented,
+        or that the live tree still lists, is not recovered here.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        identity = tuple(anchor.node_identity or ())
+        parent = snap.element(anchor.parent) if anchor.parent else None
+        parent_identity = tuple(getattr(parent, "node_identity", ()) or ())
+        if not identity or not parent_identity:
+            return None
+        if any(tuple(el.node_identity or ()) == identity for el in live.elements):
+            return None  # listed: the matcher's verdict on it stands
+        if not any(tuple(el.node_identity or ()) == parent_identity for el in live.elements):
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return None
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        ok = run(lambda: _atspi.capped_child_check(handle, identity, parent_identity, anchor.title))
+        return anchor if ok else None
+
     def _refuse_rebound_behind_modal(self, snap: Snapshot, ref: str, anchor: Element,
                                      live: Snapshot, resolved: Element, handle) -> None:
         """Refuse a ref the rematch moved onto another node across a modal (#1386).
@@ -2673,6 +2714,12 @@ class LinuxDriver:
             self._resolved_click_snapshot = (resolved, live)
             return resolved
         except ComputerUseError as exc:
+            if (exc.code is ErrorCode.STALE_REF
+                    and exc.detail.get("reason") in {"not_found", "title_changed"}
+                    and live.app == snap.app and live.pid == snap.pid):
+                capped = LinuxDriver._resolve_capped_child(self, snap, ref, snap.element(ref), live)
+                if capped is not None:
+                    return capped
             if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") == "not_found":
                 anchor = snap.element(ref)
                 # GTK can retain or flatten an unnamed group as transient
@@ -3975,6 +4022,56 @@ class LinuxDriver:
             detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
         )
 
+    def _refuse_code_editor_input_click(self, element: Element, handle) -> None:
+        """Refuse a click on Monaco's or Ace's hidden caret textarea (#1424).
+
+        The 1x1-3x1 input sits at the caret, so its centre can be on the
+        next line (Ace) or under a widget. A pointer press there moves the
+        caret or hits the widget, and grab_focus is not proven to keep the
+        caret. The ref has no faithful click point, so nothing is sent.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None or self._run(lambda: _atspi.code_editor_container(handle)) is None:
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} is a code editor's hidden caret input; it has no faithful click "
+            "point, so no click was sent. Click the editor text by coordinates to place "
+            "the caret, then type",
+            detail={"ref": element.ref, "role": element.role,
+                    "reason": "code_editor_hidden_input", "unchanged": True},
+        )
+
+    def _type_code_editor_input(self, element: Element, handle, text: str) -> int:
+        """Keys at the current caret of a focused Monaco/Ace input, unverified.
+
+        No pointer press and no grab_focus (either can move the caret). The
+        textarea's text is not the editor model, so it is no read-back: the
+        result is reported unverifiable.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if self._run(lambda: _atspi._focus_on_target(handle)) is not True:
+            raise ComputerUseError(
+                ErrorCode.FOCUS_LOST,
+                f"{element.ref} is a code editor's hidden input without keyboard focus; "
+                "nothing was typed. Click the editor text by coordinates where the caret "
+                "should go, then type",
+                detail={"ref": element.ref, "role": element.role,
+                        "reason": "code_editor_focus_required", "unchanged": True},
+            )
+        if _on_wayland():
+            raise _wayland_input_error("type (code editor)")
+        self._refuse_xtest_password_focus()
+        from a11y_computer_use.drivers import _linux_input
+
+        self._focused_editable = handle
+        _linux_input.type_string(text.replace("\r\n", "\n"))
+        self._type_unverified = True
+        self._code_editor_typed = True
+        return len(text)
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -3994,6 +4091,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         self._refuse_chromium_occluded(element, handle)
         self._refuse_hidden(element, handle)
+        self._refuse_code_editor_input_click(element, handle)
         self._refuse_calendar_click(element, handle)
         self._refuse_expander_click(element, handle)
         self._refuse_gnumeric_go_jump(element, handle)
@@ -4699,6 +4797,10 @@ class LinuxDriver:
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.FOCUS_LOST or context is None:
                     raise
+                # #1430: keys already landed. A remount retry would double
+                # them, and its refusal would say nothing was typed.
+                if (exc.detail or {}).get("sent"):
+                    raise
                 handle = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,
                 )
@@ -4876,6 +4978,7 @@ class LinuxDriver:
         )
         px, py = self._pointer(x, y) if office_pointer else (x, y)
         if isinstance(target, Element):
+            self._refuse_code_editor_input_click(target, handle)
             self._verify_chromium_pointer_target(target, handle, x, y)
         if notification is not None and not self._run(
             lambda: _atspi.notification_pointer_target(handle, notification, px, py)
@@ -5867,6 +5970,8 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._focused_editable = None
+        self._type_unverified = False
+        self._code_editor_typed = False
         self._qt_dependent_changes = []
         type_started = time.perf_counter()
         if element.secure:
@@ -5887,6 +5992,8 @@ class LinuxDriver:
         # Ref typing goes through type_into, not type_text; announce here so
         # type(ref=...) shows the same overlay as click/scroll/set_value.
         self._visible_action(element, "Type")
+        if self._run(lambda: _atspi.code_editor_container(handle)) is not None:
+            return self._type_code_editor_input(element, handle, text)
         context = self._run(lambda: _atspi.web_entry_context(handle))
         gecko_append = False
         chrome_selection = None
@@ -6054,6 +6161,10 @@ class LinuxDriver:
                     count = self._type_confirmed_handle(handle, text)
             except ComputerUseError as exc:
                 if chrome_selection is not None or exc.code is not ErrorCode.FOCUS_LOST or context is None:
+                    raise
+                # #1430: keys already landed. A remount retry would double
+                # them, and its refusal would say nothing was typed.
+                if (exc.detail or {}).get("sent"):
                     raise
                 replacement = self._focus_web_entry(
                     element, handle, context=context, request_focus=False,

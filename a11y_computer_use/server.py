@@ -8150,6 +8150,12 @@ class Runtime:
                 had_ref=True, verdict=("confirmed", "private boolean text verification succeeded"),
             )
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        if getattr(self.driver, "_code_editor_typed", False):
+            self.driver._code_editor_typed = False
+            note.append(
+                " at the editor's current caret; effect unverified: the code editor's "
+                "model is not readable through its hidden input"
+            )
         dependent = getattr(self.driver, "_qt_dependent_changes", None)
         if isinstance(dependent, list) and dependent:
             # #1420: other fields the app changed in reaction to the edit.
@@ -9651,7 +9657,27 @@ class Runtime:
                 # An opaque drawing area cannot expose a confirming match.
                 # Native Find may still select document text, so refusing
                 # must happen before Ctrl+F or any query text is injected.
+                # An opaque region wholly outside the box of an ancestor that
+                # holds it (up to and including the anchor) is clipped by that
+                # scroll container, not a surface Find could hit unseen.
+                # Chrome lists a section clipped below an overflow container
+                # as a childless generic node because its content was pruned
+                # as off screen (#1435). This holds for a container anchor and
+                # for the page root, whose box still contains the section.
+                # Ancestors without a box are not evidence; a region with no
+                # box, or not clipped by any boxed ancestor, still counts.
                 shot = self._current
+
+                def outside(box, outer) -> bool:
+                    if box is None or outer is None or box.display_id != outer.display_id:
+                        return False
+                    slack = 2
+                    overlap_x = (min(box.x + box.width, outer.x + outer.width)
+                                 - max(box.x, outer.x))
+                    overlap_y = (min(box.y + box.height, outer.y + outer.height)
+                                 - max(box.y, outer.y))
+                    return overlap_x <= slack or overlap_y <= slack
+
                 if shot is not None:
                     by_ref = {el.ref: el for el in shot.elements}
                     for el in shot.elements:
@@ -9659,9 +9685,12 @@ class Runtime:
                             continue
                         seen: set[str] = set()
                         node = el
+                        clipped = False
                         while node.ref not in seen:
                             seen.add(node.ref)
-                            if node.ref == anchor.ref:
+                            if node is not el and outside(el.bounds, node.bounds):
+                                clipped = True
+                            if node.ref == anchor.ref and not clipped:
                                 raise ComputerUseError(
                                     ErrorCode.UNSUPPORTED,
                                     "cannot verify an in-app find in an opaque container; "
