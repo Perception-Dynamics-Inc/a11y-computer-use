@@ -1127,6 +1127,22 @@ class WindowOwnerMismatch(Exception):
     """A matching window whose owner the X server cannot confirm (#1327)."""
 
 
+def _window_exists(win) -> bool:
+    """False only when the X server says ``win`` is gone (BadWindow)."""
+    probe = getattr(win, "get_attributes", None)
+    if probe is None:
+        return True
+    try:
+        from Xlib import error as xerror
+
+        probe()
+    except (xerror.BadWindow, xerror.BadDrawable):
+        return False
+    except Exception:  # noqa: BLE001 - other failures are XRes's to judge
+        return True
+    return True
+
+
 def _xres_pid(win, d) -> int | None:
     """The pid of the client that created ``win``, from the X server (XRes).
 
@@ -1139,6 +1155,13 @@ def _xres_pid(win, d) -> int | None:
         from Xlib.ext import res
 
         if not d.has_extension("X-Resource"):
+            return None
+        # XRes resolves an XID by its client bits, not by the window. Once a
+        # window's client disconnects, its id (left stale in
+        # _NET_ACTIVE_WINDOW) names whichever client reuses that slot, often
+        # the very connection asking. frontmost then read "pytest" on an
+        # empty desktop. A window that no longer exists has no owner.
+        if not _window_exists(win):
             return None
         reply = d.res_query_client_ids([{"client": int(win.id), "mask": res.LocalClientPIDMask}])
         for cid in reply.ids:
