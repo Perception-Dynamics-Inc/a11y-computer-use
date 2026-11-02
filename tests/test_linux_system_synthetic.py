@@ -2464,13 +2464,21 @@ def test_xres_names_no_owner_for_a_destroyed_window(monkeypatch) -> None:
     import sys
     import types
 
-    from Xlib import error as xerror
+    # No python-xlib on macOS/Windows CI: fake the error classes the probe catches.
+    class BadWindow(Exception):
+        pass
 
+    class BadDrawable(Exception):
+        pass
+
+    xerror = types.SimpleNamespace(BadWindow=BadWindow, BadDrawable=BadDrawable)
+    monkeypatch.setitem(sys.modules, "Xlib", types.SimpleNamespace(error=xerror))
+    monkeypatch.setitem(sys.modules, "Xlib.error", xerror)
     monkeypatch.setitem(sys.modules, "Xlib.ext", types.SimpleNamespace(res=types.SimpleNamespace(LocalClientPIDMask=2)))
     monkeypatch.setitem(sys.modules, "Xlib.ext.res", types.SimpleNamespace(LocalClientPIDMask=2))
 
     def gone():
-        raise xerror.BadWindow.__new__(xerror.BadWindow)
+        raise BadWindow()
 
     dead = types.SimpleNamespace(id=0x400001, get_attributes=gone)
     assert _REAL_XRES_PID(dead, _xres_display(0x400000, 4545)) is None
