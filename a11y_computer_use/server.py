@@ -7547,6 +7547,7 @@ class Runtime:
         found.sort(key=lambda el: el.bounds.width * el.bounds.height)
         return _atspi.sheet_address(found[0].title)
 
+    @timing.span("verdict")
     def _sheet_click_verdict(self, app: str, address: str) -> tuple[str, str] | None:
         """Selected-cell check for a Calc click. None off Linux and off a sheet."""
         if getattr(self.driver, "name", None) != "linux":
