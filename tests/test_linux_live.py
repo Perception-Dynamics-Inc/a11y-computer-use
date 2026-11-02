@@ -7123,14 +7123,26 @@ def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> N
         snap = None
         last_error = None
         last_snapshot = None
+        last_took = None
         while time.monotonic() < deadline:
+            # A1 appears while Calc is still starting: its main thread keeps
+            # stalling for seconds (first-start config, building the sheet's
+            # accessibles), and each AT-SPI call waits on it. Ready means a
+            # full sheet snapshot comes back inside the bound, so the timed
+            # steps below measure their own work and not Calc's startup.
+            asked = time.monotonic()
             try:
                 shot = driver.snapshot(Scope.WINDOW, "soffice")
             except ComputerUseError as exc:
                 last_error = (exc.code.value, exc.message, exc.detail)
             else:
+                last_took = time.monotonic() - asked
                 last_snapshot = [(el.role, el.title) for el in shot.elements[:20]]
-                if _cell(shot, "A1") is not None:
+                if (
+                    _cell(shot, "A1") is not None
+                    and len(shot.elements) > 50
+                    and last_took < bound
+                ):
                     snap = shot
                     break
             time.sleep(0.4)
@@ -7142,7 +7154,7 @@ def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> N
             assert snap is not None, (
                 f"Calc did not expose A1; launcher_pid={proc.pid}; exit={proc.poll()}; "
                 f"last_snapshot_error={last_error!r}; windows={windows!r}; "
-                f"last_snapshot={last_snapshot!r}"
+                f"last_snapshot={last_snapshot!r}; last_snapshot_seconds={last_took!r}"
             )
         a1 = _cell(snap, "A1")
         assert a1 is not None
