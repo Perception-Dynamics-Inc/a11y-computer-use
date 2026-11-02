@@ -1398,3 +1398,81 @@ def wait_until_dead(pid: int, wait_s: float) -> bool:
         if not pid_alive(pid):
             return True
     return not pid_alive(pid)
+
+
+#: A row of a list or table. A change in another row is not the target's.
+_ROW_ROLES = frozenset({"AXListItem", "AXRow", "AXOutlineRow"})
+
+
+def _row_of(snap: object, element: object) -> object | None:
+    """``element``'s nearest list-item or table-row ancestor (or itself)."""
+    by_ref = _by_ref(snap)
+    current = element
+    seen: set = set()
+    while current is not None and getattr(current, "ref", None) not in seen:
+        seen.add(getattr(current, "ref", None))
+        if getattr(current, "role", "") in _ROW_ROLES:
+            return current
+        current = by_ref.get(getattr(current, "parent", None))
+    return None
+
+
+def _row_texts(snap: object, row: object) -> str:
+    for el in _subtree(snap, row):
+        title = getattr(el, "title", "") or ""
+        if title and el is not row:
+            return title
+    return getattr(row, "title", "") or ""
+
+
+def _sibling_rows(snap: object, row: object) -> list:
+    parent = getattr(row, "parent", None)
+    return [
+        el for el in _snap_elements(snap)
+        if getattr(el, "parent", None) == parent and getattr(el, "role", "") in _ROW_ROLES
+    ]
+
+
+def wrong_row_effect(before: object, after: object, target: object) -> str | None:
+    """Evidence that a click on a row's content changed another row (#1467).
+
+    A ref inside a list item or table row must change that row. When its own
+    row's content is unchanged and a sibling row changed, the press landed
+    on the sibling: the change is not the target's. None when the target is
+    in no row, or the rows cannot be matched one to one before and after.
+    """
+    row = _row_of(before, target)
+    if row is None:
+        return None
+    before_rows = _sibling_rows(before, row)
+    index = next((i for i, el in enumerate(before_rows) if el.ref == row.ref), None)
+    if index is None:
+        return None
+    after_target = _match_control(target, after)
+    after_row = _row_of(after, after_target) if after_target is not None else None
+    if after_row is None:
+        return None
+    after_rows = _sibling_rows(after, after_row)
+    if len(after_rows) != len(before_rows):
+        return None
+
+    def content(snap: object, el: object) -> tuple:
+        rows = [_page_row(n) + (bool(getattr(n, "focused", False)),) for n in _subtree(snap, el)]
+        return tuple(sorted(rows, key=_sort_key))
+
+    if content(before, before_rows[index]) != content(after, after_rows[index]):
+        return None
+    changed = [
+        i for i, (a, b) in enumerate(zip(before_rows, after_rows))
+        if i != index and content(before, a) != content(after, b)
+    ]
+    if not changed:
+        return None
+    other = _row_texts(before, before_rows[changed[0]])
+    mine = _row_texts(before, row)
+    return (
+        f"wrong_target: the change landed in the row {other!r}, not in the row "
+        f"{mine!r} that holds the target, which is unchanged. Undo that change "
+        "(Escape closes an editor), take a fresh snapshot, and act on the "
+        "target's own ref"
+    )
