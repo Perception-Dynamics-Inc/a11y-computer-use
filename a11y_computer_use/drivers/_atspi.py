@@ -21196,8 +21196,23 @@ def _content_documents(root, limit: int = 4) -> list:
     return found
 
 
-def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object]):
+def _exact_seek_name(acc, needle: str) -> bool:
+    """True when the accessible name is ``needle`` (case-insensitive, trimmed)."""
+    name = str(_call_first(acc, ("get_name",), default="") or "")
+    if not name.strip():
+        name = str(_call_first(acc, ("get_description",), default="") or "")
+    folded = " ".join(name.replace("\u00a0", " ").split()).casefold()
+    return folded == " ".join(needle.replace("\u00a0", " ").split()).casefold()
+
+
+def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
+                        substring: list | None = None):
     """The first match in document order, or None.
+
+    With ``substring`` given, only a node whose name is exactly ``needle``
+    is returned, and the walk goes on past substring hits. The first
+    substring hit is kept in ``substring`` for the caller's fallback, so
+    prose that mentions a control does not hide the control (#1438).
 
     A table is scanned through the Table interface and not by walking every
     row as a child, so a 300-row table below the fold is still reached.
@@ -21215,18 +21230,27 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object])
     budget[0] -= 1
     role = _role_name(node)
     if role in {"table", "tree table"}:
-        return _table_seek_cell(node, needle)
+        found = _table_seek_cell(node, needle)
+        if substring is None or found is None or _exact_seek_name(found[0], needle):
+            return found
+        if not substring:
+            substring.append(found)
+        return None
     count = _child_count(node)
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         for index in range(min(int(count), _SEEK_CHILD_CAP)):
             if budget[0] <= 0:
                 return None
-            found = _seek_document_tree(_child_at(node, index), needle, budget, seen)
+            found = _seek_document_tree(_child_at(node, index), needle, budget, seen,
+                                        substring)
             if found is not None:
                 return found
     if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
         # Zero rows marks a document-text hit, not an indexed table hit.
-        return node, 0, 0
+        if substring is None or _exact_seek_name(node, needle):
+            return node, 0, 0
+        if not substring:
+            substring.append((node, 0, 0))
     return None
 
 
@@ -21246,13 +21270,19 @@ def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None)
     budget = [_SEEK_NODE_BUDGET]
     seen: set[object] = set()
     hit = None
+    # An exact accessible name wins over an earlier substring hit, so a
+    # paragraph that mentions "next slide" does not stop the walk before
+    # the off-screen button named "Next Slide" (#1438).
+    substring: list = []
     documents = _content_documents(root)
     for doc in documents:
-        hit = _seek_document_tree(doc, text, budget, seen)
+        hit = _seek_document_tree(doc, text, budget, seen, substring)
         if hit is not None:
             break
     if hit is None:
-        hit = _seek_document_tree(root, text, budget, seen)
+        hit = _seek_document_tree(root, text, budget, seen, substring)
+    if hit is None and substring:
+        hit = substring[0]
     if hit is None:
         return False
     cell, row, rows = hit

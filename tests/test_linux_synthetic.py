@@ -15873,6 +15873,79 @@ def test_chromium_document_reveal_preserves_table_child_scroll(fake_atspi, monke
     assert offscreen == []
 
 
+def test_1438_exact_named_offscreen_button_beats_onscreen_prose(fake_atspi, monkeypatch):
+    """Visible prose mentioning "next slide" must not hide the button named so."""
+    prose = _Acc("static", name="Users can choose with the previous and next slide buttons.",
+                 width=600, height=20)
+    _place_row(prose, 100, 120, 600, 20)
+    para = _adopt(_Acc("paragraph"), prose)
+    _place_row(para, 100, 120, 600, 20)
+    button = _Acc("push button", name="Next Slide", width=40, height=40)
+    _place_row(button, 100, 1700, 40, 40)
+    group = _adopt(_Acc("section"), button)
+    document = _adopt(_Acc("document web"), para, group)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    calls = []
+
+    def scroll_to_edge(node, edge):
+        calls.append((node, edge))
+        if node is button:
+            _place_row(button, 100, 300, 40, 40)
+        return True
+
+    monkeypatch.setattr(_atspi, "scroll_to_edge", scroll_to_edge)
+    offscreen = []
+    assert _atspi.reveal_text_in_document(document, "Next Slide", offscreen=offscreen)
+    assert calls == [(button, "TOP_LEFT")]
+    assert offscreen and offscreen[0][0] is button
+
+
+@pytest.mark.parametrize("role", [None, "button"])
+def test_1438_find_returns_offscreen_exact_button_over_prose(fake_atspi, monkeypatch, role):
+    """find(text=, role=) returns the off-screen exact-name button first."""
+    from a11y_computer_use import server
+
+    prose = _Acc("static", name="Users can choose with the previous and next slide buttons.",
+                 width=600, height=20)
+    _place_row(prose, 100, 120, 600, 20)
+    button = _Acc("push button", name="Next Slide", width=40, height=40)
+    _place_row(button, 100, 1700, 40, 40)
+    document = _adopt(_Acc("document web", width=1200, height=700), prose, button)
+    window = _adopt(_Acc("frame", name="Carousel", width=1280, height=800), document)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "chromium_snapshot_root", lambda node: node)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+
+    def scroll_to_edge(node, edge):
+        if node is button:
+            _place_row(button, 100, 300, 40, 40)
+        return True
+
+    monkeypatch.setattr(_atspi, "scroll_to_edge", scroll_to_edge)
+    runtime = _bare_runtime(driver)
+    found = runtime.find("chrome", text="Next Slide", role=role)
+    assert "no elements match" not in found
+    lines = [line for line in found.splitlines() if "Next Slide" in line or "next slide" in line]
+    assert lines and '"Next Slide"' in lines[0]
+    match = next(el for el in runtime._current.elements if el.title == "Next Slide")
+    assert observe.ax_handle_for(match.snapshot_id, match.ref) is button
+
+
+def test_1438_substring_hit_still_revealed_without_exact_name(fake_atspi, monkeypatch):
+    first = _Acc("static", name="see the NOTE-7 below", width=200, height=20)
+    _place_row(first, 100, 1500, 200, 20)
+    later = _Acc("static", name="another NOTE-7 mention", width=200, height=20)
+    _place_row(later, 100, 2500, 200, 20)
+    document = _adopt(_Acc("document web"), first, later)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    calls = []
+    monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: calls.append(node) or True)
+    assert _atspi.reveal_text_in_document(document, "NOTE-7")
+    assert calls == [first]
+
+
 @pytest.mark.parametrize("method", ["press_element", "click"])
 @pytest.mark.parametrize("y", [606, 710])
 def test_pdf_thumbnail_refuses_unverified_navigation(fake_atspi, monkeypatch, method, y):
