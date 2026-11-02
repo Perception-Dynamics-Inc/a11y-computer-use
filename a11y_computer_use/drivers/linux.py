@@ -3423,7 +3423,8 @@ class LinuxDriver:
                 "at the click point by the Chromium document hit test; no click was sent",
                 detail={
                     "ref": element.ref, "reason": "hit_test_unverified", "outcome": "refused",
-                    "hint": "Take a fresh snapshot or screenshot and locate the visible control. "
+                    "hint": "Take a fresh snapshot and find the control again. Do not click "
+                    "its old coordinates: that spot may now hold a different element. "
                     "Chromium can retain stale bounds and SHOWING after a page transform.",
                 },
             )
@@ -4008,7 +4009,8 @@ class LinuxDriver:
                 ErrorCode.STALE_REF,
                 f"{element.ref} ({element.title!r}) row identity changed; no input was sent",
                 detail={"ref": element.ref, "reason": "target_changed", "outcome": "refused",
-                        "hint": "Re-observe and find the intended row again."},
+                        "hint": "Re-observe and find the intended row again. Do not click its "
+                        "old coordinates: that spot may now hold a different row."},
             )
 
     def _verify_gtk_cell_target(self, element: Element, handle) -> None:

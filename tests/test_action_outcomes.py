@@ -406,7 +406,7 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     assert outcome.suggest_next("click", "partial", process_died=True) == ("ref", "foreground")
     assert outcome.suggest_next("set_value", "suspected_noop")[0] == "ref"
     assert "cdp" in outcome.suggest_next("select", "partial", browser=True)
-    assert outcome.next_for_error("stale_ref", {}) == ("ref", "coordinates", "keyboard")
+    assert outcome.next_for_error("stale_ref", {}) == ("ref", "keyboard")
     hidden = outcome.next_for_error("unsupported", {"reason": "not_showing"})
     assert hidden[0] == "foreground"
     assert outcome.next_for_error("secure_field", {}) == ()
