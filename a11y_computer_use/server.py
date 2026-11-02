@@ -7438,6 +7438,27 @@ class Runtime:
             result = outcome.ActionResult(
                 text, outcome=result.outcome, next=result.next, evidence=result.evidence,
             )
+        # #1427: a node-bound doAction press carries no real pointer gesture.
+        # Chrome's browser-side gates (the multiple-download limiter) do not
+        # count it, so a page effect can be real while the download it
+        # started is held behind a "Download multiple files" prompt and
+        # nothing is saved. The click is never reported as a success.
+        if (
+            button_mechanism and not activated
+            and parsed_button is MouseButton.LEFT
+            and isinstance(result, outcome.ActionResult)
+            and result.outcome == "confirmed"
+        ):
+            seen = f"{result.evidence}; " if result.evidence else ""
+            result = outcome.ActionResult(
+                text, outcome="unverifiable", next=(),
+                evidence=(
+                    f"{seen}no_pointer_gesture: delivered via {button_mechanism[0]}, not a real "
+                    "pointer click, so gesture-gated browser effects such as downloads are not "
+                    "verified and may be held behind a permission prompt; check with a "
+                    "screenshot and do not repeat the click or answer the prompt unasked"
+                ),
+            )
         # The text ref has no action of its own. "clicked" is only true when
         # the control it stands for actually changed.
         if activated and result.outcome in {"suspected_noop", "unverifiable"}:
