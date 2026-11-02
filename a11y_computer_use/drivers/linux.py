@@ -3499,6 +3499,111 @@ class LinuxDriver:
             },
         )
 
+    # #1346: how long one scroll gets for Chromium's bounds and hit test to
+    # follow before the next placement is tried.
+    _COVER_SETTLE_S = 0.6
+
+    def _live_center(self, handle) -> tuple[int, int] | None:
+        from a11y_computer_use.drivers import _atspi
+
+        pos, size = self._run(lambda: _atspi._extents(handle))
+        if pos is None or size is None or size[0] <= 0 or size[1] <= 0:
+            return None
+        return int(round(pos[0] + size[0] / 2)), int(round(pos[1] + size[1] / 2))
+
+    def _cover_now(self, handle):
+        """(cover, center): the overlay node at the field's live center, or None."""
+        from a11y_computer_use.drivers import _atspi
+
+        center = self._live_center(handle)
+        if center is None:
+            return None, None
+        x, y = center
+        return self._run(lambda: _atspi.chromium_cover_at(handle, x, y)), center
+
+    def _click_clear_of_overlay(self, element: Element, handle) -> bool:
+        """#1346: get a page text field out from under a sticky or fixed overlay.
+
+        The field's live center is hit-tested with the document's
+        ``get_accessible_at_point``. Uncovered (or unanswerable) returns False
+        and the caller keeps its usual pointer path. When another page node
+        answers there, the field is scrolled with AT-SPI (``scroll_to``, then
+        ``scroll_to_point`` at the viewport's middle, then the top and bottom
+        edges) and hit-tested again after each scroll. Once the center
+        answers as the field, the verified pointer press goes there and True
+        is returned; typing and read-back follow in the caller. If no
+        placement clears it, this refuses with nothing sent and names the
+        overlay so the caller can dismiss it.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            cover, center = self._cover_now(handle)
+        except Exception:  # noqa: BLE001 - the usual verified click still checks the hit
+            return False
+        if cover is None:
+            return False
+        first_cover = cover
+
+        def placements():
+            yield lambda: _atspi.scroll_to(handle)
+            document = self._run(lambda: _atspi._chromium_document_of(handle))
+            if document is not None:
+                dpos, dsize = self._run(lambda: _atspi._extents(document))
+                _fpos, fsize = self._run(lambda: _atspi._extents(handle))
+                if dpos is not None and dsize is not None and fsize is not None:
+                    left = int(dpos[0] + max(0, (dsize[0] - fsize[0]) / 2))
+                    top = int(dpos[1] + max(0, (dsize[1] - fsize[1]) / 2))
+                    yield lambda: _atspi.scroll_to_point(handle, left, top)
+            yield lambda: _atspi.scroll_to_edge(handle, "TOP_EDGE")
+            yield lambda: _atspi.scroll_to_edge(handle, "BOTTOM_EDGE")
+
+        for place in placements():
+            if not self._run(place):
+                continue
+            deadline = time.monotonic() + self._COVER_SETTLE_S
+            while True:
+                cover, center = self._cover_now(handle)
+                if cover is None and center is not None:
+                    from a11y_computer_use.drivers import _linux_input
+
+                    if _on_wayland():
+                        raise _wayland_input_error("click")
+                    x, y = center
+                    self._verify_chromium_pointer_target(element, handle, x, y)
+                    _linux_input.click(x, y)
+                    return True
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        raise self._covered_field_error(element, cover if cover is not None else first_cover, handle)
+
+    def _covered_field_error(self, element: Element, cover, handle) -> ComputerUseError:
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            role, name, control = self._run(lambda: _atspi.cover_description(cover, handle))
+        except Exception:  # noqa: BLE001 - the refusal stands without a name
+            role, name, control = "element", "", ""
+        held = LinuxDriver._caller_ref(self, element)
+        what = f"{role} {name!r}" if name else role
+        if control:
+            hint = (f"Dismiss the covering {what} first: find and click its {control!r} "
+                    "control by ref, or press Escape; then take a fresh snapshot and type again.")
+        else:
+            hint = (f"Dismiss or close the covering {what} first (click its close control "
+                    "by ref, or press Escape); then take a fresh snapshot and type again.")
+        return ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{held} ({element.role} {element.title!r}) is covered by {what} and could not "
+            "be scrolled clear of it; nothing was typed",
+            detail={
+                "ref": held, "reason": "covered_by_overlay", "outcome": "refused",
+                "cover": {"role": role, "name": name, "control": control},
+                "hint": hint,
+            },
+        )
+
     def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int) -> None:
         """Refuse page ref clicks whose native hit test cannot confirm the target."""
         from a11y_computer_use.drivers import _atspi
@@ -6189,7 +6294,7 @@ class LinuxDriver:
             # exact read-back of that replacement is a success.
             if self._run(lambda: _atspi._focus_on_target(handle)):
                 chrome_selection = self._run(lambda: _atspi.entry_text_and_selection(handle))
-            if chrome_selection is None:
+            if chrome_selection is None and not self._click_clear_of_overlay(element, handle):
                 # Accessibility focus bypasses page pointer handlers, including
                 # custom-value radios. Use the geometry-checked pointer path.
                 self.click(element)

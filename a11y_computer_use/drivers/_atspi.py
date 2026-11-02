@@ -26684,3 +26684,107 @@ def click_window_state(target) -> str | None:
         return "hidden"
     except Exception:
         return None
+
+
+# #1346: a page overlay (sticky header, fixed cookie banner) over a ref.
+_COVER_NAMED_ROLES = frozenset({
+    "push button", "toggle button", "link", "heading", "label", "static",
+})
+
+
+def _chromium_document_of(acc):
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            return node
+        if role in {"frame", "window", "application"}:
+            return None
+    return None
+
+
+def chromium_cover_at(acc, x: int, y: int):
+    """The page node that the document's hit test returns at (x, y) in place of ``acc``.
+
+    None when the hit is ``acc`` or one of its descendants, when ``acc`` is not
+    Chromium page content, or when the hit test gives no answer. In those
+    cases the existing pointer checks decide. The walk is the same as
+    `chromium_pointer_target`: native identity only, never names or boxes.
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    document = _chromium_document_of(acc)
+    if document is None:
+        return None
+    target_key = _ancestor_key(acc)
+    node = document
+    seen: set[object] = set()
+    pinned = []
+    deepest = None
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            break
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            break
+        hit = _hit_at(comp, x, y)
+        if hit is None or _ancestor_key(hit) == key:
+            break
+        if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
+            return None
+        deepest = hit
+        node = hit
+    return deepest
+
+
+def cover_description(cover, acc) -> tuple[str, str, str]:
+    """(role, name, dismiss control name) of the overlay that holds ``cover``.
+
+    The overlay is the outermost ancestor of ``cover`` under the document
+    that does not also contain ``acc``: the header or banner itself, not
+    one word inside it. With no name of its own, it is named by the first
+    named button, link or text inside it. The dismiss control is the first
+    named button or link inside it ("" when it has none).
+    """
+    target_keys = {_ancestor_key(node) for node in _ancestor_chain(acc)}
+    overlay = cover
+    for node in _ancestor_chain(cover):
+        role = _role_name(node)
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            break
+        if _ancestor_key(node) in target_keys:
+            break
+        overlay = node
+    role = _role_name(overlay) or "element"
+    name = _node_name(overlay)
+    control = ""
+    for node in _bounded_descendants(overlay, limit=96):
+        node_role = _role_name(node)
+        if node_role not in _COVER_NAMED_ROLES:
+            continue
+        label = _node_name(node)
+        if not label:
+            continue
+        if not control and node_role in {"push button", "toggle button", "link"}:
+            control = label
+        if not name:
+            name = label
+        if control and name:
+            break
+    return role, name, control
+
+
+def scroll_to_point(acc, x: int, y: int) -> bool:
+    """Scroll so the top-left of ``acc`` sits at screen (x, y) (`Component.scroll_to_point`).
+
+    No wheel and no pointer move. False when the binding or the component
+    has no such call.
+    """
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return False
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    return bool(_call_first(comp, ("scroll_to_point",), coord, int(x), int(y), default=False))
