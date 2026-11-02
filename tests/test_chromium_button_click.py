@@ -126,13 +126,47 @@ def test_runtime_reports_mechanism_but_still_checks_effect(button_case, monkeypa
         assert result.startswith("sent press to e1")
         assert "clicked" not in result
         assert "via accessibility action AT-SPI doAction(click), not a pointer click" in result
-        assert "including any download, is unverified" in result
+        assert "its effect is not verified" in result
+        # A plain button: the download caveat lives only in the evidence.
+        assert "download" not in str(result)
         assert result.next == ()
         assert result.evidence.startswith("observed effect; no_pointer_gesture")
     else:
         assert result.next == ()
         assert "re-observe first" in result.evidence
     assert calls == ["click"]
+
+
+@pytest.mark.parametrize("verdict", ["confirmed", "suspected_noop"])
+def test_runtime_right_click_says_context_menu_request_sent(button_case, monkeypatch, verdict):
+    driver, element, node, frame, action, names, calls = button_case
+    names[:] = ["press", "showContextMenu"]
+    snap = Snapshot(element.snapshot_id, Scope.WINDOW, "chrome", 0, 0.0, (), (element,))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt.driver = driver
+    rt._target = lambda *a, **kw: (element, "chrome")
+    rt._capture = lambda: {}
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._resolves_apps = lambda: False
+    rt._dismiss_open_menu = lambda app: ""
+    for name in ("_reject_coordinate", "_refuse_disabled", "_refuse_secure", "_recheck_target",
+                 "_guard_user", "_popover_cover", "_refuse_vanished_target", "_cover_owner",
+                 "_paragraph_click_verdict", "_opaque_click_verdict", "_navigating_row_location"):
+        setattr(rt, name, lambda *a, **kw: None)
+    rt._canvas_fallback_target = lambda element: False
+    rt._effect_after = lambda pre: ""
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *a: None)
+    rt._judge_mutation = lambda *a, **kw: (verdict, "menu opened" if verdict == "confirmed" else "unchanged")
+    monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
+    result = rt.click(ref="e1", button="right")
+    assert calls == ["showContextMenu"]
+    assert result.startswith("sent context-menu request to e1")
+    assert "clicked" not in str(result)
+    assert "AT-SPI doAction(showContextMenu), not a pointer right-click" in result
+    # Outcome unchanged by this wording: a seen menu stays confirmed (the
+    # #1427 downgrade is left-click only); no change is unverifiable, as before.
+    assert result.outcome == {"confirmed": "confirmed", "suspected_noop": "unverifiable"}[verdict]
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -331,7 +365,9 @@ def test_1427_download_button_doaction_click_is_not_a_success(button_case, monke
     assert "via accessibility action AT-SPI doAction(press)" in result
     assert not result.startswith("clicked")
     assert "clicked" not in result
-    assert "including any download, is unverified" in result
+    assert "its effect is not verified" in result
+    assert "download" not in str(result)
+    assert "downloads are not verified" in result.evidence
     assert result.outcome == "unverifiable"
     assert result.next == ()
     assert "no_pointer_gesture" in result.evidence

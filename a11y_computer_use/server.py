@@ -7254,7 +7254,12 @@ class Runtime:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
         mechanism_note = f" via {button_mechanism[0]}" if button_mechanism else ""
-        msg = f"clicked {self._label(ref, target)}{mechanism_note}{control_note}{''.join(menu_note)}"
+        if button_mechanism and parsed_button is MouseButton.RIGHT:
+            # A node-bound showContextMenu is a request, not a right-click.
+            msg = (f"sent context-menu request to {self._label(ref, target)}{mechanism_note}"
+                   f", not a pointer right-click{control_note}{''.join(menu_note)}")
+        else:
+            msg = f"clicked {self._label(ref, target)}{mechanism_note}{control_note}{''.join(menu_note)}"
         outline_note = (
             isinstance(target, Element)
             and not activated
@@ -7453,8 +7458,8 @@ class Runtime:
             # The text must not claim a click or its effect happened.
             sent = (
                 f"sent press to {self._label(ref, target)} via accessibility action "
-                f"{button_mechanism[0]}, not a pointer click; unverifiable: its effect, "
-                "including any download, is unverified"
+                f"{button_mechanism[0]}, not a pointer click; unverifiable: its effect "
+                "is not verified"
             )
             text = sent + (str(result)[len(msg):] if str(result).startswith(msg) else "")
             result = outcome.ActionResult(

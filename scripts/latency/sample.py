@@ -205,7 +205,12 @@ async def sample(row, head):
                                 receipt = await call("key", app=app, chord="Return")
                                 expected = "c=0 s=1"
                             elapsed = time.perf_counter() - start
-                            assert outcomes[-1] and outcomes[-1]["outcome"] == "confirmed", (receipt, outcomes[-1])
+                            # #1427: the Chrome page button "Go" is pressed by
+                            # AT-SPI doAction, not a pointer gesture, so its
+                            # receipt is deliberately unverifiable. The page
+                            # effect is still checked below.
+                            wanted = "unverifiable" if row == "R13-click" else "confirmed"
+                            assert outcomes[-1] and outcomes[-1]["outcome"] == wanted, (receipt, outcomes[-1])
                             assert expected in await snapshot(), receipt
                         elif row == "R7":
                             await call("click", ref=ref(text, '"Help"'))
