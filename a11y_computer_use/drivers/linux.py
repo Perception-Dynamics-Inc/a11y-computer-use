@@ -25,6 +25,7 @@ from dataclasses import replace
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from a11y_computer_use import timing
 from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
@@ -1604,6 +1605,7 @@ class LinuxDriver:
         return root
 
     # -- observe (AT-SPI2) --------------------------------------------------
+    @timing.snapshot_span
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
         """Pruned snapshot of ``app``.
 
@@ -2800,6 +2802,8 @@ class LinuxDriver:
                 "route_changed",
             }:
                 self._raise_if_hidden_alive(snap, ref)
+                if exc.detail.get("reason") in {"not_found", "title_changed"}:
+                    LinuxDriver._raise_if_offscreen_unreachable(self, snap, ref)
             raise
 
     @staticmethod
@@ -2939,6 +2943,7 @@ class LinuxDriver:
     #: Reason for a refused type whose keys may still land (#1190).
     TYPE_BUSY_REASON = "page busy, input may land later; re-observe before retrying"
 
+    @timing.span("driver")
     def type_into(self, element: Element, text: str) -> int:
         """Type into ``element``; see ``_type_into_unguarded`` and ``_busy_page_guard``."""
         from a11y_computer_use import observe
@@ -3270,6 +3275,49 @@ class LinuxDriver:
         if found:
             raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _raise_if_offscreen_unreachable(self, snap: Snapshot, ref: str) -> None:
+        """Refuse an alive off-screen ref by its cause, not as a reorder (#1440).
+
+        ``find`` attaches a document hit the page keeps off every display
+        (a ``left:-10000px`` skip link) without bounds. The live walk prunes
+        it, so the label matcher said ``title_changed`` and offered unrelated
+        namesakes. Only the issuing handle is asked: alive, not hidden, and
+        its box still misses the display.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            element = snap.element(ref)
+        except KeyError:
+            return
+        if element.bounds is not None:
+            return
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        try:
+            found = run(lambda: _atspi.offscreen_extents(handle))
+        except Exception:
+            return
+        if found is None:
+            return
+        shown = f" {element.title!r}" if element.title else ""
+        raise ComputerUseError(
+            ErrorCode.NOT_VISIBLE,
+            f"{ref} ({element.role}{shown}) is alive but positioned off every display; "
+            "the page shows it only on keyboard focus",
+            detail={
+                "ref": ref,
+                "role": element.role,
+                "reason": "off_screen_unreachable",
+                "outcome": "refused",
+                "next": ["keyboard"],
+                "hint": "Press Tab to move focus onto it (skip links appear on focus), then find it again.",
+            },
+        )
+
     def alive_offscreen(self, snap: Snapshot, ref: str) -> Bounds | None:
         """Bounds when ``ref`` is still alive and misses the display.
 
@@ -3375,7 +3423,8 @@ class LinuxDriver:
                 "at the click point by the Chromium document hit test; no click was sent",
                 detail={
                     "ref": element.ref, "reason": "hit_test_unverified", "outcome": "refused",
-                    "hint": "Take a fresh snapshot or screenshot and locate the visible control. "
+                    "hint": "Take a fresh snapshot and find the control again. Do not click "
+                    "its old coordinates: that spot may now hold a different element. "
                     "Chromium can retain stale bounds and SHOWING after a page transform.",
                 },
             )
@@ -3960,7 +4009,8 @@ class LinuxDriver:
                 ErrorCode.STALE_REF,
                 f"{element.ref} ({element.title!r}) row identity changed; no input was sent",
                 detail={"ref": element.ref, "reason": "target_changed", "outcome": "refused",
-                        "hint": "Re-observe and find the intended row again."},
+                        "hint": "Re-observe and find the intended row again. Do not click its "
+                        "old coordinates: that spot may now hold a different row."},
             )
 
     def _verify_gtk_cell_target(self, element: Element, handle) -> None:
@@ -4529,6 +4579,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         return handle is not None and self._run(lambda: _atspi.text_visibility_unknown(handle))
 
+    @timing.span("driver")
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi

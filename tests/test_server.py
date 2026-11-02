@@ -7969,6 +7969,64 @@ def test_ref_click_logs_phase_timing_in_one_debug_line(tmp_path, monkeypatch, ca
     ), lines[0]
 
 
+def test_ref_click_logs_one_timing_line_whose_spans_sum_to_total(tmp_path, monkeypatch, caplog) -> None:
+    """The whole Runtime.click call is timed: resolve, capture, gate, conclude + unaccounted."""
+    import logging
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    driver.click = lambda target, **kwargs: None
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+    with caplog.at_level(logging.DEBUG, logger="a11y_computer_use.timing"):
+        rt.call_tool("click", {"ref": "e2"})
+    lines = [r.getMessage() for r in caplog.records if r.name == "a11y_computer_use.timing"]
+    assert len(lines) == 1, lines
+    m = re.match(r"timing tool=click ref=e2 total=(\d+\.\d{3})s((?: [a-z_]+=\d+\.\d{3}s)*)"
+                 r" unaccounted=(-?\d+\.\d{3})s nested=\S+ marks=\S+ nodes=\S+$", lines[0])
+    assert m, lines[0]
+    top = dict(re.findall(r" ([a-z_]+)=(\d+\.\d{3})s", m[2]))
+    for name in ("resolve", "capture", "gate", "conclude"):
+        assert name in top, lines[0]
+    assert abs(sum(map(float, top.values())) + float(m[3]) - float(m[1])) <= 0.003 * (len(top) + 1)
+
+
+def test_sheet_click_verdict_is_timed_so_unaccounted_stays_small(tmp_path, monkeypatch, caplog) -> None:
+    """#1432: the Calc selected-cell check runs after the gate; it is its own span."""
+    import logging
+    import time
+
+    from a11y_computer_use.drivers import _atspi
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    driver.click = lambda target, **kwargs: None
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+    monkeypatch.setattr(rt, "_sheet_address_for_click", lambda *a, **k: "B3")
+    monkeypatch.setattr(driver, "name", "linux", raising=False)
+
+    def slow_verdict(app, address):
+        time.sleep(0.3)
+        return ("confirmed", f"{address} is the selected cell")
+
+    monkeypatch.setattr(_atspi, "sheet_click_verdict", slow_verdict)
+    with caplog.at_level(logging.DEBUG, logger="a11y_computer_use.timing"):
+        rt.call_tool("click", {"ref": "e2"})
+    lines = [r.getMessage() for r in caplog.records if r.name == "a11y_computer_use.timing"]
+    assert len(lines) == 1, lines
+    m = re.match(r"timing tool=click ref=e2 total=(\d+\.\d{3})s((?: [a-z_]+=\d+\.\d{3}s)*)"
+                 r" unaccounted=(-?\d+\.\d{3})s nested=\S+ marks=\S+ nodes=\S+$", lines[0])
+    assert m, lines[0]
+    top = dict(re.findall(r" ([a-z_]+)=(\d+\.\d{3})s", m[2]))
+    assert float(top.get("verdict", 0)) >= 0.29, lines[0]
+    assert float(m[3]) < 0.1 and float(m[3]) < 0.25 * float(m[1]), lines[0]
+
+
 def _sections_snapshot(sid: str, *, found: bool, second_y: int = 518, anchor_bounds=True,
                        box_y: int = 257) -> Snapshot:
     """#1435: a Chrome overflow-y container of tall <section> blocks.

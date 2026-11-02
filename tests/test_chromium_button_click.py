@@ -118,12 +118,55 @@ def test_runtime_reports_mechanism_but_still_checks_effect(button_case, monkeypa
     rt._judge_mutation = lambda *a, **kw: (verdict, "observed effect" if verdict == "confirmed" else "unchanged")
     monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
     result = rt.click(ref="e1")
-    assert "via AT-SPI doAction(click)" in result
-    assert result.outcome == ("confirmed" if verdict == "confirmed" else "unverifiable")
-    if verdict != "confirmed":
+    assert "AT-SPI doAction(click)" in result
+    # #1427: doAction is not a real pointer gesture; never a success.
+    assert result.outcome == "unverifiable"
+    if verdict == "confirmed":
+        # The text must not claim the click or its effect happened.
+        assert result.startswith("sent press to e1")
+        assert "clicked" not in result
+        assert "via accessibility action AT-SPI doAction(click), not a pointer click" in result
+        assert "its effect is not verified" in result
+        # A plain button: the download caveat lives only in the evidence.
+        assert "download" not in str(result)
+        assert result.next == ()
+        assert result.evidence.startswith("observed effect; no_pointer_gesture")
+    else:
         assert result.next == ()
         assert "re-observe first" in result.evidence
     assert calls == ["click"]
+
+
+@pytest.mark.parametrize("verdict", ["confirmed", "suspected_noop"])
+def test_runtime_right_click_says_context_menu_request_sent(button_case, monkeypatch, verdict):
+    driver, element, node, frame, action, names, calls = button_case
+    names[:] = ["press", "showContextMenu"]
+    snap = Snapshot(element.snapshot_id, Scope.WINDOW, "chrome", 0, 0.0, (), (element,))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt.driver = driver
+    rt._target = lambda *a, **kw: (element, "chrome")
+    rt._capture = lambda: {}
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._resolves_apps = lambda: False
+    rt._dismiss_open_menu = lambda app: ""
+    for name in ("_reject_coordinate", "_refuse_disabled", "_refuse_secure", "_recheck_target",
+                 "_guard_user", "_popover_cover", "_refuse_vanished_target", "_cover_owner",
+                 "_paragraph_click_verdict", "_opaque_click_verdict", "_navigating_row_location"):
+        setattr(rt, name, lambda *a, **kw: None)
+    rt._canvas_fallback_target = lambda element: False
+    rt._effect_after = lambda pre: ""
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *a: None)
+    rt._judge_mutation = lambda *a, **kw: (verdict, "menu opened" if verdict == "confirmed" else "unchanged")
+    monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
+    result = rt.click(ref="e1", button="right")
+    assert calls == ["showContextMenu"]
+    assert result.startswith("sent context-menu request to e1")
+    assert "clicked" not in str(result)
+    assert "AT-SPI doAction(showContextMenu), not a pointer right-click" in result
+    # Outcome unchanged by this wording: a seen menu stays confirmed (the
+    # #1427 downgrade is left-click only); no change is unverifiable, as before.
+    assert result.outcome == {"confirmed": "confirmed", "suspected_noop": "unverifiable"}[verdict]
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -181,7 +224,7 @@ def test_ref_click_counts_full_window_reads(button_case, monkeypatch, changed):
     monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
     result = rt.click(ref="e1")
     assert len(reads) == (1 if changed else 2)
-    assert result.outcome == ("confirmed" if changed else "unverifiable")
+    assert result.outcome == "unverifiable"  # #1427: no real pointer gesture
     if not changed:
         assert result.next == ()
         assert "re-observe first" in result.evidence
@@ -190,7 +233,9 @@ def test_ref_click_counts_full_window_reads(button_case, monkeypatch, changed):
     assert "_popover_cover" in guards
     assert "_refuse_vanished_target" in guards
     if changed:
-        assert result.evidence == "the clicked button's accessible name changed"
+        assert result.evidence.startswith(
+            "the clicked button's accessible name changed; no_pointer_gesture: "
+            "delivered via AT-SPI doAction(click)")
         assert rt._action_baseline["capture"] is None
         assert driver.button_click_evidence(element) is None
 
@@ -287,3 +332,44 @@ def test_failed_context_menu_action_is_unconfirmed_not_retried(button_case):
         driver.click_button_action(element, button=MouseButton.RIGHT, count=1, modifiers=())
     assert exc.value.detail["outcome"] == "unconfirmed"
     assert calls == ["showContextMenu"]
+
+
+def test_1427_download_button_doaction_click_is_not_a_success(button_case, monkeypatch):
+    """#1427: Chrome holds a page's second download behind a "Download
+    multiple files" prompt when the click came from AT-SPI doAction(press),
+    while the page handler still runs and the tree changes. A page effect is
+    not proof the gesture-gated download happened, so the click is
+    unverifiable, not confirmed, and no pointer click is substituted."""
+    driver, element, node, frame, action, names, calls = button_case
+    names[:] = ["press"]
+    snap = Snapshot(element.snapshot_id, Scope.WINDOW, "chrome", 0, 0.0, (), (element,))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt.driver = driver
+    rt._target = lambda *a, **kw: (element, "chrome")
+    rt._capture = lambda: {}
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._resolves_apps = lambda: False
+    rt._dismiss_open_menu = lambda app: ""
+    for name in ("_reject_coordinate", "_refuse_disabled", "_refuse_secure", "_recheck_target",
+                 "_guard_user", "_popover_cover", "_refuse_vanished_target", "_cover_owner",
+                 "_paragraph_click_verdict", "_opaque_click_verdict", "_navigating_row_location"):
+        setattr(rt, name, lambda *a, **kw: None)
+    rt._canvas_fallback_target = lambda element: False
+    rt._effect_after = lambda pre: ""
+    monkeypatch.setattr(driver, "same_app_window_cover", lambda *a: None)
+    # The handler ran (title DL|blob-done-2) and Chrome's Block/Allow bubble appeared.
+    rt._judge_mutation = lambda *a, **kw: ("confirmed", "the page title changed")
+    monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
+    result = rt.click(ref="e1")
+    assert "via accessibility action AT-SPI doAction(press)" in result
+    assert not result.startswith("clicked")
+    assert "clicked" not in result
+    assert "its effect is not verified" in result
+    assert "download" not in str(result)
+    assert "downloads are not verified" in result.evidence
+    assert result.outcome == "unverifiable"
+    assert result.next == ()
+    assert "no_pointer_gesture" in result.evidence
+    assert "download" in result.evidence
+    assert calls == ["press"]

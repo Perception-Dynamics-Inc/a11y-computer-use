@@ -64,6 +64,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
+from a11y_computer_use import timing
 from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, outcome, reporting, safety
 from a11y_computer_use.untrusted import (
     DomainPolicy,
@@ -3012,6 +3013,7 @@ class Runtime:
             return safety.menu_path(snap, target)
         return None
 
+    @timing.span('gate')
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
         input_target=None, no_input: bool = False,
@@ -3131,6 +3133,7 @@ class Runtime:
     # resolved a target folder waits, and only until the file appears.
     _DRAG_DROP_SETTLE_S = 0.4
 
+    @timing.span('capture')
     def _freeze(self, snap: "Snapshot") -> dict:
         """Fingerprints of ``snap``, taken now so a later in-place edit cannot move them."""
         pid = snap.pid
@@ -3172,6 +3175,7 @@ class Runtime:
             observe.touch_epoch(epoch)
         return snapped
 
+    @timing.span('capture')
     def _capture(self, app: str | None = None, *, targeted: bool = False) -> dict | None:
         """The tree immediately before this action, and whether its pid is alive.
 
@@ -3385,6 +3389,7 @@ class Runtime:
                 self._action_baseline = {"token": id(current), "app": app, "capture": None}
         return verdict
 
+    @timing.span('judge')
     def _judge_mutation(
         self,
         app: str | None,
@@ -3992,6 +3997,7 @@ class Runtime:
             return None
         return found if isinstance(found, str) else None
 
+    @timing.span('conclude')
     def _conclude(
         self,
         text: str,
@@ -4931,6 +4937,7 @@ class Runtime:
             self._audit_stale(kind, ref, exc)
             raise
 
+    @timing.span('resolve')
     def _resolve(
         self, ref: str, kind: str, *, live_snapshot: Snapshot | None = None,
     ) -> tuple[Snapshot, Element]:
@@ -5049,6 +5056,7 @@ class Runtime:
             return None
         return anchor, snap.app or self._frontmost(), bounds
 
+    @timing.span('resolve')
     def _target(
         self,
         ref: str | None,
@@ -6934,6 +6942,7 @@ class Runtime:
 
     # -- action tools -----------------------------------------------------------
 
+    @timing.call('click', ref_pos=1)
     @_serialized
     def click(
         self,
@@ -7254,7 +7263,12 @@ class Runtime:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
         mechanism_note = f" via {button_mechanism[0]}" if button_mechanism else ""
-        msg = f"clicked {self._label(ref, target)}{mechanism_note}{control_note}{''.join(menu_note)}"
+        if button_mechanism and parsed_button is MouseButton.RIGHT:
+            # A node-bound showContextMenu is a request, not a right-click.
+            msg = (f"sent context-menu request to {self._label(ref, target)}{mechanism_note}"
+                   f", not a pointer right-click{control_note}{''.join(menu_note)}")
+        else:
+            msg = f"clicked {self._label(ref, target)}{mechanism_note}{control_note}{''.join(menu_note)}"
         outline_note = (
             isinstance(target, Element)
             and not activated
@@ -7438,6 +7452,34 @@ class Runtime:
             result = outcome.ActionResult(
                 text, outcome=result.outcome, next=result.next, evidence=result.evidence,
             )
+        # #1427: a node-bound doAction press carries no real pointer gesture.
+        # Chrome's browser-side gates (the multiple-download limiter) do not
+        # count it, so a page effect can be real while the download it
+        # started is held behind a "Download multiple files" prompt and
+        # nothing is saved. The click is never reported as a success.
+        if (
+            button_mechanism and not activated
+            and parsed_button is MouseButton.LEFT
+            and isinstance(result, outcome.ActionResult)
+            and result.outcome == "confirmed"
+        ):
+            seen = f"{result.evidence}; " if result.evidence else ""
+            # The text must not claim a click or its effect happened.
+            sent = (
+                f"sent press to {self._label(ref, target)} via accessibility action "
+                f"{button_mechanism[0]}, not a pointer click; unverifiable: its effect "
+                "is not verified"
+            )
+            text = sent + (str(result)[len(msg):] if str(result).startswith(msg) else "")
+            result = outcome.ActionResult(
+                text, outcome="unverifiable", next=(),
+                evidence=(
+                    f"{seen}no_pointer_gesture: delivered via {button_mechanism[0]}, not a real "
+                    "pointer click, so gesture-gated browser effects such as downloads are not "
+                    "verified and may be held behind a permission prompt; check with a "
+                    "screenshot and do not repeat the click or answer the prompt unasked"
+                ),
+            )
         # The text ref has no action of its own. "clicked" is only true when
         # the control it stands for actually changed.
         if activated and result.outcome in {"suspected_noop", "unverifiable"}:
@@ -7538,6 +7580,7 @@ class Runtime:
         found.sort(key=lambda el: el.bounds.width * el.bounds.height)
         return _atspi.sheet_address(found[0].title)
 
+    @timing.span("verdict")
     def _sheet_click_verdict(self, app: str, address: str) -> tuple[str, str] | None:
         """Selected-cell check for a Calc click. None off Linux and off a sheet."""
         if getattr(self.driver, "name", None) != "linux":
@@ -8157,6 +8200,7 @@ class Runtime:
             had_ref=True, previous=previous,
         )
 
+    @timing.call('type_text', ref_pos=3)
     @_serialized
     def type_text(self, text: str, app: str | None = None, ref: str | None = None) -> str:
         app = _optional_app_arg(app, "type")
@@ -8753,6 +8797,7 @@ class Runtime:
                                  min(timeout_s, remaining_s))
         raise ValueError(f"unknown step '{do}' — use click/hover/type/key/scroll/drag/wait_for")
 
+    @timing.call('set_value', ref_pos=1)
     @_serialized
     def set_value(self, ref: str, value: str) -> str:
         """Set an editable element's value directly via the a11y API (one op),

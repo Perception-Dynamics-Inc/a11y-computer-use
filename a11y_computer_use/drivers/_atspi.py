@@ -21417,6 +21417,31 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
     return None
 
 
+_SEEK_ACTIONABLE_ROLES = frozenset({
+    "link", "push button", "button", "toggle button", "menu item",
+    "check box", "radio button", "tab",
+})
+
+
+def _actionable_seek_owner(node, needle: str):
+    """The link or button whose own name matches, when ``node`` is its text (#1440).
+
+    The search is children-first, so a visually hidden "Skip to main
+    content" link was reported as its static-text child: ``role="link"``
+    could not match it and the ref named the text, not the control. Up to
+    three ancestors are checked; ``node`` is returned when none qualifies.
+    """
+    current = node
+    for _ in range(3):
+        parent = _parent_of(current)
+        if parent is None:
+            break
+        if _role_name(parent) in _SEEK_ACTIONABLE_ROLES and _matches_seek(parent, needle):
+            return parent
+        current = parent
+    return node
+
+
 def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None,
                             exact_only: bool = False) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
@@ -21453,6 +21478,8 @@ def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None,
     if hit is None:
         return False
     cell, row, rows = hit
+    if rows == 0:
+        cell = _actionable_seek_owner(cell, text)
     screen = _screen_size()
     if _on_screen_item(cell, screen) is not None:
         return True
