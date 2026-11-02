@@ -2458,6 +2458,34 @@ def test_xres_never_names_the_x_server_as_a_window_owner(monkeypatch) -> None:
     assert _REAL_XRES_PID(types.SimpleNamespace(id=0x200000), _xres_display(0x200000, 4343)) == 4343
 
 
+def test_xres_names_no_owner_for_a_destroyed_window(monkeypatch) -> None:
+    """A stale _NET_ACTIVE_WINDOW id whose client slot is reused must not
+    name the reusing client (the empty-desktop test read "pytest")."""
+    import sys
+    import types
+
+    # No python-xlib on macOS/Windows CI: fake the error classes the probe catches.
+    class BadWindow(Exception):
+        pass
+
+    class BadDrawable(Exception):
+        pass
+
+    xerror = types.SimpleNamespace(BadWindow=BadWindow, BadDrawable=BadDrawable)
+    monkeypatch.setitem(sys.modules, "Xlib", types.SimpleNamespace(error=xerror))
+    monkeypatch.setitem(sys.modules, "Xlib.error", xerror)
+    monkeypatch.setitem(sys.modules, "Xlib.ext", types.SimpleNamespace(res=types.SimpleNamespace(LocalClientPIDMask=2)))
+    monkeypatch.setitem(sys.modules, "Xlib.ext.res", types.SimpleNamespace(LocalClientPIDMask=2))
+
+    def gone():
+        raise BadWindow()
+
+    dead = types.SimpleNamespace(id=0x400001, get_attributes=gone)
+    assert _REAL_XRES_PID(dead, _xres_display(0x400000, 4545)) is None
+    alive = types.SimpleNamespace(id=0x400001, get_attributes=lambda: object())
+    assert _REAL_XRES_PID(alive, _xres_display(0x400000, 4545)) == 4545
+
+
 def test_the_hit_test_never_falls_back_to_the_net_wm_pid(monkeypatch) -> None:
     """#1327 gap 1: XRes gives no pid for a popup claiming Mousepad's pid and
     class; the point is "unknown", not mousepad."""
