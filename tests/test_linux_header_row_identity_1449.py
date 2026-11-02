@@ -94,3 +94,26 @@ def test_chromium_button_header_survives_sort(fake_atspi, monkeypatch):
 def test_flat_identity_does_not_crash():
     from a11y_computer_use.drivers.linux import _header_own_identity
     assert _header_own_identity(("row", "jane@example.com", 2)) == ()
+
+
+def test_issued_header_identity_is_stable_across_a_reorder(fake_atspi, monkeypatch):
+    """#1449 step order: refs issued before a sort are compared, by every
+    later snapshot and by the act-time check, with the identity read after
+    it. The header's issued identity must not include the header row."""
+    driver, button, th, head, link, body = _table(monkeypatch, "button")
+    with _atspi.read_cache():
+        cache = {}
+        before_link = _atspi.chromium_row_identity(link, cache=cache)
+        before = _atspi.chromium_row_identity(button, cache=cache)
+    assert all(part[0] != "table row" for part in before)
+    # Sort by another column: rows re-appended, header row re-indexed and
+    # re-parented in the tree, the sort indicator moves.
+    head.name = "First Name Last Name Company Favorite Number \u25b2"
+    head.attributes["rowindex"] = "1"
+    head.parent = _GeckoNode("table")
+    body.attributes["rowindex"] = "2"
+    after = _atspi.chromium_row_identity(button, fresh=True)
+    assert after == before
+    assert _atspi.chromium_row_identity(link, fresh=True) != before_link
+    element = Element("e37", "AXButton", "Company", None, None, "hdr", row_identity=before)
+    driver._verify_chromium_row_target(element, button)

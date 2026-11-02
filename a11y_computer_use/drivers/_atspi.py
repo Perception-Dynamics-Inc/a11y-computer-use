@@ -25336,6 +25336,10 @@ def text_range_rect(acc, start: int, end: int, expected: str):
         return None
 
 
+_ROW_IDENTITY_ROW_ROLES = frozenset({"list item", "list box item", "table row", "tree item"})
+_ROW_IDENTITY_HEADER_ROLES = frozenset({"column header", "table column header"})
+
+
 def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None) -> tuple:
     """Bind pooled Chromium rows and descendants to observed semantics.
 
@@ -25388,6 +25392,17 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
             cache[key] = (tail, has_row)
     if not has_row:
         return ()
+    # A column header's identity is its own cell (#1449). The header row and
+    # table above it are shared chrome that a sort re-appends around, so the
+    # issued identity, every later snapshot's comparison and the act-time
+    # check all stop at the header cell. Body rows keep their full ancestry.
+    for i, (_key, _node, role) in enumerate(tail):
+        if role in _ROW_IDENTITY_ROW_ROLES:
+            break
+        if role in _ROW_IDENTITY_HEADER_ROLES:
+            if any(r in _ROW_IDENTITY_ROW_ROLES for _k, _n, r in tail[i + 1:]):
+                tail = tail[:i + 1]
+            break
     parts = []
     for key, node, role in tail:
         part_key = ("row-part", key)
