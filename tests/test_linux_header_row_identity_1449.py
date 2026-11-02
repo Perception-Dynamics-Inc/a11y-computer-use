@@ -138,3 +138,52 @@ def test_header_ref_survives_reissued_header_objects_1449(fake_atspi, monkeypatc
     assert exc.value.detail["reason"] == "target_changed"
     assert exc.value.detail["identity_diff"]
     assert not button.pressed
+
+
+def _dead(monkeypatch, *nodes):
+    real = _atspi.chromium_row_identity
+
+    def read(node, **kwargs):
+        if node in nodes:
+            raise RuntimeError("org.a11y.atspi: object does not exist")
+        return real(node, **kwargs)
+    monkeypatch.setattr(_atspi, "chromium_row_identity", read)
+
+
+def test_dead_issued_header_defers_to_live_rematch_1449(fake_atspi, monkeypatch):
+    """Tester @0e0d3652: after a sort Chrome rebuilt the header row, the
+    issued button and header cell objects resolve to None, and the act-time
+    read is empty. The early check must defer to the live rematch, which
+    then accepts the rebuilt "Company" header and refuses "Employer"."""
+    driver, button, th, head, *_ = _table(monkeypatch, "button")
+    element = _el(button, "Company")
+    _dead(monkeypatch, button)
+    with pytest.raises(ComputerUseError):
+        driver._verify_chromium_row_target(element, button)
+    driver._verify_chromium_row_target(element, button, defer_dead_header=True)
+
+    # The rebuilt header row: new objects, same role and name.
+    new_button = _GeckoNode("button", "Company")
+    _GeckoNode("table row", "First Name Last Name Company", children=[
+        _GeckoNode("column header", children=[new_button])])
+    new_button.parent.parent.parent = head.parent
+    live = _atspi.chromium_row_identity(new_button, fresh=True)
+    driver._verify_chromium_row_target(element, new_button, current=live)
+
+    renamed = _GeckoNode("button", "Employer")
+    _GeckoNode("table row", "First Name Last Name Employer", children=[
+        _GeckoNode("column header", children=[renamed])]).parent = head.parent
+    with pytest.raises(ComputerUseError) as exc:
+        driver._verify_chromium_row_target(
+            element, renamed, current=_atspi.chromium_row_identity(renamed, fresh=True))
+    assert exc.value.detail["reason"] == "target_changed"
+    assert not renamed.pressed
+
+
+def test_dead_body_row_is_still_refused_1449(fake_atspi, monkeypatch):
+    driver, *_, link, body = _table(monkeypatch)
+    element = _el(link, "513")
+    _dead(monkeypatch, link)
+    with pytest.raises(ComputerUseError) as exc:
+        driver._verify_chromium_row_target(element, link, defer_dead_header=True)
+    assert exc.value.detail["reason"] == "target_changed"

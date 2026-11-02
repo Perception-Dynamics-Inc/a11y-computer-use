@@ -2692,7 +2692,11 @@ class LinuxDriver:
 
         anchor = snap.element(ref)
         if anchor.row_identity:
-            self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref))
+            # A sort makes Chrome rebuild the header row, so the issued header
+            # object no longer resolves (#1449). Then the live rematch below
+            # (role + name + path) finds the header and checks its identity.
+            self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref),
+                                             defer_dead_header=True)
         if anchor.text_range is not None:
             # Preserve process/document/epoch checks, then re-read the exact
             # offsets and geometry on the live native node.
@@ -4027,8 +4031,17 @@ class LinuxDriver:
         )
 
     def _verify_chromium_row_target(self, element: Element, handle,
-                                    *, current: tuple | None = None) -> None:
-        """Refuse a recycled row before dispatching any input."""
+                                    *, current: tuple | None = None,
+                                    defer_dead_header: bool = False) -> None:
+        """Refuse a recycled row before dispatching any input.
+
+        ``defer_dead_header``: when the issued object of a column-header ref
+        no longer resolves (Chrome rebuilt the header row on a sort, #1449),
+        return without a verdict. Only ``resolve_ref`` passes it, and it then
+        rematches the header by role, name and path in the live tree and
+        verifies the live object's identity, so a renamed header is still
+        refused there.
+        """
         if not element.row_identity:
             return
         from a11y_computer_use.drivers import _atspi
@@ -4057,6 +4070,8 @@ class LinuxDriver:
                     own(element.row_identity) and own(current) == own(element.row_identity)):
                 current = fresh()
         header = own(element.row_identity)
+        if header and defer_dead_header and not current:
+            return
         if header and own(current) == header:
             # A column header's identity is its own cell (#1449). A sort moves
             # body rows and redraws sort indicators in the header row, which
