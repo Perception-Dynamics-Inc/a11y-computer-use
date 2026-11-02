@@ -45,7 +45,10 @@ OUTCOMES = frozenset({
     "refused",
 })
 
-STRATEGIES = ("ref", "coordinates", "cdp", "keyboard", "foreground", "window")
+# "type" is a retry through type(ref), named by a set_value refusal that
+# left the field empty or rewritten (#1319); detail and structuredContent
+# must name the same steps.
+STRATEGIES = ("ref", "coordinates", "cdp", "keyboard", "foreground", "window", "type")
 
 # A provider cannot authorize retry by simply omitting an inconvenient signal.
 # Non-applicable signals must be positively known empty, not missing/None.
