@@ -117,3 +117,24 @@ def test_issued_header_identity_is_stable_across_a_reorder(fake_atspi, monkeypat
     assert _atspi.chromium_row_identity(link, fresh=True) != before_link
     element = Element("e37", "AXButton", "Company", None, None, "hdr", row_identity=before)
     driver._verify_chromium_row_target(element, button)
+
+
+def test_header_ref_survives_reissued_header_objects_1449(fake_atspi, monkeypatch):
+    """#1449 order: another column's sort removes aria-sort and the CSS
+    indicator from this header, and Chromium re-issues the header cell's
+    accessible object (new object path) while it is still the "Company"
+    header. The held ref must still click; a rename must still refuse."""
+    driver, button, th, head, *_ = _table(monkeypatch, "button")
+    element = _el(button, "Company")
+    keyed = {th: ("bus", "/new/th"), button: ("bus", "/new/button")}
+    real = _atspi._ancestor_key
+    monkeypatch.setattr(_atspi, "_ancestor_key", lambda node: keyed.get(node) or real(node))
+    head.name = "First Name Last Name Company Favorite Number \u25b2"
+    head.attributes["rowindex"] = "1"
+    driver._verify_chromium_row_target(element, button)
+    button.name = "Employer"
+    with pytest.raises(ComputerUseError) as exc:
+        driver._verify_chromium_row_target(element, button)
+    assert exc.value.detail["reason"] == "target_changed"
+    assert exc.value.detail["identity_diff"]
+    assert not button.pressed
