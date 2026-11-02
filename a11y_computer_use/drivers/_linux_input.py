@@ -17,6 +17,7 @@ the focused-element typing path.
 
 from __future__ import annotations
 
+from a11y_computer_use import timing
 import math
 from time import sleep as _wheel_sleep
 from collections.abc import Sequence
@@ -424,6 +425,7 @@ class _TempKeymap:
 def type_string(text: str, *, delay: float | None = None) -> None:
     """Type ``text`` into the focused element, keeping an active IBus engine
     from transforming it (#1219). See ``_type_string_keys`` for the keystrokes."""
+    timing.mark('first_key')
     from a11y_computer_use.drivers import _linux_ime
 
     with _linux_ime.ascii_passthrough(text):
@@ -624,6 +626,7 @@ def press_chord(chord: str) -> None:
     keeps the spare-keycode path. ``physical_position_target`` supplies the
     answer, and it is asked only in that situation.
     """
+    timing.mark('first_key')
     from Xlib import X
 
     global _last_mismatch
@@ -773,6 +776,7 @@ def hover(x: int, y: int) -> None:
 def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
     """Synthesize a mouse click at screen (x, y). Only used when the a11y press
     path is unavailable (coordinate/vision fallback)."""
+    timing.mark('first_click')
     import time
     from Xlib import X
 
