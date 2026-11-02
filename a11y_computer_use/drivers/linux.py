@@ -6490,6 +6490,26 @@ class LinuxDriver:
             # compares the same rendered read, so it is the expected string.
             self._type_expected = _atspi._field_text_for_type(after, text)
             return len(text)
+        if chrome and _atspi.field_formatted_typed(before, after, text):
+            # The field formatted the input itself (#1319): the read-back holds
+            # exactly the typed characters plus the mask's separators or case.
+            # That value is correct, so it is kept and confirmed, never undone.
+            self._type_expected = after
+            return len(text)
+        if chrome and _atspi.field_truncated_typed(before, after, text):
+            # A maxlength cut (#1319): the field holds the start of ``text``.
+            # Keep it, and refuse with what is shown so the dropped part is seen.
+            raise _atspi._text_mismatch(
+                "text_mismatch",
+                f"the field kept only {after!r} of {text!r} (truncated); "
+                "the value was left in place",
+                expected=text,
+                actual=after,
+                shown=after,
+                truncated=True,
+                input_sent=True,
+                text_removed=False,
+            )
         if chrome:
             # Refused: take the text back out so a retry cannot double it, or
             # say it was sent and could not be removed (#1388).
