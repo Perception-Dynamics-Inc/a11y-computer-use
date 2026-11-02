@@ -94,7 +94,7 @@ class OwnedProcesses:
                 return
             for pid in alive:
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)  # owned pid: member of a recorded launch session
                 except OSError:
                     pass
             time.sleep(0.2)

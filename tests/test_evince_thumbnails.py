@@ -15,6 +15,8 @@ import time
 
 import pytest
 
+from tests import _owned_processes as _owned
+
 from a11y_computer_use import observe
 from a11y_computer_use.drivers import _atspi
 from a11y_computer_use.observe import RawNode, build_snapshot
@@ -358,7 +360,7 @@ def test_live_evince_thumbnail_page_numbers_are_image_names(tmp_path) -> None:
     except ImportError as exc:
         pytest.skip(f"PyGObject/Atspi missing: {exc}")
 
-    subprocess.run(["pkill", "-x", "evince"], check=False)
+    _owned.refuse_preexisting({"evince"}, "evince")
     path = tmp_path / "evince-thumbnails.pdf"
     path.write_bytes(_pdf(3))
     proc = subprocess.Popen(

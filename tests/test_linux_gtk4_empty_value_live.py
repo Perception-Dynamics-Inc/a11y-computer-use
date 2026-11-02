@@ -20,6 +20,8 @@ import time
 
 import pytest
 
+from tests import _owned_processes as _owned
+
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
 from a11y_computer_use.schema import ComputerUseError, Scope  # noqa: E402
@@ -59,9 +61,9 @@ def _stop_group(proc: subprocess.Popen) -> None:
 
 
 def _stop_named(binary: str) -> None:
-    """Close an already-open copy so the snapshot is the process this test starts."""
-    subprocess.run(["pkill", "-f", binary], check=False)
-    time.sleep(0.3)
+    """Fail on an already-open copy: the snapshot must be the process this test
+    starts, and a copy it did not start is never stopped by name."""
+    _owned.refuse_preexisting({os.path.basename(binary)[:15]}, os.path.basename(binary))
 
 
 def _launch(binary: str, args: tuple[str, ...] = ()) -> subprocess.Popen:
