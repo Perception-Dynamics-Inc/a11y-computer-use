@@ -25258,3 +25258,59 @@ def test_chromium_menu_occluder_sibling_unlocated_menu_fails_closed(monkeypatch)
     file_item.role = "push button"
     occluder = _atspi.chromium_menu_occluder(file_item)
     assert occluder is not None and "unreadable" in occluder[1]
+
+
+def _skip_link_page(fake_atspi, monkeypatch):
+    from a11y_computer_use import server
+
+    text = _Acc("static", name="Skip to main content", width=1, height=1)
+    _place_row(text, -9996, 87, 1, 1)
+    link = _adopt(_Acc("link", name="Skip to main content", width=1, height=1), text)
+    _place_row(link, -9996, 87, 1, 1)
+    nav_text = _Acc("static", name="Jump to Shipping", width=120, height=20)
+    _place_row(nav_text, 10, 120, 120, 20)
+    nav = _adopt(_Acc("link", name="Jump to Shipping", width=120, height=20,
+                      states=("SHOWING", "VISIBLE")), nav_text)
+    _place_row(nav, 10, 120, 120, 20)
+    document = _adopt(_Acc("document web", width=1200, height=700,
+                           states=("SHOWING", "VISIBLE")), link, nav)
+    _place_row(document, 0, 80, 1200, 700)
+    window = _adopt(_Acc("frame", name="Skip", width=1280, height=800,
+                         states=("SHOWING", "VISIBLE", "ACTIVE")), document)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "chromium_snapshot_root", lambda node: node)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: True)
+    return _bare_runtime(driver), link, text
+
+
+def test_1440_offscreen_skip_link_found_as_link(fake_atspi, monkeypatch):
+    """A left:-10000px skip link is listed as the link, not its text child."""
+    runtime, link, text = _skip_link_page(fake_atspi, monkeypatch)
+    found = runtime.find("chrome", text="Skip to main content")
+    match = next(el for el in runtime._current.elements
+                 if el.title == "Skip to main content")
+    assert observe.ax_handle_for(match.snapshot_id, match.ref) is link, found
+    assert match.role == "AXLink"
+    assert "link" in found and "off-screen" in found
+    by_role = runtime.find("chrome", text="Skip", role="link")
+    assert "Skip to main content" in by_role
+
+
+def test_1440_offscreen_skip_link_click_refused_by_cause(fake_atspi, monkeypatch):
+    """Its ref is refused as off_screen_unreachable, never stale_ref title_changed."""
+    from a11y_computer_use.schema import ComputerUseError
+
+    runtime, link, text = _skip_link_page(fake_atspi, monkeypatch)
+    runtime.find("chrome", text="Skip to main content")
+    match = next(el for el in runtime._current.elements
+                 if el.title == "Skip to main content")
+    try:
+        result = runtime.click(match.ref)
+    except ComputerUseError as exc:
+        detail = exc.detail
+    else:
+        detail = result if isinstance(result, dict) else {"text": str(result)}
+    assert "off_screen_unreachable" in str(detail), detail
+    assert "title_changed" not in str(detail)

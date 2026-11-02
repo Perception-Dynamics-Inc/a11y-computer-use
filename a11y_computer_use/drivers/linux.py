@@ -2790,6 +2790,8 @@ class LinuxDriver:
                 "route_changed",
             }:
                 self._raise_if_hidden_alive(snap, ref)
+                if exc.detail.get("reason") in {"not_found", "title_changed"}:
+                    LinuxDriver._raise_if_offscreen_unreachable(self, snap, ref)
             raise
 
     @staticmethod
@@ -3259,6 +3261,49 @@ class LinuxDriver:
             return
         if found:
             raise self._not_showing_error(element.ref, element.role, element.title)
+
+    def _raise_if_offscreen_unreachable(self, snap: Snapshot, ref: str) -> None:
+        """Refuse an alive off-screen ref by its cause, not as a reorder (#1440).
+
+        ``find`` attaches a document hit the page keeps off every display
+        (a ``left:-10000px`` skip link) without bounds. The live walk prunes
+        it, so the label matcher said ``title_changed`` and offered unrelated
+        namesakes. Only the issuing handle is asked: alive, not hidden, and
+        its box still misses the display.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            element = snap.element(ref)
+        except KeyError:
+            return
+        if element.bounds is not None:
+            return
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return
+        run = getattr(self, "_run", None) or (lambda fn: fn())
+        try:
+            found = run(lambda: _atspi.offscreen_extents(handle))
+        except Exception:
+            return
+        if found is None:
+            return
+        shown = f" {element.title!r}" if element.title else ""
+        raise ComputerUseError(
+            ErrorCode.NOT_VISIBLE,
+            f"{ref} ({element.role}{shown}) is alive but positioned off every display; "
+            "the page shows it only on keyboard focus",
+            detail={
+                "ref": ref,
+                "role": element.role,
+                "reason": "off_screen_unreachable",
+                "outcome": "refused",
+                "next": ["keyboard"],
+                "hint": "Press Tab to move focus onto it (skip links appear on focus), then find it again.",
+            },
+        )
 
     def alive_offscreen(self, snap: Snapshot, ref: str) -> Bounds | None:
         """Bounds when ``ref`` is still alive and misses the display.
