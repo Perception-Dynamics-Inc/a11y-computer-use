@@ -1402,6 +1402,49 @@ def _qt_edit_timing(op: str, ref):
             )
 
 
+_HEADER_CELL_ROLES = frozenset({"column header", "table column header"})
+
+
+def _header_own_identity(identity: tuple) -> tuple:
+    """The parts of a Chromium row identity that belong to a column header.
+
+    Parts run from the target upward. When a column header cell sits between
+    the target and its row, the header row is shared table chrome, not a
+    pooled data row: the target, the header cell and their object keys are
+    the header's own identity (#1449). Otherwise return ``()``.
+    """
+    for i, part in enumerate(identity or ()):
+        # Older or test identities can be flat tuples; only part tuples count.
+        role = part[0] if isinstance(part, tuple) and part else ""
+        if role in _HEADER_CELL_ROLES:
+            rows = [p for p in identity[i + 1:]
+                    if isinstance(p, tuple) and p and p[0] == "table row"]
+            # A snapshot identity is already cut at the header cell (#1451),
+            # so the header cell is its last part and no row follows.
+            last = i == len(identity) - 1
+            return tuple(identity[:i + 1]) if rows or last else ()
+        if role in {"list item", "list box item", "table row", "tree item"}:
+            return ()
+    return ()
+
+
+def _identity_diff(issued: tuple, current: tuple) -> list[dict]:
+    """The parts that differ between two row identities, for diagnosis.
+
+    Each entry gives the part index (0 is the target) and the issued and
+    current (role, name, index attributes, object key) as strings. Names
+    are what the screen already shows; values and text are never read.
+    """
+    issued, current = tuple(issued or ()), tuple(current or ())
+    out = []
+    for i in range(max(len(issued), len(current))):
+        a = issued[i] if i < len(issued) else None
+        b = current[i] if i < len(current) else None
+        if a != b:
+            out.append({"part": i, "issued": repr(a), "current": repr(b)})
+    return out[:8]
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -2676,7 +2719,11 @@ class LinuxDriver:
 
         anchor = snap.element(ref)
         if anchor.row_identity:
-            self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref))
+            # A sort makes Chrome rebuild the header row, so the issued header
+            # object no longer resolves (#1449). Then the live rematch below
+            # (role + name + path) finds the header and checks its identity.
+            self._verify_chromium_row_target(anchor, observe.ax_handle_for(snap.snapshot_id, ref),
+                                             defer_dead_header=True)
         if anchor.text_range is not None:
             # Preserve process/document/epoch checks, then re-read the exact
             # offsets and geometry on the live native node.
@@ -4012,8 +4059,17 @@ class LinuxDriver:
         )
 
     def _verify_chromium_row_target(self, element: Element, handle,
-                                    *, current: tuple | None = None) -> None:
-        """Refuse a recycled row before dispatching any input."""
+                                    *, current: tuple | None = None,
+                                    defer_dead_header: bool = False) -> None:
+        """Refuse a recycled row before dispatching any input.
+
+        ``defer_dead_header``: when the issued object of a column-header ref
+        no longer resolves (Chrome rebuilt the header row on a sort, #1449),
+        return without a verdict. Only ``resolve_ref`` passes it, and it then
+        rematches the header by role, name and path in the live tree and
+        verifies the live object's identity, so a renamed header is still
+        refused there.
+        """
         if not element.row_identity:
             return
         from a11y_computer_use.drivers import _atspi
@@ -4024,19 +4080,40 @@ class LinuxDriver:
             except Exception:
                 return ()
 
+        def own(identity: tuple) -> tuple:
+            # Compare a header by what it is, not by Chromium object paths or
+            # index attributes: Chromium can re-issue the header cell's (and
+            # the button's) accessible object when aria-sort and the CSS sort
+            # indicator are removed by another column's sort (#1449 step 6),
+            # which changed the keys while role and name stayed "Company".
+            return tuple(part[:2] if isinstance(part, tuple) else part
+                         for part in _header_own_identity(identity))
         if current is None:
             current = fresh()
             # Every read in the identity walk maps a slow or failed D-Bus reply
             # to a default ("" role, no parent), so one degraded read under
             # load looks like a recycled row (#1368). A recycled row reads
             # differently every time; refuse unless a second read agrees.
-            if current != element.row_identity:
+            if current != element.row_identity and not (
+                    own(element.row_identity) and own(current) == own(element.row_identity)):
                 current = fresh()
+        header = own(element.row_identity)
+        if header and defer_dead_header and not current:
+            return
+        if header and own(current) == header:
+            # A column header's identity is its own cell (#1449). A sort moves
+            # body rows and redraws sort indicators in the header row, which
+            # does not make this header a different target.
+            return
         if current != element.row_identity:
+            compared = _identity_diff(element.row_identity, current)
+            logging.getLogger("a11y_computer_use.row_identity").debug(
+                "%s refused target_changed: %s", element.ref, compared)
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
                 f"{element.ref} ({element.title!r}) row identity changed; no input was sent",
                 detail={"ref": element.ref, "reason": "target_changed", "outcome": "refused",
+                        "identity_diff": compared,
                         "hint": "Re-observe and find the intended row again. Do not click its "
                         "old coordinates: that spot may now hold a different row."},
             )
