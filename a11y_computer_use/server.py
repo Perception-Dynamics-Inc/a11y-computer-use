@@ -64,7 +64,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import timing
+from a11y_computer_use import sort_glyph, timing
 from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, outcome, reporting, safety
 from a11y_computer_use.untrusted import (
     DomainPolicy,
@@ -1890,6 +1890,20 @@ def _misses_display(bounds: Bounds, display) -> bool:
     return right <= max(bounds.x, 0) or bottom <= max(bounds.y, 0)
 
 
+_POPOVER_RECOVERY = "press Escape to close the popover, then click the ref again"
+# A point under the popover lands on the popover, and the window is already in
+# front: neither coordinates nor foreground can reach the target (#1463).
+_POPOVER_RECOVERY_NEXT = ("keyboard", "ref")
+
+
+def _popover_covered(ref: str, bounds: Bounds, cover: str) -> ComputerUseError:
+    """A ref under an open popover: close it with Escape, then click the ref."""
+    err = _not_visible(ref, "covered", bounds, f"the ref is covered by {cover}; {_POPOVER_RECOVERY}")
+    err.detail["next"] = list(_POPOVER_RECOVERY_NEXT)
+    err.detail["recovery"] = {"key": "Escape", "then": f"click {ref}"}
+    return err
+
+
 def _not_visible(ref: str, reason: str, bounds: Bounds, message: str) -> ComputerUseError:
     return ComputerUseError(
         ErrorCode.NOT_VISIBLE,
@@ -2142,6 +2156,44 @@ def _with_issued_ref(exc: ComputerUseError, ref: str | None, live: object) -> Co
     exc.args = (message,)
     exc.detail = {**detail, "ref": ref}
     return exc
+
+
+def _header_row_identity(identity: tuple | None) -> bool:
+    """True when a Chromium row identity is a column header's own (#1449)."""
+    for part in identity or ():
+        role = part[0] if isinstance(part, tuple) and part else ""
+        if role in {"column header", "table column header"}:
+            return True
+        if role in {"list item", "list box item", "table row", "tree item"}:
+            return False
+    return False
+
+
+# Not AXList: a CSS dropdown list does not clip its painted overflow items.
+_CLIPPING_SCROLL_ROLES = frozenset({"AXScrollArea", "AXGrid", "AXTable", "AXOutline"})
+_AGGREGATE_CONTAINER_ROLES = frozenset({
+    "AXGrid", "AXTable", "AXOutline", "AXList", "AXScrollArea", "AXGroup",
+    "AXWebArea", "AXSplitGroup", "AXTabGroup", "AXBrowser",
+})
+
+
+def _drop_aggregate_containers(matches: tuple[Element, ...],
+                               text: str | None) -> tuple[Element, ...]:
+    """Drop a container that matched only through its aggregated text (#1461).
+
+    A virtualized grid's value joins the text of every pooled row, including
+    clipped overscan rows, so ``text`` can match the grid while the target
+    control is still below the viewport. Such a container is never the
+    target: it has no ref to click, and counting it as on screen stops the
+    scroll early. A container whose own title is the text still counts.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return matches
+    needle = text.strip().casefold()
+    return tuple(el for el in matches
+                 if el.role not in _AGGREGATE_CONTAINER_ROLES
+                 or needle in (el.title or "").casefold())
+
 
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
@@ -4818,7 +4870,11 @@ class Runtime:
                 el.role == "AXWindow" or bool(el.context_identity)
                 or (bool(chain) and el.role == "AXStaticText")
             )
-            chain.append((el.role, "" if mutable_title else el.title,
+            title = "" if mutable_title else el.title
+            if title and _header_row_identity(el.row_identity):
+                # A column header's sort indicator is state, not a name (#1451).
+                title = sort_glyph.strip_sort_glyph(title)
+            chain.append((el.role, title,
                           el.row_identity, el.context_identity, el.instance_id, el.stable_id))
             ref = el.parent
         return tuple(chain)
@@ -6767,6 +6823,55 @@ class Runtime:
                 return "popover" + (f" {cover.title!r}" if cover.title else "")
         return None
 
+    def _point_lands_on_popover(self, point: Point) -> str | None:
+        """Why a click at ``point`` goes to an open popover, or None (#1463).
+
+        The intended target is the smallest control under the point outside
+        every popover that contains it. The click reached it only when the
+        live hit test at the point (``get_accessible_at_point`` on Linux)
+        returns that control or a descendant. Without a hit test the popover
+        is assumed on top: it is drawn in the top layer.
+        """
+        snap = getattr(self, "_current", None)
+        if not isinstance(snap, Snapshot):
+            return None
+        popovers = [
+            el for el in snap.elements
+            if el.role == "AXPopover" and outcome._contains_center(el.bounds, point)
+        ]
+        if not popovers:
+            return None
+        popover_refs = {el.ref for el in popovers}
+        under = [
+            el for el in snap.elements
+            if el.ref not in popover_refs
+            and el.role not in {"AXWindow", "AXWebArea", "AXApplication", "AXGroup", "AXScrollArea"}
+            and not (outcome._ancestor_refs(snap, el) & popover_refs)
+            and outcome._contains_center(el.bounds, point)
+        ]
+        if not under:
+            return None
+        intended = min(under, key=lambda el: el.bounds.width * el.bounds.height)
+        hit_test = getattr(self.driver, "hit_bounds_at_point", None)
+        if callable(hit_test):
+            try:
+                hit = hit_test(point)
+            except Exception:  # noqa: BLE001 - an unreadable hit test proves nothing
+                hit = None
+            box = intended.bounds
+            if (hit is not None and getattr(hit, "display_id", None) == box.display_id
+                    and box.x <= hit.x and box.y <= hit.y
+                    and hit.x + hit.width <= box.x + box.width
+                    and hit.y + hit.height <= box.y + box.height):
+                return None
+        cover = popovers[0]
+        name = "popover" + (f" {cover.title!r}" if cover.title else "")
+        label = f"{intended.ref} ({intended.role}" + (f" {intended.title!r})" if intended.title else ")")
+        return (
+            f"the click at ({point.x}, {point.y}) landed on {name}, not on {label} beneath it; "
+            f"{_POPOVER_RECOVERY}"
+        )
+
     def _cover_owner(self, element: Element, app: str | None, *,
                      popover_checked: bool = False) -> str | None:
         """None when the element's center is this app. ``off_screen`` or a cover name otherwise."""
@@ -7060,7 +7165,7 @@ class Runtime:
                 with phase("occluder"):
                     cover = self._popover_cover(act, refresh=True)
                 if cover:
-                    raise _not_visible(act.ref, "covered", act.bounds, f"the ref is covered by {cover}")
+                    raise _popover_covered(act.ref, act.bounds, cover)
             self._dismiss_target = act  # the menu chain holding it is kept (#1413)
             try:
                 with phase("escape"):
@@ -7222,6 +7327,11 @@ class Runtime:
         nav_before = None
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
+        # A point inside an open popover is that popover's, not the control
+        # drawn beneath it (#1463). Hit-test before the click.
+        popover_landing = (
+            self._point_lands_on_popover(target) if isinstance(target, Point) else None
+        )
         self._run_gated(
             action, app, execute, confirm=confirm,
             no_input=isinstance(target, Element) and target.bounds is None,
@@ -7377,6 +7487,8 @@ class Runtime:
                            if died else ("confirmed", evidence))
         if opaque_unchanged and verdict is None:
             verdict = ("unverifiable", "effect unknown (opaque target); verify with a screenshot")
+        if popover_landing is not None:
+            verdict = ("suspected_noop", popover_landing)
         result = self._conclude(
             text, tool="click", app=app, before=before,
             element=judged_element,
@@ -7384,6 +7496,12 @@ class Runtime:
             verdict=verdict,
             cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
+        if popover_landing is not None:
+            # Another point under the same popover lands on it again.
+            result = outcome.ActionResult(
+                f"{result}\n\n{popover_landing}", outcome=result.outcome,
+                next=_POPOVER_RECOVERY_NEXT, evidence=result.evidence,
+            )
         if (isinstance(target, Element) and target.bounds is not None
                 and result.outcome in {"suspected_noop", "unverifiable", "partial"}):
             box = target.bounds
@@ -9160,6 +9278,28 @@ class Runtime:
                     kept.append(el)
             return kept
 
+        def clip_box(el: Element, snap: Snapshot) -> tuple[float, float, float, float] | None:
+            """The window, narrowed by every scrolling ancestor that clips ``el``.
+
+            A virtualized grid keeps overscan rows in the tree below its own
+            viewport but inside the window (#1461); those are not on screen.
+            """
+            box = viewport_box(snap)
+            by_ref = {item.ref: item for item in snap.elements}
+            seen: set[str] = set()
+            node = by_ref.get(el.parent) if el.parent else None
+            while node is not None and node.ref not in seen:
+                seen.add(node.ref)
+                clip = node.bounds
+                if (node.role in _CLIPPING_SCROLL_ROLES and clip is not None
+                        and clip.width >= 1 and clip.height >= 1):
+                    edges = (clip.x, clip.y, clip.x + clip.width, clip.y + clip.height)
+                    box = edges if box is None else (
+                        max(box[0], edges[0]), max(box[1], edges[1]),
+                        min(box[2], edges[2]), min(box[3], edges[3]))
+                node = by_ref.get(node.parent) if node.parent else None
+            return box
+
         def on_screen(el: Element, snap: Snapshot) -> bool:
             """True when ``el``'s center sits inside the window.
 
@@ -9170,7 +9310,7 @@ class Runtime:
             bounds = el.bounds
             if bounds is None or bounds.width < 1 or bounds.height < 1:
                 return False
-            box = viewport_box(snap)
+            box = clip_box(el, snap)
             if box is None:
                 return True
             left, top, right, bottom = box
@@ -9179,7 +9319,7 @@ class Runtime:
             return left <= center_x < right and top <= center_y < bottom
 
         def search_matches(snap: Snapshot) -> tuple[Element, ...]:
-            matches = tuple(query_hits(snap))
+            matches = _drop_aggregate_containers(tuple(query_hits(snap)), text)
             if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
                 return observe.prefer_exact_targets(matches, text)
             by_ref = {el.ref: el for el in snap.elements}
@@ -9230,7 +9370,7 @@ class Runtime:
                 return "missing"
             if any(on_screen(el, snap) for el in located):
                 return "visible"
-            box = viewport_box(snap)
+            box = clip_box(located[0], snap)
             if box is None:
                 return "visible"
             left, top, right, bottom = box
@@ -9264,6 +9404,9 @@ class Runtime:
             if kind != "visible":
                 return kind, None
             visible = visible_matches(later)
+            if not visible:
+                # Never report "found" without the matched element (#1461).
+                return "missing", None
             later, visible = self._issue_matches(later, visible)
             return "found", (
                 f"found after {scrolls_issued} scroll(s):\n"
