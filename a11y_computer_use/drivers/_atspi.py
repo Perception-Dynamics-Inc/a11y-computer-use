@@ -11948,6 +11948,44 @@ def css_transformed_type_confirms(acc, before: str | None, after: str | None, te
     return dom if dom_holds_typed(dom, before, text) else None
 
 
+def _format_key(value: str) -> str:
+    """``value`` without separators or case: the characters a mask keeps."""
+    return "".join(ch.casefold() for ch in value if ch.isalnum())
+
+
+def field_formatted_typed(before: str | None, after: str | None, text: str) -> bool:
+    """True when ``after`` is the field's own formatting of ``text`` typed into ``before``.
+
+    An input mask (phone, card, expiry, upper-case code) rewrites what was
+    typed: ``5551234567`` reads back as ``(555) 123-4567`` (#1319). With
+    separators and case stripped, the read-back has to equal the prior value
+    with ``text`` inserted somewhere. Anything else is a real mismatch.
+    """
+    if after is None or not _format_key(text):
+        return False
+    key = _format_key(after)
+    prior = before or ""
+    if _text_is_blank(prior):
+        return key == _format_key(text)
+    return any(
+        _format_key(prior[:i] + text + prior[i:]) == key for i in range(len(prior) + 1)
+    )
+
+
+def field_truncated_typed(before: str | None, after: str | None, text: str) -> bool:
+    """True when a blank field kept only a leading part of ``text`` (a ``maxlength`` cut).
+
+    ``12345678`` into a 5-character zip reads back ``12345`` (#1319): the
+    kept characters are the start of what was typed, so they are not wrong
+    and must not be erased, but the dropped ones have to be reported.
+    """
+    if after is None or not _text_is_blank(before or ""):
+        return False
+    key = _format_key(after)
+    want = _format_key(text)
+    return bool(key) and len(key) < len(want) and want.startswith(key)
+
+
 def undo_chromium_type(acc, before: str | None, text: str) -> bool:
     """Take refused typed ``text`` back out of a Chromium field; True only when confirmed.
 
