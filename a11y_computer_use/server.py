@@ -7450,6 +7450,13 @@ class Runtime:
             and result.outcome == "confirmed"
         ):
             seen = f"{result.evidence}; " if result.evidence else ""
+            # The text must not claim a click or its effect happened.
+            sent = (
+                f"sent press to {self._label(ref, target)} via accessibility action "
+                f"{button_mechanism[0]}, not a pointer click; unverifiable: its effect, "
+                "including any download, is unverified"
+            )
+            text = sent + (str(result)[len(msg):] if str(result).startswith(msg) else "")
             result = outcome.ActionResult(
                 text, outcome="unverifiable", next=(),
                 evidence=(

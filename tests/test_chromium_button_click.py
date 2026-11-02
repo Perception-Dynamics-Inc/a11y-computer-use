@@ -118,10 +118,15 @@ def test_runtime_reports_mechanism_but_still_checks_effect(button_case, monkeypa
     rt._judge_mutation = lambda *a, **kw: (verdict, "observed effect" if verdict == "confirmed" else "unchanged")
     monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
     result = rt.click(ref="e1")
-    assert "via AT-SPI doAction(click)" in result
+    assert "AT-SPI doAction(click)" in result
     # #1427: doAction is not a real pointer gesture; never a success.
     assert result.outcome == "unverifiable"
     if verdict == "confirmed":
+        # The text must not claim the click or its effect happened.
+        assert result.startswith("sent press to e1")
+        assert "clicked" not in result
+        assert "via accessibility action AT-SPI doAction(click), not a pointer click" in result
+        assert "including any download, is unverified" in result
         assert result.next == ()
         assert result.evidence.startswith("observed effect; no_pointer_gesture")
     else:
@@ -323,7 +328,10 @@ def test_1427_download_button_doaction_click_is_not_a_success(button_case, monke
     rt._judge_mutation = lambda *a, **kw: ("confirmed", "the page title changed")
     monkeypatch.setattr(server, "PREFER_AX_ACTIONS", True)
     result = rt.click(ref="e1")
-    assert "via AT-SPI doAction(press)" in result
+    assert "via accessibility action AT-SPI doAction(press)" in result
+    assert not result.startswith("clicked")
+    assert "clicked" not in result
+    assert "including any download, is unverified" in result
     assert result.outcome == "unverifiable"
     assert result.next == ()
     assert "no_pointer_gesture" in result.evidence
