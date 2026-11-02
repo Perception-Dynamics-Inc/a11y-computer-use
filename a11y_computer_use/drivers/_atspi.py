@@ -5242,6 +5242,10 @@ class ATSPIAccessor:
             subrole=(
                 "terminal" if role_str == "terminal"
                 else "label" if role_str == "label"
+                # ARIA tab panels and status regions: a ref inside a hidden
+                # or re-rendering panel is refused by its tab (#1458).
+                else "tabpanel" if "tabpanel" in str(attrs.get("xml-roles") or "").split()
+                else "status" if "status" in str(attrs.get("xml-roles") or "").split()
                 else None
             ),
             title=str(name),
