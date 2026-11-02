@@ -561,6 +561,14 @@ _TEXT_CLICK_SKIP_ROLES = frozenset({
 })
 
 
+def _center_inside(outer: "Bounds | None", inner: "Bounds | None") -> bool:
+    """True when ``outer``'s center lies inside ``inner``, or a box is missing."""
+    if outer is None or inner is None or inner.width <= 0 or inner.height <= 0:
+        return True
+    c = outer.center
+    return inner.x <= c.x < inner.x + inner.width and inner.y <= c.y < inner.y + inner.height
+
+
 def _bounds_meet(a: "Bounds | None", b: "Bounds | None") -> bool:
     """True when both boxes overlap, or either box is missing or empty.
 
@@ -645,6 +653,12 @@ def text_click_control(elements, target: Element) -> Element | None:
             and parent.enabled
             and _bounds_meet(target.bounds, parent.bounds)
         ):
+            # The ancestor is pressed at its own center. In a list with a
+            # delegated listener that center is another row (#1467), so the
+            # ancestor stands for the text only when its point is on the text.
+            # Otherwise the text is pressed at its own center.
+            if not _center_inside(parent.bounds, target.bounds):
+                return None
             return parent
         parent_ref = parent.parent
     return None
@@ -3751,6 +3765,18 @@ class Runtime:
             cover = outcome.occluded_click_effect(before["snap"], after, element)
             if cover:
                 return "suspected_noop", cover
+        # A ref inside a list item is confirmed only by a change in its own
+        # row. A sibling row that changed is the wrong item (#1467).
+        if (
+            judged == "confirmed"
+            and requested is None
+            and element is not None
+            and before is not None
+            and after is not None
+        ):
+            wrong_row = outcome.wrong_row_effect(before["snap"], after, element)
+            if wrong_row:
+                return "unverifiable", wrong_row
         # A tab click is confirmed only when that tab is the one selected. A
         # click that activated the neighbour changed the tree and nothing else
         # (#1208).
