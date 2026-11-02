@@ -248,15 +248,20 @@ def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
     if info.get("reason") in {"fallback_target_unverified", "outside_active_modal"}:
         return ()
     named = info.get("next")
+    # A stale ref's last bounds belong to whatever row is drawn there now: a
+    # recycled, reparented, or collapsed row's spot holds a different row
+    # (#1447). Never offer a point-based retry; re-find the target instead.
+    stale = code == "stale_ref" or info.get("reason") == "target_changed"
     if isinstance(named, (list, tuple)) and named:
-        return clean_next(named)
+        chosen = clean_next(named)
+        return tuple(s for s in chosen if s != "coordinates") if stale else chosen
     reason = str(info.get("reason") or "")
     if code in _NO_RETRY or reason in _NO_RETRY:
         return ()
     if reason == "not_showing":
         return ("foreground", "ref")
-    if code == "stale_ref":
-        return ("ref", "coordinates", "keyboard")
+    if stale:
+        return ("ref", "keyboard")
     if code == "focus_changed" or reason in {"focus_changed", "not_frontmost"}:
         return ("foreground", "ref")
     if code == "focus_lost" or reason == "focus_lost":
