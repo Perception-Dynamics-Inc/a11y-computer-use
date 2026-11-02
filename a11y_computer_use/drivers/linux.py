@@ -1402,6 +1402,27 @@ def _qt_edit_timing(op: str, ref):
             )
 
 
+_HEADER_CELL_ROLES = frozenset({"column header", "table column header"})
+
+
+def _header_own_identity(identity: tuple) -> tuple:
+    """The parts of a Chromium row identity that belong to a column header.
+
+    Parts run from the target upward. When a column header cell sits between
+    the target and its row, the header row is shared table chrome, not a
+    pooled data row: the target, the header cell and their object keys are
+    the header's own identity (#1449). Otherwise return ``()``.
+    """
+    for i, part in enumerate(identity or ()):
+        role = part[0] if part else ""
+        if role in _HEADER_CELL_ROLES:
+            rows = [p for p in identity[i + 1:] if p and p[0] == "table row"]
+            return tuple(identity[:i + 1]) if rows else ()
+        if role in {"list item", "list box item", "table row", "tree item"}:
+            return ()
+    return ()
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -3995,14 +4016,22 @@ class LinuxDriver:
             except Exception:
                 return ()
 
+        own = _header_own_identity
         if current is None:
             current = fresh()
             # Every read in the identity walk maps a slow or failed D-Bus reply
             # to a default ("" role, no parent), so one degraded read under
             # load looks like a recycled row (#1368). A recycled row reads
             # differently every time; refuse unless a second read agrees.
-            if current != element.row_identity:
+            if current != element.row_identity and not (
+                    own(element.row_identity) and own(current) == own(element.row_identity)):
                 current = fresh()
+        header = own(element.row_identity)
+        if header and own(current) == header:
+            # A column header's identity is its own cell (#1449). A sort moves
+            # body rows and redraws sort indicators in the header row, which
+            # does not make this header a different target.
+            return
         if current != element.row_identity:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
