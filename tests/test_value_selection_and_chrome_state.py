@@ -2531,3 +2531,194 @@ def test_firefox_segment_guard_preserves_other_controls(monkeypatch, toolkit, ro
     node.toolkit = toolkit
     monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
     assert _atspi._refuse_gecko_date_segment_replace(node) is None
+
+
+# --- #1472 / #1471: a re-rendered ARIA multi-select listbox ------------------
+
+_FEATURES = ("Proximity of grocery shopping", "Proximity of fine dining")
+
+
+def _rerendering_listbox(selected=()):
+    """A Chrome multi-select listbox whose click handler rebuilds every option.
+
+    Like ``ul.innerHTML = ""`` plus new ``<li role=option>`` nodes: the old
+    option objects are detached and defunct, and keep their stale SELECTED
+    bit. New objects carry the same names and the live state.
+    """
+    sel = set(selected)
+    box = _Node("list box", "Important features", states={"MULTISELECTABLE"})
+    box.toolkit = "Chromium"
+
+    def render():
+        for old in box.children:
+            old.states.add("DEFUNCT")
+            old.parent = None
+        box.children = []
+        for name in _FEATURES:
+            node = _Node("list item", name, states={"SELECTED"} if name in sel else set())
+            node.parent = box
+            box.children.append(node)
+
+    render()
+
+    def click_option(name):
+        if name in sel:
+            sel.discard(name)
+        else:
+            sel.add(name)
+        render()
+
+    return box, sel, click_option
+
+
+def _live(box, name):
+    return next(child for child in box.children if child.name == name)
+
+
+def test_rerendered_option_select_click_is_confirmed_on_the_new_node(monkeypatch) -> None:
+    """#1472 step 1: the click selects; the stale handle must not refuse it."""
+    box, sel, click_option = _rerendering_listbox()
+    stale = _live(box, "Proximity of fine dining")
+    driver = _driver(monkeypatch, stale)
+    clicks = []
+
+    def click(_element, **_kwargs):
+        clicks.append(1)
+        click_option("Proximity of fine dining")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Proximity of fine dining", clickable=True)
+    assert driver.press_element(element) is True
+    assert sel == {"Proximity of fine dining"}
+    assert "DEFUNCT" in stale.states and "SELECTED" not in stale.states
+    assert "SELECTED" in _live(box, "Proximity of fine dining").states
+    assert clicks == [1]
+
+
+def test_rerendered_option_deselect_click_is_confirmed_not_stale_selected(monkeypatch) -> None:
+    """#1472 step 2 / #1471: the click deselects; nothing reselects it.
+
+    The stale pre-click handle still reads SELECTED. It must neither make the
+    verdict nor trigger a restore that selects the option again.
+    """
+    box, sel, click_option = _rerendering_listbox(selected={"Proximity of fine dining"})
+    stale = _live(box, "Proximity of fine dining")
+    driver = _driver(monkeypatch, stale)
+    clicks = []
+
+    def click(_element, **_kwargs):
+        clicks.append(1)
+        click_option("Proximity of fine dining")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e9", "AXRow", "Proximity of fine dining", clickable=True)
+    assert driver.press_element(element) is True
+    assert sel == set()
+    assert "SELECTED" in stale.states  # stale bit, never read for the verdict
+    assert "SELECTED" not in _live(box, "Proximity of fine dining").states
+    assert clicks == [1]
+
+
+def test_rerendered_option_click_that_changed_nothing_is_refused_once(monkeypatch) -> None:
+    """The list re-renders but the option state stays: refused, no retry."""
+    box, sel, _click_option = _rerendering_listbox(selected={"Proximity of fine dining"})
+    stale = _live(box, "Proximity of fine dining")
+    driver = _driver(monkeypatch, stale)
+    clicks = []
+
+    def click(_element, **_kwargs):
+        clicks.append(1)
+        for old in box.children:
+            old.states.add("DEFUNCT")
+            old.parent = None
+        box.children = []
+        for name in _FEATURES:
+            node = _Node("list item", name, states={"SELECTED"} if name in sel else set())
+            node.parent = box
+            box.children.append(node)
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e9", "AXRow", "Proximity of fine dining", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert clicks == [1]
+    assert sel == {"Proximity of fine dining"}
+
+
+def test_rerendered_option_that_cannot_be_reresolved_is_unverifiable(monkeypatch) -> None:
+    """No unique live option with that name: unverifiable, no restore, no retry."""
+    box, _sel, _click_option = _rerendering_listbox(selected={"Proximity of grocery shopping"})
+    stale = _live(box, "Proximity of fine dining")
+    driver = _driver(monkeypatch, stale)
+    clicks = []
+
+    def click(_element, **_kwargs):
+        clicks.append(1)
+        for old in box.children:
+            old.states.add("DEFUNCT")
+            old.parent = None
+        # Two live options now share the name: ambiguous.
+        box.children = [
+            _Node("list item", "Proximity of fine dining", states={"SELECTED"}),
+            _Node("list item", "Proximity of fine dining"),
+        ]
+        for child in box.children:
+            child.parent = box
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Proximity of fine dining", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["outcome"] == "unverifiable"
+    assert exc.value.detail["reason"] == "option_not_reresolved"
+    assert exc.value.detail["next"] == []
+    assert clicks == [1]
+    # No restore ran: the earlier selection was not put back by select_child.
+    assert all(child.name != "Proximity of grocery shopping" for child in box.children)
+
+
+def test_option_vanished_after_click_is_unverifiable(monkeypatch) -> None:
+    box, _sel, _click_option = _rerendering_listbox()
+    stale = _live(box, "Proximity of fine dining")
+    driver = _driver(monkeypatch, stale)
+
+    def click(_element, **_kwargs):
+        for old in box.children:
+            old.states.add("DEFUNCT")
+            old.parent = None
+        box.children = []
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Proximity of fine dining", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["outcome"] == "unverifiable"
+
+
+def test_in_place_multiselect_deselect_is_not_undone(monkeypatch) -> None:
+    """#1471: no re-render; the click toggles aria-selected off in place."""
+    box, _apple, banana, _cherry = _chrome_list()
+    box.states.add("MULTISELECTABLE")
+    driver = _driver(monkeypatch, banana)
+    clicks = []
+
+    def click(_element, **_kwargs):
+        clicks.append(1)
+        banana.states.discard("SELECTED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e7", "AXRow", "Banana", clickable=True)
+    assert driver.press_element(element) is True
+    assert "SELECTED" not in banana.states
+    assert clicks == [1]
+    assert banana.action_log == []
+
+
+def test_single_select_click_on_selected_option_still_confirms(monkeypatch) -> None:
+    box, _apple, banana, _cherry = _chrome_list()
+    driver = _driver(monkeypatch, banana)
+    driver.click = lambda *_a, **_k: None  # type: ignore[method-assign]
+    element = _element("e7", "AXRow", "Banana", clickable=True)
+    assert driver.press_element(element) is True
+    assert "SELECTED" in banana.states

@@ -18564,6 +18564,97 @@ def restore_selection(acc, names: list[str]) -> None:
         time.sleep(0.05)
 
 
+def list_row_identity(acc):
+    """Pre-click identity of a list option: its list, name, role and state.
+
+    After a click a framework list can replace every option node (#1472).
+    The handle captured before the click is then detached and its SELECTED
+    bit is stale in either direction. The identity lets the outcome be read
+    from the option re-resolved by name and role inside the same list.
+    """
+    parent, _index, target = _selection_parent(acc)
+    node = target or acc
+    if parent is None:
+        return None
+    name = _node_name(node)
+    if not name:
+        return None
+    return {
+        "parent": parent,
+        "name": name,
+        "role": _role_name(node),
+        "selected": _row_selected(node),
+        "multi": _state_has(parent, "MULTISELECTABLE"),
+    }
+
+
+def _list_options_named(parent, name: str, role: str) -> list:
+    """Live, non-defunct options under ``parent`` with this exact name and role.
+
+    Read fresh: the read cache and each node's cached properties are dropped.
+    A nested list box is not walked. The walk is bounded in depth and width.
+    """
+    _drop_read_cache()
+    _drop_cached_properties(parent)
+    found = []
+    level = [parent]
+    for _depth in range(3):
+        nxt = []
+        for node in level:
+            count = min(_child_count(node), _MAX_CHILDREN_FETCH)
+            for index in range(count):
+                child = _child_at(node, index)
+                if child is None:
+                    continue
+                _drop_cached_properties(child)
+                if _state_has(child, "DEFUNCT"):
+                    continue
+                child_role = _role_name(child)
+                if child_role == role and _node_name(child) == name:
+                    found.append(child)
+                    continue
+                if child_role not in {"list box", "list"}:
+                    nxt.append(child)
+        level = nxt
+        if not level:
+            break
+    return found
+
+
+def reresolved_row_verdict(ident) -> str:
+    """Outcome of a click on a list option, judged on the re-resolved option.
+
+    ``changed``: the one live option with that name and role in the same list
+    now has a different SELECTED state than before the click (either
+    direction, #1471), or a single-select list's option stays selected.
+    ``unchanged``: it was re-resolved and its state did not move.
+    ``unresolved``: no unique live option has that name and role, so the
+    click cannot be judged. The pre-click handle is never read here.
+    """
+    parent, name, role = ident["parent"], ident["name"], ident["role"]
+    before, multi = ident["selected"], ident["multi"]
+    verdict = "unresolved"
+    for attempt in range(8):
+        nodes = _list_options_named(parent, name, role)
+        if len(nodes) != 1:
+            verdict = "unresolved"
+        else:
+            now = _row_selected(nodes[0])
+            time.sleep(0.04)
+            again = _list_options_named(parent, name, role)
+            if len(again) != 1:
+                verdict = "unresolved"
+            elif _row_selected(again[0]) != now:
+                verdict = "unchanged"
+            elif now != before or (now and not multi):
+                return "changed"
+            else:
+                verdict = "unchanged"
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return verdict
+
+
 def row_becomes_selected(acc) -> bool:
     """True when the row is selected and still selected after a short beat.
 
