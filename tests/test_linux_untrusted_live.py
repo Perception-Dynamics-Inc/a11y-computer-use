@@ -218,6 +218,21 @@ def _click_titled(runtime, app: str, title: str) -> str:
     return runtime.click((buttons or matches)[0].ref)
 
 
+def _assert_delivered(result: str, app: str) -> None:
+    """The fence let the press through, with an honest receipt (#1427).
+
+    Chrome page buttons are pressed by AT-SPI doAction(press), on main as
+    well, and since #1427 that receipt says so and is unverifiable instead
+    of claiming a pointer click. Firefox still reports a click.
+    """
+    if app == "chrome":
+        assert result.startswith("sent press to "), result
+        assert "AT-SPI doAction(press), not a pointer click" in result, result
+        assert "unverifiable" in result, result
+    else:
+        assert "clicked" in result, result
+
+
 def _blocked(fn) -> ComputerUseError:
     with pytest.raises(ComputerUseError) as exc:
         fn()
@@ -336,7 +351,7 @@ def _exercise(tmp_path, driver, kind: str, port: int) -> None:
         _bar_enter(runtime, app, f"{allowed}/bg.html", clear=kind == "firefox")
         _wait_snapshot(driver, app, "Hidden button")
         clicked = _click_titled(runtime, app, "Hidden button")
-        assert "clicked" in clicked
+        _assert_delivered(clicked, app)
 
         runtime.key("ctrl+l", app=app)
         time.sleep(0.7)
@@ -400,7 +415,7 @@ def _firefox_tabs(runtime, driver, app: str, allowed: str, blocked: str) -> None
     _blocked(lambda: _click_titled(runtime, app, "Para button"))
     on_bg()
     clicked = _click_titled(runtime, app, "Hidden button")
-    assert "clicked" in clicked, clicked
+    _assert_delivered(clicked, app)
 
 
 def _wait_url(driver, app: str, predicate, timeout_s: float = 15) -> str:

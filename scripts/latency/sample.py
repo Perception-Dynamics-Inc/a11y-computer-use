@@ -207,9 +207,11 @@ async def sample(row, head):
                             elapsed = time.perf_counter() - start
                             # #1427: the Chrome page button "Go" is pressed by
                             # AT-SPI doAction, not a pointer gesture, so its
-                            # receipt is deliberately unverifiable. The page
-                            # effect is still checked below.
-                            wanted = "unverifiable" if row == "R13-click" else "confirmed"
+                            # receipt is deliberately unverifiable on head. The
+                            # pinned 0.4.76 baseline predates #1427 and still
+                            # reports confirmed. The page effect is checked
+                            # below for both builds.
+                            wanted = "unverifiable" if row == "R13-click" and head else "confirmed"
                             assert outcomes[-1] and outcomes[-1]["outcome"] == wanted, (receipt, outcomes[-1])
                             assert expected in await snapshot(), receipt
                         elif row == "R7":

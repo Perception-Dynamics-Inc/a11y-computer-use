@@ -11827,7 +11827,12 @@ def test_linux_chrome_canvas_fallback_button_activates_and_sibling_button_works(
         after = next(el for el in after_snap.elements if el.role == "AXButton" and el.title == "AfterBtn")
         runtime._current = after_snap
         sibling = runtime.click(after.ref)
-        assert str(sibling).startswith("clicked "), sibling
+        # Chrome presses AfterBtn by AT-SPI doAction(press), as on main;
+        # since #1427 the receipt says so and stays unverifiable. The page
+        # effect below is what proves the press landed.
+        assert str(sibling).startswith("sent press to "), sibling
+        assert "AT-SPI doAction(press), not a pointer click" in str(sibling), sibling
+        assert "unverifiable" in str(sibling), sibling
         final = None
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
