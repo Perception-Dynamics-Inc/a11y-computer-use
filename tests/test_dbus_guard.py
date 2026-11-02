@@ -76,7 +76,7 @@ def test_private_unref_does_not_warn_or_abort() -> None:
     finally:
         if pid is not None:
             try:
-                os.kill(pid, signal.SIGTERM)
+                os.kill(pid, signal.SIGTERM)  # owned pid: printed by the dbus-daemon this test started
             except OSError:
                 pass
     assert proc.returncode == 0, proc.stderr

@@ -5243,6 +5243,10 @@ class ATSPIAccessor:
             subrole=(
                 "terminal" if role_str == "terminal"
                 else "label" if role_str == "label"
+                # ARIA tab panels and status regions: a ref inside a hidden
+                # or re-rendering panel is refused by its tab (#1458).
+                else "tabpanel" if "tabpanel" in str(attrs.get("xml-roles") or "").split()
+                else "status" if "status" in str(attrs.get("xml-roles") or "").split()
                 else None
             ),
             title=str(name),
@@ -12091,13 +12095,13 @@ def _replace_with_keys(acc, text: str) -> bool:
                 # has to hold the same formatted string: on Chromium only the
                 # DOM confirms (#1394).
                 if (kept != text and field_formatted_typed("", kept, text)
-                        and chromium_dom_text(acc) == kept):
+                        and _dom_text_settles(acc, kept)):
                     return _FieldFormattedWrite.of(kept)
                 # Only a field that was blank before the call: a prefix
                 # left in a field that held a value (a colour channel that
                 # parses on its own) is not a maxlength cut and is restored.
                 if (_text_is_blank(current) and field_truncated_typed("", kept, text)
-                        and chromium_dom_text(acc) == kept):
+                        and _dom_text_settles(acc, kept)):
                     truncated = _text_mismatch(
                         "text_mismatch",
                         f"the field kept only {kept!r} of {text!r} (truncated); "
@@ -12142,6 +12146,23 @@ def _settled_masked_read(acc, rendered: str | None, text: str, *, timeout: float
             return now
         time.sleep(0.05)
         now = _full_text(acc)
+
+
+def _dom_text_settles(acc, kept: str | None, *, attempts: int = 3, pause: float = 0.1) -> bool:
+    """Whether the Chromium DOM value reads ``kept`` (#1450).
+
+    The DOM read goes through Ctrl+A and PRIMARY, and one read can come back
+    unverified (``None``) or before the page's input handler has rewritten
+    the value. A single such read used to send a correctly formatted field
+    to rollback, which left it empty. Read again a bounded number of times;
+    the value must still match exactly.
+    """
+    for i in range(attempts):
+        if chromium_dom_text(acc) == kept:
+            return True
+        if i + 1 < attempts:
+            time.sleep(pause)
+    return False
 
 
 _ROLLBACK_ATTEMPTS = 2
