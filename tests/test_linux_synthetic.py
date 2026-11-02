@@ -20799,8 +20799,9 @@ def test_chromium_ref_click_bounds_full_window_reads(fake_atspi, monkeypatch):
     monkeypatch.setattr(driver, "_visible_action", lambda *_args: None)
     result = runtime.click(ref=target.ref)
     assert presses == ["Outside"]
-    assert result.outcome == "confirmed"
-    assert result.evidence == "the accessibility state changed"
+    # #1427: a doAction press is not a real pointer gesture; never a success.
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("the accessibility state changed; no_pointer_gesture")
     assert len(walks) == 2
     assert identity_reads == [button]
 
