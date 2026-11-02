@@ -3,8 +3,13 @@
 A fake Chromium page: a 1280x800 viewport, a 140 px sticky header at the
 top, an optional 130 px fixed cookie banner at the bottom (or one that
 covers the whole viewport), and rows of 60 px with a "Qty N" entry.
-Hit tests go through the real `chromium_cover_at` walk. No gi import:
-macOS and Windows collect this file.
+Hit tests go through the real `chromium_cover_at` walk against a model of
+Chromium's cached hit test: the first query at a point is a box-only walk
+that returns the LAST child whose box holds the point (so a row listed
+after the header or banner wins), and it caches the real paint-order
+answer; a later query at a point inside that cached node's box returns it.
+That first answer is what made the old single read see no cover on the
+live page. No gi import: macOS and Windows collect this file.
 """
 
 from __future__ import annotations
@@ -57,6 +62,7 @@ class Page:
         self.scroll = max(0, min(self.max_scroll(), int(value)))
 
     def cover_box(self, y: int):
+        """The overlay painted over screen row ``y``, or None."""
         if self.cookie is not None:
             if self.banner_kind == "full":
                 return self.cookie
@@ -66,15 +72,39 @@ class Page:
             return self.header
         return None
 
+    def box(self, node):
+        if node is self.header:
+            return (0, 0, 1280, HEADER_H)
+        if node is self.cookie:
+            if self.banner_kind == "full":
+                return (0, 0, 1280, VIEW_H)
+            return (0, VIEW_H - BANNER_H, 1280, BANNER_H)
+        field = node.children[0] if node.children and node.children[0] in self.rows else node
+        return (400, self.field_top(field), 200, 30)
+
+    def _inside(self, node, x, y) -> bool:
+        left, top, width, height = self.box(node)
+        return left <= x < left + width and top <= y < top + height
+
+    def _real_hit(self, x, y):
+        cover = self.cover_box(y)
+        if cover is not None:
+            return cover.children[-1]
+        for field in self.rows:
+            if self._inside(field, x, y):
+                return field
+        return None
+
     def hit(self, comp, x, y):
         if comp is self.doc:
-            cover = self.cover_box(y)
-            if cover is not None:
-                return cover
-            for field in self.rows:
-                top = self.field_top(field)
-                if top <= y < top + 30:
-                    return field.parent
+            cached = getattr(self, "cache", None)
+            if cached is not None and self._inside(cached.parent if cached.parent is not self.doc else cached, x, y):
+                return cached
+            # Box-only guess, last child first; the real answer is cached.
+            self.cache = self._real_hit(x, y)
+            for child in reversed(self.doc.children):
+                if self._inside(child, x, y):
+                    return child
             return None
         if comp in (self.header, self.cookie):
             return comp.children[-1]
@@ -142,6 +172,7 @@ def driver(monkeypatch):
     monkeypatch.setattr(_linux_input, "click", lambda x, y: clicks.append((x, y)))
     monkeypatch.setattr(linux_mod, "_on_wayland", lambda: False)
     monkeypatch.setattr(LinuxDriver, "_COVER_SETTLE_S", 0.0)
+    monkeypatch.setattr(LinuxDriver, "_COVER_READ_GAP_S", 0.0)
     drv = LinuxDriver()
     drv._run = lambda fn: fn()  # type: ignore[method-assign]
     drv._verify_chromium_pointer_target = lambda el, h, x, y: verified.append((x, y))  # type: ignore[method-assign]
@@ -165,7 +196,11 @@ def test_field_under_the_sticky_header_is_scrolled_clear_then_clicked(driver):
     driver.page_box["page"] = page
     field = page.rows[24]
     page.set_scroll(HEADER_H + 24 * ROW_H - 100)  # field at screen y=100
-    assert _atspi.chromium_cover_at(field, 500, 115) is not None
+    # The Tester's live failure: one read at the covered point names the field.
+    assert _atspi.chromium_cover_at(field, 500, 115) is _atspi.COVER_CLEAR
+    # The settled read names the header's control.
+    assert driver._cover_now(field)[0] is page.header.children[-1]
+    page.cache = None
     assert driver._click_clear_of_overlay(_element("Qty 24"), field) is True
     assert len(driver.clicks) == 1 and driver.verified == driver.clicks
     assert _uncovered_at_click(page, field, driver.clicks[0])
@@ -201,6 +236,7 @@ def test_banner_over_the_whole_viewport_refuses_and_names_it(driver):
     assert "We use cookies" in exc.message and "nothing was typed" in exc.message
     hint = exc.detail["hint"]
     assert "'Accept cookies'" in hint and "Escape" in hint
+    assert exc.detail["cover"]["control_ref"] is None
     text = (exc.message + " " + hint).lower()
     assert "coordinate" not in text and "x=" not in text and "queued" not in text
     assert "responding" not in text
@@ -211,3 +247,29 @@ def test_type_into_uses_the_overlay_clearance_instead_of_the_covered_click():
     source = inspect.getsource(LinuxDriver._type_into_unguarded)
     assert "self._click_clear_of_overlay(element, handle)" in source
     assert source.index("_click_clear_of_overlay") < source.index("self.click(element)")
+
+
+def test_full_viewport_refusal_names_the_dismiss_buttons_ref(driver, monkeypatch):
+    from a11y_computer_use import observe
+
+    page = Page(banner="full", scroll=0)
+    driver.page_box["page"] = page
+    accept = page.cookie.children[-1]
+    monkeypatch.setitem(observe._HANDLES, "snap-1346", {"e9": page.rows[9], "e32": accept})
+    with pytest.raises(ComputerUseError) as raised:
+        driver._click_clear_of_overlay(_element("Qty 9"), page.rows[9])
+    exc = raised.value
+    assert exc.detail["cover"]["control_ref"] == "e32"
+    assert "click e32 ('Accept cookies') by ref, or press Escape" in exc.detail["hint"]
+    assert driver.clicks == []
+
+
+def test_a_hit_that_never_settles_keeps_the_usual_verified_path(driver, monkeypatch):
+    """No settled answer is not a cover: the caller's hit_test_unverified check decides."""
+    page = Page(banner="bottom", scroll=0)
+    driver.page_box["page"] = page
+    answers = iter([_atspi.COVER_CLEAR, page.cookie, _atspi.COVER_CLEAR, page.cookie,
+                    _atspi.COVER_CLEAR, page.cookie])
+    monkeypatch.setattr(_atspi, "chromium_cover_at", lambda acc, x, y: next(answers))
+    assert driver._click_clear_of_overlay(_element("Qty 9"), page.rows[9]) is False
+    assert driver.clicks == []

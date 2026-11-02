@@ -26702,13 +26702,24 @@ def _chromium_document_of(acc):
     return None
 
 
-def chromium_cover_at(acc, x: int, y: int):
-    """The page node that the document's hit test returns at (x, y) in place of ``acc``.
+# `chromium_cover_at` answer for a point where the hit test names the target.
+COVER_CLEAR = ("clear",)
 
-    None when the hit is ``acc`` or one of its descendants, when ``acc`` is not
-    Chromium page content, or when the hit test gives no answer. In those
-    cases the existing pointer checks decide. The walk is the same as
-    `chromium_pointer_target`: native identity only, never names or boxes.
+
+def chromium_cover_at(acc, x: int, y: int):
+    """What Chromium's document hit test answers at (x, y) for ``acc``.
+
+    `COVER_CLEAR` when the hit is ``acc`` or one of its descendants; the
+    other page node when one answers instead (an overlay); None when there
+    is no answer, or ``acc`` is not Chromium page content.
+
+    Chromium answers a synchronous ``get_accessible_at_point`` from a cache:
+    the first query at a point is a box-only walk that picks the last child
+    whose box holds the point, so a field listed after a sticky header or
+    fixed banner wins over it. The same query also starts the renderer's
+    real hit test, and a later query at a point inside that result's box
+    returns it. One read is not evidence; callers re-ask until two
+    consecutive answers agree (`LinuxDriver._cover_now`).
     """
     if acc is None or not _chromium_app(acc):
         return None
@@ -26733,14 +26744,14 @@ def chromium_cover_at(acc, x: int, y: int):
         if hit is None or _ancestor_key(hit) == key:
             break
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
-            return None
+            return COVER_CLEAR
         deepest = hit
         node = hit
     return deepest
 
 
-def cover_description(cover, acc) -> tuple[str, str, str]:
-    """(role, name, dismiss control name) of the overlay that holds ``cover``.
+def cover_description(cover, acc) -> tuple[str, str, str, object]:
+    """(role, name, dismiss control name, control node) of the overlay holding ``cover``.
 
     The overlay is the outermost ancestor of ``cover`` under the document
     that does not also contain ``acc``: the header or banner itself, not
@@ -26760,6 +26771,7 @@ def cover_description(cover, acc) -> tuple[str, str, str]:
     role = _role_name(overlay) or "element"
     name = _node_name(overlay)
     control = ""
+    control_node = None
     for node in _bounded_descendants(overlay, limit=96):
         node_role = _role_name(node)
         if node_role not in _COVER_NAMED_ROLES:
@@ -26768,12 +26780,12 @@ def cover_description(cover, acc) -> tuple[str, str, str]:
         if not label:
             continue
         if not control and node_role in {"push button", "toggle button", "link"}:
-            control = label
+            control, control_node = label, node
         if not name:
             name = label
         if control and name:
             break
-    return role, name, control
+    return role, name, control, control_node
 
 
 def scroll_to_point(acc, x: int, y: int) -> bool:
