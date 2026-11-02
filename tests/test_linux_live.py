@@ -5750,6 +5750,67 @@ def _cell(snap, title: str):
     return next((el for el in snap.elements if el.title == title), None)
 
 
+def _libreoffice_pids(session: int | None = None, *, other: bool = False) -> list[int]:
+    """Live (non-zombie) soffice pids; in ``session``, or outside it with ``other``."""
+    pids = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+                stat = fh.read()
+        except OSError:
+            continue
+        comm = stat[stat.find("(") + 1:stat.rfind(")")]
+        fields = stat[stat.rfind(")") + 2:].split()
+        if comm not in {"soffice", "soffice.bin", "oosplash"} or not fields or fields[0] == "Z":
+            continue
+        sid = int(fields[3]) if len(fields) > 3 else None
+        if session is None or (sid != session) == other:
+            pids.append(int(entry))
+    return pids
+
+
+def _wait_for_calc_cells(driver, proc, titles: tuple[str, ...], bound_s: float = 90):
+    """The first snapshot of the launched Calc that shows every cell in ``titles``.
+
+    Readiness is the launched instance itself: no soffice from an earlier
+    test is left running, the snapshot comes from a soffice.bin in the
+    launch session, and that window exposes the cells. A failure names
+    which of those never happened. The bound is unchanged.
+    """
+    deadline = time.monotonic() + bound_s
+    last_error = last_cells = last_pid = None
+    while time.monotonic() < deadline:
+        leftover = _libreoffice_pids(proc.pid, other=True)
+        ours = _libreoffice_pids(proc.pid)
+        if not leftover and ours:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last_error = (exc.code.value, exc.message)
+            else:
+                last_pid = shot.pid
+                last_cells = [el.title for el in shot.elements if el.role == "AXCell"][:12]
+                if (shot.pid is None or shot.pid in ours) and all(_cell(shot, t) is not None for t in titles):
+                    return shot
+        time.sleep(0.4)
+    try:
+        windows = driver.windows()
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        windows = f"window enumeration failed: {exc!r}"
+    raise AssertionError(
+        f"Calc did not expose {' and '.join(titles)} within {bound_s:.0f} s; "
+        f"launcher_pid={proc.pid} exit={proc.poll()} ours={_libreoffice_pids(proc.pid)} "
+        f"leftover={_libreoffice_pids(proc.pid, other=True)} snapshot_pid={last_pid} "
+        f"last_error={last_error!r} cells={last_cells!r} windows={windows!r}"
+    )
+
+
 def _wait_cell_value(driver, title: str, value: str):
     deadline = time.monotonic() + 8
     last = None
@@ -7022,19 +7083,7 @@ def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
         start_new_session=True,
     )
     try:
-        deadline = time.monotonic() + 90
-        snap = None
-        while time.monotonic() < deadline:
-            try:
-                shot = driver.snapshot(Scope.WINDOW, "soffice")
-            except ComputerUseError:
-                shot = None
-            else:
-                if _cell(shot, "B4") is not None and _cell(shot, "B5") is not None:
-                    snap = shot
-                    break
-            time.sleep(0.4)
-        assert snap is not None, "Calc did not expose B4 and B5"
+        snap = _wait_for_calc_cells(driver, proc, ("B4", "B5"), 90)
         b4 = _cell(snap, "B4")
         b5 = _cell(snap, "B5")
         assert b4 is not None and b5 is not None and b4.bounds is not None and b5.bounds is not None
