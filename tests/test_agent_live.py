@@ -1841,67 +1841,21 @@ def test_agent_file_save_done_rejects_a_matching_window_title(tmp_path, isolated
         stop_process(proc)
 
 
-def _display_pids(name: str) -> set[int]:
-    """Pids of ``name`` processes started on this test's X display.
+def _stop_launched(name: str, spawned: list, before) -> None:
+    """End only the processes this test's launches created, then check for strays.
 
-    Matched on ``/proc/<pid>/comm`` (the 15-byte cut of the name) and on the
-    process's own ``DISPLAY``, so a terminal on another display of the same
-    machine is never counted.
+    ``spawned`` holds the runtime's own Popen handles (recorded by patching
+    its spawn). A same-named process the test did not record is reported as
+    a failure and left running; it may belong to someone else.
     """
-    display = os.environ.get("DISPLAY", "")
-    comm = name[:15]
-    found: set[int] = set()
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if (entry / "comm").read_text().strip() != comm:
-                continue
-            environ = (entry / "environ").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if f"DISPLAY={display}".encode() in environ:
-            found.add(int(entry.name))
-    return found
+    from tests import _owned_processes as _owned
 
-
-def _running(pid: int) -> bool:
-    """True while ``pid`` exists and is not a zombie its launcher has not reaped."""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return stat.rsplit(")", 1)[-1].split()[0] != "Z"
-
-
-def _stop_launched(name: str, before: set[int], timeout: float = 5.0) -> None:
-    """End the ``name`` processes this test started, by pid, and wait for them.
-
-    ``app quit`` sends the desktop quit chord (ctrl+q). xfce4-terminal does
-    not bind ctrl+q, so it reports "still running" and the terminal stayed
-    up into the next test, whose short run needs an empty desktop.
-    """
-    import signal
-
-    launched = {pid for pid in _display_pids(name) - before if _running(pid)}
-    for pid in launched:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    deadline = time.monotonic() + timeout
-    while launched and time.monotonic() < deadline:
-        launched = {pid for pid in launched if _running(pid)}
-        time.sleep(0.05)
-    for pid in launched:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    _owned.stop_spawned(spawned)
+    _owned.fail_on_leftovers({name[:15]}, before, name)
 
 
 @requires_display
-def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home) -> None:
+def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home, monkeypatch) -> None:
     """Binary grants cover Files and Terminal; Terminal also needs exec."""
     import shutil
 
@@ -1919,7 +1873,10 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
     ), None)
     if files is None and terminal is None:
         pytest.skip("no file manager or terminal binary")
-    already = {name: _display_pids(name) for name in (files, terminal) if name}
+    from tests import _owned_processes as _owned
+
+    already = {name: _owned.running({name[:15]}) for name in (files, terminal) if name}
+    spawned = _owned.record_spawns(monkeypatch)
     store = safety.PermissionStore()
     runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
     runtime.APP_LAUNCH_WAIT_S = 12
@@ -1953,7 +1910,7 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
                 pass
             # A quit that leaves the app running is not an error, so the
             # pids this test launched are ended either way.
-            _stop_launched(name, already[name])
+            _stop_launched(name, spawned, already[name])
 
 
 @requires_display
@@ -2007,7 +1964,7 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
 
 
 @requires_display
-def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path, isolated_home) -> None:
+def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path, isolated_home, monkeypatch) -> None:
     """Live. Grants cover one program; explicit role grants cover their members.
 
     mousepad, gedit, or gnome-text-editor is launched as Text Editor. A grant
@@ -2053,6 +2010,11 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
     assert same_app("gnome-terminal", "gnome-terminal-server") is True
     runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
     runtime.APP_LAUNCH_WAIT_S = 12
+    # Only the editor this test launches is stopped, by recorded pid.
+    from tests import _owned_processes as _owned
+
+    editors_before = _owned.running({editor[:15]})
+    spawned = _owned.record_spawns(monkeypatch)
     try:
         text = runtime.app("launch", "Text Editor")
         assert "needs_permission" not in text, text
@@ -2080,7 +2042,8 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
         try:
             runtime.app("quit", editor)
         except Exception:
-            subprocess.run(["pkill", "-x", editor], check=False, timeout=3)
+            pass
+        _stop_launched(editor, spawned, editors_before)
 
 
 @requires_display

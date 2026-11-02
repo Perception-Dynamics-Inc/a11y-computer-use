@@ -515,6 +515,7 @@ jobs:
             fi
             : > /tmp/xmessage-pkg.log
             xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
+            xmessage_pid=$!
             restarts=0
             for _ in $(seq 1 40); do
               if /tmp/wheel-venv/bin/python /tmp/list-windows.py; then
@@ -526,9 +527,10 @@ jobs:
               # was still alive. Replace it a few times.
               if [ "$restarts" -lt 4 ]; then
                 restarts=$((restarts + 1))
-                pkill -x xmessage >/dev/null 2>&1 || true
+                kill "$xmessage_pid" >/dev/null 2>&1 || true
                 sleep 0.2
                 xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
+                xmessage_pid=$!
                 sleep 0.3
               fi
               sleep 0.25
