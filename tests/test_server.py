@@ -8155,3 +8155,82 @@ def test_scroll_to_find_page_root_still_refuses_visible_opaque_region(monkeypatc
         rt.scroll_to_find("chrome", text="Open section 9", max_scrolls=8)
     assert caught.value.detail["reason"] == "opaque_find_unverifiable"
     assert inputs == []
+
+
+# --- #1449: column-header refs across a row reorder, through the server ---
+from a11y_computer_use.drivers import _atspi as _atspi_1449  # noqa: E402
+from a11y_computer_use.drivers.linux import LinuxDriver as _LinuxDriver_1449  # noqa: E402
+
+
+def _tree_1449():
+    from tests.test_linux_synthetic import _GeckoNode
+    button = _GeckoNode("button", "Company")
+    th = _GeckoNode("column header", children=[button])
+    head = _GeckoNode("table row", "First Name Last Name \u25b2 Company", children=[th])
+    head.attributes = {"rowindex": "0"}
+    link = _GeckoNode("link", "513")
+    cell = _GeckoNode("table cell", children=[link])
+    body = _GeckoNode("table row", "Ralph Jefferson 513", children=[cell])
+    body.attributes = {"rowindex": "3"}
+    table = _GeckoNode("table", children=[head, body])
+    _GeckoNode("document web", children=[table])
+    return button, head, link, body, table
+
+
+@pytest.mark.parametrize("case", ["reorder", "renamed", "body_row"])
+def test_header_ref_survives_reorder_through_server_rebinding(
+    monkeypatch, mocked_driver, store, audit_dir, case,
+):
+    from tests.test_linux_synthetic import _FakeAtspi
+    _atspi_1449.reset_shown_rows()
+    monkeypatch.setattr(_atspi_1449, "_atspi", lambda: _FakeAtspi)
+    store.set_tier(APP, safety.Tier.FULL)
+    monkeypatch.setattr(_atspi_1449, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi_1449, "_drop_cached_properties", lambda node: None)
+    button, head, link, body, table = _tree_1449()
+    handles = {"e37": button, "e85": link}
+
+    def snap(sid):
+        base = build_synthetic_snapshot()
+        els = (
+            Element("e37", "AXButton", button.name, None, Bounds(1, 267, 185, 77, 22), sid,
+                    stable_id="btn", row_identity=_atspi_1449.chromium_row_identity(button, fresh=True)),
+            Element("e85", "AXLink", link.name, None, Bounds(1, 300, 300, 30, 20), sid,
+                    stable_id="lnk", row_identity=_atspi_1449.chromium_row_identity(link, fresh=True)),
+        )
+        return dataclasses.replace(base, snapshot_id=sid, elements=els)
+
+    current = [snap("before")]
+    monkeypatch.setattr(observe, "snapshot", lambda *a, **k: current[0])
+    monkeypatch.setattr(observe, "ax_handle_for", lambda sid, ref: handles.get(ref))
+    native = _LinuxDriver_1449.__new__(_LinuxDriver_1449)
+    native._run = lambda fn: fn()
+
+    def resolve(s, ref, **kwargs):
+        anchor = s.element(ref)
+        native._verify_chromium_row_target(anchor, handles[ref])
+        return observe.rematch_ref(s, ref, kwargs.get("live") or current[0])
+
+    monkeypatch.setattr(observe, "resolve_ref", resolve)
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        assert "e37" in runtime.desktop_snapshot(APP)
+        # Sort by another column: rows re-appended, header row re-indexed,
+        # re-parented and its sort indicator moved.
+        head.name = "First Name Last Name Company Favorite Number \u25b2"
+        head.attributes["rowindex"] = "1"
+        from tests.test_linux_synthetic import _GeckoNode
+        head.parent = _GeckoNode("table")
+        body.name = "Fred Jackson 56"
+        if case == "renamed":
+            button.name = "Employer"
+        current[0] = snap("after")
+        runtime.desktop_snapshot(APP)  # the server's rebinding path
+        monkeypatch.setattr(runtime, "_recheck_target", lambda *a, **k: None)
+        if case == "reorder":
+            runtime.click(ref="e37", verify=True)
+            assert mocked_driver["click"]
+            return
+        with pytest.raises(ComputerUseError) as caught:
+            runtime.click(ref="e85" if case == "body_row" else "e37", verify=True)
+        assert caught.value.code is ErrorCode.STALE_REF
+        assert mocked_driver["click"] == []
