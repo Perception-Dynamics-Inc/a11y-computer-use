@@ -4085,12 +4085,13 @@ def test_linux_key_reaches_an_open_gtk_menu(tmp_path) -> None:
         _stop(proc)
 
 
-def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_path) -> None:
+def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_path, monkeypatch) -> None:
     """`true` exits before a window. An absolute-path GTK script's window is the result."""
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
+    spawned = _owned.record_spawns(monkeypatch)
     runtime = _runtime_for(tmp_path, driver, "true", "false")
     runtime.APP_LAUNCH_WAIT_S = 30
     started = time.monotonic()
@@ -4137,16 +4138,10 @@ def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_pat
     focused = runtime.app("focus", str(script))
     assert focused.startswith("focused "), focused
     assert "app_not_found" not in focused
-    child = None
-    for row in driver.windows():
-        if row.get("title") == "cualaunchwin" and row.get("pid"):
-            child = int(row["pid"])
-            break
-    if child:
-        os.kill(child, 15)
+    _owned.stop_spawned(spawned)
 
 
-def test_linux_second_launch_reports_the_window_the_running_instance_opened(tmp_path) -> None:
+def test_linux_second_launch_reports_the_window_the_running_instance_opened(tmp_path, monkeypatch) -> None:
     """A second launch exits 0 and the running window's new title is the result.
 
     The second process writes a bump file and exits. The first process changes
@@ -4157,6 +4152,7 @@ def test_linux_second_launch_reports_the_window_the_running_instance_opened(tmp_
 
     driver = LinuxDriver()
     _require_bus(driver)
+    spawned = _owned.record_spawns(monkeypatch)
     lock = tmp_path / "lock"
     bump = tmp_path / "bump"
     script = tmp_path / "cuahandoff"
@@ -4202,13 +4198,7 @@ def test_linux_second_launch_reports_the_window_the_running_instance_opened(tmp_
     focused = runtime.app("focus", str(script))
     assert focused.startswith("focused "), focused
     assert "app_not_found" not in focused
-    for row in driver.windows():
-        title = str(row.get("title") or "")
-        if title.startswith("handoff=") and row.get("pid"):
-            try:
-                os.kill(int(row["pid"]), 15)
-            except OSError:
-                pass
+    _owned.stop_spawned(spawned)
 
 
 def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path) -> None:
@@ -7726,7 +7716,7 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
         _owned.stop_session(other)
 
 
-def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path) -> None:
+def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path, monkeypatch) -> None:
     """Live. ``app launch libreoffice-calc`` opens a usable Calc document.
 
     That desktop name used to start the suite binary with no module flag,
@@ -7760,10 +7750,9 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
     runtime = _runtime_for(
         tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "localc",
     )
-    owned: list[int] = []
+    spawned = _owned.record_spawns(monkeypatch)
     try:
         launched = runtime.app("launch", "libreoffice-calc")
-        owned = _owned.running(_LO_COMMS)  # none ran before: these are this launch
         assert "first window:" in launched, launched
         assert "Calc" in launched, launched
         assert "first window: 'LibreOffice'" not in launched, launched
@@ -7777,10 +7766,11 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        _owned.stop_pids(owned)
+        _owned.stop_spawned(spawned)
+        _owned.fail_on_leftovers(_LO_COMMS, (), "LibreOffice launch")
 
 
-def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
+def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path, monkeypatch) -> None:
     """Live. Launch LibreOffice, then snapshot it once. No poll in the test.
 
     ``app launch`` returns when the first window is up. AT-SPI can still be
@@ -7801,10 +7791,9 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
     os.environ["GTK_MODULES"] = "gail:atk-bridge"
     os.environ["NO_AT_BRIDGE"] = "0"
     runtime = _runtime_for(tmp_path, driver, "libreoffice", "soffice", "soffice.bin")
-    owned: list[int] = []
+    spawned = _owned.record_spawns(monkeypatch)
     try:
         launched = runtime.app("launch", "libreoffice")
-        owned = _owned.running(_LO_COMMS)  # none ran before: these are this launch
         assert "first window:" in launched, launched
         text = runtime.desktop_snapshot("LibreOffice", mode="interactive")
         assert text
@@ -7818,7 +7807,8 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
             os.environ.pop("SAL_USE_VCLPLUGIN", None)
         else:
             os.environ["SAL_USE_VCLPLUGIN"] = previous
-        _owned.stop_pids(owned)
+        _owned.stop_spawned(spawned)
+        _owned.fail_on_leftovers(_LO_COMMS, (), "LibreOffice launch")
 
 
 def test_linux_calc_text_import_dialog_has_no_uninitialized_value(tmp_path) -> None:

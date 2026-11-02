@@ -85,7 +85,7 @@ def stop_session(proc_or_pid, timeout: float = 3.0) -> None:
             return
         for pid in members:
             try:
-                os.kill(pid, sig)
+                os.kill(pid, sig)  # owned pid: member of our recorded session
             except OSError:
                 pass
         deadline = time.monotonic() + wait
@@ -93,18 +93,92 @@ def stop_session(proc_or_pid, timeout: float = 3.0) -> None:
             time.sleep(0.1)
 
 
-def stop_pids(pids, timeout: float = 3.0) -> None:
-    """Stop exactly the pids a test recorded as its own launch."""
-    pids = [p for p in pids if isinstance(p, int) and p > 1]
+def _children(pid: int) -> list[int]:
+    out = []
+    for other in _pids():
+        info = _stat(other)
+        if info and info[1] != "Z" and _ppid(other) == pid:
+            out.append(other)
+    return out
+
+
+def _ppid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            stat = fh.read()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2:].split()
+    return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+
+
+def record_spawns(monkeypatch) -> list:
+    """Record every Popen the runtime's app launch creates (``_spawn``).
+
+    The returned list holds those Popen handles: the only processes a test
+    that launches through ``runtime.app`` may stop.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    spawned: list = []
+    real = _linux_system._spawn
+
+    def spawn(argv, identifier):
+        proc = real(argv, identifier)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(_linux_system, "_spawn", spawn)
+    return spawned
+
+
+def stop_spawned(procs, timeout: float = 3.0) -> None:
+    """Stop the recorded Popen processes and the children they forked.
+
+    A child is ours only while its parent pid is a recorded launch (or one of
+    its recorded children); nothing is selected by name, title or user.
+    """
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        live = [p for p in pids if _stat(p) and _stat(p)[1] != "Z"]
-        if not live:
+        tree: list[int] = []
+        for proc in procs:
+            pid = getattr(proc, "pid", None)
+            if not isinstance(pid, int) or pid <= 1:
+                continue
+            if getattr(proc, "poll", lambda: None)() is None:
+                tree.append(pid)
+            frontier = [pid]
+            while frontier:
+                kids = _children(frontier.pop())
+                tree.extend(kids)
+                frontier.extend(kids)
+        if not tree:
             return
-        for pid in live:
+        for pid in tree:
             try:
-                os.kill(pid, sig)
+                os.kill(pid, sig)  # owned pid: a recorded Popen or its forked child
             except OSError:
                 pass
         deadline = time.monotonic() + timeout
-        while any(_stat(p) and _stat(p)[1] != "Z" for p in live) and time.monotonic() < deadline:
+        while time.monotonic() < deadline and any(
+            _stat(p) and _stat(p)[1] != "Z" for p in tree
+        ):
+            for proc in procs:
+                getattr(proc, "poll", lambda: None)()
             time.sleep(0.1)
+
+
+def fail_on_leftovers(comms, before, label: str, timeout: float = 5.0) -> None:
+    """Fail, never kill, when same-named processes this test did not record remain.
+
+    ``before`` is ``running(comms)`` taken before the launch. Pids that are
+    new but not ours (a daemonised or re-parented app) are reported for the
+    operator to inspect.
+    """
+    deadline = time.monotonic() + timeout
+    left = [p for p in running(comms) if p not in set(before)]
+    while left and time.monotonic() < deadline:
+        time.sleep(0.1)
+        left = [p for p in running(comms) if p not in set(before)]
+    if left:
+        pytest.fail(f"{label} left processes it did not launch itself: {sorted(left)}; "
+                    "they were not killed")
