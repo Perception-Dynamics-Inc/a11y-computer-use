@@ -2629,6 +2629,33 @@ class LinuxDriver:
         return not gone
 
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
+        """Re-resolve ``ref``; see ``_resolve_ref_live``.
+
+        The live element can carry the fresh tree's number, which the caller
+        never received (#1453). Remember which issued ref it stands for, so a
+        refusal names the caller's ref, never a renumbered one.
+        """
+        alias = None
+        try:
+            resolved = LinuxDriver._resolve_ref_live(self, snap, ref, live=live)
+            if isinstance(resolved, Element) and resolved.ref != ref:
+                alias = (resolved.ref, resolved.role, resolved.title, ref)
+            return resolved
+        finally:
+            try:
+                self._issued_ref_alias = alias
+            except AttributeError:  # a slotted stand-in keeps no alias
+                pass
+
+    def _caller_ref(self, element: Element) -> str:
+        """The ref the caller holds for ``element`` (#1453)."""
+        alias = getattr(self, "_issued_ref_alias", None)
+        if (isinstance(alias, tuple) and len(alias) == 4
+                and alias[:3] == (element.ref, element.role, element.title)):
+            return alias[3]
+        return element.ref
+
+    def _resolve_ref_live(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
         semantics as macOS, without macOS's pyobjc `observe.snapshot`.
@@ -3389,13 +3416,14 @@ class LinuxDriver:
             occluder = _atspi.UNKNOWN_MENU_STATE
         if occluder is None:
             return
+        held = LinuxDriver._caller_ref(self, element)
         if tuple(occluder) == _atspi.UNKNOWN_MENU_STATE:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
-                f"{element.ref} ({element.role} {element.title!r}): Chrome did not answer "
+                f"{held} ({element.role} {element.title!r}): Chrome did not answer "
                 "whether a menu covers it; nothing was sent",
                 detail={
-                    "ref": element.ref, "reason": "occlusion_unverified", "outcome": "refused",
+                    "ref": held, "reason": "occlusion_unverified", "outcome": "refused",
                     "retryable": True,
                     "hint": "Retry; if a menu is open, close it (Escape) first.",
                 },
@@ -3403,10 +3431,10 @@ class LinuxDriver:
         where = "at the click point" if x is not None else ""
         raise ComputerUseError(
             ErrorCode.STALE_REF,
-            f"{element.ref} ({element.role} {element.title!r}) is covered {where} "
+            f"{held} ({element.role} {element.title!r}) is covered {where} "
             f"by {occluder[0]} {occluder[1]!r}; nothing was sent".replace("  ", " "),
             detail={
-                "ref": element.ref, "reason": "occluded_target", "outcome": "refused",
+                "ref": held, "reason": "occluded_target", "outcome": "refused",
                 "hint": "Close the menu (Escape) or act on the menu item instead.",
             },
         )
