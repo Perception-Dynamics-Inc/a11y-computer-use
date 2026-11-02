@@ -2053,6 +2053,8 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
     assert same_app("gnome-terminal", "gnome-terminal-server") is True
     runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
     runtime.APP_LAUNCH_WAIT_S = 12
+    # Only the editor this test launches is stopped, by recorded pid.
+    editors_before = _display_pids(editor)
     try:
         text = runtime.app("launch", "Text Editor")
         assert "needs_permission" not in text, text
@@ -2080,7 +2082,7 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
         try:
             runtime.app("quit", editor)
         except Exception:
-            subprocess.run(["pkill", "-x", editor], check=False, timeout=3)
+            _stop_launched(editor, editors_before)
 
 
 @requires_display

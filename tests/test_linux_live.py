@@ -26,6 +26,12 @@ import time
 
 import pytest
 
+from tests import _owned_processes as _owned
+
+_LO_COMMS = frozenset({"soffice", "soffice.bin", "oosplash"})
+_THUNAR_COMMS = frozenset({"thunar"})
+_XFCE_TERM_COMMS = frozenset({"xfce4-terminal"})
+
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
 from a11y_computer_use.schema import ComputerUseError, ErrorCode, Point, Scope  # noqa: E402
@@ -4551,7 +4557,6 @@ def test_linux_snapshot_lists_a_non_raised_dialog_and_click_raises_it(tmp_path) 
     driver = LinuxDriver()
     _require_bus(driver)
     _require_ewmh()
-    subprocess.run(["pkill", "-f", "cuawindual.py"], check=False)
     script = tmp_path / "cuawindual.py"
     script.write_text(textwrap.dedent(
         """
@@ -5715,37 +5720,6 @@ _LO_REGISTRY = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def _kill_libreoffice() -> None:
-    """Stop soffice by comm. A Python command line that mentions the name is left alone."""
-    import signal
-
-    comms = {"soffice", "soffice.bin", "oosplash"}
-    for _ in range(15):
-        alive = False
-        try:
-            entries = os.listdir("/proc")
-        except OSError:
-            return
-        for entry in entries:
-            if not entry.isdigit():
-                continue
-            try:
-                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
-                    comm = fh.read().strip()
-            except OSError:
-                continue
-            if comm not in comms:
-                continue
-            alive = True
-            try:
-                os.kill(int(entry), signal.SIGKILL)
-            except OSError:
-                pass
-        if not alive:
-            return
-        time.sleep(0.2)
-
-
 def _cell(snap, title: str):
     return next((el for el in snap.elements if el.title == title), None)
 
@@ -5855,7 +5829,7 @@ def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) ->
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-profile"
     (profile / "user").mkdir(parents=True)
@@ -5923,7 +5897,7 @@ def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) ->
         assert held.value in {"0", "=B1*2", "B1*2"}, held.value
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
     gen_profile = tmp_path / "lo-gen"
     (gen_profile / "user").mkdir(parents=True)
@@ -5965,7 +5939,7 @@ def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) ->
         assert other.value.code is ErrorCode.APP_NOT_FOUND
     finally:
         _stop_group(gen)
-        _kill_libreoffice()
+        _owned.stop_session(gen)
 
     with pytest.raises(ComputerUseError) as stopped:
         driver.snapshot(Scope.WINDOW, "soffice")
@@ -5986,7 +5960,7 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-outcome"
     (profile / "user").mkdir(parents=True)
@@ -6052,7 +6026,7 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
         assert "did not change" not in typed.evidence
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
@@ -6220,7 +6194,7 @@ def test_linux_impress_frame_type_confirms_multiline(tmp_path) -> None:
     assert os.path.isfile(template), "libreoffice-impress did not install a presentation template"
     # The template lives in libreoffice-common. The slide frames need the impress component.
     assert os.path.isfile("/usr/lib/libreoffice/program/simpress"), "libreoffice-impress is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-impress"
     (profile / "user").mkdir(parents=True)
@@ -6265,7 +6239,7 @@ def test_linux_impress_frame_type_confirms_multiline(tmp_path) -> None:
         assert "text_mismatch" not in str(typed)
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> None:
@@ -6286,7 +6260,7 @@ def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> No
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-formula"
     (profile / "user").mkdir(parents=True)
@@ -6366,7 +6340,7 @@ def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> No
             assert landed is not None and landed.value in shown, (address, None if landed is None else landed.value)
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_calc_type_42_into_three_cells_is_not_a_secure_field(tmp_path) -> None:
@@ -6385,7 +6359,7 @@ def test_linux_calc_type_42_into_three_cells_is_not_a_secure_field(tmp_path) -> 
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-type-42"
     (profile / "user").mkdir(parents=True)
@@ -6442,7 +6416,7 @@ def test_linux_calc_type_42_into_three_cells_is_not_a_secure_field(tmp_path) -> 
             _wait_cell_value(driver, title, "42")
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 _WRITER_HTML = """<!doctype html><meta charset=utf-8>
@@ -6501,7 +6475,7 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     doc = tmp_path / "doc"
     doc.mkdir()
@@ -6523,7 +6497,7 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
     )
     odt = doc / "notes.odt"
     assert odt.is_file(), converted.stderr[-500:]
-    _kill_libreoffice()
+    _owned.await_exit(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     profile = tmp_path / "writer-profile"
     _writer_profile(profile)
@@ -6602,7 +6576,7 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
         assert alpha_after is not None and "INSERTED" not in (alpha_after.value or "")
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def _impress_odp(path) -> None:
@@ -6662,7 +6636,7 @@ def test_linux_impress_title_click_then_type_lands_in_the_title(tmp_path) -> Non
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     deck = tmp_path / "deck.odp"
     _impress_odp(deck)
@@ -6718,7 +6692,7 @@ def test_linux_impress_title_click_then_type_lands_in_the_title(tmp_path) -> Non
         assert "Alpha Slide Title" in (landed.value or ""), (landed.value, rendered[:1200])
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def _draw_odg(path) -> None:
@@ -6787,7 +6761,7 @@ def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
     binary = found.stdout.strip()
     assert binary, "libreoffice is not installed"
     assert _draw_component_installed(), "libreoffice-draw is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     page = tmp_path / "shapes.odg"
     _draw_odg(page)
@@ -6890,7 +6864,7 @@ def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
         assert rect_after is not None and rect_after.value == "RECT_SET", rendered[:1600]
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def _dark_rows(png: bytes) -> list[int]:
@@ -6934,7 +6908,7 @@ def test_linux_writer_paragraph_crop_and_double_click_hit_that_paragraph(tmp_pat
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     doc = tmp_path / "doc"
     doc.mkdir()
@@ -6964,7 +6938,7 @@ def test_linux_writer_paragraph_crop_and_double_click_hit_that_paragraph(tmp_pat
     )
     odt = doc / "notes.odt"
     assert odt.is_file(), converted.stderr[-500:]
-    _kill_libreoffice()
+    _owned.await_exit(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     profile = tmp_path / "writer-profile"
     _writer_profile(profile)
@@ -7046,7 +7020,7 @@ def test_linux_writer_paragraph_crop_and_double_click_hit_that_paragraph(tmp_pat
         assert "Gamma" not in hits[0]
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
@@ -7065,7 +7039,7 @@ def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-b4"
     (profile / "user").mkdir(parents=True)
@@ -7116,7 +7090,7 @@ def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
             assert other is None or other.value in (None, ""), (title, None if other is None else other.value, x, y, b4.bounds)
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> None:
@@ -7136,7 +7110,7 @@ def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> N
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-bound"
     (profile / "user").mkdir(parents=True)
@@ -7211,7 +7185,7 @@ def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> N
         _wait_cell_value(driver, "A1", "42")
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> None:
@@ -7229,7 +7203,7 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     doc = tmp_path / "doc"
     doc.mkdir()
@@ -7251,7 +7225,7 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
     )
     odt = doc / "table.odt"
     assert odt.is_file(), converted.stderr[-500:]
-    _kill_libreoffice()
+    _owned.await_exit(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     profile = tmp_path / "writer-profile"
     _writer_profile(profile)
@@ -7311,7 +7285,7 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
         assert "A1text" in texts
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> None:
@@ -7329,7 +7303,7 @@ def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> Non
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-writer is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     profile = tmp_path / "writer-doc"
     _writer_profile(profile)
@@ -7395,7 +7369,7 @@ def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> Non
         assert _atspi.paragraph_breaks_match(document.value, value), document.value
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_writer_txt_export_breaks_match_and_a_bom_is_evidence(tmp_path, monkeypatch) -> None:
@@ -7446,7 +7420,7 @@ def test_linux_writer_txt_export_breaks_match_and_a_bom_is_evidence(tmp_path, mo
         archive.writestr(stored, "application/vnd.oasis.opendocument.text")
         archive.writestr("content.xml", content)
         archive.writestr("META-INF/manifest.xml", manifest)
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     profile = tmp_path / "writer-txt"
     _writer_profile(profile)
@@ -7487,7 +7461,7 @@ def test_linux_writer_txt_export_breaks_match_and_a_bom_is_evidence(tmp_path, mo
     )
     assert missing[0]["ok"] is False
     assert "does not contain" in missing[0]["detail"]
-    _kill_libreoffice()
+    _owned.await_exit(_LO_COMMS, 'LibreOffice')
 
 
 
@@ -7541,7 +7515,7 @@ def test_linux_writer_type_newline_inserts_paragraphs(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-writer is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     odt = tmp_path / "memo.odt"
     _empty_odt(odt)
@@ -7625,7 +7599,7 @@ def test_linux_writer_type_newline_inserts_paragraphs(tmp_path) -> None:
         assert breaks == 0
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def _soffice_displays() -> set[str]:
@@ -7692,7 +7666,7 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
     assert subprocess.run(
         ["bash", "-lc", "command -v dbus-run-session"], capture_output=True, text=True,
     ).stdout.strip()
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     xvfb, display = _start_other_display()
     assert display != os.environ.get("DISPLAY")
@@ -7749,7 +7723,7 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
         if xvfb.poll() is None:
             xvfb.kill()
             xvfb.wait(timeout=5)
-        _kill_libreoffice()
+        _owned.stop_session(other)
 
 
 def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path) -> None:
@@ -7768,7 +7742,7 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
     _require_bus(driver)
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     assert found.stdout.strip(), "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     home = tmp_path / "lo-home"
     (home / ".config").mkdir(parents=True)
@@ -7786,8 +7760,10 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
     runtime = _runtime_for(
         tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "localc",
     )
+    owned: list[int] = []
     try:
         launched = runtime.app("launch", "libreoffice-calc")
+        owned = _owned.running(_LO_COMMS)  # none ran before: these are this launch
         assert "first window:" in launched, launched
         assert "Calc" in launched, launched
         assert "first window: 'LibreOffice'" not in launched, launched
@@ -7801,7 +7777,7 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        _kill_libreoffice()
+        _owned.stop_pids(owned)
 
 
 def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
@@ -7818,15 +7794,17 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
     _require_bus(driver)
     found = subprocess.run(["bash", "-lc", "command -v libreoffice"], capture_output=True, text=True)
     assert found.stdout.strip(), "libreoffice is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     previous = os.environ.get("SAL_USE_VCLPLUGIN")
     os.environ["SAL_USE_VCLPLUGIN"] = "gtk3"
     os.environ["GTK_MODULES"] = "gail:atk-bridge"
     os.environ["NO_AT_BRIDGE"] = "0"
     runtime = _runtime_for(tmp_path, driver, "libreoffice", "soffice", "soffice.bin")
+    owned: list[int] = []
     try:
         launched = runtime.app("launch", "libreoffice")
+        owned = _owned.running(_LO_COMMS)  # none ran before: these are this launch
         assert "first window:" in launched, launched
         text = runtime.desktop_snapshot("LibreOffice", mode="interactive")
         assert text
@@ -7840,7 +7818,7 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
             os.environ.pop("SAL_USE_VCLPLUGIN", None)
         else:
             os.environ["SAL_USE_VCLPLUGIN"] = previous
-        _kill_libreoffice()
+        _owned.stop_pids(owned)
 
 
 def test_linux_calc_text_import_dialog_has_no_uninitialized_value(tmp_path) -> None:
@@ -7861,7 +7839,7 @@ def test_linux_calc_text_import_dialog_has_no_uninitialized_value(tmp_path) -> N
     assert binary, "libreoffice-calc is not installed"
     csv_path = tmp_path / "sample.csv"
     csv_path.write_text("a,b,c\n1,2,3\n4,5,6\n")
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-import"
     (profile / "user").mkdir(parents=True)
@@ -7919,7 +7897,7 @@ def test_linux_calc_text_import_dialog_has_no_uninitialized_value(tmp_path) -> N
             assert el.value is None, (el.role, el.title, el.value, el.checked)
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 _SWATCH = "cuaswatch"
@@ -11383,7 +11361,7 @@ def test_linux_mousepad_backspace_and_calc_down_are_confirmed(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.4)
     profile = tmp_path / "lo-key"
     (profile / "user").mkdir(parents=True)
@@ -11447,7 +11425,7 @@ def test_linux_mousepad_backspace_and_calc_down_are_confirmed(tmp_path) -> None:
         )
     finally:
         _stop_group(calc)
-        _kill_libreoffice()
+        _owned.stop_session(calc)
 
 
 _CALC_BUS_TRIALS = 10
@@ -11542,7 +11520,7 @@ def test_linux_mcp_server_survives_calc_snapshots_in_a_fresh_home(tmp_path) -> N
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-calc is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     server_home = tmp_path / "mcp-home"
     server_home.mkdir()
     store = safety.PermissionStore(server_home / ".a11y-computer-use" / "permissions.json")
@@ -11574,7 +11552,7 @@ def test_linux_mcp_server_survives_calc_snapshots_in_a_fresh_home(tmp_path) -> N
                     pid = _pid_with_marker(marker)
                     assert pid, "MCP server process was not found"
                     for index in range(_CALC_BUS_TRIALS):
-                        _kill_libreoffice()
+                        _owned.await_exit(_LO_COMMS, 'LibreOffice')
                         _wait_calc_window(False, 8)
                         home = tmp_path / f"calc-home-{index}"
                         home.mkdir()
@@ -11587,7 +11565,7 @@ def test_linux_mcp_server_survives_calc_snapshots_in_a_fresh_home(tmp_path) -> N
                             )
                         finally:
                             _stop_group(proc)
-                            _kill_libreoffice()
+                            _owned.stop_session(proc)
                         assert _pid_with_marker(marker) == pid, f"server exited on trial {index}"
                         text = "".join(getattr(block, "text", "") for block in (result.content or []))
                         assert text, f"trial {index} returned no tool text"
@@ -12366,35 +12344,6 @@ def test_linux_ref_from_a_quit_editor_does_not_write_the_relaunched_file(tmp_pat
         _stop_group(proc2)
 
 
-def _kill_thunar() -> None:
-    """Stop Thunar by comm. A Python command line that mentions the name is left alone."""
-    comms = {"thunar"}
-    for _ in range(15):
-        alive = False
-        try:
-            entries = os.listdir("/proc")
-        except OSError:
-            return
-        for entry in entries:
-            if not entry.isdigit():
-                continue
-            try:
-                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
-                    comm = fh.read().strip()
-            except OSError:
-                continue
-            if comm not in comms:
-                continue
-            alive = True
-            try:
-                os.kill(int(entry), signal.SIGKILL)
-            except OSError:
-                pass
-        if not alive:
-            return
-        time.sleep(0.2)
-
-
 def _location_value(snap) -> str | None:
     for el in snap.elements:
         if el.role == "AXTextField" and isinstance(el.value, str) and el.value.startswith("/"):
@@ -12630,7 +12579,7 @@ def test_linux_thunar_side_pane_click_changes_the_location(tmp_path) -> None:
         ["xfconf-query", "-c", "thunar", "-p", "/last-view", "-n", "-t", "string", "-s", "ThunarIconView"],
         check=False, capture_output=True,
     )
-    _kill_thunar()
+    _owned.refuse_preexisting(_THUNAR_COMMS, 'Thunar')
     time.sleep(0.3)
     env = os.environ.copy()
     env["GTK_MODULES"] = "gail:atk-bridge"
@@ -12681,7 +12630,7 @@ def test_linux_thunar_side_pane_click_changes_the_location(tmp_path) -> None:
         assert after.rstrip("/") in {"", "/"} or after == "/", (before, after)
     finally:
         _stop_group(proc)
-        _kill_thunar()
+        _owned.stop_session(proc)
 
 
 def test_linux_gtk_actionable_wait_names_the_failed_check(tmp_path) -> None:
@@ -13054,34 +13003,6 @@ def _xfce_terminal_or_fail(driver) -> str:
     return binary
 
 
-def _kill_xfce4_terminal() -> None:
-    """Stop xfce4-terminal by comm, including a window left from an earlier case."""
-    for _ in range(15):
-        alive = False
-        try:
-            entries = os.listdir("/proc")
-        except OSError:
-            return
-        for entry in entries:
-            if not entry.isdigit():
-                continue
-            try:
-                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
-                    comm = fh.read().strip()
-            except OSError:
-                continue
-            if comm != "xfce4-terminal":
-                continue
-            alive = True
-            try:
-                os.kill(int(entry), signal.SIGKILL)
-            except OSError:
-                pass
-        if not alive:
-            return
-        time.sleep(0.2)
-
-
 def _launch_xfce_terminal(binary: str, args: list[str], tmp_path) -> subprocess.Popen:
     env = os.environ.copy()
     env["GTK_MODULES"] = "gail:atk-bridge"
@@ -13197,7 +13118,7 @@ def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
     driver = LinuxDriver()
     binary = _xfce_terminal_or_fail(driver)
     title = "Cu Tab One"
-    _kill_xfce4_terminal()
+    _owned.refuse_preexisting(_XFCE_TERM_COMMS, 'xfce4-terminal')
     proc = _launch_xfce_terminal(
         binary,
         ["--disable-server", "--dynamic-title-mode=none", "--title", title],
@@ -13217,7 +13138,7 @@ def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
         assert "no click was sent" in result
     finally:
         _stop_group(proc)
-        _kill_xfce4_terminal()
+        _owned.stop_session(proc)
 
 
 def test_xfce4_terminal_two_tabs_keep_their_titles(tmp_path) -> None:
@@ -13232,7 +13153,7 @@ def test_xfce4_terminal_two_tabs_keep_their_titles(tmp_path) -> None:
     binary = _xfce_terminal_or_fail(driver)
     alpha = "Cu Tab Alpha"
     beta = "Cu Tab Beta"
-    _kill_xfce4_terminal()
+    _owned.refuse_preexisting(_XFCE_TERM_COMMS, 'xfce4-terminal')
     proc = _launch_xfce_terminal(
         binary,
         [
@@ -13246,7 +13167,7 @@ def test_xfce4_terminal_two_tabs_keep_their_titles(tmp_path) -> None:
         _wait_xfce_tabs(driver, (alpha, beta), hidden=False)
     finally:
         _stop_group(proc)
-        _kill_xfce4_terminal()
+        _owned.stop_session(proc)
 
 def test_linux_featherpad_snapshot_omits_the_hidden_replacement_window(tmp_path) -> None:
     """Live FeatherPad. The hidden Replace dialog is not a snapshot window.
@@ -14374,7 +14295,7 @@ def test_linux_writer_key_scoped_timing(tmp_path) -> None:
     found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
     binary = found.stdout.strip()
     assert binary, "libreoffice-writer is not installed"
-    _kill_libreoffice()
+    _owned.refuse_preexisting(_LO_COMMS, 'LibreOffice')
     time.sleep(0.3)
     odt = tmp_path / "memo.odt"
     _empty_odt(odt)
@@ -14446,7 +14367,7 @@ def test_linux_writer_key_scoped_timing(tmp_path) -> None:
         assert "clipboard" in copied.evidence
     finally:
         _stop_group(proc)
-        _kill_libreoffice()
+        _owned.stop_session(proc)
 
 
 def test_linux_chrome_click_during_renderer_freeze_is_unverifiable_without_cdp(tmp_path) -> None:
