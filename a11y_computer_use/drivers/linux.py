@@ -5052,6 +5052,96 @@ class LinuxDriver:
             self._refuse_changed_peers(handle, peers, element, exc)
             raise
 
+    _ARIA_STEP_POLLS = 10
+    _ARIA_STEP_PAUSE_S = 0.02
+    _ARIA_MAX_STEPS = 1000
+
+    def _step_aria_range(self, element: Element, handle, value: str) -> bool | str:
+        """Step a Chrome ARIA slider/spinbutton to ``value`` (#780).
+
+        ``set_numeric_value`` has already refused a non-number or a value
+        outside the range, and its write did not land. The node's own
+        ``increment``/``decrement`` actions are used when it has them;
+        otherwise it is focused and stepped with arrow keys (Right/Left on a
+        slider, Up/Down on a spin button). Every step is read back through
+        the Value interface (``aria-valuenow``), and the call succeeds only
+        when the read-back equals the target. A value that cannot be read, a
+        target off the step grid, a step that does not move the value, an
+        overshoot, or lost focus raises with the value reached.
+        """
+        from a11y_computer_use.drivers import _atspi, _linux_input
+
+        target = _atspi._parse_number(value)
+
+        def refuse(reason: str, message: str, **detail) -> ComputerUseError:
+            payload = {"platform": "linux", "reason": reason, "ref": element.ref,
+                       "role": element.role, "expected": value}
+            payload.update(detail)
+            return ComputerUseError(ErrorCode.UNSUPPORTED, f"{element.ref} ({element.role}) {message}",
+                                    detail=payload)
+
+        current = self._run(lambda: _atspi.read_current_value(handle))
+        if current is None:
+            raise refuse("value_unreadable", "has no readable current value; nothing was sent", sent=0)
+        if _atspi._numbers_match(current, target):
+            return True
+        step = self._run(lambda: _atspi.value_step(handle))
+        count = (target - current) / step
+        steps = round(count)
+        if abs(count - steps) > 1e-6:
+            raise refuse("off_step", f"cannot reach {value!r} from {_atspi._format_bound(current)} "
+                         f"in steps of {_atspi._format_bound(step)}; nothing was sent",
+                         actual=current, step=step, sent=0)
+        if abs(steps) > self._ARIA_MAX_STEPS:
+            raise refuse("too_many_steps", f"needs {abs(steps)} steps to reach {value!r}; nothing was sent",
+                         actual=current, sent=0)
+        up = steps > 0
+        names = self._run(lambda: _atspi.raw_action_names(handle))
+        action = "increment" if up else "decrement"
+        via_action = action in names
+        if via_action:
+            send = lambda: self._run(lambda: _atspi.do_named_action(handle, action))
+            how = f"via {action}"
+        else:
+            self._run(lambda: _atspi.grab_focus(handle))
+            if not self._run(lambda: _atspi._state_has(handle, "FOCUSED")):
+                raise refuse("focus_lost", "could not be focused; no key was sent", actual=current, sent=0)
+            if self._run(lambda: _atspi._role_name(handle)) == "spin button":
+                key = "up" if up else "down"
+            else:
+                key = "right" if up else "left"
+            send = lambda: _linux_input.press_chord(key)
+            how = f"via key {key}"
+        sent = 0
+        reached = current
+        for _ in range(abs(steps)):
+            if not via_action and not self._run(lambda: _atspi._state_has(handle, "FOCUSED")):
+                raise refuse("focus_lost", f"lost focus after {sent} steps at {_atspi._format_bound(reached)}",
+                             actual=reached, sent=sent)
+            send()
+            sent += 1
+            moved = None
+            for poll in range(self._ARIA_STEP_POLLS):
+                moved = self._run(lambda: _atspi.read_current_value(handle))
+                if moved is not None and not _atspi._numbers_match(moved, reached):
+                    break
+                if poll + 1 < self._ARIA_STEP_POLLS:
+                    time.sleep(self._ARIA_STEP_PAUSE_S)
+            if moved is None:
+                raise refuse("value_unreadable", f"value could not be read back after {sent} steps",
+                             actual=None, sent=sent)
+            if _atspi._numbers_match(moved, reached):
+                raise refuse("step_unchanged", f"did not move from {_atspi._format_bound(reached)} "
+                             f"after a step {how}; stopped after {sent} steps", actual=reached, sent=sent)
+            if (moved - target) * (1 if up else -1) > 1e-9:
+                raise refuse("overshoot", f"stepped past {value!r} to {_atspi._format_bound(moved)} {how}",
+                             actual=moved, sent=sent)
+            reached = moved
+            if _atspi._numbers_match(reached, target):
+                return True
+        raise refuse("text_mismatch", f"read back {_atspi._format_bound(reached)} after {sent} steps {how}, "
+                     f"not {value!r}", actual=reached, sent=sent)
+
     def take_check_readback(self, element: Element) -> tuple[bool, bool] | None:
         """``(checked, changed)`` read live by the last item check (#1287).
 
@@ -5205,7 +5295,15 @@ class LinuxDriver:
                     self._run(lambda: _atspi.set_combo_value(handle, value))
                 return True
             if kind == "value":
-                wrote = self._run(lambda: _atspi.set_numeric_value(handle, value))
+                try:
+                    wrote = self._run(lambda: _atspi.set_numeric_value(handle, value))
+                except ComputerUseError as exc:
+                    if ((exc.detail or {}).get("reason") != "text_mismatch"
+                            or not self._run(lambda: _atspi.chromium_aria_range(handle))):
+                        raise
+                    # #780: Chrome ignores set_current_value on an ARIA
+                    # slider/spinbutton. Step it toward the target instead.
+                    return self._step_aria_range(element, handle, value)
                 if wrote:
                     # A snapped spin button returns the text of the value held
                     # ("5" for a request of "4.6") so the result is not the

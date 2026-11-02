@@ -17929,6 +17929,51 @@ def set_numeric_value(acc, value: str) -> bool | str:
     )
 
 
+_ARIA_RANGE_ROLES = frozenset({"slider", "spin button"})
+
+
+def chromium_aria_range(acc) -> bool:
+    """True for a Chrome ARIA ``slider``/``spinbutton`` (not ``<input>``).
+
+    Chrome ignores ``Value.set_current_value`` for ARIA range widgets
+    (#780): the value is ``aria-valuenow``, which only the page changes.
+    """
+    return bool(
+        _role_name(acc) in _ARIA_RANGE_ROLES
+        and _chromium_app(acc)
+        and not _number_input(acc)
+    )
+
+
+def raw_action_names(acc) -> tuple[str, ...]:
+    """Lower-cased AT-SPI action names of ``acc``; empty when unreadable."""
+    action = _action_iface(acc)
+    if action is None:
+        return ()
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    return tuple(
+        (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
+        for i in range(int(count))
+    )
+
+
+def read_current_value(acc) -> float | None:
+    """The Value interface's current value read fresh, or None."""
+    _drop_cached_properties(acc)
+    got = _safe(lambda: _atspi().Value.get_current_value(acc))
+    if isinstance(got, (int, float)) and not isinstance(got, bool) and math.isfinite(got):
+        return float(got)
+    return None
+
+
+def value_step(acc) -> float:
+    """``minimum_increment``, or 1 when it is 0 or unreadable."""
+    step = _safe(lambda: _atspi().Value.get_minimum_increment(acc))
+    if isinstance(step, (int, float)) and not isinstance(step, bool) and math.isfinite(step) and step > 0:
+        return float(step)
+    return 1.0
+
+
 def _selection_iface(acc):
     return _call_first(acc, ("get_selection_iface", "get_selection"))
 
