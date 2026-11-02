@@ -3040,6 +3040,19 @@ class LinuxDriver:
 
     _LO_TOGGLE_POLLS = 12
 
+    def hit_bounds_at_point(self, point: Point) -> Bounds | None:
+        """Box of the accessible ``get_accessible_at_point`` returns at ``point`` (#1463)."""
+        from a11y_computer_use.drivers import _atspi
+
+        x, y = _point_of(point)
+        handle = _atspi._accessible_at_point(x, y)
+        if handle is None:
+            return None
+        pos, size = _atspi._extents(handle)
+        if pos is None or size is None or size[0] <= 0 or size[1] <= 0:
+            return None
+        return Bounds(point.display_id, int(pos[0]), int(pos[1]), int(size[0]), int(size[1]))
+
     def toggle_click_probe(self, target: Target):
         """Capture a page toggle, GTK dialog selection or GTK inline link before the click."""
         from a11y_computer_use import observe
