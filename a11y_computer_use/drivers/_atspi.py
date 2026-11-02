@@ -21632,6 +21632,54 @@ def _actionable_seek_owner(node, needle: str):
     return node
 
 
+_SEEK_EXACT_COLLECTION_ROLES = (
+    "LINK", "PUSH_BUTTON", "BUTTON", "TOGGLE_BUTTON", "MENU_ITEM",
+    "CHECK_BOX", "RADIO_BUTTON", "PAGE_TAB", "HEADING",
+)
+# Names read from one Collection answer. The walk's own budget, so a page
+# with thousands of controls costs no more than the walk it replaces.
+_SEEK_EXACT_COLLECTION_LIMIT = _SEEK_NODE_BUDGET
+
+
+def _collection_exact_seek(doc, needle: str):
+    """The first control in ``doc`` named exactly ``needle``, via Collection (#1443).
+
+    The bounded walk past a substring hit stops 200 nodes later, and an
+    exact "Home" link can sit thousands of nodes past "W3C homepage". One
+    Collection query lists the document's links, buttons, tabs and headings
+    in document order inside the browser, so only their names are read.
+    None without Collection (GTK, fakes) or when no name is exact.
+    """
+    try:
+        Atspi = _atspi()
+    except Exception:  # noqa: BLE001
+        return None
+    coll = _call_first(doc, ("get_collection_iface", "get_collection"))
+    role_enum = getattr(Atspi, "Role", None)
+    if coll is None or role_enum is None:
+        return None
+    roles = [getattr(role_enum, name) for name in _SEEK_EXACT_COLLECTION_ROLES
+             if getattr(role_enum, name, None) is not None]
+    if not roles:
+        return None
+    try:
+        mt = Atspi.CollectionMatchType
+        rule = Atspi.MatchRule.new(
+            Atspi.StateSet.new([]), mt.NONE, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
+        )
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL,
+                                _SEEK_EXACT_COLLECTION_LIMIT, True)
+    except Exception:  # noqa: BLE001 - a failed query keeps the substring answer
+        return None
+    for hit in list(hits or [])[:_SEEK_EXACT_COLLECTION_LIMIT]:
+        try:
+            if hit is not None and _exact_seek_name(hit, needle):
+                return hit, 0, 0
+        except Exception:  # noqa: BLE001 - a dead node is skipped
+            continue
+    return None
+
+
 def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None,
                             exact_only: bool = False) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
@@ -21663,6 +21711,13 @@ def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None,
             break
     if hit is None:
         hit = _seek_document_tree(root, text, budget, seen, substring)
+    if hit is None and substring:
+        # The bounded walk found prose but no exact name. Ask the documents
+        # themselves before settling for the prose (#1443).
+        for doc in documents:
+            hit = _collection_exact_seek(doc, text)
+            if hit is not None:
+                break
     if hit is None and substring and not exact_only:
         hit = substring[0]
     if hit is None:
