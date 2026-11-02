@@ -37,6 +37,7 @@ from collections.abc import Callable, Sequence
 from functools import lru_cache
 from contextlib import contextmanager
 
+from a11y_computer_use import sort_glyph
 from a11y_computer_use.observe import (
     MAX_CHILDREN,
     SHEET_MAX_CHILDREN,
@@ -25392,6 +25393,7 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
             cache[key] = (tail, has_row)
     if not has_row:
         return ()
+    header = False
     # A column header's identity is its own cell (#1449). The header row and
     # table above it are shared chrome that a sort re-appends around, so the
     # issued identity, every later snapshot's comparison and the act-time
@@ -25402,6 +25404,7 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
         if role in _ROW_IDENTITY_HEADER_ROLES:
             if any(r in _ROW_IDENTITY_ROW_ROLES for _k, _n, r in tail[i + 1:]):
                 tail = tail[:i + 1]
+                header = True
             break
     parts = []
     for key, node, role in tail:
@@ -25417,6 +25420,10 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
         name = ((_node_name(node) if refresh else
                  (_call_first(node, ("get_name", "getName"), default="") or "").strip())
                 if named else "")
+        if header:
+            # A sort appends its indicator to the header's name ("Last Name
+            # \u25b2"); that is the header's state, not a rename (#1451).
+            name = sort_glyph.strip_sort_glyph(name)
         part = (role, name, tuple((attr, attrs.get(attr)) for attr in (
             "rowindex", "aria-rowindex", "posinset", "aria-posinset"
         )), key)

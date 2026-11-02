@@ -64,7 +64,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import timing
+from a11y_computer_use import sort_glyph, timing
 from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, outcome, reporting, safety
 from a11y_computer_use.untrusted import (
     DomainPolicy,
@@ -2142,6 +2142,17 @@ def _with_issued_ref(exc: ComputerUseError, ref: str | None, live: object) -> Co
     exc.args = (message,)
     exc.detail = {**detail, "ref": ref}
     return exc
+
+
+def _header_row_identity(identity: tuple | None) -> bool:
+    """True when a Chromium row identity is a column header's own (#1449)."""
+    for part in identity or ():
+        role = part[0] if isinstance(part, tuple) and part else ""
+        if role in {"column header", "table column header"}:
+            return True
+        if role in {"list item", "list box item", "table row", "tree item"}:
+            return False
+    return False
 
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
@@ -4818,7 +4829,11 @@ class Runtime:
                 el.role == "AXWindow" or bool(el.context_identity)
                 or (bool(chain) and el.role == "AXStaticText")
             )
-            chain.append((el.role, "" if mutable_title else el.title,
+            title = "" if mutable_title else el.title
+            if title and _header_row_identity(el.row_identity):
+                # A column header's sort indicator is state, not a name (#1451).
+                title = sort_glyph.strip_sort_glyph(title)
+            chain.append((el.role, title,
                           el.row_identity, el.context_identity, el.instance_id, el.stable_id))
             ref = el.parent
         return tuple(chain)
