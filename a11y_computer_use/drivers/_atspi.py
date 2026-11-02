@@ -12069,6 +12069,7 @@ def _replace_with_keys(acc, text: str) -> bool:
         else:
             grab_focus(acc)
             dom_original = chrome
+        truncated = None
         try:
             _type_into_target(acc, text)
             if _confirm_text(acc, text) or _hex_colour_confirmed(acc, text):
@@ -12076,15 +12077,70 @@ def _replace_with_keys(acc, text: str) -> bool:
             rendered = _full_text(acc)
             if css_transformed_value_confirms(acc, rendered, text):
                 return _CssTransformedWrite.of(rendered)
+            if chrome:
+                # An input mask formats or cuts what was typed (#1319). The
+                # field was cleared first, so the read-back is judged against
+                # a blank field, the same rule type(ref) uses. A formatted
+                # match is kept and confirmed against what the field shows;
+                # a maxlength cut is kept and refused as truncated. Neither
+                # is rolled back: that erased a correct value.
+                kept = _settled_masked_read(acc, rendered, text)
+                # The mask must have rewritten the text (an exact read that
+                # failed the confirm is not a formatting), and the DOM value
+                # has to hold the same formatted string: on Chromium only the
+                # DOM confirms (#1394).
+                if (kept != text and field_formatted_typed("", kept, text)
+                        and chromium_dom_text(acc) == kept):
+                    return _FieldFormattedWrite.of(kept)
+                # Only a field that was blank before the call: a prefix
+                # left in a field that held a value (a colour channel that
+                # parses on its own) is not a maxlength cut and is restored.
+                if (_text_is_blank(current) and field_truncated_typed("", kept, text)
+                        and chromium_dom_text(acc) == kept):
+                    truncated = _text_mismatch(
+                        "text_mismatch",
+                        f"the field kept only {kept!r} of {text!r} (truncated); "
+                        "the value was left in place",
+                        expected=text,
+                        actual=kept,
+                        shown=kept,
+                        truncated=True,
+                        input_sent=True,
+                        text_removed=False,
+                    )
         except ComputerUseError:
             rollback()
             raise
+        if truncated is not None:
+            # Raised outside the try: the kept prefix is not rolled back.
+            raise truncated
         restored = rollback()
     if chrome:
         # Keys reached the page: its input listeners already ran, so this is
         # not a clean refusal even when the field reads the old text (#1394).
         raise _keyed_write_mismatch(acc, text, original, restored=restored)
     return False
+
+
+class _FieldFormattedWrite(_CssTransformedWrite):
+    """A confirmed write that the field's own input mask formatted (#1319).
+
+    ``css_rendered`` carries the formatted read-back, so the outcome judge
+    compares the string the field shows, as ``type(ref)`` does.
+    """
+
+
+def _settled_masked_read(acc, rendered: str | None, text: str, *, timeout: float = 0.6) -> str | None:
+    """The field read once a mask has had a moment to format or cut ``text``."""
+    deadline = time.monotonic() + timeout
+    now = rendered
+    while True:
+        if field_formatted_typed("", now, text) or field_truncated_typed("", now, text):
+            return now
+        if time.monotonic() >= deadline:
+            return now
+        time.sleep(0.05)
+        now = _full_text(acc)
 
 
 _ROLLBACK_ATTEMPTS = 2
@@ -12123,6 +12179,21 @@ def _keyed_write_mismatch(acc, text: str, original: str | None, *, restored: boo
            else f"; the field now reads {_excerpt(now)!r}, not the original {_excerpt(original)!r}")
         + ". No commit key was sent"
     )
+    if restored and _text_is_blank(original or "") and _text_is_blank(now or ""):
+        # The field is empty again, so nothing was set. That is a failure,
+        # not a partial result (#1319): a client reading only the outcome or
+        # the error flag must not take an empty field as progress.
+        return _text_mismatch(
+            "text_mismatch",
+            f"set_value could not set {text!r}: the field did not keep the keys and "
+            "was left empty; input was sent to the page. Retry with type(ref) "
+            "and check the field before submitting",
+            input_sent=True,
+            restored=True,
+            outcome="refused",
+            next=["type", "ref"],
+            evidence=evidence,
+        )
     return _text_mismatch(
         "text_mismatch",
         f"the value read back does not match {text!r}; input was sent to the page",
