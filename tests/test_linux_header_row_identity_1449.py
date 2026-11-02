@@ -8,8 +8,8 @@ from a11y_computer_use.schema import ComputerUseError, Element, ErrorCode
 from tests.test_linux_synthetic import _GeckoNode, fake_atspi  # noqa: F401
 
 
-def _table(monkeypatch):
-    button = _GeckoNode("push button", "Company")
+def _table(monkeypatch, button_role="push button"):
+    button = _GeckoNode(button_role, "Company")
     th = _GeckoNode("column header", children=[button])
     head = _GeckoNode("table row", "First Name Last Name \u25b2 Company", children=[th])
     head.attributes = {"rowindex": "0"}
@@ -70,3 +70,27 @@ def test_body_row_recycle_is_still_refused(fake_atspi, monkeypatch):
     with pytest.raises(ComputerUseError) as exc:
         driver._verify_chromium_row_target(element, link)
     assert exc.value.detail["reason"] == "target_changed"
+
+
+def test_chromium_button_rename_is_refused_before_input(fake_atspi, monkeypatch):
+    """Chromium's AT-SPI role is "button": its name must be part of identity."""
+    driver, button, *_ = _table(monkeypatch, "button")
+    element = _el(button, "Company")
+    button.name = "Employer"
+    with pytest.raises(ComputerUseError) as exc:
+        driver._verify_chromium_row_target(element, button)
+    assert exc.value.detail["outcome"] == "refused"
+    assert not button.pressed
+
+
+def test_chromium_button_header_survives_sort(fake_atspi, monkeypatch):
+    driver, button, th, head, *_ = _table(monkeypatch, "button")
+    element = _el(button, "Company")
+    head.name = "resorted"
+    head.parent = _GeckoNode("table")
+    driver._verify_chromium_row_target(element, button)
+
+
+def test_flat_identity_does_not_crash():
+    from a11y_computer_use.drivers.linux import _header_own_identity
+    assert _header_own_identity(("row", "jane@example.com", 2)) == ()

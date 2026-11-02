@@ -1414,9 +1414,11 @@ def _header_own_identity(identity: tuple) -> tuple:
     the header's own identity (#1449). Otherwise return ``()``.
     """
     for i, part in enumerate(identity or ()):
-        role = part[0] if part else ""
+        # Older or test identities can be flat tuples; only part tuples count.
+        role = part[0] if isinstance(part, tuple) and part else ""
         if role in _HEADER_CELL_ROLES:
-            rows = [p for p in identity[i + 1:] if p and p[0] == "table row"]
+            rows = [p for p in identity[i + 1:]
+                    if isinstance(p, tuple) and p and p[0] == "table row"]
             return tuple(identity[:i + 1]) if rows else ()
         if role in {"list item", "list box item", "table row", "tree item"}:
             return ()

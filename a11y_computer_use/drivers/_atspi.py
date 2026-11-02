@@ -25310,8 +25310,9 @@ def chromium_row_identity(acc, *, fresh: bool = False, cache: dict | None = None
             continue
         attrs = _get_attributes(node)
         # Never read a slider's drawn value or an editor's current text.
+        # Chromium reports buttons as "button", not "push button" (#1449).
         named = role in {"list item", "list box item", "table row", "tree item",
-                         "static", "label", "push button", "link"}
+                         "static", "label", "push button", "button", "link"}
         name = ((_node_name(node) if refresh else
                  (_call_first(node, ("get_name", "getName"), default="") or "").strip())
                 if named else "")
