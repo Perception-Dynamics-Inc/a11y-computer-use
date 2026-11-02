@@ -886,6 +886,110 @@ def _raise_if_collapsed_ancestor(snap: Snapshot, ref: str, anchor: Element,
         )
 
 
+def _tab_panel_over(snap: Snapshot, anchor: Element) -> tuple[Element, Element | None] | None:
+    """The ARIA tab panel that held ``anchor`` in ``snap`` and its owning tab.
+
+    A panel is an ancestor marked ``tabpanel`` (xml-roles). Its accessible
+    name comes from ``aria-labelledby``, the tab that controls it, so the
+    owning tab is the one ``AXTab`` (or ARIA ``tab`` button) in ``snap``
+    with that name outside the panel. ``None`` when no panel holds the ref.
+    """
+    by_ref = {el.ref: el for el in snap.elements}
+    chain = set()
+    parent = by_ref.get(anchor.parent)
+    panel = None
+    while parent is not None:
+        chain.add(parent.ref)
+        if panel is None and parent.subrole == "tabpanel":
+            panel = parent
+        parent = by_ref.get(parent.parent)
+    if panel is None:
+        return None
+
+    def inside(el: Element) -> bool:
+        node = el
+        while node is not None:
+            if node.ref == panel.ref:
+                return True
+            node = by_ref.get(node.parent)
+        return False
+
+    tabs = [el for el in snap.elements
+            if el.role == "AXTab" and panel.title and el.title == panel.title and not inside(el)]
+    return panel, (tabs[0] if len(tabs) == 1 else None)
+
+
+def _raise_if_hidden_tab_panel(snap: Snapshot, ref: str, anchor: Element,
+                               live: Snapshot, reason: str) -> None:
+    """Refuse with ``hidden_ancestor`` when the ref's ARIA tab panel is not shown.
+
+    A hidden panel drops its content from the tree, so the slot the ref used
+    is held by another panel's control or by browser chrome (Forward,
+    Reload). Naming that control, or suggesting find() for content that is
+    not rendered, is wrong advice (#1458). A selected panel whose content
+    was replaced (a ``status`` "Loading..." node, or nothing yet) is
+    re-rendering: re-observe after it loads. No candidates are offered.
+    """
+    found = _tab_panel_over(snap, anchor)
+    if found is None:
+        return
+    panel, tab = found
+    live_tabs = [el for el in live.elements
+                 if el.role == "AXTab" and panel.title and el.title == panel.title]
+    live_tab = live_tabs[0] if len(live_tabs) == 1 else None
+    live_panels = [el for el in live.elements
+                   if el.subrole == "tabpanel" and el.title == panel.title]
+    shown = (live_tab.selected if live_tab is not None else bool(live_panels))
+    name = panel.title or "its tab"
+    tab_ref = tab.ref if tab is not None else None
+    held = f"{ref} ({anchor.role} {anchor.title!r})"
+    if not shown:
+        where = (f"click the {name!r} tab, ref {tab_ref} in your current snapshot"
+                 if tab_ref else f"click the {name!r} tab; snapshot again to get its ref")
+        message = (f"{held} is in the {name!r} tab panel, which is now hidden, so its "
+                   f"content is not in the tree. Select the owning tab first ({where}), "
+                   f"then act on {ref} again.")
+        state = "hidden"
+        nxt = ["ref"]
+    else:
+        live_by_ref = {el.ref: el for el in live.elements}
+        panel_refs = {el.ref for el in live_panels}
+
+        def in_live_panel(el: Element) -> bool:
+            node = live_by_ref.get(el.parent)
+            while node is not None:
+                if node.ref in panel_refs:
+                    return True
+                node = live_by_ref.get(node.parent)
+            return False
+
+        loading = [el for el in live.elements if in_live_panel(el) and (
+                   el.subrole == "status" or (el.title or el.value or "").strip().casefold()
+                   .startswith(("loading", "please wait")))]
+        message = (f"{held} is in the {name!r} tab panel, which is re-rendering"
+                   f"{' (it shows ' + repr((loading[0].title or loading[0].value or '').strip()) + ')' if loading else ''}"
+                   f", so its content is not in the tree yet. Take a new snapshot after "
+                   f"the panel finishes loading, then act on {ref} again.")
+        state = "rerendering"
+        nxt = ["snapshot"]
+    raise ComputerUseError(
+        ErrorCode.STALE_REF,
+        message + " find() and scroll_to_find cannot reach content that is not rendered.",
+        detail={
+            "ref": ref,
+            "snapshot_id": snap.snapshot_id,
+            "live_snapshot_id": live.snapshot_id,
+            "reason": "hidden_ancestor",
+            "match_reason": reason,
+            "anchor": {"role": anchor.role, "title": anchor.title, "path": list(anchor.path)},
+            "tabpanel": {"title": panel.title, "state": state},
+            "tab": {"ref": tab_ref, "role": "AXTab", "title": panel.title},
+            "candidates": [],
+            "next": nxt,
+        },
+    )
+
+
 def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     """Re-resolve ``ref`` (issued by ``snap``) against an already-captured
     ``live`` snapshot via the shared anchor matcher — the backend-agnostic core
@@ -930,6 +1034,7 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     match, reason = _match_anchor(anchor, live)
     if match is None and reason in {"not_found", "title_changed"}:
         _raise_if_collapsed_ancestor(snap, ref, anchor, live, reason)
+        _raise_if_hidden_tab_panel(snap, ref, anchor, live, reason)
     if match is None:
         message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
         candidates = stale_ref_candidates(anchor, live)
@@ -3231,7 +3336,7 @@ def _flatten(
             document_id=document_id,
             subrole=(
                 "terminal" if terminal
-                else "label" if node.raw.subrole == "label"
+                else node.raw.subrole if node.raw.subrole in {"label", "tabpanel", "status"}
                 else None
             ),
             heading_level=node.raw.heading_level,
