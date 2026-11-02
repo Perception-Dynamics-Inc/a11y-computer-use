@@ -149,6 +149,41 @@ _SCROLL_VERIFY_BACKS = 3
 # every step still moves the list.
 _SCROLL_FIND_HARD_S = 120.0
 
+
+def _row_descendant_count(snap: Snapshot, matches) -> tuple[int, bool] | None:
+    """``(descendants, complete)`` of the ``AXRow`` holding the first match.
+
+    None when no match sits inside a row. The count covers every node
+    below the row, so a row whose button cell has not arrived yet reads
+    lower than the same row once it is populated. ``complete`` is True
+    when the row has as many cells as the widest sibling row of its table.
+    """
+    by_ref = {el.ref: el for el in snap.elements}
+    for match in matches:
+        node, seen = by_ref.get(match.ref), set()
+        while node is not None and node.ref not in seen and node.role != "AXRow":
+            seen.add(node.ref)
+            node = by_ref.get(node.parent) if node.parent else None
+        if node is None or node.role != "AXRow":
+            continue
+        kids: dict[str, list[str]] = {}
+        for el in snap.elements:
+            if el.parent:
+                kids.setdefault(el.parent, []).append(el.ref)
+        cells = len(kids.get(node.ref, ()))
+        widest = max(
+            (len(kids.get(ref, ())) for ref in kids.get(node.parent or "", ())
+             if ref != node.ref and by_ref[ref].role == "AXRow"),
+            default=0,
+        )
+        total, stack = 0, list(kids.get(node.ref, ()))
+        while stack:
+            ref = stack.pop()
+            total += 1
+            stack.extend(kids.get(ref, ()))
+        return total, widest > 0 and cells >= widest
+    return None
+
 _ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
 _ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
 _TARGET_REQUIRED = "target an element ref, or both x and y coordinates"
@@ -9384,6 +9419,43 @@ class Runtime:
                 return "below"
             return "visible"
 
+        # Bound for settle_row; the search loop lowers it to its hard deadline.
+        settle_deadline = [time.monotonic() + _SCROLL_FIND_HARD_S]
+
+        def settle_row(snap: Snapshot, matches: list) -> tuple[Snapshot, list]:
+            """Wait until the matched row's descendants are in the tree.
+
+            Chrome exposes a newly scrolled table row before its later
+            cells: the row's first cell can match while the button in the
+            same row is not in the tree yet (#1469 CI). When the match sits
+            in an ``AXRow``, the tree is re-read until the row has as many
+            cells as its widest sibling row, or its descendant count is
+            the same across two reads, bounded by the search's
+            hard deadline. A match outside a row is returned as is.
+            """
+            first = _row_descendant_count(snap, matches)
+            if first is None:
+                return snap, matches
+            prev, complete = first
+            # A row that already has its siblings' cells is populated, and
+            # so is one whose count is unchanged across two
+            # reads. Otherwise read again, up to the hard deadline.
+            while not complete and time.monotonic() < settle_deadline[0]:
+                fresh = self.driver.snapshot(Scope(scope), bundle)
+                self._current = fresh
+                shown = visible_matches(fresh)
+                if not shown:
+                    return fresh, []
+                now = _row_descendant_count(fresh, shown)
+                snap, matches = fresh, shown
+                if now is None:
+                    break
+                count, complete = now
+                if count == prev:
+                    break
+                prev = count
+            return snap, matches
+
         def confirming_snapshot(scrolls_issued: int) -> tuple[str, str | None]:
             """``(found, text)`` when a later snapshot still shows the match.
 
@@ -9406,6 +9478,9 @@ class Runtime:
             visible = visible_matches(later)
             if not visible:
                 # Never report "found" without the matched element (#1461).
+                return "missing", None
+            later, visible = settle_row(later, visible)
+            if not visible:
                 return "missing", None
             later, visible = self._issue_matches(later, visible)
             return "found", (
@@ -9471,6 +9546,7 @@ class Runtime:
             started = time.monotonic()
             stall_deadline = started + budget_s
             hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
+            settle_deadline[0] = hard_deadline
             page_mode = True
             # A document table that began below the window has reached the
             # end once its box sits inside the window. Page Down is for a
@@ -10213,11 +10289,17 @@ class Runtime:
                         # The report is still one step, not a row that was
                         # already on screen.
                         count = 1 if find_tried else 0
-                        snap, shown = self._issue_matches(snap, shown)
-                        return (
-                            f"found after {count} scroll(s):\n"
-                            f"{observe.render_matches(snap, shown)}"
-                        )
+                        snap, shown = settle_row(snap, shown)
+                        if shown:
+                            snap, shown = self._issue_matches(snap, shown)
+                            return (
+                                f"found after {count} scroll(s):\n"
+                                f"{observe.render_matches(snap, shown)}"
+                            )
+                        # The match left the window while the row settled:
+                        # keep searching from the latest read.
+                        snap = self._current
+                        matches = search_matches(snap)
                     if issued == 0:
                         # The document already names the row, off screen.
                         # A five-notch burst here jumps about a viewport
