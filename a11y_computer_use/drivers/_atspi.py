@@ -21166,6 +21166,10 @@ _SEEK_SKIP_ROLES = frozenset({
     "desktop frame", "dialog",
 })
 _SEEK_NODE_BUDGET = 8000
+# After the first substring hit, the walk looks this many more nodes for an
+# exact accessible name (#1438). Main stopped at that hit; an unbounded
+# walk on a long page with no exact name cost +29% on find.
+_SEEK_EXACT_AFTER_SUBSTRING = 200
 _SEEK_CHILD_CAP = 400
 
 
@@ -21196,13 +21200,25 @@ def _content_documents(root, limit: int = 4) -> list:
     return found
 
 
-def _exact_seek_name(acc, needle: str) -> bool:
-    """True when the accessible name is ``needle`` (case-insensitive, trimmed)."""
+def _seek_name(acc) -> str:
+    """The name ``_matches_seek`` compares, read once."""
     name = str(_call_first(acc, ("get_name",), default="") or "")
     if not name.strip():
         name = str(_call_first(acc, ("get_description",), default="") or "")
-    folded = " ".join(name.replace("\u00a0", " ").split()).casefold()
-    return folded == " ".join(needle.replace("\u00a0", " ").split()).casefold()
+    return name
+
+
+def _name_has_seek(name: str, needle: str) -> bool:
+    return needle.replace("\u00a0", " ").casefold() in name.replace("\u00a0", " ").casefold()
+
+
+def _seek_fold(text: str) -> str:
+    return " ".join(text.replace("\u00a0", " ").split()).casefold()
+
+
+def _exact_seek_name(acc, needle: str) -> bool:
+    """True when the accessible name is ``needle`` (case-insensitive, trimmed)."""
+    return _seek_fold(_seek_name(acc)) == _seek_fold(needle)
 
 
 def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
@@ -21235,6 +21251,7 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
             return found
         if not substring:
             substring.append(found)
+            budget[0] = min(budget[0], _SEEK_EXACT_AFTER_SUBSTRING)
         return None
     count = _child_count(node)
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
@@ -21245,16 +21262,22 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
                                         substring)
             if found is not None:
                 return found
-    if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
+    if role not in _SEEK_SKIP_ROLES:
+        name = _seek_name(node)
+        if not _name_has_seek(name, needle):
+            return None
         # Zero rows marks a document-text hit, not an indexed table hit.
-        if substring is None or _exact_seek_name(node, needle):
+        if substring is None or _seek_fold(name) == _seek_fold(needle):
             return node, 0, 0
         if not substring:
             substring.append((node, 0, 0))
+            # Look a bounded distance further for the exact name.
+            budget[0] = min(budget[0], _SEEK_EXACT_AFTER_SUBSTRING)
     return None
 
 
-def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None) -> bool:
+def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None,
+                            exact_only: bool = False) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
 
     The walk includes nodes the pruner will drop, so a table that starts
@@ -21263,6 +21286,9 @@ def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None)
     Non-table text uses one TOP_LEFT request; Chromium PDF geometry may
     update later. ``offscreen`` retains those hits for snapshot attachment
     if pruning still drops them, without claiming that scrolling completed.
+    An exact accessible name is preferred over an earlier substring hit,
+    searched a bounded distance past it. ``exact_only`` reveals only an
+    exact name and returns False when there is none (#1438).
     """
     text = needle.strip() if isinstance(needle, str) else ""
     if not text or root is None:
@@ -21281,7 +21307,7 @@ def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None)
             break
     if hit is None:
         hit = _seek_document_tree(root, text, budget, seen, substring)
-    if hit is None and substring:
+    if hit is None and substring and not exact_only:
         hit = substring[0]
     if hit is None:
         return False

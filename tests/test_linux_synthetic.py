@@ -15933,6 +15933,83 @@ def test_1438_find_returns_offscreen_exact_button_over_prose(fake_atspi, monkeyp
     assert observe.ax_handle_for(match.snapshot_id, match.ref) is button
 
 
+def test_1438_scroll_to_find_prefers_offscreen_exact_button_over_prose(fake_atspi, monkeypatch):
+    """Visible prose mentioning the text does not stop scroll_to_find at 0 scrolls."""
+    from a11y_computer_use import server
+
+    prose = _Acc("static", name="Users can choose with the previous and next slide buttons.",
+                 width=600, height=20)
+    _place_row(prose, 100, 120, 600, 20)
+    button = _Acc("push button", name="Next Slide", width=40, height=40)
+    _place_row(button, 100, 1700, 40, 40)
+    document = _adopt(_Acc("document web", width=1200, height=700), prose, button)
+    _place_row(document, 0, 60, 1200, 700)
+    window = _adopt(_Acc("frame", name="Carousel", width=1280, height=800), document)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "chromium_snapshot_root", lambda node: node)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(server, "_SCROLL_VERIFY_PAUSE_S", 0)
+    revealed = []
+
+    def scroll_to_edge(node, edge):
+        revealed.append(node)
+        if node is button:
+            _place_row(prose, 100, -1460, 600, 20)
+            _place_row(button, 100, 120, 40, 40)
+        return True
+
+    monkeypatch.setattr(_atspi, "scroll_to_edge", scroll_to_edge)
+    runtime = _bare_runtime(driver)
+    out = runtime.scroll_to_find("chrome", text="Next Slide", max_scrolls=8)
+    assert "found after 0 scroll(s)" not in out
+    assert out.startswith("found after 1 scroll(s)")
+    assert '"Next Slide"' in out and "Users can choose" not in out
+    assert revealed == [button]
+
+
+def test_1438_scroll_to_find_prose_only_page_unchanged(fake_atspi, monkeypatch):
+    """No exact name anywhere: the visible substring hit is still found at 0 scrolls."""
+    from a11y_computer_use import server
+
+    prose = _Acc("static", name="Users can choose with the next slide buttons.",
+                 width=600, height=20)
+    _place_row(prose, 100, 120, 600, 20)
+    document = _adopt(_Acc("document web", width=1200, height=700), prose)
+    _place_row(document, 0, 60, 1200, 700)
+    window = _adopt(_Acc("frame", name="Prose", width=1280, height=800), document)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda node: True)
+    monkeypatch.setattr(_atspi, "chromium_snapshot_root", lambda node: node)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: pytest.fail("no reveal"))
+    out = _bare_runtime(driver).scroll_to_find("chrome", text="Next Slide", max_scrolls=8)
+    assert out.startswith("found after 0 scroll(s)")
+    assert "Users can choose" in out
+
+
+def test_1438_exact_search_past_substring_is_bounded(fake_atspi, monkeypatch):
+    """After a substring hit the exact-name walk reads a bounded number of nodes."""
+    prose = _Acc("static", name="the next slide buttons", width=300, height=20)
+    _place_row(prose, 10, 100, 300, 20)
+    rows = [_adopt(_Acc("list item"), _Acc("link", name=f"Link item {i}")) for i in range(4000)]
+    far = _Acc("push button", name="Next Slide", width=40, height=40)
+    _place_row(far, 10, 90000, 40, 40)
+    document = _adopt(_Acc("document web"), _adopt(_Acc("paragraph"), prose),
+                      _adopt(_Acc("list"), *rows), far)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    reads = []
+    original = _Acc.get_role_name
+    monkeypatch.setattr(_Acc, "get_role_name", lambda self: reads.append(self) or original(self))
+    monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: pytest.fail("prose is on screen"))
+    assert _atspi.reveal_text_in_document(document, "Next Slide")
+    walked = len({id(node) for node in reads})
+    assert walked <= _atspi._SEEK_EXACT_AFTER_SUBSTRING + 20
+    assert not _atspi.reveal_text_in_document(document, "Next Slide", exact_only=True)
+
+
 def test_1438_substring_hit_still_revealed_without_exact_name(fake_atspi, monkeypatch):
     first = _Acc("static", name="see the NOTE-7 below", width=200, height=20)
     _place_row(first, 100, 1500, 200, 20)

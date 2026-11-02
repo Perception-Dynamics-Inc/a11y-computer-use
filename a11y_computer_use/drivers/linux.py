@@ -1437,6 +1437,10 @@ class LinuxDriver:
         # row that is still off screen can be scrolled into the tree. A
         # plain snapshot leaves it empty and does not move the view.
         self._table_seek: str | None = None
+        # scroll_to_find arms this for one snapshot: reveal a node named
+        # exactly this text, never a substring hit (#1438).
+        self._exact_seek: str | None = None
+        self._exact_revealed = False
         # ``(atspi key, start, limit)`` for one snapshot. expand sets it so
         # that node lists its next page of children instead of the band the
         # last snapshot already showed. Cleared after the snapshot.
@@ -2037,6 +2041,12 @@ class LinuxDriver:
                     document_matches: list = []
                     if seek and not blocked and _atspi._chromium_app(node):
                         _atspi.reveal_text_in_document(node, seek, offscreen=document_matches)
+                    exact = self._exact_seek
+                    if exact and not blocked and _atspi._chromium_app(node):
+                        if _atspi.reveal_text_in_document(
+                            node, exact, offscreen=document_matches, exact_only=True,
+                        ):
+                            self._exact_revealed = True
                     accessor.refresh_visible(node)
                     snap = observe.build_snapshot(
                         node, accessor, scope=scope, app=app, pid=watch.pid,
