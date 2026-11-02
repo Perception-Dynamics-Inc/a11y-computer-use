@@ -2154,6 +2154,33 @@ def _header_row_identity(identity: tuple | None) -> bool:
             return False
     return False
 
+
+# Not AXList: a CSS dropdown list does not clip its painted overflow items.
+_CLIPPING_SCROLL_ROLES = frozenset({"AXScrollArea", "AXGrid", "AXTable", "AXOutline"})
+_AGGREGATE_CONTAINER_ROLES = frozenset({
+    "AXGrid", "AXTable", "AXOutline", "AXList", "AXScrollArea", "AXGroup",
+    "AXWebArea", "AXSplitGroup", "AXTabGroup", "AXBrowser",
+})
+
+
+def _drop_aggregate_containers(matches: tuple[Element, ...],
+                               text: str | None) -> tuple[Element, ...]:
+    """Drop a container that matched only through its aggregated text (#1461).
+
+    A virtualized grid's value joins the text of every pooled row, including
+    clipped overscan rows, so ``text`` can match the grid while the target
+    control is still below the viewport. Such a container is never the
+    target: it has no ref to click, and counting it as on screen stops the
+    scroll early. A container whose own title is the text still counts.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return matches
+    needle = text.strip().casefold()
+    return tuple(el for el in matches
+                 if el.role not in _AGGREGATE_CONTAINER_ROLES
+                 or needle in (el.title or "").casefold())
+
+
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
 
@@ -9175,6 +9202,28 @@ class Runtime:
                     kept.append(el)
             return kept
 
+        def clip_box(el: Element, snap: Snapshot) -> tuple[float, float, float, float] | None:
+            """The window, narrowed by every scrolling ancestor that clips ``el``.
+
+            A virtualized grid keeps overscan rows in the tree below its own
+            viewport but inside the window (#1461); those are not on screen.
+            """
+            box = viewport_box(snap)
+            by_ref = {item.ref: item for item in snap.elements}
+            seen: set[str] = set()
+            node = by_ref.get(el.parent) if el.parent else None
+            while node is not None and node.ref not in seen:
+                seen.add(node.ref)
+                clip = node.bounds
+                if (node.role in _CLIPPING_SCROLL_ROLES and clip is not None
+                        and clip.width >= 1 and clip.height >= 1):
+                    edges = (clip.x, clip.y, clip.x + clip.width, clip.y + clip.height)
+                    box = edges if box is None else (
+                        max(box[0], edges[0]), max(box[1], edges[1]),
+                        min(box[2], edges[2]), min(box[3], edges[3]))
+                node = by_ref.get(node.parent) if node.parent else None
+            return box
+
         def on_screen(el: Element, snap: Snapshot) -> bool:
             """True when ``el``'s center sits inside the window.
 
@@ -9185,7 +9234,7 @@ class Runtime:
             bounds = el.bounds
             if bounds is None or bounds.width < 1 or bounds.height < 1:
                 return False
-            box = viewport_box(snap)
+            box = clip_box(el, snap)
             if box is None:
                 return True
             left, top, right, bottom = box
@@ -9194,7 +9243,7 @@ class Runtime:
             return left <= center_x < right and top <= center_y < bottom
 
         def search_matches(snap: Snapshot) -> tuple[Element, ...]:
-            matches = tuple(query_hits(snap))
+            matches = _drop_aggregate_containers(tuple(query_hits(snap)), text)
             if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
                 return observe.prefer_exact_targets(matches, text)
             by_ref = {el.ref: el for el in snap.elements}
@@ -9245,7 +9294,7 @@ class Runtime:
                 return "missing"
             if any(on_screen(el, snap) for el in located):
                 return "visible"
-            box = viewport_box(snap)
+            box = clip_box(located[0], snap)
             if box is None:
                 return "visible"
             left, top, right, bottom = box
@@ -9279,6 +9328,9 @@ class Runtime:
             if kind != "visible":
                 return kind, None
             visible = visible_matches(later)
+            if not visible:
+                # Never report "found" without the matched element (#1461).
+                return "missing", None
             later, visible = self._issue_matches(later, visible)
             return "found", (
                 f"found after {scrolls_issued} scroll(s):\n"
