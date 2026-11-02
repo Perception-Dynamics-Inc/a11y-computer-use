@@ -140,3 +140,38 @@ def test_a_click_that_edits_its_own_row_is_confirmed(monkeypatch):
     before, after = _rows(None), _rows("Buy milk")
     label = next(el for el in before.elements if el.title == "Buy milk")
     assert _judge_click(monkeypatch, before, after, label)[0] == "confirmed"
+
+
+def _live_rows(snap, editing):
+    from dataclasses import replace as _replace
+    return _replace(snap, elements=tuple(
+        _replace(el, snapshot_id=snap.snapshot_id) for el in _rows(editing).elements
+    ))
+
+
+@pytest.mark.parametrize("selection_after", [None, ()])
+def test_double_click_on_text_whose_change_lands_in_another_row_says_wrong_target(
+    tmp_path, monkeypatch, selection_after,
+):
+    """Live #1467: a double-click on page text is judged by its selection, which
+    bypassed the row guard; the wrong-row edit came back as a bare unverifiable."""
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: () if selection_after == () else None
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    before = _live_rows(base, None)
+    rt._current = before
+    monkeypatch.setattr(rt, "_reread", lambda *_a, **_k: _live_rows(base, "Walk dog"))
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    result = rt.click(ref=label.ref, count=2)
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("wrong_target")
+    assert "Walk dog" in result.evidence and "Buy milk" in result.evidence
+    assert not result.next

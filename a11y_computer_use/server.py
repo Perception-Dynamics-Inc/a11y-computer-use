@@ -7524,6 +7524,21 @@ class Runtime:
                     if selection_before is not None and selection_after and selection_after != selection_before
                     else ("suspected_noop", "the text selection did not change or could not be read")
                 )
+        # A double-click on page text is judged by its selection above, which
+        # never reaches the row guard in _judge_mutation. A sibling row that
+        # changed while the target's row did not is the wrong item (#1467).
+        if (
+            verify_selection and not activated and isinstance(target, Element)
+            and verdict is not None and verdict[0] != "confirmed"
+            and isinstance(before, dict) and before.get("snap") is not None
+        ):
+            row_after = self._reread(app, before.get("scope"))
+            wrong_row = (
+                outcome.wrong_row_effect(before["snap"], row_after, target)
+                if row_after is not None else None
+            )
+            if wrong_row:
+                verdict = ("unverifiable", wrong_row)
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:
