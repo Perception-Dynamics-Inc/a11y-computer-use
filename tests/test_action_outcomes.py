@@ -81,6 +81,13 @@ def _tree() -> list[Element]:
     ]
 
 
+# The fake app's pid. It must never name a real process: a host process at a
+# small pid (4242 on the macOS runner) can exit during the settle window and
+# send a fake action down the "process died" path. 0x7FFFFFFE is above every
+# pid_max (Linux 4194304, macOS 99999), so pid_alive() is always False for it.
+_FAKE_PID = 0x7FFFFFFE
+
+
 class TreeDriver:
     """Mutable accessibility tree. ``resolves_apps`` keeps the test off the OS."""
 
@@ -89,7 +96,7 @@ class TreeDriver:
 
     def __init__(self) -> None:
         self.elements = _tree()
-        self.pid = 4242
+        self.pid = _FAKE_PID
         self.front = APP
         self.menu = {"open": False, "path": []}
         self.rows = [{
@@ -99,7 +106,7 @@ class TreeDriver:
             "on_screen": True,
             "bounds": {"display_id": 0, "x": 1, "y": 2, "width": 300, "height": 200},
         }]
-        self.apps = [{"app": APP, "name": "Demo", "pid": 4242}]
+        self.apps = [{"app": APP, "name": "Demo", "pid": _FAKE_PID}]
         self.dead = False
         self.apply_type = False
         self.move_lands = True
@@ -290,9 +297,9 @@ def _runtime(tmp_path, driver: TreeDriver):
 
 
 @pytest.mark.parametrize("ref,front_id,owner_pid,covered", [
-    ("editor", 2, 4242, True),
-    ("preferences-control", 2, 4242, False),
-    ("editor", 1, 4242, False),
+    ("editor", 2, _FAKE_PID, True),
+    ("preferences-control", 2, _FAKE_PID, False),
+    ("editor", 1, _FAKE_PID, False),
     ("editor", 2, 9000, False),  # Another app preserves the existing AX click path.
     ("editor", 2, None, False),  # An unknown owner is not evidence of a cover.
 ])
@@ -316,9 +323,9 @@ def test_linux_same_app_window_cover_before_ax_click(tmp_path, monkeypatch, ref,
     monkeypatch.setattr(observe, "ax_handle_for", lambda snap, target: target)
     monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: owner_pid)
     monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
-    monkeypatch.setattr(_atspi, "pid_of", lambda root: 4242)
+    monkeypatch.setattr(_atspi, "pid_of", lambda root: _FAKE_PID)
     monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
-        False, "Geany" if handle == "editor" else "Preferences", 4242, (0, 0, 800, 600),
+        False, "Geany" if handle == "editor" else "Preferences", _FAKE_PID, (0, 0, 800, 600),
     ))
     monkeypatch.setattr(_linux_system, "window_id_for_toplevel",
                         lambda **kw: 1 if kw["title"] == "Geany" else 2)
@@ -446,7 +453,7 @@ def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path,
 
     driver = TreeDriver()
     driver.name = "linux"
-    # Keep liveness checks independent of unrelated host processes at PID 4242.
+    # A real live pid, so the caret check runs the live-process path.
     driver.pid = os.getpid()
 
     def press(element: Element) -> bool:
@@ -1508,11 +1515,11 @@ def test_linux_popover_cover_reads_newly_opened_top_layer(tmp_path):
 
 
 @pytest.mark.parametrize("owner_pid,front_id,covered", [
-    (4242, 2, True),
-    (4242, 1, False),
+    (_FAKE_PID, 2, True),
+    (_FAKE_PID, 1, False),
     (9000, 2, False),
     (None, 2, False),
-    (4242, None, False),
+    (_FAKE_PID, None, False),
 ])
 def test_linux_snapshot_and_find_mark_same_app_window_cover(
     monkeypatch, owner_pid, front_id, covered,
@@ -1532,7 +1539,7 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
         _element("confirm", "AXButton", "Extract", parent="dialog", clickable=True,
                  bounds=Bounds(0, 350, 280, 100, 40)),
     )
-    source = Snapshot("snap", Scope.WINDOW, "xarchiver", 4242, 0, (), elements)
+    source = Snapshot("snap", Scope.WINDOW, "xarchiver", _FAKE_PID, 0, (), elements)
     driver = LinuxDriver()
     # Bypass the native walk, retaining the actual post-walk annotation and
     # same-app click gate. Native calls below are scripted ownership evidence.
@@ -1547,7 +1554,7 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
     ))
     # Discovery now shares one native stacking read across all controls.
     monkeypatch.setattr(_linux_system, "window_cover_rows", lambda: ([
-        {"window_id": 1, "title": "Archive", "pid": 4242, "on_screen": True,
+        {"window_id": 1, "title": "Archive", "pid": _FAKE_PID, "on_screen": True,
          "bounds": {"x": 0, "y": 0, "width": 800, "height": 600}},
         {"window_id": 2, "title": "Extract files", "pid": owner_pid, "on_screen": True,
          "bounds": {"x": 0 if front_id == 2 else 300, "y": 0,
@@ -1562,7 +1569,7 @@ def test_linux_snapshot_and_find_mark_same_app_window_cover(
     monkeypatch.setattr(driver, "_run", run)
     monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
         False, "Archive" if handle in {"toolbar", "main"} else "Extract files",
-        4242, (0, 0, 800, 600),
+        _FAKE_PID, (0, 0, 800, 600),
     ))
     snap = driver._snapshot_root("xarchiver", object(), Scope.WINDOW)
     matches = observe.find_elements(snap, text="Extract", role="AXButton")
@@ -1642,7 +1649,7 @@ def test_linux_discovery_cover_work_scales_with_windows_and_refreshes(monkeypatc
           for i in range(100)),
         _element("confirm", "AXButton", "Extract", parent="dialog", clickable=True),
     )
-    source = Snapshot("snap", Scope.WINDOW, "xarchiver", 4242, 0, (), elements)
+    source = Snapshot("snap", Scope.WINDOW, "xarchiver", _FAKE_PID, 0, (), elements)
     driver = LinuxDriver()
     monkeypatch.setattr(driver, "_run", lambda fn: source if fn.__name__ == "_do" else fn())
     monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda el, handle: False)
@@ -1652,12 +1659,12 @@ def test_linux_discovery_cover_work_scales_with_windows_and_refreshes(monkeypatc
     def toplevel(handle):
         native_reads.append(handle)
         assert handle in {"main", "dialog"}
-        return False, "Archive" if handle == "main" else "Extract files", 4242, (0, 0, 800, 600)
+        return False, "Archive" if handle == "main" else "Extract files", _FAKE_PID, (0, 0, 800, 600)
 
     monkeypatch.setattr(_atspi, "toplevel_raise_target", toplevel)
     reads = []
     rows = [
-        {"window_id": wid, "title": title, "pid": 4242, "on_screen": True,
+        {"window_id": wid, "title": title, "pid": _FAKE_PID, "on_screen": True,
          "bounds": {"x": 0, "y": 0, "width": 800, "height": 600}}
         for wid, title in [(1, "Archive"), (2, "Extract files")]
     ]
@@ -1688,18 +1695,18 @@ def test_linux_discovery_cover_work_scales_with_windows_and_refreshes(monkeypatc
     assert native_reads == ["main", "dialog", "main", "dialog"]
 
     # An action still probes current native ownership, independently of discovery.
-    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 4242)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: _FAKE_PID)
     monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 1)
     monkeypatch.setattr(_linux_system, "window_at_point", lambda x, y: {
         "window_id": 2, "title": "Extract files",
     })
     monkeypatch.setattr(_atspi, "toplevel_raise_target", lambda handle: (
-        False, "Archive", 4242, (0, 0, 800, 600),
+        False, "Archive", _FAKE_PID, (0, 0, 800, 600),
     ))
     assert driver.same_app_window_cover(snap.element("button0"), "xarchiver") == "Extract files"
 
 
-@pytest.mark.parametrize("popup_pid,covered", [(4242, False), (9000, True), (None, True)],
+@pytest.mark.parametrize("popup_pid,covered", [(_FAKE_PID, False), (9000, True), (None, True)],
                          ids=["own-popup-on-top", "another-apps-popup", "no-popup"])
 def test_a_ref_in_the_topmost_override_redirect_popup_is_not_covered(monkeypatch, popup_pid, covered):
     """The IBus candidate window is the target's own unmanaged window (#1227).
@@ -1718,8 +1725,8 @@ def test_a_ref_in_the_topmost_override_redirect_popup_is_not_covered(monkeypatch
     monkeypatch.setattr(driver, "_gtk4_point_untrusted", lambda el, handle: False)
     monkeypatch.setattr(observe, "ax_handle_for", lambda snap, ref: ref)
     monkeypatch.setattr(_atspi, "toplevel_raise_target",
-                        lambda handle: (False, "ibus-ui-gtk3", 4242, (50, 50, 327, 66)))
-    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 4242)
+                        lambda handle: (False, "ibus-ui-gtk3", _FAKE_PID, (50, 50, 327, 66)))
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: _FAKE_PID)
     monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 7)
     monkeypatch.setattr(_linux_system, "window_at_point",
                         lambda x, y: {"window_id": 1, "title": "KB Lab GTK3"})
@@ -1728,16 +1735,16 @@ def test_a_ref_in_the_topmost_override_redirect_popup_is_not_covered(monkeypatch
         "KB Lab GTK3" if covered else None
     )
     # The discovery path (snapshot, find) reads the same answer.
-    rows = [{"window_id": 1, "title": "KB Lab GTK3", "pid": 4242,
+    rows = [{"window_id": 1, "title": "KB Lab GTK3", "pid": _FAKE_PID,
              "bounds": {"x": 0, "y": 0, "width": 1000, "height": 500}}]
     owner = _element("main", "AXWindow", "ibus-ui-gtk3")
     monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 7)
-    targets = {owner.ref: ((False, "ibus-ui-gtk3", 4242, (50, 50, 327, 66)), 7)}
+    targets = {owner.ref: ((False, "ibus-ui-gtk3", _FAKE_PID, (50, 50, 327, 66)), 7)}
     got = driver.same_app_window_cover(candidate, "ibus-ui-gtk3", _discovery=(owner, rows, targets))
     assert got == ("KB Lab GTK3" if covered else None)
 
 
-@pytest.mark.parametrize("popup_pid,raised", [(4242, False), (None, True), (9000, True)],
+@pytest.mark.parametrize("popup_pid,raised", [(_FAKE_PID, False), (None, True), (9000, True)],
                          ids=["own-popup-on-top", "no-popup", "another-apps-popup"])
 def test_raising_a_ref_never_buries_its_own_popup(monkeypatch, popup_pid, raised):
     """An override-redirect popup is not raisable; the overlap guess is another window (#1227)."""
@@ -1749,7 +1756,7 @@ def test_raising_a_ref_never_buries_its_own_popup(monkeypatch, popup_pid, raised
     monkeypatch.setattr(driver, "_run", lambda fn: fn())
     monkeypatch.setattr(driver, "raise_window", lambda wid: calls.append(wid))
     monkeypatch.setattr(_atspi, "toplevel_raise_target",
-                        lambda handle: (False, "", 4242, (40.0, 0.0, 327.0, 66.0)))
+                        lambda handle: (False, "", _FAKE_PID, (40.0, 0.0, 327.0, 66.0)))
     monkeypatch.setattr(_linux_system, "popup_pid_at_point", lambda x, y: popup_pid)
     monkeypatch.setattr(_linux_system, "window_id_for_toplevel", lambda **kw: 12)
     monkeypatch.setattr(_linux_system, "refuse_unviewable_input", lambda wid: None)
