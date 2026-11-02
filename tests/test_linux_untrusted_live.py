@@ -226,7 +226,9 @@ def _assert_delivered(result: str, app: str) -> None:
     of claiming a pointer click. Firefox still reports a click.
     """
     if app == "chrome":
-        assert result.startswith("sent press to "), result
+        body = unwrap(str(result))
+        body = str(result) if body is None else body
+        assert body.startswith("sent press to "), result
         assert "AT-SPI doAction(press), not a pointer click" in result, result
         assert "unverifiable" in result, result
     else:
