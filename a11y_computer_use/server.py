@@ -3765,6 +3765,18 @@ class Runtime:
             cover = outcome.occluded_click_effect(before["snap"], after, element)
             if cover:
                 return "suspected_noop", cover
+        # A ref inside a list item is confirmed only by a change in its own
+        # row. A sibling row that changed is the wrong item (#1467).
+        if (
+            judged == "confirmed"
+            and requested is None
+            and element is not None
+            and before is not None
+            and after is not None
+        ):
+            wrong_row = outcome.wrong_row_effect(before["snap"], after, element)
+            if wrong_row:
+                return "unverifiable", wrong_row
         # A tab click is confirmed only when that tab is the one selected. A
         # click that activated the neighbour changed the tree and nothing else
         # (#1208).

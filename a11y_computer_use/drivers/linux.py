@@ -3517,6 +3517,30 @@ class LinuxDriver:
                 },
             )
 
+    def _verify_double_click_target(self, element: Element, handle, x: int, y: int) -> None:
+        """Ask Chromium's hit test again before a double-click (#1467).
+
+        Chromium answers the first query at a point with a box-only guess and
+        caches the real hit for the next one. Both clicks of a double-click
+        land on the real hit, so it has to resolve to the target or a
+        descendant too. Anything else refuses before the first click.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is not False:
+            return
+        raise ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{element.ref} ({element.role} {element.title!r}) is not what the double-click "
+            "point resolves to; another element is there. No input was sent",
+            detail={
+                "ref": element.ref, "reason": "wrong_target", "outcome": "refused",
+                "hint": "Take a fresh snapshot and double-click the item's own ref; if it "
+                "is covered or scrolled, bring it into view first. Do not retry at "
+                "coordinates.",
+            },
+        )
+
     def click_dialog_state(self, element: Element) -> dict | None:
         """Read visible native dialog identities around a node-bound press.
 
@@ -5155,6 +5179,8 @@ class LinuxDriver:
         if isinstance(target, Element):
             self._refuse_code_editor_input_click(target, handle)
             self._verify_chromium_pointer_target(target, handle, x, y)
+            if button is MouseButton.LEFT and count == 2:
+                self._verify_double_click_target(target, handle, x, y)
         if notification is not None and not self._run(
             lambda: _atspi.notification_pointer_target(handle, notification, px, py)
         ):
