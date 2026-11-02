@@ -26684,3 +26684,334 @@ def click_window_state(target) -> str | None:
         return "hidden"
     except Exception:
         return None
+
+
+# #1346: a page overlay (sticky header, fixed cookie banner) over a ref.
+_COVER_NAMED_ROLES = frozenset({
+    "push button", "toggle button", "link", "heading", "label", "static",
+    # Chrome's own AT-SPI role names (#1466 live: 'Accept cookies' is 'button').
+    "button", "check box", "checkbox",
+})
+
+
+def cover_is_landmark(answer) -> bool:
+    """A `chromium_cover_at` node answer that is a landmark or inside one."""
+    if answer is None or answer is COVER_CLEAR:
+        return False
+    try:
+        return any(_role_name(node) == "landmark" for node in _ancestor_chain(answer))
+    except Exception:  # noqa: BLE001 - an unreadable node is not a landmark
+        return False
+
+
+def _chromium_document_of(acc):
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            return node
+        if role in {"frame", "window", "application"}:
+            return None
+    return None
+
+
+# `chromium_cover_at` answer for a point where the hit test names the target.
+COVER_CLEAR = ("clear",)
+
+
+def chromium_cover_at(acc, x: int, y: int):
+    """What Chromium's document hit test answers at (x, y) for ``acc``.
+
+    `COVER_CLEAR` when the hit is ``acc`` or one of its descendants; the
+    other page node when one answers instead (an overlay); None when there
+    is no answer, or ``acc`` is not Chromium page content.
+
+    Chromium answers a synchronous ``get_accessible_at_point`` from a cache:
+    the first query at a point is a box-only walk that picks the last child
+    whose box holds the point, so a field listed after a sticky header or
+    fixed banner wins over it. The same query also starts the renderer's
+    real hit test, and a later query at a point inside that result's box
+    returns it. One read is not evidence; callers re-ask until two
+    consecutive answers agree (`LinuxDriver._cover_now`).
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    document = _chromium_document_of(acc)
+    if document is None:
+        return None
+    target_key = _ancestor_key(acc)
+    node = document
+    seen: set[object] = set()
+    pinned = []
+    deepest = None
+    for _ in range(32):
+        key = _ancestor_key(node)
+        if key in seen:
+            break
+        seen.add(key)
+        pinned.append(node)
+        comp = _component(node)
+        if comp is None:
+            break
+        hit = _hit_at(comp, x, y)
+        if hit is None or _ancestor_key(hit) == key:
+            break
+        if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):
+            return COVER_CLEAR
+        deepest = hit
+        node = hit
+    return deepest
+
+
+def cover_overlay(cover, acc):
+    """The outermost ancestor of ``cover`` under the document not holding ``acc``."""
+    target_keys = {_ancestor_key(node) for node in _ancestor_chain(acc)}
+    overlay = cover
+    for node in _ancestor_chain(cover):
+        role = _role_name(node)
+        if role in {"document web", "document frame", "frame", "window", "application"}:
+            break
+        if _ancestor_key(node) in target_keys:
+            break
+        overlay = node
+    return overlay
+
+
+_DISMISS_WORDS = ("accept", "close", "dismiss", "got it", "agree", "allow", "ok", "continue",
+                  "reject", "decline", "deny", "no thanks", "skip", "cancel")
+_COVER_CONTROL_ROLES = frozenset({
+    "push button", "toggle button", "link",
+    # Chrome's own AT-SPI role names (#1466 live evidence).
+    "button", "check box", "checkbox",
+})
+
+
+def _control_label(node) -> str:
+    """A button's name, or its first named text child when the name is empty."""
+    label = _node_name(node)
+    if label:
+        return label
+    for child in _bounded_descendants(node, limit=8)[1:]:
+        if _role_name(child) in {"static", "label", "text"}:
+            label = _node_name(child)
+            if label:
+                return label
+    return ""
+
+
+def _dismiss_rank(label: str) -> int:
+    import re
+
+    low = label.casefold()
+    for rank, word in enumerate(_DISMISS_WORDS):
+        if re.search(rf"\b{re.escape(word)}\b", low):
+            return rank
+    return len(_DISMISS_WORDS)
+
+
+def cover_controls(cover, acc, candidates) -> list[tuple[str, object, object]]:
+    """Actionable descendants of the overlay over ``acc``, from snapshot handles.
+
+    ``candidates`` maps snapshot refs to their live handles. Returns
+    ``(ref, label, node)`` for each button or link inside the overlay,
+    accept / close / dismiss names first, then snapshot order (#1466: a
+    full-viewport landmark named only itself, not its Accept button).
+    """
+    overlay = cover_overlay(cover, acc)
+    if overlay is None:
+        return []
+    key = _ancestor_key(overlay)
+    found = []
+    for order, (ref, node) in enumerate(candidates):
+        if node is None or _role_name(node) not in _COVER_CONTROL_ROLES:
+            continue
+        if not any(_ancestor_key(parent) == key for parent in _ancestor_chain(node)):
+            continue
+        label = _control_label(node)
+        if label:
+            found.append((_dismiss_rank(label), order, ref, label, node))
+    found.sort(key=lambda item: item[:2])
+    return [(ref, label, node) for _r, _o, ref, label, node in found]
+
+
+def cover_description(cover, acc) -> tuple[str, str, str, object]:
+    """(role, name, dismiss control name, control node) of the overlay holding ``cover``.
+
+    The overlay is the outermost ancestor of ``cover`` under the document
+    that does not also contain ``acc``: the header or banner itself, not
+    one word inside it. With no name of its own, it is named by the first
+    named button, link or text inside it. The dismiss control is the first
+    named button or link inside it ("" when it has none).
+    """
+    overlay = cover_overlay(cover, acc)
+    role = _role_name(overlay) or "element"
+    name = _node_name(overlay)
+    control = ""
+    control_node = None
+    for node in _bounded_descendants(overlay, limit=96):
+        node_role = _role_name(node)
+        if node_role not in _COVER_NAMED_ROLES:
+            continue
+        label = _node_name(node)
+        if not label:
+            continue
+        if not control and node_role in {"push button", "toggle button", "link"}:
+            control, control_node = label, node
+        if not name:
+            name = label
+        if control and name:
+            break
+    return role, name, control, control_node
+
+
+def scroll_to_point(acc, x: int, y: int) -> bool:
+    """Scroll so the top-left of ``acc`` sits at screen (x, y) (`Component.scroll_to_point`).
+
+    No wheel and no pointer move. False when the binding or the component
+    has no such call.
+    """
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return False
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    return bool(_call_first(comp, ("scroll_to_point",), coord, int(x), int(y), default=False))
+
+
+def chromium_document_miss(acc, x: int, y: int) -> bool:
+    """True when Chromium's document hit test answers (x, y) with no page node.
+
+    Chromium can answer ``get_accessible_at_point`` on the ``document web``
+    with the document itself (or nothing) at a point over its content: an
+    opacity-0 checkbox (#1468), or a field under a fixed banner (#1346).
+    That answer names no element, so it is a miss, not a cover and not a
+    hit on the ref.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    document = _chromium_document_of(acc)
+    if document is None:
+        return False
+    comp = _component(document)
+    if comp is None:
+        return False
+    hit = _hit_at(comp, x, y)
+    return hit is None or _ancestor_key(hit) == _ancestor_key(document)
+
+
+_GEOMETRY_SKIP_ROLES = frozenset({
+    "document web", "document frame", "frame", "window", "application",
+    "scroll pane", "internal frame",
+})
+
+
+def geometry_cover_at(acc, candidates, x: int, y: int):
+    """A showing page node, unrelated to ``acc``, whose box holds (x, y).
+
+    For when the hit test misses (`chromium_document_miss`). A node that is
+    neither an ancestor nor a descendant of ``acc`` and still contains the
+    point is drawn over it: a sticky header, fixed banner or dialog. The
+    outermost such node is returned; None when there is none.
+    """
+    target_keys = {_ancestor_key(node) for node in _ancestor_chain(acc)}
+    target_key = _ancestor_key(acc)
+    found = []
+    for node in candidates:
+        if node is None:
+            continue
+        role = _role_name(node)
+        if role in _GEOMETRY_SKIP_ROLES or _ancestor_key(node) in target_keys:
+            continue
+        chain = list(_ancestor_chain(node))
+        if any(_ancestor_key(parent) == target_key for parent in chain):
+            continue  # inside the ref itself
+        if not _state_has(node, "SHOWING"):
+            continue
+        pos, size = _extents(node)
+        if pos is None or size is None:
+            continue
+        if pos[0] <= x < pos[0] + size[0] and pos[1] <= y < pos[1] + size[1]:
+            found.append((node, {_ancestor_key(p) for p in chain if p is not node}))
+    keys = {_ancestor_key(node) for node, _ in found}
+    for node, parents in found:
+        if not parents & keys:
+            return node
+    return found[0][0] if found else None
+
+
+def miss_toggle_state(acc) -> tuple[bool, bool] | None:
+    """(CHECKED, PRESSED) of a checkbox, switch or toggle; None when unreadable."""
+    try:
+        return checked_state(acc), _state_has(acc, "PRESSED")
+    except Exception:
+        return None
+
+
+def chromium_foreign_hit(acc, x: int, y: int) -> bool:
+    """True when the settled hit at (x, y) is another page node, not a cover.
+
+    #1466 live: TodoMVC's 2x1 'Mark all as complete' checkbox centre lies
+    inside the first todo row's ``<label>``, which has no LABEL_FOR /
+    LABELLED_BY relation to it. A ``label`` hit that is not ``acc`` or a
+    descendant counts; any other node counts only when its box does not
+    hold ``acc``'s centre, so it is not drawn over ``acc``. The document
+    itself, ``acc`` and its descendants never count. The caller presses
+    ``acc`` through its own action and reads its state back; the point is
+    never clicked.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    document = _chromium_document_of(acc)
+    comp = _component(document) if document is not None else None
+    if comp is None:
+        return False
+    hits = [_hit_at(comp, x, y) for _ in range(2)]  # the first is a guess
+    if hits[1] is None or _ancestor_key(hits[0]) != _ancestor_key(hits[1]):
+        return False
+    hit = hits[1]
+    target = _ancestor_key(acc)
+    if _ancestor_key(hit) == _ancestor_key(document):
+        return False
+    if any(_ancestor_key(node) == target for node in _ancestor_chain(hit)):
+        return False
+    if _role_name(hit) == "label":
+        return True
+    pos, size = _extents(hit)
+    if pos is None or size is None:
+        return False
+    tpos, tsize = _extents(acc)
+    if tpos is None or tsize is None:
+        return False
+    cx, cy = tpos[0] + tsize[0] / 2, tpos[1] + tsize[1] / 2
+    return not (pos[0] <= cx < pos[0] + size[0] and pos[1] <= cy < pos[1] + size[1])
+
+
+def chromium_label_hit(acc, x: int, y: int) -> bool:
+    """True when the document's settled hit at (x, y) is ``acc``'s own label.
+
+    TodoMVC's 'Mark all as complete' is a 2x1 opacity-0 checkbox whose
+    ``<label for>`` is drawn over it: the hit names the label, not the
+    document and not the box, so it was neither a miss nor a hit (#1468).
+    The label is matched by a LABEL_FOR / LABELLED_BY relation only.
+    """
+    if acc is None or not _chromium_app(acc):
+        return False
+    document = _chromium_document_of(acc)
+    comp = _component(document) if document is not None else None
+    if comp is None:
+        return False
+    hit = None
+    for _ in range(2):  # the first answer at a point is a box-only guess
+        hit = _hit_at(comp, x, y)
+    if hit is None:
+        return False
+    target = _ancestor_key(acc)
+    labels = {_ancestor_key(node) for node in _relation_targets(acc, "labelled_by")}
+    for node in _ancestor_chain(hit):
+        key = _ancestor_key(node)
+        if key == _ancestor_key(document):
+            return False
+        if key in labels:
+            return True
+        if any(_ancestor_key(t) == target for t in _relation_targets(node, "label_for")):
+            return True
+    return False
