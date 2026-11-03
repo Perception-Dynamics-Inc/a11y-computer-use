@@ -1540,15 +1540,31 @@ def wrong_row_effect(
         return exit_("no_after_target" if after_target is None else "after_target_not_in_row")
     after_rows = _sibling_rows(after, after_row)
     t["after_rows"] = dump(after, after_rows)
-    if len(after_rows) != len(before_rows):
-        return exit_("row_count_differs")
-    if content(before, before_rows[index]) != content(after, after_rows[index]):
+    after_index = next((i for i, el in enumerate(after_rows) if el.ref == after_row.ref), None)
+    t["after_index"] = after_index
+    if after_index is None:
+        return exit_("after_row_index_not_found")
+    if content(before, before_rows[index]) != content(after, after_rows[after_index]):
         return exit_("target_row_changed")
-    changed = [
-        i for i, (a, b) in enumerate(zip(before_rows, after_rows))
-        if i != index and content(before, a) != content(after, b)
-    ]
+    # Align the other rows by content, not by index: a sibling row that
+    # turned into an editor can leave the list (#1475 live, 3 rows -> 2), so
+    # an index walk compares the wrong pairs. A before row with no unused
+    # after row of the same content changed or vanished.
+    pool: dict = {}
+    for i, el in enumerate(after_rows):
+        if i != after_index:
+            pool.setdefault(content(after, el), []).append(i)
+    changed = []
+    for i, el in enumerate(before_rows):
+        if i == index:
+            continue
+        same = pool.get(content(before, el))
+        if same:
+            same.pop(0)
+        else:
+            changed.append(i)
     t["changed"] = changed
+    t["row_counts"] = [len(before_rows), len(after_rows)]
     if not changed:
         return exit_("no_other_row_changed")
     t["exit"] = "wrong_target"

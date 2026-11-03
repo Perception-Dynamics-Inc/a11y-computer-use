@@ -284,3 +284,66 @@ def test_row_guard_debug_trace_is_off_by_default(tmp_path, monkeypatch, capsys):
     result = _debug_click(tmp_path, monkeypatch, "Walk dog", flag=False)
     assert "row_guard_debug" not in result.evidence
     assert "row_guard_debug" not in capsys.readouterr().err
+
+
+def _rows_without(dropped: str):
+    """#1475 live: the row whose editor opened leaves the list (3 rows -> 2),
+    and Chrome renumbers what follows, so 'Pay rent' takes 'Walk dog''s refs."""
+    els = [_el("e33", "AXList", (300, 260, 680, 150), clickable=True)]
+    names = [n for n in ("Buy milk", "Walk dog", "Pay rent") if n != dropped]
+    for i, name in enumerate(names):
+        row, y = f"r{i}", 260 + 50 * i
+        els.append(_el(row, "AXListItem", (300, y, 680, 50), parent="e33"))
+        els.append(_el(f"t{i}", "AXStaticText", (424, y + 26, 84, 25), parent=row, title=name))
+    return SimpleNamespace(elements=tuple(els))
+
+
+def test_a_sibling_row_that_left_the_list_is_the_wrong_target():
+    before, after = _rows(None), _rows_without("Walk dog")
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    trace: dict = {}
+    evidence = outcome.wrong_row_effect(before, after, label, trace=trace)
+    assert evidence and evidence.startswith("wrong_target")
+    assert "'Walk dog'" in evidence and "'Buy milk'" in evidence
+    assert trace["row_counts"] == [3, 2] and trace["exit"] == "wrong_target"
+
+
+def test_the_targets_own_row_leaving_the_list_is_not_wrong_target():
+    before, after = _rows(None), _rows_without("Buy milk")
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    assert outcome.wrong_row_effect(before, after, label) is None
+
+
+def test_a_row_added_elsewhere_is_not_wrong_target():
+    before, after = _rows_without("Walk dog"), _rows(None)
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    assert outcome.wrong_row_effect(before, after, label) is None
+
+
+def test_double_click_whose_wrong_row_leaves_the_list_says_wrong_target(tmp_path, monkeypatch):
+    """The live 3 -> 2 shape through click(), with the debug flag on."""
+    from dataclasses import replace as _replace
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    monkeypatch.setenv("A11Y_DEBUG_ROW_GUARD", "1")
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: ()
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    before = _live_rows(base, None)
+    after = _replace(base, elements=tuple(
+        _replace(el, snapshot_id=base.snapshot_id) for el in _rows_without("Walk dog").elements))
+    rt._current = before
+    monkeypatch.setattr(rt, "_reread", lambda *_a, **_k: after)
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    result = rt.click(ref=label.ref, count=2)
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("wrong_target")
+    assert "Walk dog" in result.evidence
+    data = _debug_payload(result.evidence)
+    assert data["trace"]["row_counts"] == [3, 2] and data["trace"]["exit"] == "wrong_target"
