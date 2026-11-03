@@ -59,3 +59,17 @@ def test_a_ref_outside_any_status_region_keeps_the_generic_refusal():
     with pytest.raises(ComputerUseError) as caught:
         observe.rematch_ref(old, by_title(old, "Resend code in 6s").ref, live)
     assert caught.value.detail["reason"] != "hidden_ancestor"
+
+
+def test_the_refusal_result_tells_the_caller_to_snapshot():
+    from a11y_computer_use import outcome
+
+    old = snap_of(page(True))
+    live = snap_of(page(False, resend="Resend code"))
+    with pytest.raises(ComputerUseError) as caught:
+        observe.rematch_ref(old, by_title(old, "Undo (1)").ref, live)
+    err = caught.value
+    result = outcome.refused_result(text=str(err), code=err.code.value,
+                                    message=err.message, detail=err.detail)
+    assert result.outcome == "refused"
+    assert tuple(result.next) == ("snapshot",)
