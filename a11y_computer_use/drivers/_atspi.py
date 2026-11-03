@@ -23445,7 +23445,8 @@ def _occluder_sibling_bar_menus(opener, chain):
     return menus or None
 
 
-def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
+def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None,
+                           sole: list | None = None):
     """A showing menu over (x, y) that does not contain ``acc`` (#1387).
 
     Chromium answers AT-SPI hit tests from a cache of its last hover result,
@@ -23471,6 +23472,10 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
     Without (x, y) the target's own on-screen center is the point, for the
     node-bound paths (doAction, CDP, focus by ref). When the target's bounds
     cannot be read, any showing menu outside it covers it.
+
+    ``sole`` (#1470): when given, receives the target's own menu when it is
+    positively the single open menu (no popup window, no other showing menu,
+    at most one opener, every part of the page read). Otherwise it stays empty.
     """
     if acc is None or not _chromium_app(acc):
         return None
@@ -23561,6 +23566,12 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
                 continue
             return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
         candidates.extend(menus)
+    if sole is not None and windows_known and not page_errors and len(openers) <= 1 \
+            and all(_ancestor_key(menu) in keys for menu in candidates):
+        own_menus = [node for node in chain[1:]
+                     if _role_name(node) in _OCCLUDER_MENU_ROLES and _state_has(node, "SHOWING")]
+        if len(own_menus) == 1:
+            sole.append(own_menus[0])
     if not candidates:
         if not windows_known and page_errors:
             return UNKNOWN_MENU_STATE
@@ -23584,6 +23595,15 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None):
         if width > 0 and height > 0 and left <= x < left + width and top <= y < top + height:
             return label
     return None
+
+
+def chromium_sole_open_menu(acc, x: int | None = None, y: int | None = None):
+    """The target's own menu when it is the only open menu and covers
+    nothing over (x, y), else None (fail closed, #1470)."""
+    sole: list = []
+    if chromium_menu_occluder(acc, x, y, sole=sole) is not None:
+        return None
+    return sole[0] if sole else None
 
 
 def chromium_clipped_target(acc) -> bool:

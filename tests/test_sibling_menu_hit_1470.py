@@ -1,6 +1,10 @@
-"""#1470 ?sib: a menu rendered right after its button. Chromium's first hit
-test at the freshly drawn item answers from its hover cache; the real hit
-follows. Hermetic: the native hit test is stubbed."""
+"""#1470 ?sib: a menu drawn as its button's sibling. Every native hit test at
+the item's point lands on the editor under the menu (entry "Document"), so
+re-asking cannot help. The item is pressed through its own AT-SPI action
+only when its menu is the single open menu, the hit is outside that menu,
+and the action exists; no pointer click is ever sent at that point.
+Hermetic: the AT-SPI tree and the native hit test are fakes."""
+import inspect
 import json
 
 import pytest
@@ -8,87 +12,148 @@ import pytest
 from a11y_computer_use.drivers import _atspi
 from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode
+from tests.test_linux_menu_portal_owner_1470 import INSIDE, _tree, _wire
+from tests.test_linux_synthetic import _GeckoNode
 
 
 def _item():
-    return Element(ref="e42", role="AXMenuItem", title="Mono", value=None, snapshot_id="s1",
-                   bounds=Bounds(display_id=1, x=100, y=200, width=80, height=20))
+    return Element(ref="e42", role="AXMenuItemRadio", title="Mono", value=None, snapshot_id="s1",
+                   bounds=Bounds(display_id=1, x=392, y=282, width=69, height=31))
 
 
-def _driver(monkeypatch, answers, occluded=None):
+@pytest.fixture
+def page(monkeypatch):
+    """The live shape: one open menu; the hit names entry "Document"."""
+    app, document, button, menu, mono, rects = _tree()
+    editor = _GeckoNode("entry", "Document", ("SHOWING", "VISIBLE", "EDITABLE"))
+    document.children.insert(1, editor)
+    editor.parent = document
+    _wire(monkeypatch, app, rects)
+    hit = {"node": editor}
+    monkeypatch.setattr(_atspi, "_component", lambda node: node)
+    monkeypatch.setattr(_atspi, "_hit_at", lambda comp, x, y: hit["node"])
+    monkeypatch.setattr(_atspi, "code_editor_container", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_chromium_select_option_at_point", lambda *a: False)
+    pressed = []
+
+    def act(acc, names):
+        if not getattr(acc, "actions", None):
+            return False
+        pressed.append((acc, names))
+        return True
+
+    monkeypatch.setattr(_atspi, "_do_action_named", act)
     driver = LinuxDriver()
     driver._run = lambda fn: fn()  # type: ignore[method-assign]
-    driver._COVER_READ_GAP_S = 0
-    calls = []
-
-    def occluder(*a, **k):
-        calls.append("occluder")
-        if occluded:
-            raise occluded
-
-    monkeypatch.setattr(driver, "_refuse_chromium_occluded", occluder)
-    seq = iter(answers)
-
-    def hit(h, x, y, trace=None):
-        calls.append("hit")
-        answer = next(seq)
-        if trace is not None:
-            trace.append({"hit": {"role": "menu item" if answer else "push button"}})
-        return answer
-
-    monkeypatch.setattr(_atspi, "chromium_pointer_target", hit)
-    return driver, calls
+    return {"driver": driver, "mono": mono, "menu": menu, "document": document,
+            "editor": editor, "hit": hit, "pressed": pressed}
 
 
-def test_a_cached_first_miss_then_a_settled_hit_on_the_item_proceeds(monkeypatch):
-    driver, calls = _driver(monkeypatch, [False, True, True])
-    driver._verify_chromium_pointer_target(_item(), object(), 140, 210)
-    assert calls[0] == "occluder" and calls.count("hit") == 3
+def test_the_live_hit_names_the_editor_under_the_menu(page):
+    trace = []
+    assert _atspi.chromium_pointer_target(page["mono"], *INSIDE, trace=trace) is False
+    assert trace[0]["hit"] == {"role": "entry", "name": "Document"}
 
 
-def test_a_hit_that_never_settles_on_the_item_still_refuses(monkeypatch):
-    driver, _ = _driver(monkeypatch, [False, True, False, True, False, True, False])
+def test_a_document_entry_hit_presses_the_item_by_its_own_action(page):
+    pressed = page["driver"]._verify_chromium_pointer_target(
+        _item(), page["mono"], *INSIDE, may_press=True)
+    assert pressed is True
+    assert [acc for acc, _ in page["pressed"]] == [page["mono"]]
+
+
+def test_without_may_press_the_same_hit_refuses(page):
     with pytest.raises(ComputerUseError) as raised:
-        driver._verify_chromium_pointer_target(_item(), object(), 140, 210)
+        page["driver"]._verify_chromium_pointer_target(_item(), page["mono"], *INSIDE)
+    assert raised.value.detail["reason"] == "hit_test_unverified" and not page["pressed"]
+
+
+def test_a_hit_on_another_item_inside_the_menu_refuses(page):
+    page["hit"]["node"] = page["menu"].children[0]  # "Sans"
+    with pytest.raises(ComputerUseError) as raised:
+        page["driver"]._verify_chromium_pointer_target(
+            _item(), page["mono"], *INSIDE, may_press=True)
+    assert raised.value.detail["reason"] == "hit_test_unverified" and not page["pressed"]
+
+
+def test_an_item_without_its_own_action_refuses(page):
+    page["mono"].actions = []
+    with pytest.raises(ComputerUseError) as raised:
+        page["driver"]._verify_chromium_pointer_target(
+            _item(), page["mono"], *INSIDE, may_press=True)
     assert raised.value.detail["reason"] == "hit_test_unverified"
 
 
-def test_a_hit_on_another_element_refuses(monkeypatch):
-    driver, _ = _driver(monkeypatch, [False] * 7)
+def test_two_open_menus_refuse_before_any_press(page, monkeypatch):
+    second = _GeckoNode("menu", "Actions", ("SHOWING", "VISIBLE"),
+                        [_GeckoNode("menu item", "Delete", ("SHOWING", "VISIBLE"))])
+    page["document"].children.append(second)
+    second.parent = page["document"]
+    assert _atspi.chromium_sole_open_menu(page["mono"], *INSIDE) is None
+    with pytest.raises(ComputerUseError):
+        page["driver"]._verify_chromium_pointer_target(
+            _item(), page["mono"], *INSIDE, may_press=True)
+    assert not page["pressed"]
+
+
+def test_a_non_menu_target_is_never_pressed(page):
+    button = Element(ref="e7", role="AXButton", title="Mono", value=None, snapshot_id="s1",
+                     bounds=Bounds(display_id=1, x=392, y=282, width=69, height=31))
     with pytest.raises(ComputerUseError) as raised:
-        driver._verify_chromium_pointer_target(_item(), object(), 140, 210)
-    assert raised.value.detail["reason"] == "hit_test_unverified"
+        page["driver"]._verify_chromium_pointer_target(button, page["mono"], *INSIDE, may_press=True)
+    assert raised.value.detail["reason"] == "hit_test_unverified" and not page["pressed"]
+
+
+def test_the_sole_open_menu_is_the_targets_own(page):
+    assert _atspi.chromium_sole_open_menu(page["mono"], *INSIDE) is page["menu"]
+
+
+def test_click_sends_no_pointer_after_an_action_press():
+    src = inspect.getsource(LinuxDriver.click)
+    verify = src.index("_verify_chromium_pointer_target")
+    tail = src[verify:]
+    assert "may_press=" in tail[:400] and "return None" in tail[:600]
+    assert tail.index("return None") < tail.index("_linux_input.click(")
 
 
 def test_the_open_menu_rule_still_decides_before_any_hit_test(monkeypatch):
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()  # type: ignore[method-assign]
     blocked = ComputerUseError(ErrorCode.STALE_REF, "covered", detail={"reason": "occluded_target"})
-    driver, calls = _driver(monkeypatch, [True, True], occluded=blocked)
+    calls = []
+
+    def occluder(*a, **k):
+        raise blocked
+
+    monkeypatch.setattr(driver, "_refuse_chromium_occluded", occluder)
+    monkeypatch.setattr(_atspi, "chromium_pointer_target",
+                        lambda *a, **k: calls.append("hit") or True)
     with pytest.raises(ComputerUseError) as raised:
-        driver._verify_chromium_pointer_target(_item(), object(), 140, 210)
-    assert raised.value.detail["reason"] == "occluded_target" and "hit" not in calls
+        driver._verify_chromium_pointer_target(_item(), object(), 140, 210, may_press=True)
+    assert raised.value.detail["reason"] == "occluded_target" and not calls
 
 
-def test_debug_flag_dumps_every_read(monkeypatch, capsys):
+def test_debug_flag_dumps_the_walk_and_the_press(page, monkeypatch, capsys):
     monkeypatch.setenv("A11Y_DEBUG_HIT_TEST", "1")
-    driver, _ = _driver(monkeypatch, [False, True, True])
-    driver._verify_chromium_pointer_target(_item(), object(), 140, 210)
+    page["driver"]._verify_chromium_pointer_target(_item(), page["mono"], *INSIDE, may_press=True)
     line = next(l for l in capsys.readouterr().err.splitlines() if l.startswith("hit_test_debug: "))
     data = json.loads(line.split(": ", 1)[1])
-    assert data["verified"] is True and [r["answer"] for r in data["reads"]] == [False, True, True]
-    assert data["reads"][0]["walk"][0]["hit"]["role"] == "push button"
+    assert data["verified"] is False and data["pressed_by_action"] is True
+    assert data["walk"][0]["hit"] == {"role": "entry", "name": "Document"}
 
 
-def test_no_debug_output_without_the_flag(monkeypatch, capsys):
+def test_no_debug_output_without_the_flag(page, monkeypatch, capsys):
     monkeypatch.delenv("A11Y_DEBUG_HIT_TEST", raising=False)
-    driver, _ = _driver(monkeypatch, [True])
-    driver._verify_chromium_pointer_target(_item(), object(), 140, 210)
+    page["driver"]._verify_chromium_pointer_target(_item(), page["mono"], *INSIDE, may_press=True)
     assert "hit_test_debug" not in capsys.readouterr().err
 
 
-def test_a_non_menu_target_is_not_re_asked(monkeypatch):
-    driver, calls = _driver(monkeypatch, [False, True, True])
-    button = Element(ref="e7", role="AXButton", title="Font", value=None, snapshot_id="s1",
-                     bounds=Bounds(display_id=1, x=100, y=170, width=80, height=20))
-    with pytest.raises(ComputerUseError):
-        driver._verify_chromium_pointer_target(button, object(), 140, 180)
-    assert calls.count("hit") == 1
+def test_a_second_menu_away_from_the_point_still_blocks_the_press(page, monkeypatch):
+    # A second showing menu elsewhere on the page is never the target's.
+    away = _GeckoNode("menu", "Other", ("SHOWING", "VISIBLE"))
+    page["document"].children.append(away)
+    away.parent = page["document"]
+    real = _atspi._raw_rect
+    monkeypatch.setattr(_atspi, "_raw_rect",
+                        lambda node, coord: (1000, 700, 50, 50) if node is away else real(node, coord))
+    assert _atspi.chromium_sole_open_menu(page["mono"], *INSIDE) is None
