@@ -481,8 +481,12 @@ def test_another_users_real_mousepad_does_not_block(monkeypatch) -> None:
 
 
 def test_another_users_process_owning_the_target_is_refused(monkeypatch) -> None:
+    """Only another user's process owns the target: refused. With this user's
+    own target beside it, that one decides and per-action checks keep the
+    other user's window out of reach (#1322 o_beside,
+    tests/test_linux_other_user_shared_display_1322.py)."""
     m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 30: (MOUSEPAD, 1, (30,))},
-               uids={30: os.getuid() + 1})
+               owners={30}, uids={30: os.getuid() + 1})
     key, hint = m.check("mousepad", MOUSEPAD)
     assert key == "mousepad" and hint and "another user" in hint
 

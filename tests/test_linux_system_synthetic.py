@@ -28,6 +28,9 @@ def _honest_x_server(monkeypatch):
     set an honest ``_NET_WM_PID``: XRes names the same pid. Spoof and
     no-owner cases override ``_xres_pid`` explicitly (#1327)."""
     monkeypatch.setattr(_linux_system, "_xres_pid", lambda win, d: _linux_system._pid_of(win, d) or None)
+    # Fake pids are this user's processes; a real /proc pid of the same number
+    # may belong to anyone (#1322 tests other users explicitly).
+    monkeypatch.setattr(_linux_system, "_foreign_uid", lambda pid: None)
 
 
 class _FakeXWin:
