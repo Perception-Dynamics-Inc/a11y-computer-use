@@ -499,7 +499,13 @@ def frontmost_app_id() -> str:
             comm = _comm_for_pid(pid)
             if not comm:
                 return ""
-            return _app_id(win, d, pid=pid)
+            name = _app_id(win, d, pid=pid)
+            uid = _foreign_uid(pid)
+            if uid is not None and name:
+                # #1322: another user's focused window is never the gated
+                # app, so type and key refuse it as a focus change.
+                return f"{name} (uid {uid})"
+            return name
     except ComputerUseError:
         raise
     except Exception:

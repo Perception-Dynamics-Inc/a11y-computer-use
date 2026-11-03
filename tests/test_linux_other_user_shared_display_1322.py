@@ -11,16 +11,20 @@ raises it. A target owned only by another user is still refused.
 from __future__ import annotations
 
 import os
+import sys
 from types import SimpleNamespace as _NS
 
 import pytest
+
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"),
+                                reason="Linux X11 and /proc uids")
 
 from a11y_computer_use.drivers import _linux_exe, _linux_system
 from a11y_computer_use.schema import ComputerUseError, ErrorCode
 from tests.test_linux_system_synthetic import _FakeXRoot, _FakeXWin
 
 MOUSEPAD = "/usr/bin/mousepad"
-ME = os.getuid()
+ME = getattr(os, "getuid", lambda: 1000)()  # collected (and skipped) off POSIX
 OTHER = ME + 1
 
 
@@ -152,3 +156,54 @@ def test_activate_app_with_only_another_users_window_raises_nothing(monkeypatch)
     with pytest.raises(ComputerUseError) as exc:
         _linux_system.activate_app("mousepad")
     assert exc.value.code is ErrorCode.APP_NOT_FOUND and raised == []
+
+
+# --- the other user's same-named window is the focused one ---------------
+
+
+def _focused(monkeypatch, focused_pid):
+    mine, theirs = _shared_display(monkeypatch, mine_on_top=True)
+    win = {10: mine, 30: theirs}[focused_pid]
+    real_prop = _linux_system._prop
+
+    def prop(obj, d, name):
+        if name == "_NET_ACTIVE_WINDOW":
+            return [win.id]
+        return real_prop(obj, d, name)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def opened():
+        yield _linux_system._display()
+
+    monkeypatch.setattr(_linux_system, "_prop", prop)
+    monkeypatch.setattr(_linux_system, "_open_display", opened)
+    monkeypatch.setattr(_linux_system, "_wm_owned", lambda pid, d: False)
+    monkeypatch.setattr(_linux_system, "_app_id", lambda w, d, pid=None: "mousepad")
+
+
+def test_another_users_focused_mousepad_is_not_frontmost_mousepad(monkeypatch) -> None:
+    _focused(monkeypatch, 30)
+    front = _linux_system.frontmost_app_id()
+    assert front != "mousepad" and f"uid {OTHER}" in front
+
+
+def test_my_focused_mousepad_is_frontmost_mousepad(monkeypatch) -> None:
+    _focused(monkeypatch, 10)
+    assert _linux_system.frontmost_app_id() == "mousepad"
+
+
+@pytest.mark.parametrize("tool, args", [("type", {"text": "secret"}), ("key", {"keys": "ctrl+s"})])
+def test_type_and_key_refuse_another_users_focused_window(monkeypatch, tool, args) -> None:
+    """Granted mousepad, but the focused window is the other user's mousepad."""
+    from a11y_computer_use import server
+
+    _focused(monkeypatch, 30)
+    monkeypatch.setattr(server, "_system_ops", lambda: _linux_system)
+    with pytest.raises(ComputerUseError) as exc:
+        server._recheck_frontmost("mousepad")
+    assert exc.value.code is ErrorCode.FOCUS_CHANGED
+    assert f"uid {OTHER}" in exc.value.detail["frontmost_app"]
+    _focused(monkeypatch, 10)
+    server._recheck_frontmost("mousepad")  # my own focused window passes

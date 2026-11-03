@@ -300,6 +300,7 @@ def test_grant_records_the_installed_binary(monkeypatch) -> None:
 
 
 CHROME = "/opt/google/chrome/chrome"
+ME = os.getuid()
 
 
 def _procs(monkeypatch, table: dict[int, tuple[str | None, int, tuple[int, ...]]], named=None,
@@ -316,7 +317,11 @@ def _procs(monkeypatch, table: dict[int, tuple[str | None, int, tuple[int, ...]]
     monkeypatch.setattr(m, "pids_named", lambda n: set(names))
     monkeypatch.setattr(m, "_x11_owner_pids", lambda n: set())
     monkeypatch.setattr(m, "_atspi_owner_pids", lambda: set(owning))
-    monkeypatch.setattr(m, "_uid", lambda pid: (uids or {}).get(pid, os.getuid()))
+    # Nothing here reads the real box: a running mousepad registers on the
+    # real AT-SPI bus under its name and would join every check.
+    monkeypatch.setattr(m, "_atspi_named_pids", lambda n: set())
+    monkeypatch.setattr(m, "_me", lambda: ME)
+    monkeypatch.setattr(m, "_uid", lambda pid: (uids or {}).get(pid, ME))
     monkeypatch.setattr(m, "exe_of", lambda pid: table[pid][0] if pid in table else None)
     monkeypatch.setattr(m, "_status", lambda pid: (table[pid][1], table[pid][2]) if pid in table else (None, ()))
     monkeypatch.setattr(m, "_gone", lambda pid: pid in (zombies or ()))
@@ -476,7 +481,7 @@ def test_unrelated_same_named_binary_does_not_grant_either(monkeypatch) -> None:
 
 def test_another_users_real_mousepad_does_not_block(monkeypatch) -> None:
     m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 30: (None, 1, (30,))},
-               owners={10}, uids={30: os.getuid() + 1})
+               owners={10}, uids={30: ME + 1})
     assert m.check("mousepad", MOUSEPAD) == ("mousepad", None)
 
 
@@ -486,7 +491,7 @@ def test_another_users_process_owning_the_target_is_refused(monkeypatch) -> None
     other user's window out of reach (#1322 o_beside,
     tests/test_linux_other_user_shared_display_1322.py)."""
     m = _procs(monkeypatch, {10: (MOUSEPAD, 1, (10,)), 30: (MOUSEPAD, 1, (30,))},
-               owners={30}, uids={30: os.getuid() + 1})
+               owners={30}, uids={30: ME + 1})
     key, hint = m.check("mousepad", MOUSEPAD)
     assert key == "mousepad" and hint and "another user" in hint
 
