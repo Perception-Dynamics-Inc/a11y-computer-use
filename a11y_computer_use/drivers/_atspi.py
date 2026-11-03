@@ -23160,7 +23160,11 @@ def fallback_pointer_target(acc, x: int, y: int) -> bool:
     return False
 
 
-def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
+def _hit_brief(node) -> dict:
+    return {"role": _safe(lambda: _role_name(node)), "name": _safe(lambda: _node_name(node))}
+
+
+def chromium_pointer_target(acc, x: int, y: int, trace: list | None = None) -> bool | None:
     """Verify a Chromium page ref against the document's native hit test.
 
     None means this is not Chromium page content. False includes unavailable
@@ -23199,6 +23203,14 @@ def chromium_pointer_target(acc, x: int, y: int) -> bool | None:
         if comp is None:
             return in_editor
         hit = _hit_at(comp, x, y)
+        if trace is not None:
+            # A11Y_DEBUG_HIT_TEST (#1470): each native hit and its ancestors.
+            trace.append({
+                "from": _hit_brief(node),
+                "hit": None if hit is None else _hit_brief(hit),
+                "hit_chain": [] if hit is None else [
+                    _hit_brief(n) for n in list(_ancestor_chain(hit))[:8]],
+            })
         if hit is None:
             return in_editor
         if any(_ancestor_key(parent) == target_key for parent in _ancestor_chain(hit)):

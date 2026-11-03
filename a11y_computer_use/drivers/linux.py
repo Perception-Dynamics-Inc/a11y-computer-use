@@ -16,9 +16,12 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import re
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -3529,6 +3532,9 @@ class LinuxDriver:
     # pause between them (Chromium's real hit test answers asynchronously).
     _COVER_READS = 6
     _COVER_READ_GAP_S = 0.08
+    # Items of a page menu just opened: the first hit test there can answer
+    # from the hover cache (#1470), so a miss is re-asked until it settles.
+    _SETTLE_HIT_ROLES = frozenset({"AXMenuItem", "AXMenuItemCheckbox", "AXMenuItemRadio"})
 
     def _live_center(self, handle) -> tuple[int, int] | None:
         from a11y_computer_use.drivers import _atspi
@@ -3820,7 +3826,37 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         self._refuse_chromium_occluded(element, handle, x, y)
-        if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
+        debug = os.environ.get("A11Y_DEBUG_HIT_TEST") == "1"
+        reads: list = []
+
+        def ask():
+            if not debug:
+                return self._run(lambda: _atspi.chromium_pointer_target(handle, x, y))
+            trace: list = []
+            answer = self._run(lambda: _atspi.chromium_pointer_target(handle, x, y, trace=trace))
+            reads.append({"answer": answer, "walk": trace})
+            return answer
+
+        verified = ask()
+        if verified is False and element.role in self._SETTLE_HIT_ROLES:
+            # Chromium answers the first query at a freshly drawn point (a menu
+            # rendered as its button's sibling, #1470) from its last hover
+            # cache, then resolves the real hit asynchronously. Re-ask; only
+            # two consecutive native hits on the target verify it. The menu
+            # occlusion check above has already run and still decides cover.
+            agree = 0
+            for _ in range(self._COVER_READS):
+                time.sleep(self._COVER_READ_GAP_S)
+                agree = agree + 1 if ask() is True else 0
+                if agree >= 2:
+                    verified = True
+                    break
+        if debug:
+            print("hit_test_debug: " + json.dumps(
+                {"ref": element.ref, "role": element.role, "title": element.title,
+                 "point": [x, y], "verified": verified, "reads": reads},
+                default=repr), file=sys.stderr, flush=True)
+        if verified is False:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
                 f"{element.ref} ({element.role} {element.title!r}) could not be verified "
