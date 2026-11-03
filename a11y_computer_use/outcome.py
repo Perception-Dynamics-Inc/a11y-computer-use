@@ -810,7 +810,20 @@ def values_match(requested: str, actual: str) -> bool:
     try:
         return float(requested) == float(actual)
     except (TypeError, ValueError):
+        pass
+    # A range widget's read-back carries its bounds: "3 (min 0, max 10)"
+    # is the value 3 (#780). The shown number must equal the request.
+    ranged = _RANGED_READBACK.match(actual) if isinstance(actual, str) else None
+    if ranged is None:
         return False
+    try:
+        return float(requested) == float(ranged.group(1))
+    except (TypeError, ValueError):
+        return False
+
+
+_RANGED_READBACK = re.compile(
+    r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?) \(min [^,()]+, max [^,()]+\)\s*$")
 
 
 def display_numbers_match(shown: str, wanted: str) -> bool:
