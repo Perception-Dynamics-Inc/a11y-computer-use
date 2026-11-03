@@ -4844,18 +4844,44 @@ class LinuxDriver:
             self.click(element)
             return True
         if self._run(lambda: _atspi.chromium_list_row(handle)):
+            # The outcome is read on the option re-resolved by name and role
+            # in the same list after the click, never on the pre-click handle:
+            # a list that re-renders detaches that node, and its stale
+            # SELECTED bit inverts the verdict (#1472). Either direction of
+            # change is the click working, so a deselect is not undone
+            # (#1471). One click only; a toggle is never retried.
             before = self._run(lambda: _atspi.selected_option_names(handle))
             choice = self._run(lambda: _atspi.combobox_option_context(handle))
+            ident = self._run(lambda: _atspi.list_row_identity(handle))
             bounds = element.bounds
             if bounds is not None and bounds.width > 0 and bounds.height > 0:
                 try:
                     self.click(element)
                 except ComputerUseError:
                     pass
-                if self._run(lambda: _atspi.row_becomes_selected(handle)):
+                verdict = (self._run(lambda: _atspi.reresolved_row_verdict(ident))
+                           if ident is not None else "unresolved")
+                if verdict == "changed":
                     return True
                 if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
                     return True
+                # An ARIA combobox option leaves with its list; the combobox
+                # value is that read-back, and it did not commit this option.
+                if verdict == "unresolved" and not choice:
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{element.ref} ({element.role}) was clicked once, but no single "
+                        "live option with its name is in the list now, so the selection "
+                        "cannot be confirmed. Take a fresh snapshot and read the option's "
+                        "state before clicking again",
+                        detail={"ref": element.ref, "role": element.role,
+                                "reason": "option_not_reresolved",
+                                "outcome": "unverifiable", "next": [],
+                                "input_delivered": True},
+                    )
+            if ident is not None:
+                # The clicked option keeps whatever state it has now.
+                before = [name for name in before if name != ident["name"]]
             self._run(lambda: _atspi.restore_selection(handle, before))
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
