@@ -82,6 +82,7 @@ def drive(monkeypatch):
         monkeypatch.setattr(_atspi, "grab_focus", focus)
         monkeypatch.setattr(_atspi, "_state_has", lambda node, s: s == "FOCUSED" and widget.focused)
         monkeypatch.setattr(_linux_input, "press_chord", widget.key)
+        monkeypatch.setattr(_atspi, "_drop_cached_properties", lambda node: None)
         monkeypatch.setattr(LinuxDriver, "_ARIA_STEP_PAUSE_S", 0.0)
         return driver
     return make
@@ -200,3 +201,82 @@ def test_chromium_aria_range_is_only_chrome_slider_and_spinbutton(monkeypatch):
     assert not _atspi.chromium_aria_range({"chrome": False, "role": "slider"})
     assert not _atspi.chromium_aria_range({"chrome": True, "role": "push button"})
     assert not _atspi.chromium_aria_range({"chrome": True, "role": "spin button", "input": True})
+
+
+# --- Tester's #1477 gate: the first spinbutton call on a fresh page ------
+
+
+def _lagging_focus(monkeypatch, widget, *, ignored_grabs=0, lag_reads=0):
+    """Chrome's shapes: a grab_focus the document keeps, then FOCUSED that
+    reads false for a few fresh reads before the node reports it."""
+    state = {"grabs": 0, "reads": 0, "dropped": 0}
+
+    def focus(node):
+        state["grabs"] += 1
+        if state["grabs"] > ignored_grabs:
+            widget.focused = True
+        return True
+
+    def has(node, name):
+        if name != "FOCUSED" or not widget.focused:
+            return False
+        state["reads"] += 1
+        return state["reads"] > lag_reads
+
+    monkeypatch.setattr(_atspi, "grab_focus", focus)
+    monkeypatch.setattr(_atspi, "_state_has", has)
+    monkeypatch.setattr(_atspi, "_drop_cached_properties",
+                        lambda node: state.__setitem__("dropped", state["dropped"] + 1))
+    return state
+
+
+def test_first_spinbutton_call_waits_for_focus_to_arrive(drive, monkeypatch):
+    widget = _Widget("spin button", 1, 0, 10)
+    driver = drive(widget)
+    state = _lagging_focus(monkeypatch, widget, lag_reads=3)
+    assert driver._apply_set_value(_element("AXSpinButton"), "5", object()) is True
+    assert widget.now == 5 and widget.keys == ["up"] * 4
+    assert state["dropped"] >= 4  # FOCUSED is read fresh, not from Chrome's cache
+
+
+def test_first_grab_focus_kept_by_the_document_is_retried(drive, monkeypatch):
+    widget = _Widget("spin button", 1, 0, 10)
+    driver = drive(widget)
+    state = _lagging_focus(monkeypatch, widget, ignored_grabs=1)
+    assert driver._apply_set_value(_element("AXSpinButton"), "5", object()) is True
+    assert widget.now == 5 and state["grabs"] == 2
+
+
+def test_spinbutton_that_never_takes_focus_sends_no_key(drive, monkeypatch):
+    widget = _Widget("spin button", 1, 0, 10)
+    driver = drive(widget)
+    state = _lagging_focus(monkeypatch, widget, ignored_grabs=99)
+    with pytest.raises(ComputerUseError) as exc:
+        driver._apply_set_value(_element("AXSpinButton"), "5", object())
+    assert exc.value.detail["reason"] == "focus_lost" and exc.value.detail["sent"] == 0
+    assert widget.keys == [] and widget.now == 1
+    assert state["grabs"] == LinuxDriver._ARIA_FOCUS_TRIES
+
+
+# --- the spinbutton read-back carries its range: "3 (min 0, max 10)" ------
+
+
+@pytest.mark.parametrize("requested, readback", [
+    ("3", "3 (min 0, max 10)"), ("10", "10 (min 0, max 10)"), ("0", "0 (min 0, max 10)"),
+    ("2.5", "2.5 (min 0, max 10)"),
+])
+def test_ranged_read_back_of_the_request_is_confirmed(requested, readback):
+    from a11y_computer_use import outcome
+
+    assert outcome.judge(changed=True, requested=requested, readback=readback,
+                         before_value="1 (min 0, max 10)")[0] == "confirmed"
+
+
+@pytest.mark.parametrize("readback", [
+    "4 (min 0, max 10)", "3 (min 0)", "3 apples (min 0, max 10)", "13 (min 0, max 10)",
+])
+def test_ranged_read_back_of_another_value_is_not_confirmed(readback):
+    from a11y_computer_use import outcome
+
+    assert outcome.judge(changed=True, requested="3", readback=readback,
+                         before_value="1 (min 0, max 10)")[0] != "confirmed"

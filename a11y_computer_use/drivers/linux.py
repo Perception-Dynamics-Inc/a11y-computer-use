@@ -5103,8 +5103,7 @@ class LinuxDriver:
             send = lambda: self._run(lambda: _atspi.do_named_action(handle, action))
             how = f"via {action}"
         else:
-            self._run(lambda: _atspi.grab_focus(handle))
-            if not self._run(lambda: _atspi._state_has(handle, "FOCUSED")):
+            if not self._focus_aria_range(handle):
                 raise refuse("focus_lost", "could not be focused; no key was sent", actual=current, sent=0)
             if self._run(lambda: _atspi._role_name(handle)) == "spin button":
                 key = "up" if up else "down"
@@ -5115,7 +5114,7 @@ class LinuxDriver:
         sent = 0
         reached = current
         for _ in range(abs(steps)):
-            if not via_action and not self._run(lambda: _atspi._state_has(handle, "FOCUSED")):
+            if not via_action and not self._aria_focused(handle):
                 raise refuse("focus_lost", f"lost focus after {sent} steps at {_atspi._format_bound(reached)}",
                              actual=reached, sent=sent)
             send()
@@ -5141,6 +5140,37 @@ class LinuxDriver:
                 return True
         raise refuse("text_mismatch", f"read back {_atspi._format_bound(reached)} after {sent} steps {how}, "
                      f"not {value!r}", actual=reached, sent=sent)
+
+    _ARIA_FOCUS_POLLS = 25
+    _ARIA_FOCUS_TRIES = 2
+
+    def _aria_focused(self, handle) -> bool:
+        """FOCUSED read fresh: Chrome's cached state lags a focus change."""
+        from a11y_computer_use.drivers import _atspi
+
+        self._run(lambda: _atspi._drop_cached_properties(handle))
+        return bool(self._run(lambda: _atspi._state_has(handle, "FOCUSED")))
+
+    def _focus_aria_range(self, handle) -> bool:
+        """Focus the range node itself, waiting for Chrome to report it (#780).
+
+        Tester's #1477 gate: on a fresh page the first ``grab_focus`` on a
+        spinbutton is applied asynchronously, so an immediate FOCUSED read
+        is false (the document still has focus) while a second call works.
+        The node's own FOCUSED state is polled fresh, and focus is requested
+        once more if it has not arrived. Focus on anything else is not
+        accepted: the arrow keys would go there.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        for _ in range(self._ARIA_FOCUS_TRIES):
+            self._run(lambda: _atspi.grab_focus(handle))
+            for poll in range(self._ARIA_FOCUS_POLLS):
+                if self._aria_focused(handle):
+                    return True
+                if poll + 1 < self._ARIA_FOCUS_POLLS:
+                    time.sleep(self._ARIA_STEP_PAUSE_S)
+        return False
 
     def take_check_readback(self, element: Element) -> tuple[bool, bool] | None:
         """``(checked, changed)`` read live by the last item check (#1287).
