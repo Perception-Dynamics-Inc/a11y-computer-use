@@ -1446,6 +1446,27 @@ def _sibling_rows(snap: object, row: object) -> list:
     ]
 
 
+def _anchor_in(snap: object, element: object) -> object | None:
+    """``element`` as it appears in ``snap``, whose refs may be another read's.
+
+    A click's before-state is the full tree that resolved the ref, not the
+    snapshot (often a ``find`` result) that issued it, so the issuing ref
+    and parent ref name different nodes there (#1467 live). Prefer the
+    same object, then the same native node, then the shared control match.
+    """
+    elements = _snap_elements(snap)
+    if any(el is element for el in elements):
+        return element
+    if getattr(element, "snapshot_id", None) == getattr(snap, "snapshot_id", object()):
+        return _by_ref(snap).get(getattr(element, "ref", None))
+    node = tuple(getattr(element, "node_identity", ()) or ())
+    if node:
+        same = [el for el in elements if tuple(getattr(el, "node_identity", ()) or ()) == node]
+        if len(same) == 1:
+            return same[0]
+    return _match_control(element, snap)
+
+
 def wrong_row_effect(before: object, after: object, target: object) -> str | None:
     """Evidence that a click on a row's content changed another row (#1467).
 
@@ -1454,7 +1475,8 @@ def wrong_row_effect(before: object, after: object, target: object) -> str | Non
     on the sibling: the change is not the target's. None when the target is
     in no row, or the rows cannot be matched one to one before and after.
     """
-    row = _row_of(before, target)
+    target = _anchor_in(before, target)
+    row = _row_of(before, target) if target is not None else None
     if row is None:
         return None
     before_rows = _sibling_rows(before, row)

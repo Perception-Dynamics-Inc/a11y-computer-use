@@ -175,3 +175,57 @@ def test_double_click_on_text_whose_change_lands_in_another_row_says_wrong_targe
     assert result.evidence.startswith("wrong_target")
     assert "Walk dog" in result.evidence and "Buy milk" in result.evidence
     assert not result.next
+
+
+def _renumbered(snap, prefix):
+    """The same page read again: every ref (and parent ref) is new."""
+    from dataclasses import is_dataclass, replace as _replace
+    elements = tuple(
+        _replace(el, ref=prefix + el.ref, snapshot_id=prefix,
+                 parent=(prefix + el.parent) if el.parent else None)
+        for el in snap.elements
+    )
+    if is_dataclass(snap):
+        return _replace(snap, snapshot_id=prefix, elements=elements)
+    return SimpleNamespace(snapshot_id=prefix, elements=elements)
+
+
+@pytest.mark.parametrize("selection_after", [None, ()])
+def test_wrong_row_is_found_when_the_click_resolved_against_a_fresh_tree(
+    tmp_path, monkeypatch, selection_after,
+):
+    """Tester's #1475 gate: the before-state is the full tree that resolved
+    the ``find`` ref, whose refs differ from the issuing snapshot's. The row
+    guard located the target by its issuing ref there, found no row, and the
+    live click came back as a bare unverifiable."""
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: () if selection_after == () else None
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    issuing = _live_rows(base, None)
+    resolved = _renumbered(issuing, "z")
+    d.take_click_snapshot = lambda el: resolved
+    rt._current = issuing
+    monkeypatch.setattr(rt, "_reread", lambda *_a, **_k: _renumbered(_live_rows(base, "Walk dog"), "y"))
+    label = next(el for el in issuing.elements if el.title == "Buy milk")
+    result = rt.click(ref=label.ref, count=2)
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("wrong_target")
+    assert "Walk dog" in result.evidence and "Buy milk" in result.evidence
+
+
+def test_row_guard_anchors_the_target_in_a_renumbered_before_tree():
+    before = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows(None).elements), "z")
+    after = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows("Walk dog").elements), "y")
+    label = next(el for el in _rows(None).elements if el.title == "Buy milk")
+    evidence = outcome.wrong_row_effect(before, after, label)
+    assert evidence and "'Walk dog'" in evidence
+    own = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows("Buy milk").elements), "y")
+    assert outcome.wrong_row_effect(before, own, label) is None
