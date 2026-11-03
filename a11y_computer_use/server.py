@@ -7527,18 +7527,46 @@ class Runtime:
         # A double-click on page text is judged by its selection above, which
         # never reaches the row guard in _judge_mutation. A sibling row that
         # changed while the target's row did not is the wrong item (#1467).
+        # A11Y_DEBUG_ROW_GUARD=1: record why the row guard did or did not fire
+        # (#1475 live). Off by default; never changes the verdict itself.
+        row_debug = {} if os.environ.get("A11Y_DEBUG_ROW_GUARD") == "1" else None
+        if row_debug is not None:
+            row_debug["selection_branch"] = None if verdict is None else verdict[0]
+            row_debug["selection_evidence"] = None if verdict is None else verdict[1]
+            row_debug["detailed_selection"] = bool(detailed_selection)
+            row_debug["conditions"] = {
+                "verify_selection": bool(verify_selection),
+                "activated": bool(activated),
+                "target_type": type(target).__name__,
+                "verdict": None if verdict is None else verdict[0],
+                "before_snap": isinstance(before, dict) and before.get("snap") is not None,
+            }
+            row_debug["guard_ran"] = False
+            row_debug["wrong_row_effect_called"] = False
         if (
             verify_selection and not activated and isinstance(target, Element)
             and verdict is not None and verdict[0] != "confirmed"
             and isinstance(before, dict) and before.get("snap") is not None
         ):
             row_after = self._reread(app, before.get("scope"))
+            guard_trace = {} if row_debug is not None else None
             wrong_row = (
-                outcome.wrong_row_effect(before["snap"], row_after, target)
+                outcome.wrong_row_effect(before["snap"], row_after, target, trace=guard_trace)
                 if row_after is not None else None
             )
+            if row_debug is not None:
+                row_debug["guard_ran"] = True
+                row_debug["reread"] = row_after is not None
+                row_debug["wrong_row_effect_called"] = row_after is not None
+                row_debug["result"] = wrong_row
+                row_debug["trace"] = guard_trace
             if wrong_row:
                 verdict = ("unverifiable", wrong_row)
+        if row_debug is not None:
+            dumped = json.dumps(row_debug, default=repr, sort_keys=True)
+            print(f"row_guard_debug: {dumped}", file=sys.stderr, flush=True)
+            if verdict is not None:
+                verdict = (verdict[0], f"{verdict[1]}; row_guard_debug={dumped}")
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
         if verdict is None and outline_note:

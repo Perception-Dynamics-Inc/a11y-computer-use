@@ -229,3 +229,58 @@ def test_row_guard_anchors_the_target_in_a_renumbered_before_tree():
     assert evidence and "'Walk dog'" in evidence
     own = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows("Buy milk").elements), "y")
     assert outcome.wrong_row_effect(before, own, label) is None
+
+
+def _debug_click(tmp_path, monkeypatch, editing_after, flag):
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    if flag:
+        monkeypatch.setenv("A11Y_DEBUG_ROW_GUARD", "1")
+    else:
+        monkeypatch.delenv("A11Y_DEBUG_ROW_GUARD", raising=False)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: ()
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    issuing = _live_rows(base, None)
+    d.take_click_snapshot = lambda el: _renumbered(issuing, "z")
+    rt._current = issuing
+    monkeypatch.setattr(
+        rt, "_reread", lambda *_a, **_k: _renumbered(_live_rows(base, editing_after), "y"))
+    label = next(el for el in issuing.elements if el.title == "Buy milk")
+    return rt.click(ref=label.ref, count=2)
+
+
+def _debug_payload(evidence):
+    import json
+    assert "row_guard_debug=" in evidence
+    return json.JSONDecoder().raw_decode(evidence.split("row_guard_debug=", 1)[1])[0]
+
+
+def test_row_guard_debug_trace_records_the_path_when_flagged(tmp_path, monkeypatch, capsys):
+    result = _debug_click(tmp_path, monkeypatch, "Walk dog", flag=True)
+    assert result.evidence.startswith("wrong_target")
+    data = _debug_payload(result.evidence)
+    assert data["guard_ran"] and data["wrong_row_effect_called"] and data["reread"]
+    assert data["selection_branch"] == "suspected_noop"
+    trace = data["trace"]
+    assert trace["exit"] == "wrong_target"
+    assert "object" in trace["before_lookup"] and "control_match" in trace["before_lookup"]
+    assert len(trace["before_rows"]) == len(trace["after_rows"]) == 3
+    assert "row_guard_debug:" in capsys.readouterr().err
+
+
+def test_row_guard_debug_trace_names_the_early_exit(tmp_path, monkeypatch):
+    result = _debug_click(tmp_path, monkeypatch, None, flag=True)
+    assert _debug_payload(result.evidence)["trace"]["exit"] == "no_other_row_changed"
+
+
+def test_row_guard_debug_trace_is_off_by_default(tmp_path, monkeypatch, capsys):
+    result = _debug_click(tmp_path, monkeypatch, "Walk dog", flag=False)
+    assert "row_guard_debug" not in result.evidence
+    assert "row_guard_debug" not in capsys.readouterr().err

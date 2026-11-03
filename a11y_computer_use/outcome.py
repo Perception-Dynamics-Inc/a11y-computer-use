@@ -1454,20 +1454,49 @@ def _anchor_in(snap: object, element: object) -> object | None:
     and parent ref name different nodes there (#1467 live). Prefer the
     same object, then the same native node, then the shared control match.
     """
+    found, _ = _anchor_lookup(snap, element)
+    return found
+
+
+def _brief(el: object) -> dict | None:
+    if el is None:
+        return None
+    return {
+        "ref": getattr(el, "ref", None), "role": getattr(el, "role", None),
+        "title": getattr(el, "title", None), "parent": getattr(el, "parent", None),
+    }
+
+
+def _anchor_lookup(snap: object, element: object) -> tuple[object | None, dict]:
+    """``_anchor_in`` plus what each lookup method returned (debug trace)."""
     elements = _snap_elements(snap)
-    if any(el is element for el in elements):
-        return element
-    if getattr(element, "snapshot_id", None) == getattr(snap, "snapshot_id", object()):
-        return _by_ref(snap).get(getattr(element, "ref", None))
+    methods: dict = {}
+    obj = element if any(el is element for el in elements) else None
+    methods["object"] = _brief(obj)
+    if obj is not None:
+        return obj, methods
+    same_snap = getattr(element, "snapshot_id", None) == getattr(snap, "snapshot_id", object())
+    methods["same_snapshot_id"] = same_snap
+    if same_snap:
+        hit = _by_ref(snap).get(getattr(element, "ref", None))
+        methods["ref"] = _brief(hit)
+        return hit, methods
     node = tuple(getattr(element, "node_identity", ()) or ())
+    methods["node_identity_key"] = repr(node) if node else None
     if node:
         same = [el for el in elements if tuple(getattr(el, "node_identity", ()) or ()) == node]
+        methods["node_identity_matches"] = len(same)
         if len(same) == 1:
-            return same[0]
-    return _match_control(element, snap)
+            methods["node_identity"] = _brief(same[0])
+            return same[0], methods
+    hit = _match_control(element, snap)
+    methods["control_match"] = _brief(hit)
+    return hit, methods
 
 
-def wrong_row_effect(before: object, after: object, target: object) -> str | None:
+def wrong_row_effect(
+    before: object, after: object, target: object, trace: dict | None = None,
+) -> str | None:
     """Evidence that a click on a row's content changed another row (#1467).
 
     A ref inside a list item or table row must change that row. When its own
@@ -1475,34 +1504,54 @@ def wrong_row_effect(before: object, after: object, target: object) -> str | Non
     on the sibling: the change is not the target's. None when the target is
     in no row, or the rows cannot be matched one to one before and after.
     """
-    target = _anchor_in(before, target)
-    row = _row_of(before, target) if target is not None else None
-    if row is None:
-        return None
-    before_rows = _sibling_rows(before, row)
-    index = next((i for i, el in enumerate(before_rows) if el.ref == row.ref), None)
-    if index is None:
-        return None
-    after_target = _match_control(target, after)
-    after_row = _row_of(after, after_target) if after_target is not None else None
-    if after_row is None:
-        return None
-    after_rows = _sibling_rows(after, after_row)
-    if len(after_rows) != len(before_rows):
+    t = trace if trace is not None else {}
+
+    def exit_(point: str) -> None:
+        t["exit"] = point
         return None
 
     def content(snap: object, el: object) -> tuple:
         rows = [_page_row(n) + (bool(getattr(n, "focused", False)),) for n in _subtree(snap, el)]
         return tuple(sorted(rows, key=_sort_key))
 
+    def dump(snap: object, rows: list) -> list | None:
+        if trace is None:
+            return None
+        return [{"row": _brief(r), "content": repr(content(snap, r))} for r in rows]
+
+    t["target_in"] = _brief(target)
+    target, t["before_lookup"] = _anchor_lookup(before, target)
+    t["before_target"] = _brief(target)
+    row = _row_of(before, target) if target is not None else None
+    t["before_row"] = _brief(row)
+    if row is None:
+        return exit_("no_before_target" if target is None else "target_not_in_row")
+    before_rows = _sibling_rows(before, row)
+    t["before_rows"] = dump(before, before_rows)
+    index = next((i for i, el in enumerate(before_rows) if el.ref == row.ref), None)
+    t["index"] = index
+    if index is None:
+        return exit_("row_index_not_found")
+    after_target = _match_control(target, after)
+    t["after_target"] = _brief(after_target)
+    after_row = _row_of(after, after_target) if after_target is not None else None
+    t["after_row"] = _brief(after_row)
+    if after_row is None:
+        return exit_("no_after_target" if after_target is None else "after_target_not_in_row")
+    after_rows = _sibling_rows(after, after_row)
+    t["after_rows"] = dump(after, after_rows)
+    if len(after_rows) != len(before_rows):
+        return exit_("row_count_differs")
     if content(before, before_rows[index]) != content(after, after_rows[index]):
-        return None
+        return exit_("target_row_changed")
     changed = [
         i for i, (a, b) in enumerate(zip(before_rows, after_rows))
         if i != index and content(before, a) != content(after, b)
     ]
+    t["changed"] = changed
     if not changed:
-        return None
+        return exit_("no_other_row_changed")
+    t["exit"] = "wrong_target"
     other = _row_texts(before, before_rows[changed[0]])
     mine = _row_texts(before, row)
     return (
