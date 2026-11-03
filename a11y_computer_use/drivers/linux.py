@@ -2408,7 +2408,8 @@ class LinuxDriver:
             new_routes = LinuxDriver._ref_routes(live, resolved)
             for context, old_url in old_routes.items():
                 new_url = new_routes.get(context)
-                if new_url and old_url != new_url:
+                if new_url and old_url != new_url and not LinuxDriver._same_page_anchor(
+                        live, context, old_url, new_url):
                     raise ComputerUseError(
                         ErrorCode.STALE_REF,
                         f"{ref} belongs to a previous page route; observe the current page again",
@@ -2499,17 +2500,16 @@ class LinuxDriver:
     def _ref_routes(snap: Snapshot, element: Element) -> dict[tuple, str]:
         """Observed enclosing routes, including outer documents for iframe controls.
 
-        Missing URLs alone do not establish navigation. Fragment widgets do
-        not change the route. No issuing native handle is read again here.
+        Missing URLs alone do not establish navigation. The fragment is part
+        of the route: a hash router changes pages by fragment alone (#1478).
+        No issuing native handle is read again here.
         """
-        from urllib.parse import urldefrag
-
         routes = {}
         seen = set()
         while element.ref not in seen:
             seen.add(element.ref)
             if element.context_identity and element.document_route:
-                routes[element.context_identity] = urldefrag(element.document_route)[0]
+                routes[element.context_identity] = element.document_route
             if element.parent is None:
                 break
             try:
@@ -2517,6 +2517,29 @@ class LinuxDriver:
             except KeyError:
                 break
         return routes
+
+    @staticmethod
+    def _same_page_anchor(live: Snapshot, context: tuple, old_url: str, new_url: str) -> bool:
+        """True for an in-page ``#section`` jump, which is not navigation.
+
+        The URL outside the fragment must be unchanged, and the new fragment
+        must name an element id in that same live document. A hash-router
+        route such as ``#/settings`` names no element, so it stays a route
+        change and an old ref is refused (#1478).
+        """
+        from urllib.parse import unquote, urldefrag
+
+        old_base, _ = urldefrag(old_url)
+        new_base, fragment = urldefrag(new_url)
+        if old_base != new_base or not fragment:
+            return False
+        fragment = unquote(fragment)
+        for node in live.elements:
+            if node.stable_id != fragment:
+                continue
+            if LinuxDriver._ref_routes(live, node).get(context) == new_url:
+                return True
+        return False
 
     @staticmethod
     def _ref_context(snap: Snapshot, element: Element) -> tuple:

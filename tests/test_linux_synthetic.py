@@ -21644,13 +21644,13 @@ def test_spa_route_change_refuses_old_ref_before_dispatch(monkeypatch, recreated
     monkeypatch.setattr(observe, "ax_handle_for", lambda *args: None)
     pressed = []
     monkeypatch.setattr(driver, "press_element", lambda el: pressed.append(el))
-    if route in {"path", "query"}:
+    if route in {"path", "query", "fragment"}:
         with pytest.raises(ComputerUseError) as caught:
             driver.press_element(driver.resolve_ref(old, button.ref, live=live))
         assert caught.value.code is ErrorCode.STALE_REF
         assert caught.value.detail == {
             "ref": button.ref, "reason": "route_changed", "outcome": "refused",
-            "old_url": url.split("#")[0], "new_url": next_url.split("#")[0],
+            "old_url": url, "new_url": next_url,
         }
         assert pressed == []
         assert driver.take_click_snapshot(button) is None
