@@ -300,7 +300,7 @@ def test_grant_records_the_installed_binary(monkeypatch) -> None:
 
 
 CHROME = "/opt/google/chrome/chrome"
-ME = os.getuid()
+ME = getattr(os, "getuid", lambda: 1000)()  # import-safe off POSIX; the Linux value is unchanged
 
 
 def _procs(monkeypatch, table: dict[int, tuple[str | None, int, tuple[int, ...]]], named=None,
