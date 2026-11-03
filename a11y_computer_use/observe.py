@@ -990,6 +990,66 @@ def _raise_if_hidden_tab_panel(snap: Snapshot, ref: str, anchor: Element,
     )
 
 
+_LIVE_REGION_ROLES = frozenset({"AXStatusBar"})
+_LIVE_REGION_SUBROLES = frozenset({"status", "alert", "log"})
+
+
+def _raise_if_dismissed_live_region(snap: Snapshot, ref: str, anchor: Element,
+                                    live: Snapshot, reason: str) -> None:
+    """Refuse with ``hidden_ancestor`` when the ref's toast or status region is gone.
+
+    An auto-dismissing toast (``role="status"``) hides its controls when it
+    expires, so the slot its Undo button used is held by an unrelated
+    control. Naming that control or suggesting find() is wrong advice
+    (#1481, the #1458 family): the region is gone and find() cannot reach
+    it. No candidates are offered; re-observe instead.
+    """
+    by_ref = {el.ref: el for el in snap.elements}
+    region = None
+    parent = by_ref.get(anchor.parent)
+    while parent is not None:
+        if parent.role in _LIVE_REGION_ROLES or parent.subrole in _LIVE_REGION_SUBROLES:
+            region = parent
+            break
+        parent = by_ref.get(parent.parent)
+    if region is None:
+        return
+    still, _ = _match_anchor(region, live)
+    if still is not None:
+        return
+
+    def label_of(container: Element) -> str:
+        if container.title:
+            return container.title
+        kids = [el for el in snap.elements if el.parent == container.ref]
+        for el in kids:
+            text = (el.title or (el.value if isinstance(el.value, str) else "") or "").strip()
+            if text and el.ref != anchor.ref:
+                return text
+        return ""
+
+    name = label_of(region)
+    what = f"the status message {name!r}" if name else "the status message"
+    raise ComputerUseError(
+        ErrorCode.STALE_REF,
+        f"{ref} ({anchor.role} {anchor.title!r}) was in {what}, which is no longer "
+        "shown; it may have timed out or been dismissed. Nothing was sent. Take a new "
+        "snapshot before acting; a control in an expired message cannot be found again.",
+        detail={
+            "ref": ref,
+            "snapshot_id": snap.snapshot_id,
+            "live_snapshot_id": live.snapshot_id,
+            "reason": "hidden_ancestor",
+            "match_reason": reason,
+            "anchor": {"role": anchor.role, "title": anchor.title, "path": list(anchor.path)},
+            "container": {"role": region.role, "subrole": region.subrole, "title": name,
+                          "state": "dismissed"},
+            "candidates": [],
+            "next": ["snapshot"],
+        },
+    )
+
+
 def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     """Re-resolve ``ref`` (issued by ``snap``) against an already-captured
     ``live`` snapshot via the shared anchor matcher — the backend-agnostic core
@@ -1035,6 +1095,7 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     if match is None and reason in {"not_found", "title_changed"}:
         _raise_if_collapsed_ancestor(snap, ref, anchor, live, reason)
         _raise_if_hidden_tab_panel(snap, ref, anchor, live, reason)
+        _raise_if_dismissed_live_region(snap, ref, anchor, live, reason)
     if match is None:
         message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
         candidates = stale_ref_candidates(anchor, live)
