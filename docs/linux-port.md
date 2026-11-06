@@ -998,7 +998,8 @@ substitute their advertised `toggle` action for a click.
 
 For these node-bound button actions, a fresh native page/window title change
 can confirm page activation, including open-shadow, nested-shadow and slotted
-buttons (#1487). The before/after snapshots must belong to the same app and
+buttons (#1487), and ordinary light-DOM toolbar buttons
+that update the page title (#1489). The before/after snapshots must belong to the same app and
 process, and the title must retain the native identity of an ancestor of the
 clicked control. Unrelated page titles do not qualify. New windows/dialogs or
 reported modals retain the unverified outcome, protecting the multiple-download
