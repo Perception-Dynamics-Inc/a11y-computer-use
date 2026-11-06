@@ -5009,7 +5009,10 @@ class LinuxDriver:
         # is taken here too, before that action closes the list.
         before_toggle = self._run(lambda: _atspi.row_toggle_state(handle))
         choice = self._run(lambda: _atspi.combobox_option_context(handle))
-        selected = self._run(lambda: _atspi.select_contained_row(handle))
+        row_sent: list[bool] = []
+        selected = self._run(lambda: _atspi.select_contained_row(
+            handle, on_dispatch=lambda: row_sent.append(True),
+        ))
         if selected is None:
             dispatched = []
             pressed = self._run(lambda: _atspi.do_press(
@@ -5042,11 +5045,23 @@ class LinuxDriver:
         if bounds is not None and bounds.width > 0 and bounds.height > 0:
             try:
                 self.click(element)
-            except ComputerUseError:
+            except ComputerUseError as exc:
                 if self._run(lambda: _atspi.row_is_selected(handle)):
                     return True
                 if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
                     return True
+                if row_sent:
+                    # The row's own action already ran (#1444). A date-picker
+                    # cell's handler sets the date and closes the dialog, so
+                    # the grid is gone and the pointer path's identity check
+                    # refuses. No pointer click was sent, but input was:
+                    # never say "no input was sent", and never retry here.
+                    if (exc.code is ErrorCode.STALE_REF
+                            and (exc.detail or {}).get("reason") == "target_changed"):
+                        # The press is the input; the outcome judge reads
+                        # the page and reports confirmed or unverifiable.
+                        return True
+                    exc.detail = dict(exc.detail or {}, input_sent=True)
                 raise
             if self._run(lambda: _atspi.row_is_selected(handle)):
                 return True
