@@ -34,6 +34,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from a11y_computer_use.roles import roles_match
 from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
@@ -1715,7 +1716,10 @@ def find_elements(
             the view.
         role: case-insensitive substring of the role, with an optional ``AX``
             prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
-            and ``"AXTextField"`` matches exactly.
+            and ``"AXTextField"`` matches that role. Complete aliases are matched
+            by canonical role: ``"textbox"`` and ``"text field"`` match only
+            ``textfield`` / ``AXTextField``, including contenteditable fields
+            exposed with that role. They do not match text areas or containers.
         editable / clickable: keep only elements whose flag equals the given
             boolean.
 
@@ -1737,7 +1741,7 @@ def find_elements(
             haystack = f"{el.title} {value} {el.hint} {el.shortcut}".replace("\u00a0", " ").lower()
             if needle.replace("\u00a0", " ") not in haystack and not (submit_query and el.default):
                 continue
-        if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
+        if role and not roles_match(el.role, role, substring=True):
             continue
         if editable is not None and el.editable is not editable:
             continue

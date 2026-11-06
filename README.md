@@ -60,6 +60,13 @@ Then it acts: `click(ref="e3")`, `type("hello")`, `set_value(ref="e2", value="..
 
 26 tools: `desktop_snapshot`, `find`, `screen_text`, `screenshot`, `zoom`, `crop` (PNG of one ref's on-screen bounds; no OCR), `click`, `hover` (Linux: move the pointer and deliver a hover with no click; elsewhere `unsupported`), `type`, `key`, `scroll`, `drag` (with waypoint paths for strokes), `wait_for`, `wait_until`, `act`, `set_value`, `scroll_to_find`, `notes`, `menu`, `file_dialog`, `app`, `window`, `clipboard`, `request_permission`, `grant_app`, `report_issue` (agents file the tool's own defects and slow calls as issues here, [docs/reporting.md](./docs/reporting.md)), plus `console`, `network`, and `webmcp` (tools a page registers through `navigator.modelContext`, listed as `w1..wN`, [docs/webmcp.md](./docs/webmcp.md)) on the browser. Menus and file dialogs stay reachable even in custom-drawn apps ([docs/macos-primitives.md](./docs/macos-primitives.md)). Details: [docs/agent-loop.md](./docs/agent-loop.md) and the tool docstrings.
 
+`find(app="chrome", role="textbox", text="Editor")` matches a field exposed as
+`textfield "Editor"`, including a contenteditable with that accessibility role.
+Role queries ignore case and an optional `AX` prefix. `textbox` and `text field`
+are exact aliases for `textfield` / `AXTextField` in find and locators; they do
+not match text areas, secure fields, or containers. Other find role queries
+retain substring matching (for example, `button` also matches `menubutton`).
+
 ## Why not the alternatives
 
 <p align="center"><img src="docs/assets/alternatives.png" alt="Comparison with other computer-use approaches" width="92%"></p>
