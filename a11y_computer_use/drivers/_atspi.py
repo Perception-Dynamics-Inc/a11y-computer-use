@@ -2647,6 +2647,60 @@ def _section_text(acc, role_str: str, attrs: dict) -> str | None:
     return raw.strip() or None
 
 
+def _gecko_pdf_text_layer(node) -> bool:
+    """True for Firefox PDF.js ``div.textLayer``.
+
+    The built-in viewer paints the page in ``div.canvasWrapper`` and puts the
+    same words on unnamed ``span`` children of this layer. The class token is
+    ``textLayer``; a longer class name is not this layer. Other sections are
+    not.
+    """
+    if node is None or _role_name(node) != "section":
+        return False
+    attrs = _get_attributes(node)
+    if str(attrs.get("tag") or "").lower() != "div":
+        return False
+    return "textLayer" in str(attrs.get("class") or "").split()
+
+
+def _mark_gecko_pdf_text_spans(node, kids) -> None:
+    """Mark leaf spans listed under a Gecko PDF.js text layer.
+
+    The caller has already established that this tree is Gecko. The pruner
+    reads each child after ``children`` returns the same wrapper, and the
+    mark stays on that wrapper, so a span read does not walk parents on
+    every other Firefox span. A Chromium page that uses the same class is
+    not passed here.
+    """
+    if not kids or node is None or not _gecko_pdf_text_layer(node):
+        return
+    for child in kids:
+        if child is None:
+            continue
+        try:
+            child._a11y_pdf_text_layer = True
+        except Exception:
+            continue
+
+
+def _gecko_pdf_span_text(node, role_str: str, attrs: dict) -> str | None:
+    """The Text interface of one marked PDF.js line span, or None.
+
+    The span's accessible name is empty. ``_section_text`` reads div, pre,
+    and code, not span, so the line used to survive as an empty group beside
+    the canvas ``opaque_region``. Only a childless span is a line. A span
+    that wraps another control keeps that control. ``_page_text`` is bounded
+    and skips a protected node. ``None`` leaves the span unchanged.
+    """
+    if role_str != "section" or not getattr(node, "_a11y_pdf_text_layer", False):
+        return None
+    if str(attrs.get("tag") or "").lower() != "span":
+        return None
+    if _child_count(node) != 0:
+        return None
+    return _page_text(node)
+
+
 _BLOCK_TAGS = frozenset({
     "p", "div", "li", "pre", "blockquote", "address",
     "h1", "h2", "h3", "h4", "h5", "h6",
@@ -5056,6 +5110,12 @@ class ATSPIAccessor:
             sentence = _section_text(node, role_str, attrs)
             if sentence:
                 value = sentence
+        if value is None and role == "AXGroup":
+            # PDF.js line text. The canvas wrapper stays an opaque region.
+            line = _gecko_pdf_span_text(node, role_str, attrs)
+            if line:
+                value = line
+                role = "AXStaticText"
         search_value = None
         if (value is None and role == "AXTextArea"
                 and role_str in {"text", "editable text", "entry"}
@@ -5536,6 +5596,8 @@ class ATSPIAccessor:
         _share_parent_application(node, kids)
         if role == "page tab list":
             return _hoist_hidden_page_tabs(kids)
+        if self._tree_is_gecko(node):
+            _mark_gecko_pdf_text_spans(node, kids)
         return kids
 
     def _lo_placement(self, frame):
