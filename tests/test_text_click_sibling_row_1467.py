@@ -140,3 +140,298 @@ def test_a_click_that_edits_its_own_row_is_confirmed(monkeypatch):
     before, after = _rows(None), _rows("Buy milk")
     label = next(el for el in before.elements if el.title == "Buy milk")
     assert _judge_click(monkeypatch, before, after, label)[0] == "confirmed"
+
+
+def _live_rows(snap, editing):
+    from dataclasses import replace as _replace
+    return _replace(snap, elements=tuple(
+        _replace(el, snapshot_id=snap.snapshot_id) for el in _rows(editing).elements
+    ))
+
+
+@pytest.mark.parametrize("selection_after", [None, ()])
+def test_double_click_on_text_whose_change_lands_in_another_row_says_wrong_target(
+    tmp_path, monkeypatch, selection_after,
+):
+    """Live #1467: a double-click on page text is judged by its selection, which
+    bypassed the row guard; the wrong-row edit came back as a bare unverifiable."""
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: () if selection_after == () else None
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    before = _live_rows(base, None)
+    rt._current = before
+    monkeypatch.setattr(rt, "_reread", lambda *_a, **_k: _live_rows(base, "Walk dog"))
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    result = rt.click(ref=label.ref, count=2)
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("wrong_target")
+    assert "Walk dog" in result.evidence and "Buy milk" in result.evidence
+    assert not result.next
+
+
+def _renumbered(snap, prefix):
+    """The same page read again: every ref (and parent ref) is new."""
+    from dataclasses import is_dataclass, replace as _replace
+    elements = tuple(
+        _replace(el, ref=prefix + el.ref, snapshot_id=prefix,
+                 parent=(prefix + el.parent) if el.parent else None)
+        for el in snap.elements
+    )
+    if is_dataclass(snap):
+        return _replace(snap, snapshot_id=prefix, elements=elements)
+    return SimpleNamespace(snapshot_id=prefix, elements=elements)
+
+
+@pytest.mark.parametrize("selection_after", [None, ()])
+def test_wrong_row_is_found_when_the_click_resolved_against_a_fresh_tree(
+    tmp_path, monkeypatch, selection_after,
+):
+    """Tester's #1475 gate: the before-state is the full tree that resolved
+    the ``find`` ref, whose refs differ from the issuing snapshot's. The row
+    guard located the target by its issuing ref there, found no row, and the
+    live click came back as a bare unverifiable."""
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: () if selection_after == () else None
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    issuing = _live_rows(base, None)
+    resolved = _renumbered(issuing, "z")
+    d.take_click_snapshot = lambda el: resolved
+    rt._current = issuing
+    monkeypatch.setattr(rt, "_reread", lambda *_a, **_k: _renumbered(_live_rows(base, "Walk dog"), "y"))
+    label = next(el for el in issuing.elements if el.title == "Buy milk")
+    result = rt.click(ref=label.ref, count=2)
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("wrong_target")
+    assert "Walk dog" in result.evidence and "Buy milk" in result.evidence
+
+
+def test_row_guard_anchors_the_target_in_a_renumbered_before_tree():
+    before = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows(None).elements), "z")
+    after = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows("Walk dog").elements), "y")
+    label = next(el for el in _rows(None).elements if el.title == "Buy milk")
+    evidence = outcome.wrong_row_effect(before, after, label)
+    assert evidence and "'Walk dog'" in evidence
+    own = _renumbered(SimpleNamespace(snapshot_id="s1", elements=_rows("Buy milk").elements), "y")
+    assert outcome.wrong_row_effect(before, own, label) is None
+
+
+def _debug_click(tmp_path, monkeypatch, editing_after, flag):
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    if flag:
+        monkeypatch.setenv("A11Y_DEBUG_ROW_GUARD", "1")
+    else:
+        monkeypatch.delenv("A11Y_DEBUG_ROW_GUARD", raising=False)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: ()
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    issuing = _live_rows(base, None)
+    d.take_click_snapshot = lambda el: _renumbered(issuing, "z")
+    rt._current = issuing
+    monkeypatch.setattr(
+        rt, "_reread", lambda *_a, **_k: _renumbered(_live_rows(base, editing_after), "y"))
+    label = next(el for el in issuing.elements if el.title == "Buy milk")
+    return rt.click(ref=label.ref, count=2)
+
+
+def _debug_payload(evidence):
+    import json
+    assert "row_guard_debug=" in evidence
+    return json.JSONDecoder().raw_decode(evidence.split("row_guard_debug=", 1)[1])[0]
+
+
+def test_row_guard_debug_trace_records_the_path_when_flagged(tmp_path, monkeypatch, capsys):
+    result = _debug_click(tmp_path, monkeypatch, "Walk dog", flag=True)
+    assert result.evidence.startswith("wrong_target")
+    data = _debug_payload(result.evidence)
+    assert data["guard_ran"] and data["wrong_row_effect_called"] and data["reread"]
+    assert data["selection_branch"] == "suspected_noop"
+    trace = data["trace"]
+    assert trace["exit"] == "wrong_target"
+    assert "object" in trace["before_lookup"] and "control_match" in trace["before_lookup"]
+    assert len(trace["before_rows"]) == len(trace["after_rows"]) == 3
+    assert "row_guard_debug:" in capsys.readouterr().err
+
+
+def test_row_guard_debug_trace_names_the_early_exit(tmp_path, monkeypatch):
+    result = _debug_click(tmp_path, monkeypatch, None, flag=True)
+    assert _debug_payload(result.evidence)["trace"]["exit"] == "no_other_row_changed"
+
+
+def test_row_guard_debug_trace_is_off_by_default(tmp_path, monkeypatch, capsys):
+    result = _debug_click(tmp_path, monkeypatch, "Walk dog", flag=False)
+    assert "row_guard_debug" not in result.evidence
+    assert "row_guard_debug" not in capsys.readouterr().err
+
+
+def _rows_without(dropped: str):
+    """#1475 live: the row whose editor opened leaves the list (3 rows -> 2),
+    and Chrome renumbers what follows, so 'Pay rent' takes 'Walk dog''s refs."""
+    els = [_el("e33", "AXList", (300, 260, 680, 150), clickable=True)]
+    names = [n for n in ("Buy milk", "Walk dog", "Pay rent") if n != dropped]
+    for i, name in enumerate(names):
+        row, y = f"r{i}", 260 + 50 * i
+        els.append(_el(row, "AXListItem", (300, y, 680, 50), parent="e33"))
+        els.append(_el(f"t{i}", "AXStaticText", (424, y + 26, 84, 25), parent=row, title=name))
+    return SimpleNamespace(elements=tuple(els))
+
+
+def test_a_sibling_row_that_left_the_list_is_the_wrong_target():
+    before, after = _rows(None), _rows_without("Walk dog")
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    trace: dict = {}
+    evidence = outcome.wrong_row_effect(before, after, label, trace=trace)
+    assert evidence and evidence.startswith("wrong_target")
+    assert "'Walk dog'" in evidence and "'Buy milk'" in evidence
+    assert trace["row_counts"] == [3, 2] and trace["exit"] == "wrong_target"
+
+
+def test_the_targets_own_row_leaving_the_list_is_not_wrong_target():
+    before, after = _rows(None), _rows_without("Buy milk")
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    assert outcome.wrong_row_effect(before, after, label) is None
+
+
+def test_a_row_added_elsewhere_is_not_wrong_target():
+    before, after = _rows_without("Walk dog"), _rows(None)
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    assert outcome.wrong_row_effect(before, after, label) is None
+
+
+def test_double_click_whose_wrong_row_leaves_the_list_says_wrong_target(tmp_path, monkeypatch):
+    """The live 3 -> 2 shape through click(), with the debug flag on."""
+    from dataclasses import replace as _replace
+    from a11y_computer_use import safety, server
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+
+    monkeypatch.setenv("A11Y_DEBUG_ROW_GUARD", "1")
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.selection_details = lambda el: ()
+    rt = _hover_runtime(tmp_path, d)
+    base = build_synthetic_snapshot(app="editor")
+    before = _live_rows(base, None)
+    after = _replace(base, elements=tuple(
+        _replace(el, snapshot_id=base.snapshot_id) for el in _rows_without("Walk dog").elements))
+    rt._current = before
+    monkeypatch.setattr(rt, "_reread", lambda *_a, **_k: after)
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    result = rt.click(ref=label.ref, count=2)
+    assert result.outcome == "unverifiable"
+    assert result.evidence.startswith("wrong_target")
+    assert "Walk dog" in result.evidence
+    data = _debug_payload(result.evidence)
+    assert data["trace"]["row_counts"] == [3, 2] and data["trace"]["exit"] == "wrong_target"
+
+
+@pytest.mark.parametrize("dropped", [False, True])
+@pytest.mark.parametrize("focus_target", [False, True])
+def test_row_labels_and_matching_survive_controls_focus_and_new_paths(dropped, focus_target):
+    """Tester tree: nested text, glyph and Delete; editor may remove its row."""
+    from dataclasses import replace
+
+    def shaped(snap, after=False):
+        els = []
+        for el in snap.elements:
+            # An ancestry read may differ after the list changes.
+            el = replace(el, path=("AXWindow", "AXGroup" if after else "AXList", el.role))
+            if after and focus_target and el.title == "Buy milk":
+                el = replace(el, focused=True)
+            els.append(el)
+            if el.role == "AXListItem":
+                els.extend([
+                    _el("glyph" + el.ref, "AXStaticText", (300, 260, 10, 10), parent=el.ref, title="○"),
+                    _el("delete" + el.ref, "AXButton", (900, 260, 30, 30), parent=el.ref, title="Delete"),
+                ])
+        return SimpleNamespace(elements=tuple(els))
+
+    before = shaped(_rows(None))
+    after = shaped(_rows_without("Walk dog") if dropped else _rows("Walk dog"), after=True)
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    evidence = outcome.wrong_row_effect(before, after, label)
+    assert evidence and "row 'Walk dog'" in evidence and "row 'Buy milk'" in evidence
+    assert "Delete" not in evidence
+
+
+@pytest.mark.parametrize("probe_kind", ["changed", "missing", "unchanged"])
+@pytest.mark.parametrize("selection_changed", [False, True])
+def test_linux_double_click_reports_observed_selection_or_explicit_failure(
+    tmp_path, monkeypatch, probe_kind, selection_changed,
+):
+    from dataclasses import replace
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import ErrorCode
+    from tests.conftest import build_synthetic_snapshot
+    from tests.test_server import _HoverDriver, _hover_runtime
+    from tests.test_retry_evidence import READ
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda p: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    d = _HoverDriver()
+    d.name = "linux"
+    selections = [(), ((4, 8, "milk"),) if selection_changed else ()]
+    d.selection_details = lambda el: selections.pop(0) if len(selections) > 1 else selections[0]
+    after_probe = (replace(READ, context=((), ("click recorded in title",), ("parent", 0)))
+                   if probe_kind == "changed" else None if probe_kind == "missing" else READ)
+    probes = iter([READ, after_probe])
+    d.retry_evidence = lambda *a, **k: next(probes)
+    rt = _hover_runtime(tmp_path, d)
+    before = _live_rows(build_synthetic_snapshot(app="editor"), None)
+    rt._current = before
+    monkeypatch.setattr(rt, "_reread", lambda *a, **k: before)
+    label = next(el for el in before.elements if el.title == "Buy milk")
+    if probe_kind == "missing" and not selection_changed:
+        with pytest.raises(ComputerUseError) as raised:
+            rt.click(ref=label.ref, count=2)
+        assert raised.value.code == ErrorCode.UNSUPPORTED
+        assert raised.value.detail["reason"] == "double_click_effect_unconfirmed"
+        assert raised.value.detail["input_sent"] is True
+        assert "No wrong row was observed" in raised.value.message
+    else:
+        result = rt.click(ref=label.ref, count=2)
+        assert result.outcome == ("confirmed" if selection_changed else "suspected_noop")
+        if probe_kind == "changed" and not selection_changed:
+            assert not result.next
+            assert "re-observe first" in result.evidence
+    assert len(d.clicked) == 1
+
+
+def test_row_guard_does_not_trust_a_recycled_ref_under_the_same_snapshot_id():
+    from dataclasses import replace
+
+    before = _rows(None)
+    issued = next(el for el in before.elements if el.title == "Buy milk")
+    # Internal reads can retain the snapshot token while pruning reuses refs.
+    resolved = SimpleNamespace(snapshot_id="s1", elements=tuple(
+        replace(el, ref="other" + el.ref, parent="other" + el.parent if el.parent else None)
+        for el in before.elements
+    ) + (replace(issued, title="Unrelated", parent=None),))
+    after = _rows("Walk dog")
+    evidence = outcome.wrong_row_effect(resolved, after, issued)
+    assert evidence and "row 'Walk dog'" in evidence and "row 'Buy milk'" in evidence

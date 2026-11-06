@@ -1050,6 +1050,16 @@ are confirmed only when a readable, nonempty text selection changes, not when
 only focus or the caret changes. Existing cross-app/cross-snapshot drag refusals
 remain in force.
 
+For row text, a changed or removed sibling row is reported as `wrong_target`
+using its text label, independently of row count, ref numbering and focus.
+An unchanged readable selection remains `suspected_noop` when complete scoped
+reads show only surrounding context changes, with no retry suggestions. If
+those reads are incomplete and a static-text double-click has no observed
+selection effect, Linux returns `double_click_effect_unconfirmed` with
+`input_sent: true`; inspect a fresh snapshot or screenshot before further input.
+`A11Y_DEBUG_ROW_GUARD=1` retains the diagnostic trace. These paths have hermetic
+regressions; a new live Tester run is still required.
+
 
 Writer table-cell `set_value` verifies the exact paragraph list, including empty
 paragraphs. Newlines request paragraph boundaries, not line breaks within one

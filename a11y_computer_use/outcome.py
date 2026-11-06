@@ -9,8 +9,8 @@ structured content. The agent loop reads the attributes.
 
 - ``confirmed`` — a read-back, a state change, or a still-living window/process
   showed the action landed.
-- ``suspected_noop`` — every required action/context signal was readable and
-  unchanged, and repeating the action is not a toggle.
+- ``suspected_noop`` — the requested effect was observably unchanged. Retry
+  suggestions additionally require complete unchanged action/context signals.
 - ``unverifiable`` — the requested effect or complete no-change evidence was
   unavailable; re-observe before deciding whether to repeat input.
 - ``partial`` — something landed, but not the requested effect. A process that
@@ -103,6 +103,7 @@ def commits_action(element: object) -> bool:
 def retry_verdict(
     verdict: tuple[str, str], before: RetryEvidence | None,
     after: RetryEvidence | None, *, toggle: bool = False, tool: str = "click",
+    selection_unchanged: bool = False,
 ) -> tuple[str, str]:
     """The single gate from a candidate no-op to permission to suggest retry.
 
@@ -149,6 +150,14 @@ def retry_verdict(
         if missing or len(names) != len(probe.signals) or tool not in RETRY_SIGNALS:
             return "unverifiable", reason + "; required signals missing: " + ", ".join(sorted(missing)) + "; re-observe first (snapshot/screenshot)"
     if before.context != after.context or before.signals != after.signals:
+        # A readable unchanged text selection describes the requested effect,
+        # even if the page records the click in its title. This scoped no-op
+        # does NOT authorize retry; Runtime suppresses next steps in this case.
+        if tool == "click" and judged == "suspected_noop" and selection_unchanged:
+            before_signals, after_signals = dict(before.signals), dict(after.signals)
+            if all(before_signals[name] == after_signals[name] for name in
+                   ("target_identity", "target_states", "target_name", "target_value", "target_text")):
+                return "suspected_noop", reason + "; action or context readings differ; re-observe first (snapshot/screenshot)"
         # A changed context is not proof that the requested effect succeeded.
         return "unverifiable", reason + "; action or context readings differ; re-observe first (snapshot/screenshot)"
     if judged == "partial":
@@ -1431,11 +1440,16 @@ def _row_of(snap: object, element: object) -> object | None:
 
 
 def _row_texts(snap: object, row: object) -> str:
+    title = getattr(row, "title", "") or ""
+    if title:
+        return title
+    # Traversal order is not label priority: a trailing Delete button is
+    # visited before the text. Prefer actual row text, excluding glyphs.
     for el in _subtree(snap, row):
-        title = getattr(el, "title", "") or ""
-        if title and el is not row:
-            return title
-    return getattr(row, "title", "") or ""
+        text = getattr(el, "title", "") or ""
+        if getattr(el, "role", "") == "AXStaticText" and any(c.isalnum() for c in text):
+            return text
+    return getattr(row, "value", "") or ""
 
 
 def _sibling_rows(snap: object, row: object) -> list:
@@ -1446,7 +1460,59 @@ def _sibling_rows(snap: object, row: object) -> list:
     ]
 
 
-def wrong_row_effect(before: object, after: object, target: object) -> str | None:
+def _anchor_in(snap: object, element: object) -> object | None:
+    """``element`` as it appears in ``snap``, whose refs may be another read's.
+
+    A click's before-state is the full tree that resolved the ref, not the
+    snapshot (often a ``find`` result) that issued it, so the issuing ref
+    and parent ref name different nodes there (#1467 live). Prefer the
+    same object, then the same native node, then the shared control match.
+    """
+    found, _ = _anchor_lookup(snap, element)
+    return found
+
+
+def _brief(el: object) -> dict | None:
+    if el is None:
+        return None
+    return {
+        "ref": getattr(el, "ref", None), "role": getattr(el, "role", None),
+        "title": getattr(el, "title", None), "parent": getattr(el, "parent", None),
+    }
+
+
+def _anchor_lookup(snap: object, element: object) -> tuple[object | None, dict]:
+    """``_anchor_in`` plus what each lookup method returned (debug trace)."""
+    elements = _snap_elements(snap)
+    methods: dict = {}
+    obj = element if any(el is element for el in elements) else None
+    methods["object"] = _brief(obj)
+    if obj is not None:
+        return obj, methods
+    same_snap = getattr(element, "snapshot_id", None) == getattr(snap, "snapshot_id", object())
+    methods["same_snapshot_id"] = same_snap
+    if same_snap:
+        hit = _by_ref(snap).get(getattr(element, "ref", None))
+        methods["ref"] = _brief(hit)
+        if (hit is not None and getattr(hit, "role", None) == getattr(element, "role", None)
+                and getattr(hit, "title", None) == getattr(element, "title", None)):
+            return hit, methods
+    node = tuple(getattr(element, "node_identity", ()) or ())
+    methods["node_identity_key"] = repr(node) if node else None
+    if node:
+        same = [el for el in elements if tuple(getattr(el, "node_identity", ()) or ()) == node]
+        methods["node_identity_matches"] = len(same)
+        if len(same) == 1:
+            methods["node_identity"] = _brief(same[0])
+            return same[0], methods
+    hit = _match_control(element, snap)
+    methods["control_match"] = _brief(hit)
+    return hit, methods
+
+
+def wrong_row_effect(
+    before: object, after: object, target: object, trace: dict | None = None,
+) -> str | None:
     """Evidence that a click on a row's content changed another row (#1467).
 
     A ref inside a list item or table row must change that row. When its own
@@ -1454,33 +1520,72 @@ def wrong_row_effect(before: object, after: object, target: object) -> str | Non
     on the sibling: the change is not the target's. None when the target is
     in no row, or the rows cannot be matched one to one before and after.
     """
-    row = _row_of(before, target)
-    if row is None:
-        return None
-    before_rows = _sibling_rows(before, row)
-    index = next((i for i, el in enumerate(before_rows) if el.ref == row.ref), None)
-    if index is None:
-        return None
-    after_target = _match_control(target, after)
-    after_row = _row_of(after, after_target) if after_target is not None else None
-    if after_row is None:
-        return None
-    after_rows = _sibling_rows(after, after_row)
-    if len(after_rows) != len(before_rows):
+    t = trace if trace is not None else {}
+
+    def exit_(point: str) -> None:
+        t["exit"] = point
         return None
 
     def content(snap: object, el: object) -> tuple:
-        rows = [_page_row(n) + (bool(getattr(n, "focused", False)),) for n in _subtree(snap, el)]
+        # Focus is incidental to a pointer gesture, and ancestry/ref numbering
+        # can change when another row becomes an editor. Compare row content.
+        rows = [_page_row(n)[:-1] for n in _subtree(snap, el)]
         return tuple(sorted(rows, key=_sort_key))
 
-    if content(before, before_rows[index]) != content(after, after_rows[index]):
-        return None
-    changed = [
-        i for i, (a, b) in enumerate(zip(before_rows, after_rows))
-        if i != index and content(before, a) != content(after, b)
-    ]
+    def dump(snap: object, rows: list) -> list | None:
+        if trace is None:
+            return None
+        return [{"row": _brief(r), "content": repr(content(snap, r))} for r in rows]
+
+    t["target_in"] = _brief(target)
+    target, t["before_lookup"] = _anchor_lookup(before, target)
+    t["before_target"] = _brief(target)
+    row = _row_of(before, target) if target is not None else None
+    t["before_row"] = _brief(row)
+    if row is None:
+        return exit_("no_before_target" if target is None else "target_not_in_row")
+    before_rows = _sibling_rows(before, row)
+    t["before_rows"] = dump(before, before_rows)
+    index = next((i for i, el in enumerate(before_rows) if el.ref == row.ref), None)
+    t["index"] = index
+    if index is None:
+        return exit_("row_index_not_found")
+    after_target = _match_control(target, after)
+    t["after_target"] = _brief(after_target)
+    after_row = _row_of(after, after_target) if after_target is not None else None
+    t["after_row"] = _brief(after_row)
+    if after_row is None:
+        return exit_("no_after_target" if after_target is None else "after_target_not_in_row")
+    after_rows = _sibling_rows(after, after_row)
+    t["after_rows"] = dump(after, after_rows)
+    after_index = next((i for i, el in enumerate(after_rows) if el.ref == after_row.ref), None)
+    t["after_index"] = after_index
+    if after_index is None:
+        return exit_("after_row_index_not_found")
+    if content(before, before_rows[index]) != content(after, after_rows[after_index]):
+        return exit_("target_row_changed")
+    # Align the other rows by content, not by index: a sibling row that
+    # turned into an editor can leave the list (#1475 live, 3 rows -> 2), so
+    # an index walk compares the wrong pairs. A before row with no unused
+    # after row of the same content changed or vanished.
+    pool: dict = {}
+    for i, el in enumerate(after_rows):
+        if i != after_index:
+            pool.setdefault(content(after, el), []).append(i)
+    changed = []
+    for i, el in enumerate(before_rows):
+        if i == index:
+            continue
+        same = pool.get(content(before, el))
+        if same:
+            same.pop(0)
+        else:
+            changed.append(i)
+    t["changed"] = changed
+    t["row_counts"] = [len(before_rows), len(after_rows)]
     if not changed:
-        return None
+        return exit_("no_other_row_changed")
+    t["exit"] = "wrong_target"
     other = _row_texts(before, before_rows[changed[0]])
     mine = _row_texts(before, row)
     return (

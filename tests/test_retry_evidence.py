@@ -542,3 +542,26 @@ def test_read_budget_credit_is_capped_at_half_the_elapsed_time(readable_native_b
     budget, clock = _budget(native, monkeypatch, 0.0, (1.0, 5.0))
     clock[0] = 0.1
     assert budget.spent() is True
+
+
+@pytest.mark.parametrize("signal,value", [
+    ("target_identity", "other node"), ("target_name", "other row"),
+    ("target_value", "edited"), ("target_text", "changed"),
+    ("target_states", ("selected",)),
+])
+def test_observed_selection_noop_cannot_hide_changed_target(signal, value):
+    changed = replace(READ, signals=tuple(
+        (name, value if name == signal else original) for name, original in READ.signals))
+    judged, _ = outcome.retry_verdict(
+        ("suspected_noop", "the text selection did not change"), READ, changed,
+        selection_unchanged=True,
+    )
+    assert judged == "unverifiable"
+
+
+def test_observed_selection_noop_still_requires_complete_reads():
+    judged, _ = outcome.retry_verdict(
+        ("suspected_noop", "the text selection did not change"), READ,
+        replace(READ, context=None), selection_unchanged=True,
+    )
+    assert judged == "unverifiable"
