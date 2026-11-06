@@ -1288,6 +1288,124 @@ def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> Non
     assert plain.role == "AXTextArea"
 
 
+def test_qt6_line_edit_textarea_matches_textbox_and_password_matches_secure(monkeypatch) -> None:
+    """Qt 6 QLineEdit is AT-SPI ``text`` with neither SINGLE_LINE nor MULTI_LINE.
+
+    The snapshot role stays ``textarea``. ``find(role=textbox)`` and
+    ``find(role=textfield)`` match that editable line edit and skip a
+    multi-line editor, a read-only line edit, a GTK text view, and a
+    password field. ``find(role=password)`` matches the password
+    ``QLineEdit`` (AT-SPI ``password text`` / ``securetextfield``).
+    ``find(role=textfield)`` does not substring-select that secure field.
+    The state set is the Qt 6.11/6.12 shape recorded for #1418 and
+    confirmed live in #1494/#1495. This test does not launch Qt.
+    """
+    from a11y_computer_use.roles import LINE_EDIT_SUBROLE
+
+    class _States:
+        def __init__(self, names):
+            self.names = set(names)
+
+    class _App:
+        def __init__(self, toolkit):
+            self.toolkit = toolkit
+
+        def get_toolkit_name(self):
+            return self.toolkit
+
+    class _Field:
+        def __init__(self, role, name, states, toolkit, text):
+            self.role = role
+            self.name = name
+            self.states = set(states)
+            self.toolkit = toolkit
+            self.text = text
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States(self.states)
+
+        def get_application(self):
+            return _App(self.toolkit)
+
+        def get_attributes(self):
+            return {}
+
+        def get_editable_text_iface(self):
+            return object()
+
+    line_states = {"EDITABLE", "ENABLED", "FOCUSABLE", "SENSITIVE", "SHOWING", "VISIBLE"}
+    assert "SINGLE_LINE" not in line_states and "MULTI_LINE" not in line_states
+
+    def flags(acc):
+        editable = "EDITABLE" in acc.states and "READ_ONLY" not in acc.states
+        return (True, False, None, False, None, True, editable)
+
+    monkeypatch.setattr(_atspi, "_state_flags", flags)
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((12.0, 40.0), (180.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+    # Multi-line Qt documents read viewport text through the native binding.
+    # Role matching does not. Keep this fixture free of gi/Atspi.
+    monkeypatch.setattr(_atspi, "_qt_viewport_text", lambda acc: None)
+
+    def read(role, name, states, toolkit, text):
+        return _atspi.ATSPIAccessor().read(_Field(role, name, states, toolkit, text))
+
+    line = read("text", "Your name", line_states, "Qt", "Ada")
+    notes = read("text", "Notes", line_states | {"MULTI_LINE"}, "Qt", "line1\nline2")
+    locked = read("text", "Locked", line_states | {"READ_ONLY"}, "Qt", "nope")
+    secret = read("password text", "SecretField", line_states, "Qt", "hunter2")
+    gtk = read("text", "Gtk entry", line_states, "gtk", "gtk")
+    assert line.role == "AXTextArea" and line.subrole == LINE_EDIT_SUBROLE
+    assert notes.role == "AXTextArea" and notes.subrole is None
+    assert locked.role == "AXTextArea" and locked.subrole is None
+    assert secret.role == "AXSecureTextField" and secret.subrole is None
+    assert gtk.role == "AXTextArea" and gtk.subrole is None
+
+    window = (
+        RawNode(role="AXWindow", title="Qt form", position=(0.0, 0.0), size=(640.0, 480.0)),
+        [(line, []), (notes, []), (locked, []), (secret, []), (gtk, [])],
+    )
+    snap = build_snapshot(
+        window, _FakeAccessor(), scope=Scope.WINDOW, app="qtform", pid=7, geometry=_geometry(),
+    )
+    rendered = observe.render_text(snap)
+    assert 'textarea "Your name"' in rendered
+    assert 'textarea "Notes"' in rendered
+    assert 'securetextfield "SecretField"' in rendered
+    assert "hunter2" not in rendered
+    assert "lineedit" not in rendered
+    by_title = {el.title: el for el in snap.elements}
+    assert by_title["Your name"].editable and not by_title["Your name"].secure
+    assert by_title["Your name"].subrole == LINE_EDIT_SUBROLE
+    assert by_title["SecretField"].secure and by_title["SecretField"].value is None
+
+    def titles(role):
+        return [el.title for el in observe.find_elements(snap, role=role)]
+
+    assert titles("textbox") == ["Your name"]
+    assert titles("textfield") == ["Your name"]
+    assert titles("AXTextBox") == ["Your name"]
+    assert titles("text field") == ["Your name"]
+    assert set(titles("textarea")) == {"Your name", "Notes", "Locked", "Gtk entry"}
+    assert titles("password") == ["SecretField"]
+    assert titles("password text") == ["SecretField"]
+    assert titles("securetextfield") == ["SecretField"]
+    assert "SecretField" not in titles("textfield")
+    assert "SecretField" not in titles("textbox")
+    assert "Notes" not in titles("textfield")
+
+
 def test_chromium_textarea_entry_is_multi_line_text(monkeypatch) -> None:
     """Chromium exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
 

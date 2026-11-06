@@ -1243,6 +1243,49 @@ def test_find_textbox_alias_matches_only_textfield_editor(actual_role: str, quer
     assert observe.find_elements(snap, role="textboxcontainer", text="Editor") == ()
 
 
+def test_find_password_alias_and_qt_line_edit_textarea() -> None:
+    """#1494/#1495: textbox/textfield match a line-edit textarea, not secure fields.
+
+    ``password`` matches ``securetextfield``. ``textfield`` does not
+    substring-match that role. A multi-line textarea and a non-editable
+    line-edit marker stay out of the text-field query.
+    """
+    from a11y_computer_use.roles import LINE_EDIT_SUBROLE
+
+    line = Element(
+        ref="e1", role="AXTextArea", title="Your name", value="Ada",
+        bounds=None, snapshot_id="qt", editable=True, subrole=LINE_EDIT_SUBROLE,
+    )
+    notes = Element(
+        ref="e2", role="AXTextArea", title="Notes", value="line1\nline2",
+        bounds=None, snapshot_id="qt", editable=True,
+    )
+    locked = dataclasses.replace(line, ref="e3", title="Locked", editable=False)
+    secret = Element(
+        ref="e4", role="AXSecureTextField", title="SecretField", value=None,
+        bounds=None, snapshot_id="qt", editable=True, secure=True,
+    )
+    plain = Element(
+        ref="e5", role="AXTextField", title="Gtk entry", value="gtk",
+        bounds=None, snapshot_id="qt", editable=True,
+    )
+    snap = Snapshot("qt", Scope.WINDOW, "qtform", 7, 0.0, (), (line, notes, locked, secret, plain))
+
+    def titles(role):
+        return [el.title for el in observe.find_elements(snap, role=role)]
+
+    assert titles("textbox") == ["Your name", "Gtk entry"]
+    assert titles("textfield") == ["Your name", "Gtk entry"]
+    assert titles("password") == ["SecretField"]
+    assert titles("AXPassword") == ["SecretField"]
+    assert "SecretField" not in titles("textfield")
+    assert "SecretField" not in titles("textbox")
+    assert "Notes" not in titles("textbox")
+    assert "Locked" not in titles("textfield")
+    assert set(titles("textarea")) == {"Your name", "Notes", "Locked"}
+    assert observe.find_elements(snap, role="button") == ()
+
+
 def test_find_by_capability_flags() -> None:
     snap = snap_of(_find_window())
     assert [e.title for e in observe.find_elements(snap, editable=True)] == ["Name"]

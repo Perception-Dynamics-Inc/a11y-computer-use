@@ -46,6 +46,7 @@ from a11y_computer_use.observe import (
     _generic_region_name,
     normalize_document_title,
 )
+from a11y_computer_use.roles import LINE_EDIT_SUBROLE
 from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
@@ -5287,6 +5288,14 @@ class ATSPIAccessor:
                 # or re-rendering panel is refused by its tab (#1458).
                 else "tabpanel" if "tabpanel" in str(attrs.get("xml-roles") or "").split()
                 else "status" if "status" in str(attrs.get("xml-roles") or "").split()
+                # Qt 6 QLineEdit is AT-SPI role text with neither SINGLE_LINE
+                # nor MULTI_LINE, so the snapshot role stays textarea (#1494).
+                # The marker lets textbox/textfield find that line edit only.
+                else LINE_EDIT_SUBROLE if (
+                    role == "AXTextArea"
+                    and role_str in {"text", "entry"}
+                    and qt_line_edit(node)
+                )
                 else None
             ),
             title=str(name),
