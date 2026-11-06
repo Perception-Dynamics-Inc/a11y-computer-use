@@ -21639,6 +21639,12 @@ _SEEK_EXACT_COLLECTION_ROLES = (
 # Names read from one Collection answer. The walk's own budget, so a page
 # with thousands of controls costs no more than the walk it replaces.
 _SEEK_EXACT_COLLECTION_LIMIT = _SEEK_NODE_BUDGET
+# Chrome answers this GetMatches in about a second on a 10k-row page. The
+# process-wide default is 300ms and raises "timeout from dbind", which
+# dropped the exact name for the substring hit. Three seconds is the ceiling
+# for this call only; it is restored before the next read so a hung query
+# cannot keep the wider budget (#1396). Not 10s.
+_SEEK_EXACT_COLLECTION_TIMEOUT_MS = 3000
 
 
 def _collection_exact_seek(doc, needle: str):
@@ -21648,7 +21654,8 @@ def _collection_exact_seek(doc, needle: str):
     exact "Home" link can sit thousands of nodes past "W3C homepage". One
     Collection query lists the document's links, buttons, tabs and headings
     in document order inside the browser, so only their names are read.
-    None without Collection (GTK, fakes) or when no name is exact.
+    None without Collection (GTK, fakes), when no name is exact, or when
+    the query times out: the caller then keeps the substring hit.
     """
     try:
         Atspi = _atspi()
@@ -21667,10 +21674,27 @@ def _collection_exact_seek(doc, needle: str):
         rule = Atspi.MatchRule.new(
             Atspi.StateSet.new([]), mt.NONE, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
         )
+    except Exception:  # noqa: BLE001 - a failed query keeps the substring answer
+        return None
+    budget = None
+    try:
+        set_timeout = getattr(Atspi, "set_timeout", None)
+        if set_timeout is not None:
+            set_timeout(_SEEK_EXACT_COLLECTION_TIMEOUT_MS, 0)
+            budget = set_timeout
+    except Exception:  # noqa: BLE001 - still try the query on the default budget
+        budget = None
+    try:
         hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL,
                                 _SEEK_EXACT_COLLECTION_LIMIT, True)
     except Exception:  # noqa: BLE001 - a failed query keeps the substring answer
         return None
+    finally:
+        if budget is not None:
+            try:
+                budget(300, 0)
+            except Exception:  # noqa: BLE001
+                pass
     for hit in list(hits or [])[:_SEEK_EXACT_COLLECTION_LIMIT]:
         try:
             if hit is not None and _exact_seek_name(hit, needle):

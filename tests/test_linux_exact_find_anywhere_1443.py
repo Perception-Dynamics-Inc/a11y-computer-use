@@ -18,7 +18,7 @@ def _page(filler=4000):
     return document, prose, decoy, home
 
 
-def _collection(monkeypatch, document, controls, queries):
+def _collection(monkeypatch, document, controls, queries, *, timeouts=None, error=None):
     fake = _NS(
         Role=_NS(LINK="link", PUSH_BUTTON="push button", HEADING="heading"),
         StateSet=_NS(new=lambda states: tuple(states)),
@@ -26,9 +26,17 @@ def _collection(monkeypatch, document, controls, queries):
         CollectionSortOrder=_NS(CANONICAL="canonical"),
         MatchRule=_NS(new=lambda *args: args),
     )
+    if timeouts is not None:
+        def set_timeout(ms, grace):
+            timeouts.append((ms, grace))
+
+        fake.set_timeout = set_timeout
 
     def get_matches(rule, order, limit, traverse):
-        queries.append((tuple(rule[4]), limit))
+        seen = timeouts[-1] if timeouts else None
+        queries.append((tuple(rule[4]), limit, seen))
+        if error is not None:
+            raise error
         return list(controls)
 
     document.get_collection_iface = lambda: _NS(get_matches=get_matches)
@@ -39,7 +47,8 @@ def _collection(monkeypatch, document, controls, queries):
 def test_exact_name_far_past_partial_match_is_revealed(fake_atspi, monkeypatch, exact_only):
     document, prose, decoy, home = _page()
     queries = []
-    _collection(monkeypatch, document, [prose, decoy, home], queries)
+    timeouts = []
+    _collection(monkeypatch, document, [prose, decoy, home], queries, timeouts=timeouts)
     monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
     revealed = []
     monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: revealed.append(node))
@@ -49,6 +58,9 @@ def test_exact_name_far_past_partial_match_is_revealed(fake_atspi, monkeypatch, 
     assert _atspi.reveal_text_in_document(document, "Home", exact_only=exact_only)
     assert revealed == [home]
     assert len(queries) == 1 and "link" in queries[0][0]
+    # The reply budget covers Chrome's ~1s GetMatches, then the 300ms default returns.
+    assert queries[0][2] == (_atspi._SEEK_EXACT_COLLECTION_TIMEOUT_MS, 0)
+    assert timeouts == [queries[0][2], (300, 0)]
     # The tree walk itself stays bounded; Collection did the long reach.
     assert len({id(n) for n in reads}) <= _atspi._SEEK_EXACT_AFTER_SUBSTRING + 20
 
@@ -79,3 +91,24 @@ def test_collection_without_an_exact_name_keeps_the_partial_match(fake_atspi, mo
     monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: pytest.fail("prose is on screen"))
     assert _atspi.reveal_text_in_document(document, "Home")
     assert len(queries) == 1
+
+
+def test_collection_timeout_falls_back_to_the_partial_match(fake_atspi, monkeypatch):
+    """A dbind timeout keeps the substring hit and restores the 300ms budget."""
+    document, prose, decoy, home = _page()
+    queries = []
+    timeouts = []
+    _collection(
+        monkeypatch, document, [prose, decoy, home], queries, timeouts=timeouts,
+        error=RuntimeError("atspi_error: timeout from dbind"),
+    )
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(
+        _atspi, "scroll_to_edge", lambda node, edge: pytest.fail("prose is on screen"),
+    )
+    assert 2000 <= _atspi._SEEK_EXACT_COLLECTION_TIMEOUT_MS <= 3000
+    assert _atspi.reveal_text_in_document(document, "Home")
+    assert not _atspi.reveal_text_in_document(document, "Home", exact_only=True)
+    widened = (_atspi._SEEK_EXACT_COLLECTION_TIMEOUT_MS, 0)
+    assert [seen for _roles, _limit, seen in queries] == [widened, widened]
+    assert timeouts == [widened, (300, 0), widened, (300, 0)]
