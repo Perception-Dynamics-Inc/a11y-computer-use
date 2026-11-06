@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from PIL import Image
 
 from a11y_computer_use import capture, safety, server
@@ -391,3 +392,66 @@ def test_crop_of_a_scrolled_off_ref_is_off_screen_and_click_stays_stale(tmp_path
     else:
         raise AssertionError("a gone ref stays stale_ref")
     assert driver.shots == shots
+
+
+class _RevealDriver(_ScrolledDriver):
+    """A driver that can reveal an unchanged scrolled-off ref (#1402)."""
+
+    def __init__(self, elements, png, display) -> None:
+        super().__init__(elements, png, display)
+        self.unchanged: set[str] = set()
+        self.reveal_calls: list[str] = []
+        self.clicked: list[str] = []
+
+    def reveal_scrolled_off(self, snap, ref):
+        self.reveal_calls.append(ref)
+        if ref not in self.unchanged:
+            return None
+        return snap.element(ref)
+
+    def click(self, target, *args, **kwargs):
+        self.clicked.append(getattr(target, "ref", target))
+
+    def press_element(self, target, *args, **kwargs):
+        self.clicked.append(getattr(target, "ref", target))
+        return True
+
+
+def test_click_on_a_scrolled_off_unchanged_ref_reveals_it_and_a_changed_one_stays_stale(tmp_path) -> None:
+    """#1402: an unchanged element a later find scrolled away still acts.
+
+    The driver proves the issued accessible is unchanged and reveals it, and
+    the click lands on that element. When the driver cannot prove that (a
+    different element, or a gone one), the click stays stale_ref and nothing
+    is clicked.
+    """
+    display = Display(0, 100, 80, 1.0, True)
+    same = _element("e3", Bounds(0, 8, 40, 20, 16), title="Row 3")
+    other = _element("e4", Bounds(0, 8, 40, 20, 16), title="Row 4")
+    driver = _RevealDriver([same, other], _png(100, 80), display)
+    driver.offscreen["e3"] = Bounds(0, 8, -80, 20, 16)
+    driver.offscreen["e4"] = Bounds(0, 8, -120, 20, 16)
+    driver.unchanged.add("e3")
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("demo", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    runtime.desktop_snapshot("demo")
+
+    result = runtime.click("e3")
+    assert "Row 3" in result, result
+    assert driver.reveal_calls == ["e3"]
+    assert driver.clicked == ["e3"]
+
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.click("e4")
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "title_changed"
+    assert driver.reveal_calls == ["e3", "e4"]
+    assert driver.clicked == ["e3"]
+
+    # A gone node is never offered for reveal.
+    driver.offscreen["e4"] = None
+    driver.reveal_calls.clear()
+    with pytest.raises(ComputerUseError):
+        runtime.click("e4")
+    assert driver.reveal_calls == []
