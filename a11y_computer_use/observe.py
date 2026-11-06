@@ -950,7 +950,7 @@ def _raise_if_hidden_tab_panel(snap: Snapshot, ref: str, anchor: Element,
                    f"content is not in the tree. Select the owning tab first ({where}), "
                    f"then act on {ref} again.")
         state = "hidden"
-        nxt = ["ref"]
+        nxt = ["snapshot"]
     else:
         live_by_ref = {el.ref: el for el in live.elements}
         panel_refs = {el.ref for el in live_panels}
