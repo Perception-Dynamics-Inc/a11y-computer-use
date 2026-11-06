@@ -5106,17 +5106,22 @@ class LinuxDriver:
     _ARIA_MAX_STEPS = 1000
 
     def _step_aria_range(self, element: Element, handle, value: str) -> bool | str:
-        """Step a Chrome ARIA slider/spinbutton to ``value`` (#780).
+        """Step a Chrome ARIA slider/spinbutton to ``value`` (#780, #1484).
 
         ``set_numeric_value`` has already refused a non-number or a value
-        outside the range, and its write did not land. The node's own
+        outside the range, and its write did not land. Prefer that Value
+        path; this runs only when Chrome ignored the write. The node's own
         ``increment``/``decrement`` actions are used when it has them;
         otherwise it is focused and stepped with arrow keys (Right/Left on a
         slider, Up/Down on a spin button). Every step is read back through
-        the Value interface (``aria-valuenow``), and the call succeeds only
-        when the read-back equals the target. A value that cannot be read, a
-        target off the step grid, a step that does not move the value, an
-        overshoot, or lost focus raises with the value reached.
+        the Value interface (``aria-valuenow``). The page's real step size is
+        learned from the first observed move (AT-SPI ``minimum_increment`` is
+        often 1 while the page steps by 5). The next step is never sent when
+        it would pass the target. An overshoot is undone with one opposite
+        step; a successful restore may refuse with the nearest reachable
+        values, and a failed restore returns unverifiable naming the value
+        held. ``refused`` is never returned while the live value differs
+        from the start. Confirmed only when read-back equals the target.
         """
         from a11y_computer_use.drivers import _atspi, _linux_input
 
@@ -5129,66 +5134,171 @@ class LinuxDriver:
             return ComputerUseError(ErrorCode.UNSUPPORTED, f"{element.ref} ({element.role}) {message}",
                                     detail=payload)
 
+        def changed_outcome(holding: float, *, reason: str, overshot=None) -> ComputerUseError:
+            """Honest non-refused result when the live value is not the start."""
+            lo_hi = ""
+            detail = {
+                "platform": "linux", "reason": reason, "ref": element.ref,
+                "role": element.role, "expected": value, "actual": holding,
+                "sent": sent, "restored": False, "outcome": "unverifiable", "next": [],
+                "evidence": (f"the element now holds {_atspi._format_bound(holding)}, "
+                             f"not {value!r}"),
+            }
+            if observed_step is not None:
+                lo, hi = nearest_pair(start, target, observed_step)
+                detail["step"] = observed_step
+                detail["nearest"] = [lo, hi]
+                lo_hi = (f"; nearest reachable are {_atspi._format_bound(lo)} and "
+                         f"{_atspi._format_bound(hi)}")
+            if overshot is not None:
+                detail["overshot"] = overshot
+            return ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) now holds {_atspi._format_bound(holding)}, "
+                f"not {value!r}{lo_hi}",
+                detail=detail,
+            )
+
+        def nearest_pair(origin: float, goal: float, step: float) -> list[float]:
+            span = (goal - origin) / step
+            below = origin + math.floor(span) * step
+            above = origin + math.ceil(span) * step
+            return [_atspi._parse_number(_atspi._format_bound(below)),
+                    _atspi._parse_number(_atspi._format_bound(above))]
+
+        def poll_value(previous: float):
+            moved = None
+            for poll in range(self._ARIA_STEP_POLLS):
+                moved = self._run(lambda: _atspi.read_current_value(handle))
+                if moved is not None and not _atspi._numbers_match(moved, previous):
+                    return moved
+                if poll + 1 < self._ARIA_STEP_POLLS:
+                    time.sleep(self._ARIA_STEP_PAUSE_S)
+            return moved
+
         current = self._run(lambda: _atspi.read_current_value(handle))
         if current is None:
             raise refuse("value_unreadable", "has no readable current value; nothing was sent", sent=0)
         if _atspi._numbers_match(current, target):
             return True
-        step = self._run(lambda: _atspi.value_step(handle))
-        count = (target - current) / step
+        advertised = self._run(lambda: _atspi.value_step(handle))
+        count = (target - current) / advertised
         steps = round(count)
         if abs(count - steps) > 1e-6:
             raise refuse("off_step", f"cannot reach {value!r} from {_atspi._format_bound(current)} "
-                         f"in steps of {_atspi._format_bound(step)}; nothing was sent",
-                         actual=current, step=step, sent=0)
+                         f"in steps of {_atspi._format_bound(advertised)}; nothing was sent",
+                         actual=current, step=advertised, sent=0)
         if abs(steps) > self._ARIA_MAX_STEPS:
             raise refuse("too_many_steps", f"needs {abs(steps)} steps to reach {value!r}; nothing was sent",
                          actual=current, sent=0)
-        up = steps > 0
+        up = target > current
         names = self._run(lambda: _atspi.raw_action_names(handle))
         action = "increment" if up else "decrement"
-        via_action = action in names
+        back_action = "decrement" if up else "increment"
+        # Need both directions so a restore key/action exists (#1484).
+        via_action = action in names and back_action in names
         if via_action:
             send = lambda: self._run(lambda: _atspi.do_named_action(handle, action))
+            send_back = lambda: self._run(lambda: _atspi.do_named_action(handle, back_action))
             how = f"via {action}"
         else:
             if not self._focus_aria_range(handle):
                 raise refuse("focus_lost", "could not be focused; no key was sent", actual=current, sent=0)
             if self._run(lambda: _atspi._role_name(handle)) == "spin button":
-                key = "up" if up else "down"
+                key, back_key = ("up", "down") if up else ("down", "up")
             else:
-                key = "right" if up else "left"
+                key, back_key = ("right", "left") if up else ("left", "right")
             send = lambda: _linux_input.press_chord(key)
+            send_back = lambda: _linux_input.press_chord(back_key)
             how = f"via key {key}"
-        sent = 0
+
+        start = current
         reached = current
-        for _ in range(abs(steps)):
+        observed_step = None
+        sent = 0
+
+        def restore_one() -> float:
+            """One opposite step toward the start (#1484; never more than one)."""
+            nonlocal sent, reached
+            if _atspi._numbers_match(reached, start):
+                return reached
             if not via_action and not self._aria_focused(handle):
-                raise refuse("focus_lost", f"lost focus after {sent} steps at {_atspi._format_bound(reached)}",
-                             actual=reached, sent=sent)
+                return reached
+            before = reached
+            send_back()
+            sent += 1
+            moved = poll_value(before)
+            if moved is None or _atspi._numbers_match(moved, before):
+                return reached
+            reached = moved
+            return reached
+
+        def finish_unreachable(*, overshot=None) -> ComputerUseError:
+            """Restore at most once, then refuse only if the start value held."""
+            holding = restore_one()
+            restored = _atspi._numbers_match(holding, start)
+            if not restored:
+                return changed_outcome(holding, reason="overshoot" if overshot is not None else "off_step",
+                                       overshot=overshot)
+            step = observed_step if observed_step is not None else advertised
+            lo, hi = nearest_pair(start, target, step)
+            reason = "overshoot" if overshot is not None else "off_step"
+            return refuse(
+                reason,
+                f"cannot reach {value!r} in steps of {_atspi._format_bound(step)}; "
+                f"nearest reachable are {_atspi._format_bound(lo)} and "
+                f"{_atspi._format_bound(hi)}; restored to {_atspi._format_bound(holding)}",
+                actual=holding, step=step, sent=sent, nearest=[lo, hi], restored=True,
+                **({"overshot": overshot} if overshot is not None else {}),
+            )
+
+        while not _atspi._numbers_match(reached, target):
+            if sent >= self._ARIA_MAX_STEPS:
+                raise finish_unreachable()
+            if observed_step is not None:
+                remaining = target - reached
+                needed = remaining / observed_step
+                # Stop before a step that would pass the target, or when the
+                # target is off the page's real step grid.
+                if abs(needed - round(needed)) > 1e-6 or abs(remaining) < observed_step - 1e-9:
+                    raise finish_unreachable()
+            if not via_action and not self._aria_focused(handle):
+                holding = reached
+                if not _atspi._numbers_match(holding, start):
+                    raise changed_outcome(holding, reason="focus_lost")
+                raise refuse("focus_lost", f"lost focus after {sent} steps at "
+                             f"{_atspi._format_bound(holding)}", actual=holding, sent=sent)
+            before = reached
             send()
             sent += 1
-            moved = None
-            for poll in range(self._ARIA_STEP_POLLS):
-                moved = self._run(lambda: _atspi.read_current_value(handle))
-                if moved is not None and not _atspi._numbers_match(moved, reached):
-                    break
-                if poll + 1 < self._ARIA_STEP_POLLS:
-                    time.sleep(self._ARIA_STEP_PAUSE_S)
+            moved = poll_value(before)
             if moved is None:
+                # Cannot verify; do not claim a clean refusal if we already moved.
+                if not _atspi._numbers_match(before, start):
+                    raise changed_outcome(before, reason="value_unreadable")
                 raise refuse("value_unreadable", f"value could not be read back after {sent} steps",
                              actual=None, sent=sent)
-            if _atspi._numbers_match(moved, reached):
-                raise refuse("step_unchanged", f"did not move from {_atspi._format_bound(reached)} "
-                             f"after a step {how}; stopped after {sent} steps", actual=reached, sent=sent)
+            if _atspi._numbers_match(moved, before):
+                if not _atspi._numbers_match(before, start):
+                    raise finish_unreachable()
+                raise refuse("step_unchanged", f"did not move from {_atspi._format_bound(before)} "
+                             f"after a step {how}; stopped after {sent} steps",
+                             actual=before, sent=sent)
+            delta = abs(moved - before)
+            if observed_step is None and delta > 0:
+                observed_step = delta
             if (moved - target) * (1 if up else -1) > 1e-9:
-                raise refuse("overshoot", f"stepped past {value!r} to {_atspi._format_bound(moved)} {how}",
-                             actual=moved, sent=sent)
+                reached = moved
+                raise finish_unreachable(overshot=moved)
             reached = moved
             if _atspi._numbers_match(reached, target):
                 return True
-        raise refuse("text_mismatch", f"read back {_atspi._format_bound(reached)} after {sent} steps {how}, "
-                     f"not {value!r}", actual=reached, sent=sent)
+            if observed_step is not None:
+                remaining = target - reached
+                needed = remaining / observed_step
+                if abs(needed - round(needed)) > 1e-6:
+                    raise finish_unreachable()
+        return True
 
     _ARIA_FOCUS_POLLS = 25
     _ARIA_FOCUS_TRIES = 2
