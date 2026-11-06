@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -213,6 +214,30 @@ def test_cdp_session_skips_events_and_raises_on_error() -> None:
     sess = _cdp.CDPSession(T())
     assert sess.call("Foo.bar") == {"ok": 1}
     assert sess.drain_events()[0]["method"] == "Page.frameNavigated"
+
+    frames = [
+        json.dumps({"id": 1, "result": {}}),
+        json.dumps({"method": "Network.loadingFailed",
+                    "params": {"requestId": "1", "errorText": "net::ERR_UNSAFE_PORT"}}),
+    ]
+
+    class PollTransport:
+        def send(self, payload):
+            raise AssertionError("poll_event must not send")
+
+        def recv(self, timeout=None):
+            raise AssertionError("poll_event must not use recv")
+
+        def try_recv(self, timeout):
+            return frames.pop(0) if frames else None
+
+        def close(self):
+            pass
+
+    polled = _cdp.CDPSession(PollTransport())
+    event = polled.poll_event(0)
+    assert event["method"] == "Network.loadingFailed"
+    assert polled.poll_event(0) is None
 
     sess_err = _cdp.CDPSession(ScriptedTransport(
         lambda m, p: (_ for _ in ()).throw(_CDPError("nope"))))
@@ -1054,6 +1079,125 @@ def test_network_requests_join_status_and_failures() -> None:
     assert d.network_requests() == []  # cleared
 
 
+def test_network_log_reports_unsafe_port_and_ignores_replay_and_monotonic_noise() -> None:
+    """Chrome can record a blocked port only as a network log line.
+
+    ``Log.enable`` also replays older lines. Those must not become failures.
+    A monotonic timestamp is trusted only for a request this session already saw.
+    """
+    d, _ = _driver_on(lambda m, p: {})
+    fresh = time.time() * 1000.0 + 5_000.0
+    d._session._events = [
+        {"method": "Log.entryAdded",
+         "params": {"entry": {
+             "source": "network", "level": "error",
+             "text": "Failed to load resource: net::ERR_UNSAFE_PORT",
+             "timestamp": fresh, "url": "http://127.0.0.1:1/x",
+             "networkRequestId": "port-1"}}},
+        {"method": "Log.entryAdded",
+         "params": {"entry": {
+             "source": "network", "level": "error",
+             "text": "Failed to load resource: net::ERR_FAILED",
+             "timestamp": 1_700_000_000_000.0, "url": "http://stale.example/old",
+             "networkRequestId": "old"}}},
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "mono", "request": {"method": "GET", "url": "http://127.0.0.1:1/y"}}},
+        {"method": "Log.entryAdded",
+         "params": {"entry": {
+             "source": "network", "level": "error",
+             "text": "Failed to load resource: net::ERR_UNSAFE_PORT",
+             "timestamp": 12.5, "url": "http://127.0.0.1:1/y",
+             "networkRequestId": "mono"}}},
+        {"method": "Log.entryAdded",
+         "params": {"entry": {
+             "source": "network", "level": "error",
+             "text": "Failed to load resource: net::ERR_FAILED",
+             "timestamp": 12.5, "url": "http://not-announced.example/",
+             "networkRequestId": "nope"}}},
+    ]
+    reqs = d.network_requests()
+    assert {"method": "GET", "url": "http://127.0.0.1:1/x", "error": "net::ERR_UNSAFE_PORT"} in reqs
+    assert {"method": "GET", "url": "http://127.0.0.1:1/y", "error": "net::ERR_UNSAFE_PORT"} in reqs
+    assert all(r.get("url") != "http://stale.example/old" for r in reqs)
+    assert all(r.get("url") != "http://not-announced.example/" for r in reqs)
+    assert d._net_pending == {}
+
+
+def test_network_loading_failed_and_log_collapse_and_status_wins() -> None:
+    d, _ = _driver_on(lambda m, p: {})
+    fresh = time.time() * 1000.0 + 5_000.0
+    d._session._events = [
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "bad", "request": {"method": "GET", "url": "http://127.0.0.1:1/x"}}},
+        {"method": "Network.loadingFailed",
+         "params": {"requestId": "bad", "errorText": "net::ERR_UNSAFE_PORT"}},
+        {"method": "Log.entryAdded",
+         "params": {"entry": {
+             "source": "network", "level": "error",
+             "text": "Failed to load resource: net::ERR_UNSAFE_PORT",
+             "timestamp": fresh, "url": "http://127.0.0.1:1/x",
+             "networkRequestId": "bad"}}},
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "ok", "request": {"method": "GET", "url": "data:text/plain,ok"}}},
+        {"method": "Network.responseReceived",
+         "params": {"requestId": "ok", "response": {"status": 200, "url": "data:text/plain,ok"}}},
+        {"method": "Log.entryAdded",
+         "params": {"entry": {
+             "source": "network", "level": "error",
+             "text": "Failed to load resource: net::ERR_FAILED",
+             "timestamp": fresh, "url": "data:text/plain,ok",
+             "networkRequestId": "ok"}}},
+    ]
+    reqs = d.network_requests()
+    errors = [r for r in reqs if r.get("url") == "http://127.0.0.1:1/x"]
+    assert errors == [{"method": "GET", "url": "http://127.0.0.1:1/x", "error": "net::ERR_UNSAFE_PORT"}]
+    assert {"method": "GET", "url": "data:text/plain,ok", "status": 200} in reqs
+    assert not any(r.get("url") == "data:text/plain,ok" and "error" in r for r in reqs)
+
+
+def test_network_requests_read_a_failure_still_on_the_socket(monkeypatch) -> None:
+    """loadingFailed that arrives after the command pump is still an error outcome.
+
+    The document 200 is already buffered (so this read settles). The unsafe-port
+    failure is still on the socket. A long settle window must not be sat out
+    once that failure is quiet. An idle read, with nothing new, must not poll.
+    """
+    monkeypatch.setattr(browser, "_NETWORK_SETTLE_S", 5.0)
+    d, transport = _driver_on(lambda m, p: {})
+    d._session._events = [
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "doc", "request": {"method": "GET", "url": "data:text/html,ok"}}},
+        {"method": "Network.responseReceived",
+         "params": {"requestId": "doc", "response": {"status": 200, "url": "data:text/html,ok"}}},
+    ]
+    queued = [
+        json.dumps({"method": "Network.requestWillBeSent",
+                    "params": {"requestId": "late",
+                               "request": {"method": "GET", "url": "http://127.0.0.1:1/x"}}}),
+        json.dumps({"method": "Network.loadingFailed",
+                    "params": {"requestId": "late", "errorText": "net::ERR_UNSAFE_PORT"}}),
+    ]
+    calls = {"n": 0}
+
+    def try_recv(timeout):
+        calls["n"] += 1
+        return queued.pop(0) if queued else None
+
+    transport.try_recv = try_recv
+    started = time.monotonic()
+    reqs = d.network_requests()
+    elapsed = time.monotonic() - started
+    assert {"method": "GET", "url": "data:text/html,ok", "status": 200} in reqs
+    assert {"method": "GET", "url": "http://127.0.0.1:1/x", "error": "net::ERR_UNSAFE_PORT"} in reqs
+    assert calls["n"] == 3  # the two frames, then one quiet read
+    assert elapsed < 1.0
+    assert d._net_pending == {}
+
+    calls["n"] = 0
+    assert d.network_requests() == []
+    assert calls["n"] == 0
+
+
 def test_runtime_network_gated_and_unsupported_elsewhere(tmp_path) -> None:
     from a11y_computer_use import safety, server
 
@@ -1417,8 +1561,8 @@ def test_live_network_reports_status_and_failures() -> None:
             "fetch('http://127.0.0.1:1/x').catch(()=>{})</script>")
     d.navigate("data:text/html," + urllib.parse.quote(page))
     reqs = d.network_requests()
-    assert any(r.get("status") == 200 for r in reqs)  # the main document / data fetch
-    assert any("error" in r for r in reqs)  # the unsafe-port fetch failed
+    assert any(r.get("status") == 200 for r in reqs), reqs  # the main document / data fetch
+    assert any("error" in r for r in reqs), reqs  # the unsafe-port fetch failed
     d._reset()
 
 
