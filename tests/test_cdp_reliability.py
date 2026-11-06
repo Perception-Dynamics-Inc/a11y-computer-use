@@ -181,6 +181,7 @@ def test_close_discards_previous_tabs_console_and_network(monkeypatch) -> None:
     driver._console.append({"text": "secret from TAB1"})
     driver._network.append({"url": "/TAB1"})
     driver._net_pending["pending"] = {"url": "/TAB1"}
+    driver._net_by_id["pending"] = {"url": "/TAB1"}
     monkeypatch.setattr(_cdp, "page_targets", lambda endpoint: [
         {"id": "TAB2", "webSocketDebuggerUrl": "ws://tab2"}])
     monkeypatch.setattr(_cdp, "connect", lambda url: ScriptedTransport(lambda m, p: {}))
@@ -188,6 +189,7 @@ def test_close_discards_previous_tabs_console_and_network(monkeypatch) -> None:
     assert driver.console_messages() == []
     assert driver.network_requests() == []
     assert driver._net_pending == {}
+    assert driver._net_by_id == {}
 
 
 def test_feeds_remain_bounded_when_only_one_feed_is_read() -> None:
