@@ -3731,14 +3731,21 @@ class Runtime:
         # Chrome's contenteditable often publishes the new characters after
         # type has already returned. One snapshot can still be the pre-type
         # text, and the outcome is then a false suspected_noop.
+        # A ref type can also miss the element entirely. Chrome rebuilds the
+        # focused entry, and a walk taken in that gap has no matching node,
+        # so readback stays None and the outcome is unverifiable even when
+        # the next walk shows the text. Retry only while that ref is missing.
+        # A node that was found, whose full text cannot be read, stays
+        # unverifiable: do not substitute its preview.
         stale_read = isinstance(before_value, str) and readback == before_value
         if before_value is None and readback in (None, ""):
             stale_read = True
+        missing_target = element is not None and anchor is None and readback is None
         if (
             requested
             and not died
             and getattr(self.driver, "name", None) == "linux"
-            and stale_read
+            and (stale_read or missing_target)
         ):
             def _pause_for_ui() -> None:
                 # Same 0.05s bound. When the AT-SPI listener is up, a state
@@ -3754,6 +3761,11 @@ class Runtime:
                 _pause_for_ui()
                 later = self._reread(app, scope)
                 if later is None:
+                    # Only a bound ref that has not reappeared keeps polling.
+                    # Calc and other element-less settles, and a stale read
+                    # of a field already found, stop on a failed reread.
+                    if missing_target and anchor is None:
+                        continue
                     break
                 if element is not None:
                     fresh_anchor = self._element_like(element, later)
