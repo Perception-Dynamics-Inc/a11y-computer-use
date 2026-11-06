@@ -1118,6 +1118,27 @@ def test_find_by_role_ignores_ax_prefix_and_is_substring() -> None:
     assert [e.title for e in observe.find_elements(snap, role="textfield")] == ["Name"]
 
 
+@pytest.mark.parametrize("actual_role", ["textfield", "AXTextField"])
+@pytest.mark.parametrize("query_role", ["textbox", "TeXtBoX", "AXTextBox", "text field"])
+def test_find_textbox_alias_matches_only_textfield_editor(actual_role: str, query_role: str) -> None:
+    editor = Element(
+        ref="e1", role=actual_role, title="Editor", value="Type here.",
+        bounds=None, snapshot_id="alias", editable=True,
+    )
+    unrelated = tuple(
+        dataclasses.replace(editor, ref=f"e{i}", role=role)
+        for i, role in enumerate(
+            ["AXStaticText", "AXButton", "AXTextArea", "AXSearchField",
+             "AXSecureTextField", "AXTextFieldContainer", "AXComboBox"], start=2,
+        )
+    )
+    snap = Snapshot("alias", Scope.WINDOW, "chrome", 101, 0.0, (), (editor, *unrelated))
+    assert observe.find_elements(snap, role=query_role, text="Editor") == (editor,)
+    assert observe.find_elements(snap, text="Editor") == (editor, *unrelated)
+    assert observe.find_elements(snap, role=query_role, text="Other editor") == ()
+    assert observe.find_elements(snap, role="textboxcontainer", text="Editor") == ()
+
+
 def test_find_by_capability_flags() -> None:
     snap = snap_of(_find_window())
     assert [e.title for e in observe.find_elements(snap, editable=True)] == ["Name"]

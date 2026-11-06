@@ -18,18 +18,13 @@ import re
 from dataclasses import dataclass
 
 from a11y_computer_use.observe import render_text
+from a11y_computer_use.roles import normalize_role as _role_key, roles_match as _roles_match
 from a11y_computer_use.schema import ComputerUseError, Element, ErrorCode, Snapshot
 
 _REF_LINE = re.compile(r"^(\s*)(e\d+)\b")
 _SEGMENT = re.compile(
     r'^(?P<role>.+?):"(?P<name>(?:\\.|[^"\\])*)"(@(?P<id>[\w.-]+|"(?:\\.|[^"\\])*"))?$'
 )
-_ROLE_ALIASES = {
-    "push button": "button",
-    "pushbutton": "button",
-    "text field": "textfield",
-    "static text": "statictext",
-}
 
 
 @dataclass(frozen=True)
@@ -331,17 +326,6 @@ def _by_ref(snap: Snapshot, ref: str) -> Element | None:
 
 def _exact_name(text: str) -> str:
     return " ".join(str(text or "").split()).casefold()
-
-
-def _roles_match(actual: str, wanted: str) -> bool:
-    return _role_key(actual) == _role_key(wanted)
-
-
-def _role_key(role: str) -> str:
-    text = " ".join(str(role or "").split()).casefold()
-    if text.startswith("ax"):
-        text = text[2:]
-    return _ROLE_ALIASES.get(text, text)
 
 
 def _is_opaque(role: str) -> bool:
