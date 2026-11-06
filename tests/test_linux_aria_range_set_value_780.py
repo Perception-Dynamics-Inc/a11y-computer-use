@@ -4,6 +4,9 @@ Chrome ignores Value.set_current_value for ARIA range widgets; the value is
 aria-valuenow, which only the page changes. set_value steps the widget with
 its own increment/decrement actions, or focus plus arrow keys, reads the
 value back after every step, and confirms only when it equals the target.
+A page whose real step is larger than AT-SPI minimum_increment (#1484)
+learns that step from the first move, restores on overshoot, and never
+returns refused while the live value differs from the start.
 """
 import pytest
 
@@ -14,29 +17,47 @@ from tests.test_linux_synthetic import _Acc, fake_atspi  # noqa: F401
 
 
 class _Widget:
-    """A page-driven ARIA range: arrow keys and actions move aria-valuenow."""
+    """A page-driven ARIA range: arrow keys and actions move aria-valuenow.
 
-    def __init__(self, role, now, low, high, *, actions=(), readable=True, stuck=False):
+    ``page_step`` is the page's real step (often 5 while AT-SPI reports 1).
+    """
+
+    def __init__(self, role, now, low, high, *, actions=(), readable=True, stuck=False,
+                 page_step=1, reverse_stuck=False):
         self.role, self.now, self.low, self.high = role, now, low, high
         self.actions = tuple(actions)
         self.readable = readable
         self.stuck = stuck
+        self.page_step = page_step
+        self.reverse_stuck = reverse_stuck
         self.focused = False
         self.keys: list[str] = []
         self.done: list[str] = []
+        self._forward_chord = None
+        self._forward_action = None
 
-    def move(self, delta):
-        if not self.stuck:
-            self.now = max(self.low, min(self.high, self.now + delta))
+    def move(self, delta, *, reverse=False):
+        if self.stuck or (reverse and self.reverse_stuck):
+            return
+        self.now = max(self.low, min(self.high, self.now + delta * self.page_step))
 
     def key(self, chord):
         self.keys.append(chord)
-        if self.focused:
-            self.move({"right": 1, "up": 1, "left": -1, "down": -1}[chord])
+        if not self.focused:
+            return
+        if self._forward_chord is None:
+            self._forward_chord = chord
+        reverse = chord != self._forward_chord
+        delta = {"right": 1, "up": 1, "left": -1, "down": -1}[chord]
+        self.move(delta, reverse=reverse)
 
     def act(self, name):
         self.done.append(name)
-        self.move(1 if name == "increment" else -1)
+        if self._forward_action is None:
+            self._forward_action = name
+        reverse = name != self._forward_action
+        delta = 1 if name == "increment" else -1
+        self.move(delta, reverse=reverse)
         return True
 
 
@@ -166,12 +187,22 @@ def test_step_that_does_not_move_the_value_stops_and_reports(drive):
 
 
 def test_overshoot_is_not_confirmed(drive):
+    """A 2x step past the target is restored, then refused with the start value."""
     widget = _Widget("slider", 50, 0, 100)
-    driver = drive(widget)
-    widget.move = lambda delta: setattr(widget, "now", widget.now + 2 * delta)
+
+    def double(delta, *, reverse=False):
+        if reverse and widget.reverse_stuck:
+            return
+        widget.now = max(widget.low, min(widget.high, widget.now + 2 * delta))
+
+    widget.move = double  # type: ignore[method-assign]
     with pytest.raises(ComputerUseError) as exc:
-        driver._apply_set_value(_element("AXSlider"), "51", object())
-    assert exc.value.detail["reason"] == "overshoot" and exc.value.detail["actual"] == 52
+        drive(widget)._apply_set_value(_element("AXSlider"), "51", object())
+    detail = exc.value.detail
+    assert detail["reason"] == "overshoot"
+    assert detail["actual"] == 50 and detail.get("restored") is True
+    assert widget.now == 50 and detail["sent"] == 2
+    assert detail["nearest"] == [50, 52]
 
 
 def test_off_step_target_is_refused_with_nothing_sent(drive, monkeypatch):
@@ -201,6 +232,110 @@ def test_chromium_aria_range_is_only_chrome_slider_and_spinbutton(monkeypatch):
     assert not _atspi.chromium_aria_range({"chrome": False, "role": "slider"})
     assert not _atspi.chromium_aria_range({"chrome": True, "role": "push button"})
     assert not _atspi.chromium_aria_range({"chrome": True, "role": "spin button", "input": True})
+
+
+# --- #1484: page step 5 while AT-SPI reports minimum_increment 1 ---------------
+
+
+def test_page_step5_off_step_target_restores_start_and_names_nearest(drive):
+    """Tester #1484: 45→42 overshoots to 40; restore to 45 before refusing."""
+    widget = _Widget("slider", 45, 0, 100, page_step=5)
+    with pytest.raises(ComputerUseError) as exc:
+        drive(widget)._apply_set_value(_element("AXSlider"), "42", object())
+    detail = exc.value.detail
+    assert detail["reason"] == "overshoot"
+    assert detail["actual"] == 45 and detail.get("restored") is True
+    assert detail["step"] == 5 and detail["nearest"] == [40, 45]
+    assert detail["sent"] == 2 and widget.now == 45
+    assert widget.keys == ["left", "right"]
+    assert detail.get("outcome") != "unverifiable"
+
+
+def test_page_step5_upward_off_step_restores_start(drive):
+    """Tester #1484: 40→43 overshoots to 45; restore to 40 before refusing."""
+    widget = _Widget("slider", 40, 0, 100, page_step=5)
+    with pytest.raises(ComputerUseError) as exc:
+        drive(widget)._apply_set_value(_element("AXSlider"), "43", object())
+    detail = exc.value.detail
+    assert detail["reason"] == "overshoot"
+    assert detail["actual"] == 40 and detail.get("restored") is True
+    assert detail["nearest"] == [40, 45] and widget.now == 40
+    assert widget.keys == ["right", "left"]
+
+
+def test_page_step5_on_step_target_is_confirmed_with_learned_step(drive):
+    widget = _Widget("slider", 50, 0, 100, page_step=5)
+    assert drive(widget)._apply_set_value(_element("AXSlider"), "40", object()) is True
+    assert widget.now == 40 and widget.keys == ["left", "left"]
+
+
+def test_page_step5_stops_before_a_second_step_that_would_pass(drive):
+    """50→42: first key lands on 45; target is off-grid; restore, do not go to 40."""
+    widget = _Widget("slider", 50, 0, 100, page_step=5)
+    with pytest.raises(ComputerUseError) as exc:
+        drive(widget)._apply_set_value(_element("AXSlider"), "42", object())
+    detail = exc.value.detail
+    assert detail["reason"] == "off_step"
+    assert detail["actual"] == 50 and detail.get("restored") is True
+    assert detail["step"] == 5 and detail["nearest"] == [40, 45]
+    assert widget.now == 50 and widget.keys == ["left", "right"]
+
+
+def test_ignored_restore_key_is_unverifiable_not_refused(drive):
+    """If the reverse key does nothing, the live value changed: not refused."""
+    widget = _Widget("slider", 45, 0, 100, page_step=5, reverse_stuck=True)
+    with pytest.raises(ComputerUseError) as exc:
+        drive(widget)._apply_set_value(_element("AXSlider"), "42", object())
+    detail = exc.value.detail
+    assert detail.get("outcome") == "unverifiable"
+    assert detail.get("next") == []
+    assert detail["actual"] == 40 and detail.get("restored") is False
+    assert widget.now == 40
+    assert "now holds" in exc.value.message and "40" in exc.value.message
+
+
+def test_refused_implies_value_unchanged_or_restored(drive):
+    """Invariant: a refused ARIA step never leaves a wrong live value."""
+    cases = [
+        _Widget("slider", 45, 0, 100, page_step=5),
+        _Widget("slider", 40, 0, 100, page_step=5),
+        _Widget("slider", 50, 0, 100, page_step=5),
+        _Widget("spin button", 0, 0, 100, page_step=10),
+    ]
+    targets = ["42", "43", "42", "15"]
+    for widget, target in zip(cases, targets):
+        start = widget.now
+        with pytest.raises(ComputerUseError) as exc:
+            drive(widget)._apply_set_value(
+                _element("AXSlider" if widget.role == "slider" else "AXIncrementor"),
+                target, object())
+        detail = exc.value.detail
+        if detail.get("outcome") == "unverifiable":
+            assert widget.now != start
+            continue
+        assert detail.get("reason") in {"overshoot", "off_step", "step_unchanged",
+                                        "value_unreadable", "focus_lost", "too_many_steps"}
+        assert widget.now == start
+        assert detail["actual"] == start
+
+
+def test_spinbutton_page_step10_off_step_restores(drive):
+    widget = _Widget("spin button", 20, 0, 100, page_step=10)
+    with pytest.raises(ComputerUseError) as exc:
+        drive(widget)._apply_set_value(_element("AXIncrementor"), "25", object())
+    detail = exc.value.detail
+    assert detail["reason"] == "overshoot"
+    assert detail["actual"] == 20 and widget.now == 20 and detail.get("restored") is True
+    assert detail["nearest"] == [20, 30]
+
+
+def test_page_step5_at_min_boundary_clamped_overshoot_restores(drive):
+    widget = _Widget("slider", 5, 0, 100, page_step=5)
+    with pytest.raises(ComputerUseError) as exc:
+        drive(widget)._apply_set_value(_element("AXSlider"), "2", object())
+    detail = exc.value.detail
+    assert detail.get("restored") is True and widget.now == 5
+    assert detail["actual"] == 5
 
 
 # --- Tester's #1477 gate: the first spinbutton call on a fresh page ------
