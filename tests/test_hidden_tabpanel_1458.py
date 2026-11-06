@@ -7,7 +7,7 @@ find()/scroll_to_find.
 """
 import pytest
 
-from a11y_computer_use import observe
+from a11y_computer_use import observe, outcome
 from a11y_computer_use.schema import ComputerUseError, ErrorCode
 from tests.fixtures.trees import ax, button
 from tests.test_observe import by_title, snap_of
@@ -53,12 +53,17 @@ def test_ref_in_hidden_tabpanel_names_the_owning_tab(title):
     assert err.code is ErrorCode.STALE_REF
     assert err.detail["reason"] == "hidden_ancestor"
     assert err.detail["candidates"] == []
+    assert err.detail["next"] == ["snapshot"]
     assert err.detail["tabpanel"] == {"title": "Profile", "state": "hidden"}
     assert err.detail["tab"]["ref"] == by_title(old, "Profile").ref
     assert target.ref in message and title in message
     assert "Profile" in message and "Select the owning tab first" in message
     for wrong in ("Card number", "Pay'", "Forward", "Back", "reordered", "use find"):
         assert wrong not in message
+    result = outcome.refused_result(text=message, code=err.code.value,
+                                    message=err.message, detail=err.detail)
+    assert result.outcome == "refused"
+    assert tuple(result.next) == ("snapshot",)
 
 
 def test_ref_in_rerendering_tabpanel_says_reobserve():
@@ -72,8 +77,13 @@ def test_ref_in_rerendering_tabpanel_says_reobserve():
     assert err.detail["reason"] == "hidden_ancestor"
     assert err.detail["tabpanel"]["state"] == "rerendering"
     assert err.detail["candidates"] == []
+    assert err.detail["next"] == ["snapshot"]
     assert "re-rendering" in str(err) and "Loading" in str(err)
     assert "new snapshot" in str(err)
+    result = outcome.refused_result(text=str(err), code=err.code.value,
+                                    message=err.message, detail=err.detail)
+    assert result.outcome == "refused"
+    assert tuple(result.next) == ("snapshot",)
 
 
 def test_ref_in_shown_tabpanel_still_resolves():
