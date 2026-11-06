@@ -128,6 +128,18 @@ def test_push_button_alias_and_quoted_name() -> None:
     assert resolve_locator(snap, 'AXWindow:"Say \\"hi\\"" >> push button:"Save"').ref == "e2"
 
 
+@pytest.mark.parametrize("role", ["textfield", "AXTextField"])
+def test_textbox_alias_resolves_exact_textfield_role(role: str) -> None:
+    editor = el("e1", role, "Editor", editable=True)
+    other = el("e2", "AXTextFieldContainer", "Editor")
+    snap = tree(editor, other)
+    assert resolve_locator(snap, 'textbox:"Editor"') == editor
+    with pytest.raises(ComputerUseError):
+        resolve_locator(tree(other), 'textbox:"Editor"')
+    with pytest.raises(ComputerUseError):
+        resolve_locator(snap, 'textbox:"Other editor"')
+
+
 def test_canvas_selector_is_not_a_coordinate_click() -> None:
     window = el("e1", "AXWindow", "Editor", path=("AXWindow",))
     canvas = el("e2", "AXCanvas", "Drawing", parent="e1", path=("AXWindow", "AXCanvas"))
