@@ -21502,6 +21502,23 @@ _SEEK_NODE_BUDGET = 8000
 # walk on a long page with no exact name cost +29% on find.
 _SEEK_EXACT_AFTER_SUBSTRING = 200
 _SEEK_CHILD_CAP = 400
+# A list or tree this long is the row run, not the control the exact name
+# names. Chrome's Collection walk of those rows is about a second on a
+# 10k-item list (#1396). The slice above still runs inside the run; this
+# many nodes are kept for the siblings after it, where the exact control
+# sits. One resume per seek, so a pile of lists cannot refill the budget.
+_SEEK_EXACT_ROW_CONTAINER_ROLES = frozenset({
+    "list", "list box", "tree", "description list",
+})
+_SEEK_EXACT_ROW_ROLES = frozenset({
+    "list item", "table row", "row", "tree item", "option",
+})
+_SEEK_EXACT_WIDE_ROWS = 48
+# Node budget handed back after the row run. A handful of trailing siblings
+# (the decoy link, the exact link, and their text) fit in it. Not a second
+# walk of the rows.
+_SEEK_EXACT_AFTER_WIDE = 64
+_SEEK_EXACT_TAIL = 8
 
 
 def _content_documents(root, limit: int = 4) -> list:
@@ -21552,14 +21569,42 @@ def _exact_seek_name(acc, needle: str) -> bool:
     return _seek_fold(_seek_name(acc)) == _seek_fold(needle)
 
 
+def _seek_past_wide_rows(role: str, total: int, index: int, row_run: int,
+                         substring: list | None, resume: list | None) -> str | None:
+    """How to leave a row run once the exact-name budget is spent.
+
+    ``"sibling"``: this node is the list or tree. Stop walking its rows and
+    give the caller a small budget for the controls after it.
+    ``"tail"``: the rows are direct children here. The caller jumps to the
+    end only when a non-row sibling follows; if the run goes to the end, it
+    treats that like ``"sibling"`` so the parent keeps the reserve.
+    None keeps the old stop, so a section of paragraphs still falls through
+    to Collection.
+    """
+    if not substring or resume is None or resume[0]:
+        return None
+    if total <= _SEEK_EXACT_WIDE_ROWS:
+        return None
+    if role in _SEEK_EXACT_ROW_CONTAINER_ROLES:
+        return "sibling"
+    if row_run < _SEEK_EXACT_WIDE_ROWS or index >= total - 1:
+        return None
+    return "tail"
+
+
 def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
-                        substring: list | None = None):
+                        substring: list | None = None, resume: list | None = None):
     """The first match in document order, or None.
 
     With ``substring`` given, only a node whose name is exactly ``needle``
     is returned, and the walk goes on past substring hits. The first
     substring hit is kept in ``substring`` for the caller's fallback, so
     prose that mentions a control does not hide the control (#1438).
+
+    A wide list or tree does not spend the rest of that budget on its rows.
+    The bounded slice still runs, then siblings after the list are visited,
+    so an exact link past 10k ``<li>`` nodes is reached without a second
+    whole-document Collection walk (#1443, #1396). ``resume`` is one-shot.
 
     A table is scanned through the Table interface and not by walking every
     row as a child, so a 300-row table below the fold is still reached.
@@ -21586,13 +21631,42 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object],
         return None
     count = _child_count(node)
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        for index in range(min(int(count), _SEEK_CHILD_CAP)):
+        total = int(count)
+        index = 0
+        cap = min(total, _SEEK_CHILD_CAP)
+        row_run = 0
+        while index < total and index < cap:
             if budget[0] <= 0:
+                leave = _seek_past_wide_rows(role, total, index, row_run, substring, resume)
+                if leave == "tail":
+                    last = _child_at(node, total - 1)
+                    last_role = _role_name(last) if last is not None else ""
+                    if last_role not in _SEEK_EXACT_ROW_ROLES:
+                        resume[0] = True
+                        budget[0] = _SEEK_EXACT_AFTER_WIDE
+                        index = max(index + 1, total - _SEEK_EXACT_TAIL)
+                        cap = total
+                        continue
+                    leave = "sibling"
+                if leave == "sibling":
+                    resume[0] = True
+                    budget[0] = _SEEK_EXACT_AFTER_WIDE
+                    break
                 return None
-            found = _seek_document_tree(_child_at(node, index), needle, budget, seen,
-                                        substring)
+            child = _child_at(node, index)
+            if (
+                child is not None and substring
+                and role not in _SEEK_EXACT_ROW_CONTAINER_ROLES
+                and total > _SEEK_CHILD_CAP
+            ):
+                child_role = _role_name(child)
+                row_run = row_run + 1 if child_role in _SEEK_EXACT_ROW_ROLES else 0
+            found = _seek_document_tree(
+                child, needle, budget, seen, substring, resume,
+            )
             if found is not None:
                 return found
+            index += 1
     if role not in _SEEK_SKIP_ROLES:
         name = _seek_name(node)
         if not _name_has_seek(name, needle):
@@ -21728,16 +21802,18 @@ def reveal_text_in_document(root, needle: str, *, offscreen: list | None = None,
     # paragraph that mentions "next slide" does not stop the walk before
     # the off-screen button named "Next Slide" (#1438).
     substring: list = []
+    # One refill after a wide row run. Further lists do not each get another.
+    resume = [False]
     documents = _content_documents(root)
     for doc in documents:
-        hit = _seek_document_tree(doc, text, budget, seen, substring)
+        hit = _seek_document_tree(doc, text, budget, seen, substring, resume)
         if hit is not None:
             break
     if hit is None:
-        hit = _seek_document_tree(root, text, budget, seen, substring)
+        hit = _seek_document_tree(root, text, budget, seen, substring, resume)
     if hit is None and substring:
-        # The bounded walk found prose but no exact name. Ask the documents
-        # themselves before settling for the prose (#1443).
+        # The walk found prose but no exact name after the row run. A name
+        # buried in those rows is still asked of the document (#1443).
         for doc in documents:
             hit = _collection_exact_seek(doc, text)
             if hit is not None:

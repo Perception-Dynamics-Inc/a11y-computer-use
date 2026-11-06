@@ -16109,7 +16109,11 @@ def test_1438_scroll_to_find_prose_only_page_unchanged(fake_atspi, monkeypatch):
 
 
 def test_1438_exact_search_past_substring_is_bounded(fake_atspi, monkeypatch):
-    """After a substring hit the exact-name walk reads a bounded number of nodes."""
+    """A wide list keeps the exact-name walk bounded and still reaches the control after it.
+
+    The 4,000 rows are not walked. The button after the list is the exact
+    name, within the same node bound (#1438, #1443).
+    """
     prose = _Acc("static", name="the next slide buttons", width=300, height=20)
     _place_row(prose, 10, 100, 300, 20)
     rows = [_adopt(_Acc("list item"), _Acc("link", name=f"Link item {i}")) for i in range(4000)]
@@ -16121,11 +16125,15 @@ def test_1438_exact_search_past_substring_is_bounded(fake_atspi, monkeypatch):
     reads = []
     original = _Acc.get_role_name
     monkeypatch.setattr(_Acc, "get_role_name", lambda self: reads.append(self) or original(self))
-    monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: pytest.fail("prose is on screen"))
+    revealed = []
+    monkeypatch.setattr(_atspi, "scroll_to_edge", lambda node, edge: revealed.append(node))
     assert _atspi.reveal_text_in_document(document, "Next Slide")
+    assert revealed == [far]
     walked = len({id(node) for node in reads})
     assert walked <= _atspi._SEEK_EXACT_AFTER_SUBSTRING + 20
-    assert not _atspi.reveal_text_in_document(document, "Next Slide", exact_only=True)
+    revealed.clear()
+    assert _atspi.reveal_text_in_document(document, "Next Slide", exact_only=True)
+    assert revealed == [far]
 
 
 def test_1438_substring_hit_still_revealed_without_exact_name(fake_atspi, monkeypatch):
