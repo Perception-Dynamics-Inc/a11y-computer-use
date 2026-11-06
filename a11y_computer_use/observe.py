@@ -34,7 +34,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from a11y_computer_use.roles import roles_match
+from a11y_computer_use.roles import LINE_EDIT_SUBROLE, roles_match
 from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
@@ -1724,9 +1724,14 @@ def find_elements(
         role: case-insensitive substring of the role, with an optional ``AX``
             prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
             and ``"AXTextField"`` matches that role. Complete aliases are matched
-            by canonical role: ``"textbox"`` and ``"text field"`` match only
+            by canonical role: ``"textbox"`` and ``"text field"`` match
             ``textfield`` / ``AXTextField``, including contenteditable fields
-            exposed with that role. They do not match text areas or containers.
+            exposed with that role. They also match a single-line editable
+            ``textarea`` whose subrole is ``lineedit`` (Qt 6 ``QLineEdit``,
+            still rendered as textarea). They do not match multi-line text
+            areas, secure fields, or containers. ``"password"`` matches
+            ``securetextfield``. A ``textfield`` query does not substring-match
+            that secure role.
         editable / clickable: keep only elements whose flag equals the given
             boolean.
 
@@ -1748,7 +1753,7 @@ def find_elements(
             haystack = f"{el.title} {value} {el.hint} {el.shortcut}".replace("\u00a0", " ").lower()
             if needle.replace("\u00a0", " ") not in haystack and not (submit_query and el.default):
                 continue
-        if role and not roles_match(el.role, role, substring=True):
+        if role and not roles_match(el.role, role, substring=True, element=el):
             continue
         if editable is not None and el.editable is not editable:
             continue
@@ -3436,7 +3441,9 @@ def _flatten(
             document_id=document_id,
             subrole=(
                 "terminal" if terminal
-                else node.raw.subrole if node.raw.subrole in {"label", "tabpanel", "status"}
+                else node.raw.subrole if node.raw.subrole in {
+                    "label", "tabpanel", "status", LINE_EDIT_SUBROLE,
+                }
                 else None
             ),
             heading_level=node.raw.heading_level,

@@ -63,9 +63,15 @@ Then it acts: `click(ref="e3")`, `type("hello")`, `set_value(ref="e2", value="..
 `find(app="chrome", role="textbox", text="Editor")` matches a field exposed as
 `textfield "Editor"`, including a contenteditable with that accessibility role.
 Role queries ignore case and an optional `AX` prefix. `textbox` and `text field`
-are exact aliases for `textfield` / `AXTextField` in find and locators; they do
-not match text areas, secure fields, or containers. Other find role queries
-retain substring matching (for example, `button` also matches `menubutton`).
+are exact aliases for `textfield` / `AXTextField` in find and locators. They
+also match a Qt 6 single-line `QLineEdit` that AT-SPI exposes as role `text`
+(neither `SINGLE_LINE` nor `MULTI_LINE`) and the snapshot still renders as
+`textarea`, when that field is editable and not secure. They do not match
+multi-line text areas, secure fields, or containers. `password` matches
+`securetextfield` / `AXSecureTextField` (a Qt password `QLineEdit` is AT-SPI
+`password text`). A `textfield` query does not select that secure field through
+a substring of `securetextfield`. Other find role queries retain substring
+matching (for example, `button` also matches `menubutton`).
 
 ## Why not the alternatives
 

@@ -128,6 +128,26 @@ def test_push_button_alias_and_quoted_name() -> None:
     assert resolve_locator(snap, 'AXWindow:"Say \\"hi\\"" >> push button:"Save"').ref == "e2"
 
 
+def test_textbox_resolves_qt_line_edit_and_password_resolves_secure_field() -> None:
+    """Locators share the find aliases for a Qt line edit and a password field."""
+    from a11y_computer_use.roles import LINE_EDIT_SUBROLE
+
+    line = el("e1", "AXTextArea", "Your name", editable=True, subrole=LINE_EDIT_SUBROLE)
+    notes = el("e2", "AXTextArea", "Notes", editable=True)
+    secret = el("e3", "AXSecureTextField", "SecretField", editable=True, secure=True)
+    snap = tree(line, notes, secret)
+    assert resolve_locator(snap, 'textbox:"Your name"') == line
+    assert resolve_locator(snap, 'textfield:"Your name"') == line
+    assert resolve_locator(snap, 'password:"SecretField"') == secret
+    assert resolve_locator(snap, 'password text:"SecretField"') == secret
+    with pytest.raises(ComputerUseError):
+        resolve_locator(snap, 'textbox:"Notes"')
+    with pytest.raises(ComputerUseError):
+        resolve_locator(snap, 'textfield:"SecretField"')
+    with pytest.raises(ComputerUseError):
+        resolve_locator(snap, 'password:"Your name"')
+
+
 @pytest.mark.parametrize("role", ["textfield", "AXTextField"])
 def test_textbox_alias_resolves_exact_textfield_role(role: str) -> None:
     editor = el("e1", role, "Editor", editable=True)
