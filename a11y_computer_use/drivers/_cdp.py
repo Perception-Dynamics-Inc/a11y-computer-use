@@ -120,6 +120,22 @@ class _WebSocketTransport:
         except websocket.WebSocketException as exc:
             raise OSError(str(exc)) from exc
 
+    def try_recv(self, timeout: float) -> str | None:
+        """One frame, or None if nothing arrives within ``timeout``.
+
+        ``recv`` raises on timeout so a command wait stays an error. Network
+        settle needs the quiet case instead: no frame yet is not a failure.
+        """
+        import websocket
+
+        try:
+            self._ws.settimeout(0.0 if timeout <= 0 else timeout)
+            return self._ws.recv()
+        except websocket.WebSocketTimeoutException:
+            return None
+        except websocket.WebSocketException as exc:
+            raise OSError(str(exc)) from exc
+
     def close(self) -> None:
         try:
             self._ws.close()
@@ -268,6 +284,63 @@ class CDPSession:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def poll_event(self, timeout: float) -> dict | None:
+        """Read one CDP event already on the socket, or None if ``timeout`` elapses.
+
+        Command replies that arrive in the same wait are skipped (they belong to
+        an earlier call). Transports without ``try_recv`` — the scripted test
+        double — return None immediately and do not touch ``recv``. ``timeout``
+        of 0 drains one already-queued event without waiting.
+        """
+        try_recv = getattr(self._t, "try_recv", None)
+        if not callable(try_recv):
+            return None
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("timeout must be finite and nonnegative")
+        lock_wait = timeout if timeout > 0 else 0.05
+        if not self._lock.acquire(timeout=lock_wait):
+            return None
+        try:
+            if self._closed:
+                return None
+            deadline = time.monotonic() + timeout
+            for _ in range(32):
+                if timeout > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    slice_timeout = remaining
+                else:
+                    slice_timeout = 0.0
+                try:
+                    raw = try_recv(slice_timeout)
+                except TimeoutError:
+                    return None
+                except OSError as exc:
+                    raise self._connection_error("poll", str(exc)) from exc
+                if raw is None:
+                    return None
+                if isinstance(raw, bytes):
+                    try:
+                        raw = raw.decode("utf-8")
+                    except UnicodeError as exc:
+                        raise self._connection_error("poll", "invalid JSON from CDP") from exc
+                if not isinstance(raw, str) or not raw:
+                    raise self._connection_error("poll", "the target closed the connection")
+                if len(raw) > self._max_message_size:
+                    raise self._connection_error("poll", "CDP message exceeded max_message_size")
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, UnicodeError) as exc:
+                    raise self._connection_error("poll", "invalid JSON from CDP") from exc
+                if isinstance(msg, dict) and "method" in msg:
+                    return msg
+                if timeout <= 0:
+                    continue
+            return None
+        finally:
+            self._lock.release()
 
     def drain_events(self) -> list[dict]:
         """Return and clear the events buffered while waiting on `call` replies."""

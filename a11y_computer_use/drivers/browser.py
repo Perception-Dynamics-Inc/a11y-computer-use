@@ -52,6 +52,13 @@ if TYPE_CHECKING:
 _DEFAULT_ENDPOINT = "http://127.0.0.1:9222"
 _FEED_LIMIT = 1000
 _FEED_TEXT_LIMIT = 4096
+# A page fetch can fail after document.readyState is already "complete"
+# (Chrome's unsafe-port block is one). network_requests keeps reading a live
+# socket until a failure is in hand and nothing is in flight, or this long.
+_NETWORK_SETTLE_S = 1.0
+# Log.entryAdded timestamps are epoch ms. Ignore entries Chrome replays from
+# before this session (Log.enable) by this much slack for clock skew.
+_NET_LOG_SKEW_MS = 50.0
 _WEBMCP_TOOL_LIMIT = 200
 _WEBMCP_RESULT_LIMIT = 16384
 _WEBMCP_CALL_TIMEOUT_S = 30.0
@@ -232,6 +239,11 @@ class BrowserDriver:
         self._console: deque[dict] = deque(maxlen=_FEED_LIMIT)
         self._net_pending: dict[str, dict] = {}  # requestId -> {method,url} in flight
         self._network: deque[dict] = deque(maxlen=_FEED_LIMIT)
+        # requestId -> the outcome dict already recorded this session. Stops a
+        # loadingFailed and the matching network log from becoming two rows,
+        # including after the completed buffer is cleared.
+        self._net_by_id: dict[str, dict] = {}
+        self._net_log_floor_ms = time.time() * 1000.0 - _NET_LOG_SKEW_MS
 
     # -- connection ---------------------------------------------------------
     def _connect(self) -> CDPSession:
@@ -261,6 +273,9 @@ class BrowserDriver:
         if not target.get("id") or not target.get("webSocketDebuggerUrl"):
             raise ComputerUseError(ErrorCode.APP_NOT_FOUND, "CDP page has no target id or WebSocket URL")
         sess = _cdp.CDPSession(_cdp.connect(target["webSocketDebuggerUrl"]))
+        # Floor before Log.enable: Chrome replays buffered log entries on enable,
+        # and those timestamps fall before the session.
+        self._net_log_floor_ms = time.time() * 1000.0 - _NET_LOG_SKEW_MS
         # Runtime + Log emit console / exception events; Network emits request/
         # response/failure events — the console + network feeds a vision agent is
         # blind to (buffered, bounded, by the session). Enabling here starts both
@@ -289,6 +304,7 @@ class BrowserDriver:
         self._console.clear()
         self._network.clear()
         self._net_pending.clear()
+        self._net_by_id.clear()
 
     _reset = close  # internal alias kept for existing call sites
 
@@ -760,11 +776,7 @@ class BrowserDriver:
             if exc.code is not ErrorCode.UNSUPPORTED:
                 raise
         for ev in sess.drain_events():
-            entry = _console_entry(ev)
-            if entry is not None:
-                entry["text"] = str(entry["text"])[:_FEED_TEXT_LIMIT]
-                self._console.append(entry)
-            self._ingest_network(ev)
+            self._consume_cdp_event(ev)
 
     def console_messages(self, *, clear: bool = True) -> list[dict]:
         """Console output + uncaught JS exceptions from the bound tab.
@@ -786,33 +798,167 @@ class BrowserDriver:
 
         Each entry is ``{"method", "url", "status"}`` for a response, or
         ``{"method", "url", "error"}`` for a failure. Request/response events are
-        joined by CDP ``requestId``; the pending-request map is bounded so a
-        long-lived tab can't accumulate ids without limit. ``clear`` empties the
-        completed buffer after reading."""
+        joined by CDP ``requestId``. A blocked fetch such as an unsafe port may
+        arrive as ``Network.loadingFailed`` (``net::ERR_UNSAFE_PORT``) or only as
+        a network ``Log.entryAdded`` ("Failed to load resource: net::ERR_…");
+        both become an ``error`` entry. Log entries Chrome replays from before
+        this session are not treated as new failures. On a live socket the read
+        keeps going until a failure is recorded and nothing is in flight, or for
+        ``_NETWORK_SETTLE_S``, because ``document.readyState == "complete"`` does
+        not mean the page's fetch has failed yet. The pending-request map is
+        bounded so a long-lived tab can't accumulate ids without limit.
+        ``clear`` empties the completed buffer after reading. The extra wait runs
+        only when this read saw a new outcome or a new in-flight request, so an
+        idle check does not sit out the settle."""
+        before_n = len(self._network)
+        before_pending = tuple(self._net_pending)
         self._pump_events()
+        if (len(self._network) != before_n
+                or tuple(self._net_pending) != before_pending):
+            self._settle_network()
         out = list(self._network)
         if clear:
             self._network.clear()
         return out
 
+    def _consume_cdp_event(self, ev: dict) -> None:
+        entry = _console_entry(ev)
+        if entry is not None:
+            entry["text"] = str(entry["text"])[:_FEED_TEXT_LIMIT]
+            self._console.append(entry)
+        self._ingest_network(ev)
+
+    def _settle_network(self) -> None:
+        """Pull failure events a live Chrome has not delivered to the command pump yet.
+
+        Scripted transports have no ``try_recv`` and return immediately. A live
+        socket blocks in ``poll_event``; once an ``error`` outcome is recorded
+        and no request is still in flight, the next quiet read returns so a
+        failure that was already buffered does not pay the full settle.
+        """
+        sess = self._session
+        if sess is None or not callable(getattr(getattr(sess, "_t", None), "try_recv", None)):
+            return
+        if not math.isfinite(_NETWORK_SETTLE_S) or _NETWORK_SETTLE_S <= 0:
+            return
+        deadline = time.monotonic() + _NETWORK_SETTLE_S
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            slice_s = min(0.05, remaining)
+            started = time.monotonic()
+            event = sess.poll_event(slice_s)
+            if event is not None:
+                self._consume_cdp_event(event)
+                continue
+            # A non-blocking transport (or a timeout shorter than the slice)
+            # must not spin. A live socket already waited inside poll_event.
+            leftover = slice_s - (time.monotonic() - started)
+            if leftover > 0.001:
+                time.sleep(leftover)
+            if not self._net_pending and any("error" in item for item in self._network):
+                return
+
+    def _remember_net(self, rid: str, entry: dict) -> None:
+        self._net_by_id.pop(rid, None)
+        self._net_by_id[rid] = entry
+        while len(self._net_by_id) > 512:
+            self._net_by_id.pop(next(iter(self._net_by_id)))
+
+    def _record_network_failure(self, rid: str | None, error: object, *, url: str = "") -> None:
+        error_text = _network_error_text(error)
+        if rid and rid in self._net_by_id:
+            existing = self._net_by_id[rid]
+            # An HTTP status already closed this id. A later log line must not
+            # turn that 200 into a failure, or add a second row.
+            if "status" in existing and "error" not in existing:
+                self._net_pending.pop(rid, None)
+                return
+            if url and not existing.get("url"):
+                existing["url"] = url[:_FEED_TEXT_LIMIT]
+            if error_text.startswith("net::") and not str(existing.get("error", "")).startswith("net::"):
+                existing["error"] = error_text
+            self._net_pending.pop(rid, None)
+            return
+        base = self._net_pending.pop(rid, None) if rid else None
+        if base is None:
+            base = {"method": "GET", "url": url[:_FEED_TEXT_LIMIT]}
+        elif url and not base.get("url"):
+            base = {**base, "url": url[:_FEED_TEXT_LIMIT]}
+        failure = {**base, "error": error_text}
+        if failure.get("url"):
+            for item in self._network:
+                if item.get("url") == failure["url"] and "error" in item:
+                    if rid:
+                        self._remember_net(rid, item)
+                    return
+        self._network.append(failure)
+        if rid:
+            self._remember_net(rid, failure)
+
+    def _ingest_network_log(self, params: dict) -> None:
+        entry = params.get("entry")
+        if not isinstance(entry, dict):
+            return
+        if entry.get("source") != "network" or entry.get("level") != "error":
+            return
+        rid = entry.get("networkRequestId")
+        if not isinstance(rid, str) or not rid:
+            rid = None
+        url = entry.get("url") if isinstance(entry.get("url"), str) else ""
+        ts = _epoch_ms(entry.get("timestamp"))
+        if ts is None:
+            # Monotonic or missing clock: only a request announced this session.
+            if rid is None or rid not in self._net_pending:
+                return
+        elif ts < self._net_log_floor_ms:
+            return
+        self._record_network_failure(rid, entry.get("text"), url=url)
+
     def _ingest_network(self, ev: dict) -> None:
         method = ev.get("method")
         p = ev.get("params", {})
-        rid = p.get("requestId")
+        if not isinstance(p, dict):
+            p = {}
+        raw_rid = p.get("requestId")
+        rid = raw_rid if isinstance(raw_rid, str) and raw_rid else None
         if method == "Network.requestWillBeSent":
+            if rid and rid in self._net_by_id:
+                return
             req = p.get("request", {})
-            self._net_pending[rid] = {"method": req.get("method", "GET"),
-                                      "url": str(req.get("url", ""))[:_FEED_TEXT_LIMIT]}
+            if not isinstance(req, dict):
+                req = {}
+            method_name = req.get("method")
+            if rid:
+                self._net_pending[rid] = {
+                    "method": method_name if isinstance(method_name, str) and method_name else "GET",
+                    "url": str(req.get("url", ""))[:_FEED_TEXT_LIMIT],
+                }
             if len(self._net_pending) > 512:  # bound: drop the oldest in-flight ids
                 for k in list(self._net_pending)[:256]:
                     self._net_pending.pop(k, None)
         elif method == "Network.responseReceived":
-            base = self._net_pending.pop(rid, {"method": "GET",
-                                               "url": str(p.get("response", {}).get("url", ""))[:_FEED_TEXT_LIMIT]})
-            self._network.append({**base, "status": p.get("response", {}).get("status")})
+            resp = p.get("response", {})
+            if not isinstance(resp, dict):
+                resp = {}
+            if rid and rid in self._net_by_id:
+                self._net_pending.pop(rid, None)
+                return
+            base = self._net_pending.pop(rid, {
+                "method": "GET",
+                "url": str(resp.get("url", ""))[:_FEED_TEXT_LIMIT],
+            })
+            recorded = {**base, "status": resp.get("status")}
+            self._network.append(recorded)
+            if rid:
+                self._remember_net(rid, recorded)
         elif method == "Network.loadingFailed":
-            base = self._net_pending.pop(rid, {"method": "GET", "url": ""})
-            self._network.append({**base, "error": str(p.get("errorText", "failed"))[:_FEED_TEXT_LIMIT]})
+            self._record_network_failure(
+                rid, p.get("errorText") or p.get("blockedReason") or "failed",
+            )
+        elif method == "Log.entryAdded":
+            self._ingest_network_log(p)
 
     # -- WebMCP (navigator.modelContext) ------------------------------------
     def _install_webmcp_shim(self, sess: CDPSession) -> None:
@@ -1198,6 +1344,27 @@ def _raise_page_exception(reply: dict, what: str) -> None:
     text = str(exc.get("description") or det.get("text") or "JavaScript exception")[:_FEED_TEXT_LIMIT]
     raise ComputerUseError(ErrorCode.UNSUPPORTED, f"{what} raised in the page: {text}",
                            detail={"page_error": text})
+
+
+def _epoch_ms(value: object) -> float | None:
+    """Epoch milliseconds, or None for monotonic / missing CDP timestamps."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number >= 1e12:  # already epoch milliseconds (Log.entryAdded)
+        return number
+    if number >= 1e9:  # epoch seconds
+        return number * 1000.0
+    return None
+
+
+def _network_error_text(value: object) -> str:
+    """Prefer the ``net::ERR_…`` token Chrome puts in a failure or a log line."""
+    text = str(value or "failed")
+    for part in text.split():
+        if part.startswith("net::"):
+            return part[:_FEED_TEXT_LIMIT]
+    return text[:_FEED_TEXT_LIMIT]
 
 
 def _console_entry(event: dict) -> dict | None:
