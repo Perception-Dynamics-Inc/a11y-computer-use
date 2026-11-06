@@ -1005,7 +1005,13 @@ that update the page title (#1489). The before/after snapshots must belong to th
 process, and the title must retain the native identity of an ancestor of the
 clicked control. Unrelated page titles do not qualify. New windows/dialogs or
 reported modals retain the unverified outcome, protecting the multiple-download
-permission case (#1427). The receipt explicitly confirms page activation only:
+permission case (#1427). When that effect snapshot contains a browser dialog
+whose accessible name contains "Download multiple files" outside the clicked
+page document (live Chrome titles it `<origin> wants to: Download multiple files`,
+with Block and Allow), the receipt names the prompt and stays unverifiable.
+Page activation is not confirmed for that click, and Allow and Block are not
+clicked. In-page text with the same words is not this prompt, and a download
+history bubble is not this prompt. The receipt explicitly confirms page activation only:
 no pointer gesture was sent, and downloads or other gesture-gated browser
 effects are not verified. Missing title evidence retains the existing outcome;
 an action acknowledgement alone never confirms activation.

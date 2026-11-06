@@ -7152,6 +7152,68 @@ class Runtime:
                 return "the clicked page's native title changed"
         return None
 
+    def _download_multiple_files_prompt(self, before: dict | None, target: Element) -> str | None:
+        """Name Chrome's multiple-download permission dialog when the effect tree shows it.
+
+        A live Chrome effect snapshot titles that bubble
+        ``<origin> wants to: Download multiple files`` and places it outside
+        the page document, with Block and Allow. Page text that merely
+        contains the same words is not this prompt. Nothing here clicks
+        either button.
+        """
+        baseline = getattr(self, "_action_baseline", None)
+        capture = baseline.get("capture") if isinstance(baseline, dict) else None
+        after = capture.get("snap") if isinstance(capture, dict) else None
+        if not isinstance(after, Snapshot):
+            return None
+        prior = before.get("snap") if isinstance(before, dict) else None
+        page_contexts: set[tuple] = set()
+        if isinstance(prior, Snapshot):
+            old = {el.ref: el for el in prior.elements}
+            parent = target.parent
+            seen: set[str] = set()
+            while parent in old and parent not in seen:
+                seen.add(parent)
+                ancestor = old[parent]
+                if ancestor.context_identity and ancestor.context_identity[0] in {
+                    "document web", "document frame",
+                }:
+                    page_contexts.add(ancestor.context_identity)
+                parent = ancestor.parent
+        by_ref = {el.ref: el for el in after.elements}
+
+        def in_clicked_page(el: Element) -> bool:
+            walked: set[str] = set()
+            current: Element | None = el
+            while current is not None and current.ref not in walked:
+                walked.add(current.ref)
+                identity = current.context_identity
+                if identity and (
+                    identity in page_contexts or identity[0] in {"document web", "document frame"}
+                ):
+                    return True
+                current = by_ref.get(current.parent)
+            return False
+
+        names: list[str] = []
+        for el in after.elements:
+            title = " ".join((el.title or "").split())
+            folded = title.casefold()
+            if el.role != "AXDialog" or "download multiple files" not in folded:
+                continue
+            # A page dialog can reuse the words. Chrome's permission bubble
+            # also says "wants to:", which is the phrase the permission gate
+            # already keys on, including when the bubble is parented oddly.
+            if in_clicked_page(el) and "wants to:" not in folded:
+                continue
+            if len(title) > 180:
+                title = title[:177] + "..."
+            if title not in names:
+                names.append(title)
+        if not names:
+            return None
+        return "; ".join(names)
+
     # -- action tools -----------------------------------------------------------
 
     @timing.call('click', ref_pos=1)
@@ -7746,8 +7808,33 @@ class Runtime:
         # Chrome's browser-side gates (the multiple-download limiter) do not
         # count it, so a page effect can be real while the download it
         # started is held behind a "Download multiple files" prompt and
-        # nothing is saved. Fresh title evidence can confirm page activation,
-        # but never a download or other gesture-gated browser effect.
+        # nothing is saved. When that permission dialog is in the effect
+        # snapshot, name it. Do not click Allow or Block. Fresh title
+        # evidence can confirm page activation only when that dialog is
+        # absent, and even then it never verifies a download.
+        if (
+            button_mechanism and not activated
+            and parsed_button is MouseButton.LEFT
+            and isinstance(target, Element)
+            and isinstance(result, outcome.ActionResult)
+        ):
+            prompt = self._download_multiple_files_prompt(before, target)
+            if prompt is not None:
+                mechanism = button_mechanism[0]
+                return outcome.ActionResult(
+                    f"sent press to {self._label(ref, target)} via accessibility action "
+                    f"{mechanism}, not a pointer click; Chrome is showing a Download "
+                    f"multiple files permission prompt ({prompt}). The download is held "
+                    "behind that prompt and is not confirmed saved. Do not click Allow "
+                    "or Block unless the user asks to decide that permission.",
+                    outcome="unverifiable",
+                    next=(),
+                    evidence=(
+                        f"download_multiple_files_prompt: {prompt}; no_pointer_gesture: "
+                        f"delivered via {mechanism}, not a real pointer click; the download "
+                        "is held behind the permission prompt and must not be treated as saved"
+                    ),
+                )
         if (
             button_mechanism and not activated
             and parsed_button is MouseButton.LEFT
@@ -12705,6 +12792,9 @@ def build_server(
         from a fresh title change on its native page/window, including shadow
         and slotted controls. This verifies page activation only, not a pointer
         gesture or downloads. A new dialog or unreadable effect stays unverified.
+        When the effect snapshot shows Chrome's Download multiple files
+        permission dialog, the result names that prompt and stays unverifiable.
+        Allow and Block are not clicked.
         On Linux a Qt table cell is clicked at its center. That click is
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
