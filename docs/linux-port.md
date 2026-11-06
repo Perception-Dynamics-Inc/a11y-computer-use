@@ -1015,6 +1015,17 @@ route avoids that geometry; it does not establish freshness for other roles
 or for direct low-level `LinuxDriver.click` pointer calls. Explicit coordinate
 clicks continue to send the requested pointer input.
 
+A plain left ref click on a menu item can use that item's own AT-SPI
+`click`, `press`, `activate`, `check`, or `select` action when exactly one
+menu is open and Chromium's hit test lands on the document or an entry
+outside that menu (#1470). That background hit is a miss, never permission
+to click the editor underneath. Missing menu/action evidence, a hit on
+another menu item, and right, multiple, or modified clicks refuse without
+pointer input. The usual post-action page-state check decides confirmation;
+the action's return value alone does not prove the selection changed.
+`A11Y_DEBUG_HIT_TEST=1` records `menu_action_gates`, including menu discovery,
+the outside/background hit checks, advertised actions, and dispatch result.
+
 Chromium field writes containing TAB (`type` and `set_value`) are refused before
 inserting text or clearing the existing value, with `unsupported` and
 `reason: tab_moves_focus`. The AT-SPI key fallback sends Tab as focus navigation,

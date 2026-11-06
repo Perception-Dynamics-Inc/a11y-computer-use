@@ -16,9 +16,12 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import re
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -3529,6 +3532,9 @@ class LinuxDriver:
     # pause between them (Chromium's real hit test answers asynchronously).
     _COVER_READS = 6
     _COVER_READ_GAP_S = 0.08
+    # Page menu items that may be pressed through their own action when the
+    # hit test lands outside their menu (#1470).
+    _MENU_ITEM_ROLES = frozenset({"AXMenuItem", "AXMenuItemCheckbox", "AXMenuItemRadio"})
 
     def _live_center(self, handle) -> tuple[int, int] | None:
         from a11y_computer_use.drivers import _atspi
@@ -3815,12 +3821,42 @@ class LinuxDriver:
             },
         )
 
-    def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int) -> None:
-        """Refuse page ref clicks whose native hit test cannot confirm the target."""
+    def _verify_chromium_pointer_target(self, element: Element, handle, x: int, y: int,
+                                        *, may_press: bool = False) -> bool:
+        """Refuse page ref clicks whose native hit test cannot confirm the target.
+
+        True when the target was pressed through its own AT-SPI action
+        instead (#1470): the caller sends no pointer input and the usual
+        outcome check verifies the press. Only with ``may_press`` (a plain
+        single left click), for a menu item whose menu is the only open menu,
+        whose hit lands outside that menu, and that has its own action.
+        A pointer click is never sent at a point whose hit is another element.
+        """
         from a11y_computer_use.drivers import _atspi
 
         self._refuse_chromium_occluded(element, handle, x, y)
-        if self._run(lambda: _atspi.chromium_pointer_target(handle, x, y)) is False:
+        debug = os.environ.get("A11Y_DEBUG_HIT_TEST") == "1"
+        trace: list | None = [] if debug else None
+        if trace is None:
+            verified = self._run(lambda: _atspi.chromium_pointer_target(handle, x, y))
+        else:
+            verified = self._run(lambda: _atspi.chromium_pointer_target(handle, x, y, trace=trace))
+        pressed = False
+        gates = {"plain_left_click": may_press,
+                 "menu_item": element.role in self._MENU_ITEM_ROLES,
+                 "target_missed": verified is False} if debug else None
+        if verified is False and may_press and element.role in self._MENU_ITEM_ROLES:
+            pressed = self._press_menu_item_off_hit(handle, x, y, gates=gates)
+        if debug:
+            print("hit_test_debug: " + json.dumps(
+                {"ref": element.ref, "role": element.role, "title": element.title,
+                 "point": [x, y], "verified": verified, "pressed_by_action": pressed,
+                 "menu_action_gates": gates,
+                 "walk": trace},
+                default=repr), file=sys.stderr, flush=True)
+        if pressed:
+            return True
+        if verified is False:
             raise ComputerUseError(
                 ErrorCode.STALE_REF,
                 f"{element.ref} ({element.role} {element.title!r}) could not be verified "
@@ -3832,6 +3868,52 @@ class LinuxDriver:
                     "Chromium can retain stale bounds and SHOWING after a page transform.",
                 },
             )
+        return False
+
+    def _press_menu_item_off_hit(self, handle, x: int, y: int, *,
+                                 gates: dict | None = None) -> bool:
+        """Press a menu item by its own action when the hit is outside its menu.
+
+        A menu drawn as its button's sibling (#1470) can leave Chromium's hit
+        test on the content under it. False (the caller refuses) unless the
+        item's menu is the single open menu, the hit at (x, y) is outside
+        that menu, and the item's own action ran.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        # A check/radio menu item can advertise "check" or "select", rather
+        # than "click". These still activate the requested item itself.
+        names = frozenset({"click", "press", "activate", "check", "select"})
+        if gates is not None:
+            gates.update(sole_open_menu=False, hit_outside_menu=False,
+                         document_entry_miss=False, own_action_available=False,
+                         action_succeeded=False)
+        try:
+            menu = self._run(lambda: _atspi.chromium_sole_open_menu(handle, x, y, gates=gates))
+            if gates is not None:
+                gates["sole_open_menu"] = menu is not None
+                gates["actions"] = self._run(lambda: _atspi._raw_action_names(handle))
+                gates["own_action_available"] = bool(names.intersection(gates["actions"]))
+            if menu is None:
+                return False
+            outside = self._run(lambda: _atspi.chromium_pointer_target(menu, x, y)) is False
+            if gates is not None:
+                gates["hit_outside_menu"] = outside
+            if not outside:
+                return False  # another item inside the menu is not a miss
+            miss = self._run(lambda: _atspi.chromium_menu_background_hit(handle, menu, x, y))
+            if gates is not None:
+                gates["document_entry_miss"] = miss
+            if not miss:
+                return False
+        except Exception as exc:  # noqa: BLE001 - unreadable gates refuse
+            if gates is not None:
+                gates["read_error"] = type(exc).__name__
+            return False
+        pressed = bool(self._run(lambda: _atspi._do_action_named(handle, names)))
+        if gates is not None:
+            gates["action_succeeded"] = pressed
+        return pressed
 
     def _verify_double_click_target(self, element: Element, handle, x: int, y: int) -> None:
         """Ask Chromium's hit test again before a double-click (#1467).
@@ -5765,7 +5847,12 @@ class LinuxDriver:
                 and self._click_on_document_miss(target, handle, x, y)
             ):
                 return None
-            self._verify_chromium_pointer_target(target, handle, x, y)
+            if self._verify_chromium_pointer_target(
+                target, handle, x, y,
+                may_press=(handle is not None and button is MouseButton.LEFT
+                           and count == 1 and not modifiers and notification is None),
+            ):
+                return None  # pressed through its own action; no pointer input
             if button is MouseButton.LEFT and count == 2:
                 self._verify_double_click_target(target, handle, x, y)
         if notification is not None and not self._run(
