@@ -9,8 +9,8 @@ structured content. The agent loop reads the attributes.
 
 - ``confirmed`` — a read-back, a state change, or a still-living window/process
   showed the action landed.
-- ``suspected_noop`` — every required action/context signal was readable and
-  unchanged, and repeating the action is not a toggle.
+- ``suspected_noop`` — the requested effect was observably unchanged. Retry
+  suggestions additionally require complete unchanged action/context signals.
 - ``unverifiable`` — the requested effect or complete no-change evidence was
   unavailable; re-observe before deciding whether to repeat input.
 - ``partial`` — something landed, but not the requested effect. A process that
@@ -103,6 +103,7 @@ def commits_action(element: object) -> bool:
 def retry_verdict(
     verdict: tuple[str, str], before: RetryEvidence | None,
     after: RetryEvidence | None, *, toggle: bool = False, tool: str = "click",
+    selection_unchanged: bool = False,
 ) -> tuple[str, str]:
     """The single gate from a candidate no-op to permission to suggest retry.
 
@@ -149,6 +150,14 @@ def retry_verdict(
         if missing or len(names) != len(probe.signals) or tool not in RETRY_SIGNALS:
             return "unverifiable", reason + "; required signals missing: " + ", ".join(sorted(missing)) + "; re-observe first (snapshot/screenshot)"
     if before.context != after.context or before.signals != after.signals:
+        # A readable unchanged text selection describes the requested effect,
+        # even if the page records the click in its title. This scoped no-op
+        # does NOT authorize retry; Runtime suppresses next steps in this case.
+        if tool == "click" and judged == "suspected_noop" and selection_unchanged:
+            before_signals, after_signals = dict(before.signals), dict(after.signals)
+            if all(before_signals[name] == after_signals[name] for name in
+                   ("target_identity", "target_states", "target_name", "target_value", "target_text")):
+                return "suspected_noop", reason + "; action or context readings differ; re-observe first (snapshot/screenshot)"
         # A changed context is not proof that the requested effect succeeded.
         return "unverifiable", reason + "; action or context readings differ; re-observe first (snapshot/screenshot)"
     if judged == "partial":
@@ -1431,11 +1440,16 @@ def _row_of(snap: object, element: object) -> object | None:
 
 
 def _row_texts(snap: object, row: object) -> str:
+    title = getattr(row, "title", "") or ""
+    if title:
+        return title
+    # Traversal order is not label priority: a trailing Delete button is
+    # visited before the text. Prefer actual row text, excluding glyphs.
     for el in _subtree(snap, row):
-        title = getattr(el, "title", "") or ""
-        if title and el is not row:
-            return title
-    return getattr(row, "title", "") or ""
+        text = getattr(el, "title", "") or ""
+        if getattr(el, "role", "") == "AXStaticText" and any(c.isalnum() for c in text):
+            return text
+    return getattr(row, "value", "") or ""
 
 
 def _sibling_rows(snap: object, row: object) -> list:
@@ -1480,7 +1494,9 @@ def _anchor_lookup(snap: object, element: object) -> tuple[object | None, dict]:
     if same_snap:
         hit = _by_ref(snap).get(getattr(element, "ref", None))
         methods["ref"] = _brief(hit)
-        return hit, methods
+        if (hit is not None and getattr(hit, "role", None) == getattr(element, "role", None)
+                and getattr(hit, "title", None) == getattr(element, "title", None)):
+            return hit, methods
     node = tuple(getattr(element, "node_identity", ()) or ())
     methods["node_identity_key"] = repr(node) if node else None
     if node:
@@ -1511,7 +1527,9 @@ def wrong_row_effect(
         return None
 
     def content(snap: object, el: object) -> tuple:
-        rows = [_page_row(n) + (bool(getattr(n, "focused", False)),) for n in _subtree(snap, el)]
+        # Focus is incidental to a pointer gesture, and ancestry/ref numbering
+        # can change when another row becomes an editor. Compare row content.
+        rows = [_page_row(n)[:-1] for n in _subtree(snap, el)]
         return tuple(sorted(rows, key=_sort_key))
 
     def dump(snap: object, rows: list) -> list | None:

@@ -4133,6 +4133,7 @@ class Runtime:
         selection: tuple[int, int] | None = None,
         cover_click: bool = False,
         key_window: tuple | None = None,
+        selection_unchanged: bool = False,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if tool == "type" and getattr(self, "_private_text_result", False):
@@ -4189,6 +4190,7 @@ class Runtime:
             judged, evidence = outcome.retry_verdict(
                 (judged, evidence), retry_before, retry_after, toggle=toggle,
                 tool=tool,
+                selection_unchanged=selection_unchanged,
             )
         if tool == "key" and not died and judged in {"suspected_noop", "unverifiable"}:
             # #1283: Return on a wizard's last page or Escape on a dialog
@@ -4257,7 +4259,7 @@ class Runtime:
             if isinstance(why, str) and why:
                 hung = True
                 judged, evidence = "unverifiable", evidence + "; " + why
-        no_retry = hung or no_bridge or bool(layout_mismatch) or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
+        no_retry = (selection_unchanged and "action or context readings differ" in evidence) or hung or no_bridge or bool(layout_mismatch) or (evidence == "the row was selected and activates on double-click") or not_dispatched or toggle or copy or (tool in {"key", "drag"} and judged == "unverifiable") or (
             tool == "click" and judged == "unverifiable"
             and ("text selection" in evidence or "opaque target" in evidence)
         ) or (
@@ -7599,7 +7601,29 @@ class Runtime:
             had_ref=ref is not None,
             verdict=verdict,
             cover_click=isinstance(target, Element) and not activated and ref is not None,
+            selection_unchanged=(verify_selection and detailed_selection and not activated
+                                 and paragraph_verdict is None
+                                 and selection_before is not None
+                                 and selection_after == selection_before),
         )
+        if (getattr(self.driver, "name", None) == "linux"
+                and callable(getattr(self.driver, "retry_evidence", None))
+                and verify_selection and detailed_selection and not activated
+                and isinstance(target, Element) and target.role == "AXStaticText"
+                and count == 2 and paragraph_verdict is None
+                and selection_before is not None and selection_after == selection_before
+                and result.outcome == "unverifiable"
+                and result.evidence.startswith("the text selection did not change")
+                and "could not be read" in result.evidence):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "The double-click was sent, but the text selection did not change and "
+                "the requested effect could not be verified. No wrong row was observed. "
+                "Take a fresh snapshot or screenshot before further input.",
+                detail={"ref": target.ref, "reason": "double_click_effect_unconfirmed",
+                        "outcome": "unverifiable", "input_sent": True,
+                        "evidence": result.evidence},
+            )
         if popover_landing is not None:
             # Another point under the same popover lands on it again.
             result = outcome.ActionResult(
