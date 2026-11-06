@@ -302,7 +302,9 @@ class Element:
     #: ``label`` for an AT-SPI label. ``find`` keeps that label when its
     #: title is the search text, and leaves it out when the title only
     #: mentions the text and a cell or control has the exact name.
-    #: None for every other role.
+    #: ``lineedit`` for a Qt single-line editable line edit whose snapshot
+    #: role stays ``textarea``. ``find`` role ``textbox`` or ``textfield``
+    #: matches it. None for every other role.
     subrole: str | None = None
     #: Native heading level, when reported; never inferred from text or geometry.
     heading_level: int | None = None

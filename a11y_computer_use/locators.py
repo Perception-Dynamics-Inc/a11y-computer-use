@@ -169,7 +169,7 @@ def _resolve_dict(snap: Snapshot, locator: dict) -> Element | ComputerUseError:
             return ComputerUseError(ErrorCode.STALE_REF, "stable_id matched more than one element")
         if len(hits) == 1:
             element = hits[0]
-            if role and not _roles_match(element.role, role):
+            if role and not _roles_match(element.role, role, element=element):
                 return ComputerUseError(ErrorCode.STALE_REF, "stable_id role changed")
             if name and _exact_name(element.title) != _exact_name(name):
                 return ComputerUseError(ErrorCode.STALE_REF, "stable_id name changed")
@@ -178,11 +178,11 @@ def _resolve_dict(snap: Snapshot, locator: dict) -> Element | ComputerUseError:
         return ComputerUseError(ErrorCode.STALE_REF, "no durable locator; refusing stored coordinates")
     found = [
         element for element in snap.elements
-        if _roles_match(element.role, role) and _exact_name(element.title) == _exact_name(name)
+        if _roles_match(element.role, role, element=element) and _exact_name(element.title) == _exact_name(name)
     ]
     if recorded_ref:
         live = _by_ref(snap, recorded_ref)
-        if live is not None and _roles_match(live.role, role) and _exact_name(live.title) == _exact_name(name):
+        if live is not None and _roles_match(live.role, role, element=live) and _exact_name(live.title) == _exact_name(name):
             if any(element.ref == recorded_ref for element in found):
                 return live
             return ComputerUseError(ErrorCode.STALE_REF, "recorded ref is no longer that control")
@@ -222,7 +222,7 @@ def _match_chain(snap: Snapshot, segments: list[_Segment]) -> list[Element]:
 
 
 def _segment_matches(element: Element, segment: _Segment) -> bool:
-    if not _roles_match(element.role, segment.role):
+    if not _roles_match(element.role, segment.role, element=element):
         return False
     if _exact_name(element.title) != _exact_name(segment.name):
         return False

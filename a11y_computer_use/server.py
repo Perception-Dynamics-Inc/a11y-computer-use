@@ -12536,9 +12536,13 @@ def build_server(
         is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view when
         the terminal exposes it. A terminal miss with earlier scrollback names
-        that scrollback and suggests scroll_to_find direction=up. role =
+        that scrollback and suggests scroll_to_find direction=up.         role =
         substring of the accessibility role (e.g. 'button', 'textfield',
-        'checkbox', 'link'); editable/clickable = keep only elements with that
+        'checkbox', 'link'). textbox and text field match textfield, and also
+        a single-line editable Qt line edit rendered as textarea; they do not
+        match a multi-line textarea or a secure field. password matches
+        securetextfield. textfield does not select a secure field.
+        editable/clickable = keep only elements with that
         capability. Give at least one filter. Returns each match's ref, role,
         title, value, flags, and bounds. Takes a fresh snapshot, so the returned
         refs (e1..eN) are the current epoch — act on them promptly and re-observe
