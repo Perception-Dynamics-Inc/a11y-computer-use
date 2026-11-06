@@ -3761,10 +3761,10 @@ class Runtime:
                 _pause_for_ui()
                 later = self._reread(app, scope)
                 if later is None:
-                    # A stale value already identified the field. A failed
-                    # reread ends that poll. A field that has not appeared
-                    # yet gets the rest of the same 8 tries.
-                    if anchor is None:
+                    # Only a bound ref that has not reappeared keeps polling.
+                    # Calc and other element-less settles, and a stale read
+                    # of a field already found, stop on a failed reread.
+                    if missing_target and anchor is None:
                         continue
                     break
                 if element is not None:
