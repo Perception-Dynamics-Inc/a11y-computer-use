@@ -1730,3 +1730,19 @@ requires Value read-back; the refreshed snapshot must expose the requested
 text before search reports success. A verified stationary endpoint stops the
 search. An ignored or unreadable write elsewhere is an error. Explicit scroll
 and click requests keep their existing action paths.
+
+### Firefox PDF.js text layer
+
+Firefox's built-in PDF.js viewer paints each page in `div.canvasWrapper` and
+exposes the same words on unnamed `span` sections under `div.textLayer`
+(class token `textLayer`). On Firefox ESR 153.6.0 the page is a landmark
+named `Page N`; the canvas wrapper has no Text interface and stays an
+`opaque_region`. Each childless text-layer span's AT-SPI Text is published
+as static text when that layer's children are listed, so an on-screen line
+is in the snapshot and `find` can match it. The span's native bounds are
+kept. A span outside that layer, a span that wraps another control, and a
+Chromium node with the same class are unchanged. Off-screen spans stay out
+of the snapshot with the rest of the clipped tree. The existing child-fetch
+cap still applies to a text layer with more children than that cap. Hermetic
+tests model this tree. A live test launches Firefox when a display and the
+binary are present and skips otherwise.
