@@ -98,6 +98,110 @@ def test_decorative_nodes_dropped_but_described_image_kept() -> None:
     assert not any(el.role == "AXStaticText" and not el.value for el in snap.elements)
 
 
+def test_window_splitter_is_kept_and_plain_separators_stay_decorative() -> None:
+    """A separator with focus, a value, or a press is a window splitter.
+
+    Synthetic tree. A plain rule, a named menu separator, and a separator
+    whose only action is a context menu stay dropped, as do AXUnknown and
+    AXGrowArea. No platform tree.
+    """
+    tree = ax(
+        "AXWindow",
+        title="Panes",
+        at=(0.0, 0.0),
+        size=(800.0, 600.0),
+        children=[
+            button("Open file", (40.0, 80.0)),
+            ax(
+                "AXSplitter",
+                title="Resize files pane",
+                value="33",
+                focusable=True,
+                actions=("AXPress",),
+                at=(327.0, 98.0),
+                size=(12.0, 260.0),
+            ),
+            ax(
+                "AXSplitter",
+                title="Resize only value",
+                value=0,
+                at=(40.0, 40.0),
+                size=(8.0, 200.0),
+            ),
+            ax(
+                "AXSplitter",
+                title="Resize focus",
+                focusable=True,
+                at=(500.0, 40.0),
+                size=(8.0, 200.0),
+            ),
+            ax(
+                "AXSplitter",
+                title="Resize click",
+                actions=("AXPress",),
+                at=(520.0, 40.0),
+                size=(8.0, 200.0),
+            ),
+            button("Save doc", (400.0, 80.0)),
+            ax("AXSplitter", at=(10.0, 400.0), size=(400.0, 2.0)),
+            ax("AXSplitter", title="separator", at=(10.0, 420.0), size=(80.0, 2.0)),
+            ax(
+                "AXSplitter",
+                title="context only",
+                actions=("showContextMenu",),
+                at=(10.0, 440.0),
+                size=(80.0, 2.0),
+            ),
+            ax("AXUnknown", title="mystery", at=(10.0, 460.0), size=(20.0, 20.0)),
+            ax("AXGrowArea", title="grow", at=(40.0, 460.0), size=(16.0, 16.0)),
+        ],
+    )
+    snap = snap_of(tree)
+    titles = [el.title for el in snap.elements]
+    assert titles.index("Open file") < titles.index("Resize files pane") < titles.index("Save doc")
+    assert "separator" not in titles
+    assert "context only" not in titles
+    assert "mystery" not in titles
+    assert "grow" not in titles
+    assert not any(el.role in {"AXUnknown", "AXGrowArea"} for el in snap.elements)
+
+    kept = by_title(snap, "Resize files pane")
+    assert kept.role == "AXSplitter"
+    assert kept.value == "33"
+    assert kept.clickable
+    assert observe.is_interactive(kept)
+    assert kept.bounds.width == 24 and kept.bounds.height == 520
+    assert kept.bounds.x == 654 and kept.bounds.y == 196
+    value_only = by_title(snap, "Resize only value")
+    assert value_only.value == "0"
+    assert not value_only.clickable
+    assert observe.is_interactive(value_only)
+    focus_only = by_title(snap, "Resize focus")
+    assert focus_only.value is None
+    assert not focus_only.clickable
+    assert observe.is_interactive(focus_only)
+    click_only = by_title(snap, "Resize click")
+    assert click_only.clickable and click_only.value is None
+
+    full = render_text(snap, mode="full")
+    interactive = render_text(snap, mode="interactive")
+    assert f'{kept.ref} splitter "Resize files pane" ="33" (click)' in full
+    assert f'{kept.ref} splitter "Resize files pane" ="33" (click)' in interactive
+    assert "separator" not in full
+    assert "context only" not in interactive
+    splitters = observe.find_elements(snap, role="separator")
+    assert splitters == observe.find_elements(snap, role="splitter")
+    assert {el.title for el in splitters} == {
+        "Resize files pane",
+        "Resize only value",
+        "Resize focus",
+        "Resize click",
+    }
+    assert observe.find_elements(snap, text="Resize files pane") == (kept,)
+    assert observe.find_elements(snap, text="separator") == ()
+    assert observe.find_elements(snap, text="Open file")
+
+
 def test_canvas_unnamed_image_and_dead_group_are_opaque_regions() -> None:
     """A pixel surface or a childless empty group is ``opaque_region``.
 

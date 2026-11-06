@@ -113,6 +113,10 @@ _AMBIGUITY_PX = 2.0  #: distance tie window that makes re-resolution ambiguous
 _WEAK_ANCHOR_DRIFT_PX = 400.0  #: max drift when only one of title/path matches
 
 _SECURE_ROLE = "AXSecureTextField"
+#: Dropped with their subtrees. ``AXSplitter`` is the AT-SPI and CDP role for
+#: both a decorative rule (``<hr>``, a menu separator) and a WAI-ARIA window
+#: splitter. ``_is_decorative`` keeps the splitter when it is focusable, has a
+#: value, or has a press action.
 _DECORATIVE_ROLES = frozenset({"AXUnknown", "AXSplitter", "AXGrowArea"})
 _WRAPPER_ROLES = frozenset(
     {"AXGroup", "AXGenericElement", "AXLayoutArea", "AXScrollArea", "AXSplitGroup"}
@@ -197,9 +201,12 @@ SNAPSHOT_MODES = ("full", "interactive", "diff")
 
 #: Roles kept by the interactive view even when the platform exposes no press
 #: action on them: rows are what an agent selects in lists/tables/trees, tabs
-#: switch panes, sliders and ARIA spin buttons take values. Cells are folded
-#: into their row's text.
-_INTERACTIVE_ROLES = frozenset({"AXRow", "AXTab", "AXSlider", "AXSpinButton", "AXIncrementor"})
+#: switch panes, sliders and ARIA spin buttons take values. A kept
+#: ``AXSplitter`` is a window splitter (a decorative rule never survives
+#: pruning). Cells are folded into their row's text.
+_INTERACTIVE_ROLES = frozenset(
+    {"AXRow", "AXTab", "AXSlider", "AXSpinButton", "AXIncrementor", "AXSplitter"}
+)
 #: Containers the interactive view keeps as structure (even untitled) so refs
 #: inside them stay disambiguated: windows/dialogs, menus, toolbars, tab groups.
 _STRUCTURAL_ROLES = frozenset(
@@ -3244,7 +3251,35 @@ def _as_opaque_region(
     return dataclasses.replace(raw, role=OPAQUE_ROLE, title=title, description=description)
 
 
+def _separator_value_present(raw: RawNode) -> bool:
+    """True when a separator carries a real value, including numeric zero."""
+    value = raw.value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _window_splitter(raw: RawNode) -> bool:
+    """A separator the user can operate, not a decorative rule.
+
+    AT-SPI and CDP both map ``separator`` to ``AXSplitter``. A plain ``<hr>``
+    or menu separator has no focus, no value, and no press. A WAI-ARIA window
+    splitter is focusable, exposes ``aria-valuenow`` (a value), or has a click
+    action. ``showContextMenu`` is not a press. That splitter stays in the
+    snapshot, with its value, and the interactive view keeps it.
+    """
+    if raw.focusable or raw.focused:
+        return True
+    if _separator_value_present(raw):
+        return True
+    return bool(_PRESS_ACTIONS.intersection(raw.actions))
+
+
 def _is_decorative(raw: RawNode) -> bool:
+    if raw.role == "AXSplitter":
+        return not _window_splitter(raw)
     if raw.role in _DECORATIVE_ROLES:
         return True
     labelled = bool(raw.title or raw.description) and not (

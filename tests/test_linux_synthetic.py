@@ -47,7 +47,7 @@ def test_role_map_covers_common_atspi_roles() -> None:
     assert r["radio button"] == "AXRadioButton"
     assert r["frame"] == "AXWindow"
     assert r["menu item"] == "AXMenuItem"
-    assert r["separator"] == "AXSplitter"  # decorative -> dropped by the engine
+    assert r["separator"] == "AXSplitter"  # a plain rule stays decorative; a window splitter is kept
     assert r["terminal"] == "AXTextArea"  # VTE: the screen text is its Text iface, else the tab is empty
     assert r["internal frame"] == "AXGroup"
     assert _atspi.atspi_web_kind("document web") == "page"
