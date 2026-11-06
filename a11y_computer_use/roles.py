@@ -6,6 +6,9 @@ _ROLE_ALIASES = {
     "text field": "textfield",
     "textbox": "textfield",
     "static text": "statictext",
+    # AT-SPI and CDP expose a window splitter as AXSplitter. find(role="separator")
+    # is that control. The alias is exact, so it does not match a longer role.
+    "separator": "splitter",
 }
 
 

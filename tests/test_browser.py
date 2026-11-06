@@ -279,6 +279,66 @@ def test_cdp_accessor_multiline_textbox_is_textarea() -> None:
     assert acc.read(node).role == "AXTextArea"
 
 
+def test_cdp_window_splitter_is_kept_and_a_plain_separator_is_not() -> None:
+    """CDP maps separator to AXSplitter. A valued or focusable one is kept.
+
+    A rule with neither signal stays decorative. Synthetic AX nodes. No browser.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.observe import DisplayGeometry, build_snapshot
+    from a11y_computer_use.schema import Display, Scope
+
+    root = _ax("1", "RootWebArea", "Panes", backend=1, children=["2", "3", "4", "5"])
+    splitter = _ax(
+        "2", "separator", "Resize files pane", backend=2, parent="1",
+        props={"focusable": True},
+    )
+    splitter["value"] = {"value": 33}
+    focus_only = _ax(
+        "3", "separator", "Resize focus", backend=3, parent="1",
+        props={"focusable": True},
+    )
+    rule = _ax("4", "separator", "", backend=4, parent="1")
+    button = _ax("5", "button", "Open file", backend=5, parent="1", props={"focusable": True})
+    nodes = [root, splitter, focus_only, rule, button]
+    acc = _cdp_ax.CDPAccessor(nodes, {
+        1: (0, 0, 800, 600),
+        2: (327, 98, 12, 260),
+        3: (500, 40, 8, 200),
+        4: (10, 400, 400, 2),
+        5: (40, 80, 80, 30),
+    }, frozenset())
+    raw = acc.read(splitter)
+    assert raw.role == "AXSplitter"
+    assert raw.focusable is True
+    assert raw.value == 33
+    assert acc.read(focus_only).focusable is True
+    assert acc.read(focus_only).value in (None, "")
+    assert acc.read(rule).focusable is False
+    assert acc.read(rule).value in (None, "")
+    assert acc.read(button).focusable is False
+    screen = (
+        DisplayGeometry(
+            display=Display(display_id=1, width=1280, height=800, scale=1.0, is_main=True),
+            origin=(0.0, 0.0),
+        ),
+    )
+    snap = build_snapshot(root, acc, scope=Scope.WINDOW, app="chrome", pid=1, geometry=screen)
+    titles = {el.title for el in snap.elements}
+    assert "Resize files pane" in titles
+    assert "Resize focus" in titles
+    assert "Open file" in titles
+    assert "" not in {el.title for el in snap.elements if el.role == "AXSplitter"}
+    kept = next(el for el in snap.elements if el.title == "Resize files pane")
+    assert kept.value == "33"
+    assert kept.bounds.width == 12 and kept.bounds.height == 260
+    assert observe.is_interactive(kept)
+    assert f'{kept.ref} splitter "Resize files pane" ="33"' in observe.render_text(snap, mode="interactive")
+    assert observe.find_elements(snap, role="separator") == observe.find_elements(snap, role="splitter")
+    assert kept in observe.find_elements(snap, role="separator")
+    assert observe.find_elements(snap, text="Resize files pane") == (kept,)
+
+
 # --------------------------------------------------------------------------- #
 # iframe stitching
 # --------------------------------------------------------------------------- #

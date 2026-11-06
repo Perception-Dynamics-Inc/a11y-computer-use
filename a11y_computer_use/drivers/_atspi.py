@@ -2332,6 +2332,9 @@ def _action_names(acc) -> tuple[str, ...]:
 # D-Bus round-trips per node (Text + Value iface probes that always fail), and
 # groups/buttons/windows are the bulk of a tree. Their label lives in the Name
 # (title), not the value, so skipping the value read is a pure speedup.
+# AXSplitter stays in this set so a decorative <hr> or menu separator does not
+# pay for a Text probe. A window splitter's aria-valuenow is read afterwards
+# by `_splitter_value`, and only when a Value interface or valuetext exists.
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
@@ -4221,6 +4224,39 @@ def _qt_unknown_value_range(acc, span) -> bool:
     )
 
 
+def _splitter_value(acc, attrs: dict | None = None) -> str | None:
+    """Current value of a window splitter, or None for a decorative separator.
+
+    A plain ``<hr>`` or menu separator has no ``valuetext`` and no real Value
+    range. A WAI-ARIA window splitter publishes ``aria-valuenow`` as
+    ``valuetext`` and as the Value interface. Minimum and maximum are included
+    when that range is real, the same way an ARIA spin button's value is
+    shown. An unsane range (no interface, uninitialized bounds, or a minimum
+    that is not below the maximum) is not a value, so a toolkit that answers
+    Value with zeros does not turn a rule into a control. This does not read
+    the Text interface.
+    """
+    if attrs is None:
+        attrs = _get_attributes(acc)
+    raw = attrs.get("valuetext") if isinstance(attrs, dict) else None
+    shown = raw.strip() if isinstance(raw, str) else ""
+    span = _value_range(acc)
+    if not shown:
+        if span is None or not _sane_range(*span):
+            return None
+        cur = _safe(lambda: _atspi().Value.get_current_value(acc))
+        if isinstance(cur, bool) or not isinstance(cur, (int, float)):
+            return None
+        number = float(cur)
+        if not math.isfinite(number) or _uninitialized_double(number):
+            return None
+        shown = _format_bound(number)
+    if span is None or not _sane_range(*span):
+        return shown or None
+    low, high = span
+    return f"{shown} (min {_format_bound(low)}, max {_format_bound(high)})"
+
+
 def _range_value(acc):
     """Current Value for a slider, spin button, progress bar, or level bar.
 
@@ -5001,6 +5037,10 @@ class ATSPIAccessor:
             value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
                 node, role, role_str,
             )
+        if role == "AXSplitter":
+            # The generic probe is skipped above. This read is the Value
+            # interface (and valuetext), not Text.
+            value = _splitter_value(node, attrs)
         if status_text is not None:
             value = status_text
         if (
