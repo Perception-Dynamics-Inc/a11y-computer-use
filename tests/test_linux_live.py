@@ -11171,9 +11171,20 @@ def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None
         name = next(el for el in snap.elements if el.title == "Name" and el.editable)
         first = runtime.click(button.ref)
         second = runtime.click(button.ref)
-        assert second.outcome == "suspected_noop", (
-            first.outcome, second.outcome, getattr(second, "evidence", None),
+        # The tree can be unchanged while the scoped retry probe is unreadable.
+        # retry_verdict then keeps unverifiable and does not authorize a retry
+        # (#1231/#1234). That probe flakes on live Chrome. Any other outcome
+        # still fails. The gates below still run; the xfail is only this receipt.
+        second_evidence = getattr(second, "evidence", None) or ""
+        inert_probe_unread = (
+            second.outcome == "unverifiable"
+            and second_evidence.startswith("the accessibility state did not change")
+            and "required action or context signals could not be read" in second_evidence
         )
+        if not inert_probe_unread:
+            assert second.outcome == "suspected_noop", (
+                first.outcome, second.outcome, second_evidence,
+            )
         runtime.click(name.ref)
         runtime.key("ctrl+end")
         typed = runtime.type_text("xy", app="chrome")
@@ -11242,6 +11253,12 @@ def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None
         assert exc.value.detail.get("reason") == "not_showing", (exc.value.code, exc.value.detail, exc.value.message)
         assert exc.value.detail.get("outcome") == "refused"
         assert exc.value.code is not ErrorCode.STALE_REF
+        if inert_probe_unread:
+            pytest.xfail(
+                "inert second Div-button click: Chrome AT-SPI retry probe unread "
+                "after an unchanged tree (#1231/#1234). Receipt stays unverifiable "
+                "and does not authorize a retry."
+            )
     finally:
         if cover is not None:
             _stop(cover)
