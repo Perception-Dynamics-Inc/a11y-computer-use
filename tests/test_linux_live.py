@@ -1786,6 +1786,9 @@ def test_linux_chrome_type_ref_lands_only_in_the_named_field(tmp_path) -> None:
             time.sleep(0.25)
         assert set_a is not None and str(set_a).startswith("set "), last_error
         fields = _fields()
+        # Confirm retries when the effect snapshot omits FieldB for a walk
+        # (Chrome rebuilds the focused entry). The outcome is still confirmed
+        # only from that field's text. A walk that never shows it stays unverifiable.
         again = runtime.type_text("from-a", ref=fields["FieldB"].ref)
         assert again.outcome == "confirmed", (again.outcome, again.evidence)
         deadline = time.monotonic() + 4
