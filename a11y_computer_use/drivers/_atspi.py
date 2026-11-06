@@ -19523,7 +19523,7 @@ def libreoffice_popup_list_closed(acc, timeout: float = 1.0) -> bool:
         time.sleep(0.05)
 
 
-def select_contained_row(acc) -> bool | None:
+def select_contained_row(acc, *, on_dispatch=None) -> bool | None:
     """Select a row or cell inside a Selection container.
 
     None means this node is not such a row, so the caller uses ``do_press``.
@@ -19535,6 +19535,10 @@ def select_contained_row(acc) -> bool | None:
     checked afterwards. A click action that returns without leaving the row
     selected is not success, unless the combobox that owns the option now
     shows it.
+
+    ``on_dispatch`` runs before the row's own action or ``select_child`` is
+    sent, so the caller knows input reached the page even when this returns
+    False (#1444).
     """
     parent, index, target = _selection_parent(acc)
     if parent is None or target is None:
@@ -19542,13 +19546,15 @@ def select_contained_row(acc) -> bool | None:
     choice = combobox_option_context(acc)
     action = _first_press_action(acc)
     if action in _SELECTING_ACTION_NAMES:
-        do_press(acc)
+        do_press(acc, on_dispatch=on_dispatch)
         if _row_settled(target):
             return True
         if combobox_option_committed(choice, target):
             return True
     iface = _selection_iface(parent)
     if iface is not None and index is not None:
+        if on_dispatch is not None:
+            on_dispatch()
         _call_first(iface, ("select_child", "selectChild"), index, default=False)
         if _row_settled(target):
             return True
