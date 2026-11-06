@@ -996,6 +996,17 @@ buttons retain their existing routes. Native `toggle button` controls also retai
 the existing click path, even though they map to `AXButton`; this route does not
 substitute their advertised `toggle` action for a click.
 
+For these node-bound button actions, a fresh native page/window title change
+can confirm page activation, including open-shadow, nested-shadow and slotted
+buttons (#1487). The before/after snapshots must belong to the same app and
+process, and the title must retain the native identity of an ancestor of the
+clicked control. Unrelated page titles do not qualify. New windows/dialogs or
+reported modals retain the unverified outcome, protecting the multiple-download
+permission case (#1427). The receipt explicitly confirms page activation only:
+no pointer gesture was sent, and downloads or other gesture-gated browser
+effects are not verified. Missing title evidence retains the existing outcome;
+an action acknowledgement alone never confirms activation.
+
 Other Chromium page ref pointer paths retain the document AT-SPI hit-test
 identity check (`hit_test_unverified` on a missing/different hit). That check
 is **not a freshness signal**: Chromium can retain both old extents and old

@@ -60,7 +60,7 @@ def run_once_click(python, point, env):
     return result
 
 
-async def sample(row, head):
+async def sample(row, _head=False):
     from a11y_computer_use import safety
     from a11y_computer_use.drivers.linux import LinuxDriver
     from a11y_computer_use.schema import Scope
@@ -205,13 +205,13 @@ async def sample(row, head):
                                 receipt = await call("key", app=app, chord="Return")
                                 expected = "c=0 s=1"
                             elapsed = time.perf_counter() - start
-                            # #1427: the Chrome page button "Go" is pressed by
-                            # AT-SPI doAction, not a pointer gesture, so its
-                            # receipt is deliberately unverifiable on head. The
-                            # pinned 0.4.76 baseline predates #1427 and still
-                            # reports confirmed. The page effect is checked
-                            # below for both builds.
-                            wanted = "unverifiable" if row == "R13-click" and head else "confirmed"
+                            # #1488: Chromium page-button AT-SPI press confirms
+                            # page activation when the page's native title
+                            # changes. Baseline 0.4.76 and head both report
+                            # confirmed for R13-click; the page effect is still
+                            # checked below. #1427's unverifiable downgrade no
+                            # longer applies once title evidence is present.
+                            wanted = "confirmed"
                             assert outcomes[-1] and outcomes[-1]["outcome"] == wanted, (receipt, outcomes[-1])
                             assert expected in await snapshot(), receipt
                         elif row == "R7":
