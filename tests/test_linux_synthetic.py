@@ -21193,6 +21193,146 @@ def test_type_outcome_clipped_unreadable_target_is_not_confirmed(monkeypatch):
     )[0] == "unverifiable"
 
 
+def _chrome_type_form(value):
+    """Window plus the named field the live Chrome type-ref test addresses."""
+    return build_snapshot(
+        _node("AXWindow", "cuatypeform", children=(
+            _node("AXButton", "Other", pos=(10.0, 10.0), size=(80.0, 30.0)),
+            _node(
+                "AXTextField", "FieldB", value=value,
+                pos=(10.0, 60.0), size=(180.0, 24.0),
+            ),
+        )),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+
+
+def _chrome_type_form_without_field():
+    """The same window while the entry is missing from the effect snapshot."""
+    return build_snapshot(
+        _node("AXWindow", "cuatypeform", children=(
+            _node("AXButton", "Other", pos=(10.0, 10.0), size=(80.0, 30.0)),
+        )),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+
+
+def _judge_chrome_type(monkeypatch, shots, *, requested="from-a", previous="from-none"):
+    """Run the Linux type verdict with scripted effect snapshots and no real wait."""
+    from a11y_computer_use import server
+    from a11y_computer_use.drivers import _atspi_events
+
+    before = _chrome_type_form(previous)
+    element = next(el for el in before.elements if el.title == "FieldB")
+    queued = list(shots)
+    calls = []
+    pauses = []
+
+    def reread(*_args, **_kwargs):
+        calls.append(1)
+        if queued:
+            return queued.pop(0)
+        return shots[-1]
+
+    def pause(seconds):
+        pauses.append(seconds)
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = LinuxDriver()
+    monkeypatch.setattr(runtime, "_reread", reread)
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_remember_baseline", lambda after: None)
+    monkeypatch.setattr(server.time, "sleep", pause)
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    verdict, evidence = runtime._judge_mutation(
+        "chrome", None, element, requested, previous=previous,
+    )
+    return verdict, evidence, len(calls), pauses
+
+
+def test_linux_type_retries_a_chrome_field_missing_from_the_effect_snapshot(monkeypatch):
+    """The ref is absent on the first walk and present, with the typed text, on the next.
+
+    Confirm only from that later read. Run 42203913667 attempt 2 failed
+    ``type_text("from-a", ref=FieldB)`` as unverifiable because this gap
+    returned no readback at all.
+    """
+    landed = _chrome_type_form("from-nonefrom-a")
+    verdict, evidence, calls, pauses = _judge_chrome_type(
+        monkeypatch, [_chrome_type_form_without_field(), landed],
+    )
+    assert verdict == "confirmed", evidence
+    assert "from-nonefrom-a" in evidence
+    assert calls == 2
+    assert pauses == [0.05]
+
+
+def test_linux_type_stays_unverifiable_when_the_chrome_field_never_reappears(monkeypatch):
+    """Eight settles without the ref stay unverifiable. Absence is not success."""
+    verdict, evidence, calls, pauses = _judge_chrome_type(
+        monkeypatch, [_chrome_type_form_without_field()],
+    )
+    assert verdict == "unverifiable", evidence
+    assert evidence.startswith("the value could not be read back")
+    assert "from-a" not in evidence
+    assert calls == 9
+    assert pauses == [0.05] * 8
+
+
+def test_linux_type_does_not_confirm_a_different_value_found_after_the_gap(monkeypatch):
+    """A field that comes back holding something else is not the typed text."""
+    verdict, evidence, calls, pauses = _judge_chrome_type(
+        monkeypatch, [_chrome_type_form_without_field(), _chrome_type_form("nope")],
+    )
+    assert verdict == "partial", evidence
+    assert "nope" in evidence
+    assert calls == 2
+    assert pauses == [0.05]
+
+
+def test_linux_type_does_not_confirm_when_the_missing_field_comes_back_unchanged(monkeypatch):
+    """Reappearing with the pre-type value is a no-op, not a landed type."""
+    stale = _chrome_type_form("from-none")
+    verdict, evidence, calls, pauses = _judge_chrome_type(
+        monkeypatch, [_chrome_type_form_without_field(), stale],
+    )
+    assert verdict == "suspected_noop", evidence
+    assert "did not change" in evidence
+    assert calls == 9
+    assert pauses == [0.05] * 8
+
+
+def test_unreadable_full_text_does_not_retry_past_the_found_field(monkeypatch):
+    """A found node whose full read fails is not a missing node.
+
+    Retrying would publish the clipped preview and could turn this
+    unverifiable result into a partial or confirmed one.
+    """
+    from a11y_computer_use import server
+    from a11y_computer_use.drivers import _atspi_events
+
+    snap = build_snapshot(
+        _node("AXTextArea", "Editor", value="x" * 1000), _FakeAccessor(),
+        scope=Scope.WINDOW, app="editor", pid=1, geometry=_geometry(),
+    )
+    calls = []
+    pauses = []
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = LinuxDriver()
+    monkeypatch.setattr(runtime.driver, "type_outcome_text", lambda element: None)
+    monkeypatch.setattr(runtime, "_reread", lambda *args: calls.append(1) or snap)
+    monkeypatch.setattr(runtime, "_process_died", lambda before: False)
+    monkeypatch.setattr(runtime, "_remember_baseline", lambda after: None)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: pauses.append(seconds))
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    verdict, evidence = runtime._judge_mutation(
+        "editor", None, snap.elements[0], "x" * 1000, previous="",
+    )
+    assert verdict == "unverifiable", evidence
+    assert calls == [1]
+    assert pauses == []
+
+
 @pytest.mark.parametrize("needle", ["ROW-00012", "ROW-00019"])
 def test_first_gtk_find_after_snapshot_never_queries_collection(fake_atspi, monkeypatch, needle):
     """A cold find must retain visible rows without materializing the model."""
