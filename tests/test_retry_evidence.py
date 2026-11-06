@@ -542,3 +542,71 @@ def test_read_budget_credit_is_capped_at_half_the_elapsed_time(readable_native_b
     budget, clock = _budget(native, monkeypatch, 0.0, (1.0, 5.0))
     clock[0] = 0.1
     assert budget.spent() is True
+
+
+def _peer_budget(native, monkeypatch, own, peer, pid=4242):
+    clock = [0.0]
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    own, peer = iter(own), iter(peer)
+    monkeypatch.setattr(native._ReadBudget, "_runq_wait", staticmethod(lambda: next(own)))
+    seen = []
+
+    def peer_wait(p):
+        seen.append(p)
+        return next(peer)
+
+    monkeypatch.setattr(native._ReadBudget, "_peer_runq_wait", staticmethod(peer_wait))
+    return native._ReadBudget(0.04, pid), clock, seen
+
+
+def test_read_budget_credits_the_application_main_thread_cpu_wait(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    # Second Chrome click on a loaded host: 55 ms elapsed, this thread never
+    # waited, but Chrome's main thread queued 20 ms for a CPU before replying.
+    budget, clock, seen = _peer_budget(native, monkeypatch, (1.0, 1.0), (3.0, 3.02))
+    clock[0] = 0.055
+    assert budget.spent() is False
+    assert seen == [4242, 4242]
+
+
+def test_read_budget_does_not_credit_a_sleeping_application(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    # A hung or blocked application is not runnable: no wait accrues, so the
+    # cap still runs out (a truly unreadable state stays unverifiable).
+    budget, clock, _seen = _peer_budget(native, monkeypatch, (1.0, 1.0), (3.0, 3.0))
+    clock[0] = 0.04
+    assert budget.spent() is True
+
+
+def test_read_budget_peer_credit_shares_the_half_elapsed_cap(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    budget, clock, _seen = _peer_budget(native, monkeypatch, (1.0, 1.03), (3.0, 3.03))
+    clock[0] = 0.1  # 60 ms of wait offered, at most 50 ms credited
+    assert budget.spent() is True
+
+
+def test_read_budget_unreadable_peer_credits_nothing(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    budget, clock, _seen = _peer_budget(native, monkeypatch, (1.0, 1.0), (None, None))
+    clock[0] = 0.045
+    assert budget.spent() is True
+
+
+def test_read_budget_without_pid_never_reads_a_peer(readable_native_button, monkeypatch):
+    native = readable_native_button[0]
+    budget, clock, seen = _peer_budget(native, monkeypatch, (1.0, 1.0), (), pid=None)
+    clock[0] = 0.05
+    assert budget.spent() is True and seen == []
+
+
+def test_retry_evidence_forwards_the_application_pid_to_its_budget(monkeypatch):
+    from a11y_computer_use.drivers import _atspi as native
+
+    calls = []
+    monkeypatch.setattr(native, "_without_child_cache", lambda target, fn: fn())
+    monkeypatch.setattr(native, "_retry_evidence", lambda a, t, f, pid=None: calls.append(pid))
+    from a11y_computer_use.schema import Click, Element, Bounds
+
+    el = Element("e1", "AXButton", "Div button", None, Bounds(0, 0, 0, 1, 1), "s", clickable=True)
+    native.retry_evidence(Click(el), object(), None, 777)
+    assert calls == [777]
