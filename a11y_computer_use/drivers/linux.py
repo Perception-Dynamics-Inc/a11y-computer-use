@@ -3842,12 +3842,16 @@ class LinuxDriver:
         else:
             verified = self._run(lambda: _atspi.chromium_pointer_target(handle, x, y, trace=trace))
         pressed = False
+        gates = {"plain_left_click": may_press,
+                 "menu_item": element.role in self._MENU_ITEM_ROLES,
+                 "target_missed": verified is False} if debug else None
         if verified is False and may_press and element.role in self._MENU_ITEM_ROLES:
-            pressed = self._press_menu_item_off_hit(handle, x, y)
+            pressed = self._press_menu_item_off_hit(handle, x, y, gates=gates)
         if debug:
             print("hit_test_debug: " + json.dumps(
                 {"ref": element.ref, "role": element.role, "title": element.title,
                  "point": [x, y], "verified": verified, "pressed_by_action": pressed,
+                 "menu_action_gates": gates,
                  "walk": trace},
                 default=repr), file=sys.stderr, flush=True)
         if pressed:
@@ -3866,7 +3870,8 @@ class LinuxDriver:
             )
         return False
 
-    def _press_menu_item_off_hit(self, handle, x: int, y: int) -> bool:
+    def _press_menu_item_off_hit(self, handle, x: int, y: int, *,
+                                 gates: dict | None = None) -> bool:
         """Press a menu item by its own action when the hit is outside its menu.
 
         A menu drawn as its button's sibling (#1470) can leave Chromium's hit
@@ -3876,16 +3881,39 @@ class LinuxDriver:
         """
         from a11y_computer_use.drivers import _atspi
 
+        # A check/radio menu item can advertise "check" or "select", rather
+        # than "click". These still activate the requested item itself.
+        names = frozenset({"click", "press", "activate", "check", "select"})
+        if gates is not None:
+            gates.update(sole_open_menu=False, hit_outside_menu=False,
+                         document_entry_miss=False, own_action_available=False,
+                         action_succeeded=False)
         try:
-            menu = self._run(lambda: _atspi.chromium_sole_open_menu(handle, x, y))
-        except Exception:  # noqa: BLE001 - unreadable menu state refuses
+            menu = self._run(lambda: _atspi.chromium_sole_open_menu(handle, x, y, gates=gates))
+            if gates is not None:
+                gates["sole_open_menu"] = menu is not None
+                gates["actions"] = self._run(lambda: _atspi._raw_action_names(handle))
+                gates["own_action_available"] = bool(names.intersection(gates["actions"]))
+            if menu is None:
+                return False
+            outside = self._run(lambda: _atspi.chromium_pointer_target(menu, x, y)) is False
+            if gates is not None:
+                gates["hit_outside_menu"] = outside
+            if not outside:
+                return False  # another item inside the menu is not a miss
+            miss = self._run(lambda: _atspi.chromium_menu_background_hit(handle, menu, x, y))
+            if gates is not None:
+                gates["document_entry_miss"] = miss
+            if not miss:
+                return False
+        except Exception as exc:  # noqa: BLE001 - unreadable gates refuse
+            if gates is not None:
+                gates["read_error"] = type(exc).__name__
             return False
-        if menu is None:
-            return False
-        if self._run(lambda: _atspi.chromium_pointer_target(menu, x, y)) is not False:
-            return False  # the hit is inside the menu: a different item there
-        return bool(self._run(
-            lambda: _atspi._do_action_named(handle, frozenset({"click", "press", "activate"}))))
+        pressed = bool(self._run(lambda: _atspi._do_action_named(handle, names)))
+        if gates is not None:
+            gates["action_succeeded"] = pressed
+        return pressed
 
     def _verify_double_click_target(self, element: Element, handle, x: int, y: int) -> None:
         """Ask Chromium's hit test again before a double-click (#1467).

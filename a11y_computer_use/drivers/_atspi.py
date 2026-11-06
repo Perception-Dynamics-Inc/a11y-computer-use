@@ -23446,7 +23446,7 @@ def _occluder_sibling_bar_menus(opener, chain):
 
 
 def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None,
-                           sole: list | None = None):
+                           sole: list | None = None, gates: dict | None = None):
     """A showing menu over (x, y) that does not contain ``acc`` (#1387).
 
     Chromium answers AT-SPI hit tests from a cache of its last hover result,
@@ -23552,6 +23552,15 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None,
                 openers.append(kid)
             if depth + 1 < _OCCLUDER_DEPTH:
                 queue.append((kid, depth + 1))
+    if gates is not None:
+        own_menus = [node for node in chain[1:]
+                     if _role_name(node) in _OCCLUDER_MENU_ROLES and _state_has(node, "SHOWING")]
+        gates.update(windows_known=windows_known, page_readable=not page_errors,
+                     at_most_one_opener=len(openers) <= 1,
+                     no_foreign_menu=all(_ancestor_key(menu) in keys for menu in candidates),
+                     one_own_showing_menu=len(own_menus) == 1,
+                     menu_ancestors=[_hit_brief(node) for node in chain[1:]
+                                     if _role_name(node) in _OCCLUDER_MENU_ROLES])
     for opener in openers:
         menus = [m for m in _safe(lambda o=opener: _relation_targets(o, "controller_for")) or []
                  if _role_name(m) in _OCCLUDER_MENU_ROLES | {"list box"}]
@@ -23566,6 +23575,8 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None,
                 continue
             return _role_name(opener) or "menu", f"{_node_name(opener)} (open menu, unreadable)"
         candidates.extend(menus)
+    if gates is not None:
+        gates["no_foreign_menu"] = all(_ancestor_key(menu) in keys for menu in candidates)
     if sole is not None and windows_known and not page_errors and len(openers) <= 1 \
             and all(_ancestor_key(menu) in keys for menu in candidates):
         own_menus = [node for node in chain[1:]
@@ -23597,13 +23608,36 @@ def chromium_menu_occluder(acc, x: int | None = None, y: int | None = None,
     return None
 
 
-def chromium_sole_open_menu(acc, x: int | None = None, y: int | None = None):
+def chromium_sole_open_menu(acc, x: int | None = None, y: int | None = None,
+                            *, gates: dict | None = None):
     """The target's own menu when it is the only open menu and covers
     nothing over (x, y), else None (fail closed, #1470)."""
     sole: list = []
-    if chromium_menu_occluder(acc, x, y, sole=sole) is not None:
+    if chromium_menu_occluder(acc, x, y, sole=sole, gates=gates) is not None:
         return None
     return sole[0] if sole else None
+
+
+def chromium_menu_background_hit(acc, menu, x: int, y: int) -> bool:
+    """A document/entry hit outside the requested item's own menu (#1470).
+
+    Like #1468's document miss, this is never pointer verification. Only
+    the item's own action may be used, after the sole-open-menu gate.
+    Another control, an unreadable hit, or a different document refuses.
+    """
+    document = _chromium_document_of(acc)
+    comp = _component(document) if document is not None else None
+    if comp is None:
+        return False
+    hit = _hit_at(comp, x, y)
+    if hit is None or _role_name(hit) not in {"document web", "document frame", "entry"}:
+        return False
+    hit_document = _chromium_document_of(hit)
+    keys = {_ancestor_key(node) for node in _ancestor_chain(hit)}
+    return (hit_document is not None
+            and _ancestor_key(hit_document) == _ancestor_key(document)
+            and _ancestor_key(menu) not in keys
+            and _ancestor_key(acc) not in keys)
 
 
 def chromium_clipped_target(acc) -> bool:
