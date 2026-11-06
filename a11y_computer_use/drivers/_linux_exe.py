@@ -540,6 +540,15 @@ def _verdict(name: str, recorded: str | None, targets: set[int],
     """``check``'s exe verdict for ``targets``; ``named`` supplies ancestors."""
     me = _me()
     foreign = sorted(pid for pid in targets if _uid(pid) not in (me, None))
+    if foreign and len(foreign) < len(targets):
+        # #1322 o_beside: another user's same-named window on this display is
+        # not what a gated action reaches. Per action, the pointer recheck
+        # names a foreign-owned point as another app, activate_app never
+        # raises a foreign window, the frontmost route binds the active
+        # window's uid, and find_root binds only this user's bus pids. So
+        # this user's own targets decide; the foreign ones are not trusted.
+        targets = set(targets) - set(foreign)
+        foreign = []
     if foreign:
         pid = foreign[0]
         return name, (f"a window or a11y app named {name!r} belongs to pid {pid} of another "

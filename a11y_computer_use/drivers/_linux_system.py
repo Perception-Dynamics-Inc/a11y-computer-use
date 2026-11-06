@@ -499,7 +499,13 @@ def frontmost_app_id() -> str:
             comm = _comm_for_pid(pid)
             if not comm:
                 return ""
-            return _app_id(win, d, pid=pid)
+            name = _app_id(win, d, pid=pid)
+            uid = _foreign_uid(pid)
+            if uid is not None and name:
+                # #1322: another user's focused window is never the gated
+                # app, so type and key refuse it as a focus change.
+                return f"{name} (uid {uid})"
+            return name
     except ComputerUseError:
         raise
     except Exception:
@@ -785,11 +791,33 @@ def app_at_point_id(x: float, y: float) -> str | None:
             # No XRes owner, or an owner with no comm, is "unknown": the
             # recheck refuses it. _NET_WM_PID and WM_CLASS are client-written
             # and never name the point (#1327).
-            return _app_id(win, d, pid=_owner_pid(win, d)) or "unknown"
+            owner = _owner_pid(win, d)
+            name = _app_id(win, d, pid=owner) or "unknown"
+            uid = _foreign_uid(owner)
+            if uid is not None:
+                # #1322: another user's window is never the gated app, even
+                # when its program has the same name.
+                return f"{name} (uid {uid})"
+            return name
     except ComputerUseError:
         raise
     except Exception:
         return None
+
+
+def _foreign_uid(pid: int | None) -> int | None:
+    """The uid owning ``pid`` when it is not this process's user (#1322).
+
+    None for this user's processes, for an unknown pid, and off POSIX.
+    """
+    getuid = getattr(os, "getuid", None)
+    if not pid or getuid is None:
+        return None
+    try:
+        uid = os.stat(f"/proc/{int(pid)}").st_uid
+    except (OSError, ValueError):
+        return None
+    return uid if uid != getuid() else None
 
 
 def pid_at_point(x: float, y: float) -> int | None:
@@ -2763,6 +2791,8 @@ def activate_app(identifier: str) -> str:
                 named = any(name and name in title.lower() for name in _identity_needles(identifier))
             if not named:
                 continue
+            if _foreign_uid(_xres_pid(win, d)) is not None:
+                continue  # another user's window is not this app (#1322)
             saw = True
             if _is_hidden(win, d):
                 continue
