@@ -7108,6 +7108,50 @@ class Runtime:
             recheck=self._recheck_frontmost_app, confirm=confirm,
         )
 
+    def _button_page_title_evidence(self, before: dict | None, target: Element) -> str | None:
+        """Name a changed native page title, without claiming a pointer gesture.
+
+        Reuse the outcome snapshots. A new browser prompt/window must retain
+        the gesture-gated refusal (#1427), even if a page handler also ran.
+        """
+        baseline = getattr(self, "_action_baseline", None)
+        capture = baseline.get("capture") if isinstance(baseline, dict) else None
+        after = capture.get("snap") if isinstance(capture, dict) else None
+        prior = before.get("snap") if isinstance(before, dict) else None
+        if not isinstance(prior, Snapshot) or not isinstance(after, Snapshot):
+            return None
+        if prior.app != after.app or prior.pid != after.pid:
+            return None
+        old = {el.ref: el for el in prior.elements}
+        # A scoped native name read alone does not establish page activation.
+        # Bind the title to a reported document ancestor of the clicked ref.
+        ancestors = []
+        parent = target.parent
+        seen = set()
+        while parent in old and parent not in seen:
+            seen.add(parent)
+            ancestor = old[parent]
+            ancestors.append(ancestor)
+            parent = ancestor.parent
+        if not any(el.context_identity and el.context_identity[0] in {
+            "document web", "document frame",
+        } for el in ancestors):
+            return None
+        contexts = {el.context_identity for el in ancestors if el.context_identity}
+        occluders = {"AXWindow", "AXDialog", "AXSheet", "AXPopover"}
+        old_boundaries = {(el.role, el.context_identity, el.title) for el in prior.elements
+                          if el.role in occluders and el.context_identity not in contexts}
+        if any(el.modal or (el.role in occluders and el.context_identity not in contexts
+                           and (el.role, el.context_identity, el.title) not in old_boundaries)
+               for el in after.elements):
+            return None
+        fresh = {el.context_identity: el for el in after.elements if el.context_identity}
+        for ancestor in ancestors:
+            live = fresh.get(ancestor.context_identity)
+            if live is not None and ancestor.title and live.title and ancestor.title != live.title:
+                return "the clicked page's native title changed"
+        return None
+
     # -- action tools -----------------------------------------------------------
 
     @timing.call('click', ref_pos=1)
@@ -7702,13 +7746,23 @@ class Runtime:
         # Chrome's browser-side gates (the multiple-download limiter) do not
         # count it, so a page effect can be real while the download it
         # started is held behind a "Download multiple files" prompt and
-        # nothing is saved. The click is never reported as a success.
+        # nothing is saved. Fresh title evidence can confirm page activation,
+        # but never a download or other gesture-gated browser effect.
         if (
             button_mechanism and not activated
             and parsed_button is MouseButton.LEFT
             and isinstance(result, outcome.ActionResult)
             and result.outcome == "confirmed"
         ):
+            page_evidence = self._button_page_title_evidence(before, target)
+            if page_evidence is not None:
+                return outcome.ActionResult(
+                    f"activated {self._label(ref, target)} via {button_mechanism[0]}"
+                    + (str(result)[len(msg):] if str(result).startswith(msg) else ""),
+                    outcome="confirmed", next=(),
+                    evidence=f"{page_evidence}; page activation only; no pointer gesture was sent; "
+                             "downloads and other gesture-gated browser effects are not verified",
+                )
             seen = f"{result.evidence}; " if result.evidence else ""
             # The text must not claim a click or its effect happened.
             sent = (
@@ -12643,6 +12697,10 @@ def build_server(
         the click changed without a separate desktop_snapshot round-trip.
         The text is unchanged. Structured content adds outcome, next, and
         evidence (confirmed, suspected_noop, unverifiable, partial, or refused).
+        On Linux, a Chromium button's AT-SPI press can confirm page activation
+        from a fresh title change on its native page/window, including shadow
+        and slotted controls. This verifies page activation only, not a pointer
+        gesture or downloads. A new dialog or unreadable effect stays unverified.
         On Linux a Qt table cell is clicked at its center. That click is
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
