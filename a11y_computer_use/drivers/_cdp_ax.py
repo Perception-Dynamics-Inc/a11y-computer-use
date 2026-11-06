@@ -195,6 +195,9 @@ class CDPAccessor:
             description=str(node.get("description", {}).get("value") or ""),
             enabled=props.get("disabled") is not True,
             focused=props.get("focused") is True,
+            # Only a separator grows this signal. Other roles stay at the
+            # default so a focusable zero-size wrapper is still hollow.
+            focusable=raw_role == "separator" and props.get("focusable") is True,
             position=position,
             size=size,
             actions=actions,

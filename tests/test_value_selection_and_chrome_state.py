@@ -14,7 +14,8 @@ from a11y_computer_use import observe
 from a11y_computer_use.drivers import _atspi
 from a11y_computer_use.drivers._atspi import ATSPIAccessor
 from a11y_computer_use.drivers.linux import LinuxDriver
-from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode
+from a11y_computer_use.observe import DisplayGeometry
+from a11y_computer_use.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Scope
 
 
 class _States:
@@ -2713,6 +2714,153 @@ def test_in_place_multiselect_deselect_is_not_undone(monkeypatch) -> None:
     assert "SELECTED" not in banana.states
     assert clicks == [1]
     assert banana.action_log == []
+
+
+def test_chrome_window_splitter_keeps_its_value_and_a_rule_stays_decorative(monkeypatch) -> None:
+    """A focusable separator with aria-valuenow is kept; a rule is not.
+
+    AT-SPI maps ``separator`` to ``AXSplitter``. The pruner used to drop every
+    one of those, and the value probe skipped the role, so a window splitter
+    never appeared in a snapshot. A plain rule, a menu separator, and a
+    separator whose Value bounds are not a range stay dropped. Synthetic
+    nodes. No browser and no accessibility bus.
+    """
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+
+    def expose_value(node):
+        node.get_value_iface = lambda: node
+        return node
+
+    def hide_value(node):
+        node.get_value_iface = lambda: None
+        return node
+
+    splitter = expose_value(_Node(
+        "separator", "Resize files pane", text=None,
+        value=33.0, minimum=10.0, maximum=90.0,
+        states=("FOCUSABLE", "ENABLED", "SENSITIVE"),
+        actions=["click", "showContextMenu"],
+        attrs={"xml-roles": "separator", "id": "sep", "valuetext": "33"},
+        x=327, y=98, w=12, h=260,
+    ))
+    value_only = expose_value(_Node(
+        "separator", "Resize only value", text=None,
+        value=20.0, minimum=0.0, maximum=100.0,
+        states=("ENABLED",),
+        x=40, y=40, w=8, h=200,
+    ))
+    text_only = hide_value(_Node(
+        "separator", "Resize text", text=None,
+        states=("ENABLED",),
+        attrs={"valuetext": "33"},
+        x=600, y=40, w=8, h=200,
+    ))
+    focus_only = hide_value(_Node(
+        "separator", "Resize focus", text=None,
+        states=("FOCUSABLE", "ENABLED"),
+        x=620, y=40, w=8, h=200,
+    ))
+    click_only = hide_value(_Node(
+        "separator", "Resize click", text=None,
+        states=("ENABLED",),
+        actions=["click"],
+        x=640, y=40, w=8, h=200,
+    ))
+    rule = hide_value(_Node(
+        "separator", "", text=None, states=("ENABLED",),
+        x=10, y=400, w=400, h=2,
+    ))
+    menu_sep = hide_value(_Node(
+        "separator", "separator", text=None,
+        states=("ENABLED",),
+        actions=["showContextMenu"],
+        x=10, y=420, w=80, h=2,
+    ))
+    bogus = expose_value(_Node(
+        "separator", "rule", text=None,
+        value=0.0, minimum=0.0, maximum=0.0,
+        states=("ENABLED",),
+        x=10, y=440, w=80, h=2,
+    ))
+    open_file = _Node(
+        "push button", "Open file", text=None,
+        states=("ENABLED", "SENSITIVE", "FOCUSABLE"),
+        actions=["click"], x=40, y=80, w=80, h=30,
+    )
+    save = _Node(
+        "push button", "Save doc", text=None,
+        states=("ENABLED", "SENSITIVE", "FOCUSABLE"),
+        actions=["click"], x=400, y=80, w=80, h=30,
+    )
+    window = _Node(
+        "frame", "Panes", text=None,
+        children=[
+            open_file, splitter, value_only, text_only, focus_only, click_only,
+            save, rule, menu_sep, bogus,
+        ],
+        x=0, y=0, w=1280, h=800,
+    )
+
+    raw = ATSPIAccessor().read(splitter)
+    assert raw.role == "AXSplitter"
+    assert raw.focusable is True
+    assert raw.value == "33 (min 10, max 90)"
+    assert raw.actions == ("AXPress",)
+    assert ATSPIAccessor().read(value_only).value == "20 (min 0, max 100)"
+    assert ATSPIAccessor().read(value_only).focusable is False
+    assert ATSPIAccessor().read(value_only).actions == ()
+    assert ATSPIAccessor().read(text_only).value == "33"
+    assert ATSPIAccessor().read(focus_only).value is None
+    assert ATSPIAccessor().read(focus_only).focusable is True
+    assert ATSPIAccessor().read(click_only).actions == ("AXPress",)
+    assert ATSPIAccessor().read(rule).value is None
+    assert ATSPIAccessor().read(menu_sep).value is None
+    assert ATSPIAccessor().read(menu_sep).actions == ()
+    assert ATSPIAccessor().read(bogus).value is None
+
+    class _Accessor:
+        def read(self, node):
+            return ATSPIAccessor().read(node)
+
+        def children(self, node):
+            return list(node.children)
+
+    screen = (
+        DisplayGeometry(
+            display=Display(display_id=1, width=1280, height=800, scale=1.0, is_main=True),
+            origin=(0.0, 0.0),
+        ),
+    )
+    snap = observe.build_snapshot(
+        window, _Accessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=screen,
+    )
+    titles = [el.title for el in snap.elements]
+    assert titles.index("Open file") < titles.index("Resize files pane") < titles.index("Save doc")
+    assert "separator" not in titles
+    assert "rule" not in titles
+    kept = next(el for el in snap.elements if el.title == "Resize files pane")
+    assert kept.role == "AXSplitter"
+    assert kept.value == "33 (min 10, max 90)"
+    assert kept.clickable
+    assert kept.bounds.width == 12 and kept.bounds.height == 260
+    assert kept.bounds.x == 327 and kept.bounds.y == 98
+    assert observe.is_interactive(kept)
+    line = f'{kept.ref} splitter "Resize files pane" ="33 (min 10, max 90)" (click)'
+    assert line in observe.render_text(snap, mode="full")
+    assert line in observe.render_text(snap, mode="interactive")
+    found = observe.find_elements(snap, text="Resize files pane")
+    assert found == (kept,)
+    by_role = observe.find_elements(snap, role="separator")
+    assert by_role == observe.find_elements(snap, role="splitter")
+    assert {el.title for el in by_role} == {
+        "Resize files pane",
+        "Resize only value",
+        "Resize text",
+        "Resize focus",
+        "Resize click",
+    }
+    assert observe.find_elements(snap, text="separator") == ()
+    assert observe.find_elements(snap, text="rule") == ()
 
 
 def test_single_select_click_on_selected_option_still_confirms(monkeypatch) -> None:
